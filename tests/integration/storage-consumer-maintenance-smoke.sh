@@ -9,7 +9,8 @@ private_storage_consumer_private() {
     case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:9|exercise:yes:9|finish:yes:9|publish:yes:10|exercise:yes:10|finish:yes:10) set -- "$@" --fixture-correlation ;;
+        publish:yes:10) set -- "$@" --fixture-request-stage ;;
+        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
@@ -43,7 +44,8 @@ private_storage_consumer_phase() {
     else
         rm -f -- "$WORK/provider-activity.part" || true
     fi
-    if [ "${storage_fixture_correlation:-no}" = yes ]; then
+    if [ "${storage_fixture_correlation:-no}" = yes ] \
+        && { [ "${storage_consumer_profile_version:-7}" = 9 ] || [ "$consumer_phase" = publish ]; }; then
         if (umask 077; python3 -B "$WORK/bin/storage-fixture-correlation-sampler.py" \
             "$consumer_user/private-storage-fixture-correlation-$consumer_phase.json" \
             "$consumer_phase" "$WORKER_UID" >"$WORK/fixture-correlation.part") 2>/dev/null; then
@@ -52,15 +54,57 @@ private_storage_consumer_phase() {
             rm -f -- "$WORK/fixture-correlation.part" || true
         fi
     fi
+    if [ "$consumer_status" -ne 0 ]; then
+        # Optional early snapshot; never replace the primary failure or cleanup.
+        # This distinct no-clobber receipt survives the later cleanup captures.
+        (umask 077; timeout --signal=TERM --kill-after=1s 20s python3 -B \
+            "$WORK/bin/storage-consumer-failure-boundary.py" capture "$WORK" \
+            "$binary_directory/volparossa" "$consumer_phase" "${provider_baseline_ms:-0}") \
+            >/dev/null 2>&1 || true
+    fi
     [ "$consumer_status" -eq 0 ] || fail CONSUMER_APPLICATION_FAILED
     # These are independent actual route, packet/control and completion checks,
     # not an inference from the application's successful process exit.
     storage_consumer_phase_finish "$consumer_minimum" || fail CONSUMER_NETWORK_FINISH_FAILED
 }
 
+private_storage_consumer_usage_snapshot() {
+    # All original app operations and authorized remote deletion have returned.
+    # A process still using a journal forbids both this snapshot and its removal.
+    consumer_joined_mask=000
+    if private_storage_consumer_private quiesced "$consumer_user" >/dev/null 2>&1; then
+      consumer_joined_mask=
+      for consumer_provider in relay4 relay5 relay3; do
+        consumer_unit=volparossa-alpha-agent@$consumer_provider.service
+        consumer_group=$(systemctl show --property=ControlGroup --value "$consumer_unit" 2>/dev/null) || consumer_group=
+        consumer_joined=0
+        if timeout --signal=TERM --kill-after=1s 10s systemctl stop "$consumer_unit" >/dev/null 2>&1 \
+            && [ "$(systemctl show --property=ActiveState --value "$consumer_unit" 2>/dev/null)" = inactive ] \
+            && [ "$(systemctl show --property=MainPID --value "$consumer_unit" 2>/dev/null)" = 0 ] \
+            && python3 -B "$WORK/bin/storage-consumer-provider-usage.py" group-empty \
+                "$consumer_group" "$consumer_unit" >/dev/null 2>&1; then consumer_joined=1; fi
+        consumer_joined_mask=$consumer_joined_mask$consumer_joined
+      done
+    fi
+    # Stop/join all three BEFORE any RO query. The existing status CLI opens RW
+    # and is intentionally not used. No lease expiry/reconciliation is performed.
+    if (umask 077; timeout --signal=TERM --kill-after=1s 5s setpriv \
+        --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/storage-consumer-provider-usage.py" collect "$WORK" "$consumer_joined_mask" \
+        >"$WORK/storage-consumer-provider-usage.part") 2>/dev/null; then
+        mv -- "$WORK/storage-consumer-provider-usage.part" "$WORK/storage-consumer-provider-usage.json" || true
+    else
+        rm -f -- "$WORK/storage-consumer-provider-usage.part" || true
+    fi
+}
+
 private_storage_consumer_cleanup() {
     [ "${consumer_private_cleanup_complete:-no}" != yes ] || return 0
     [ -n "${consumer_user:-}" ] || return 0
+    if [ "${storage_fixture_correlation:-no}" = yes ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
+        private_storage_consumer_usage_snapshot || true
+    fi
     private_storage_consumer_private cleanup "$consumer_user" \
         >"$WORK/storage-consumer-private-cleanup.json" || return 1
     # Only an empty fixture-owned parent is removed here. Provider deletion is

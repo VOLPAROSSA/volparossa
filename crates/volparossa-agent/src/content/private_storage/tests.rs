@@ -238,6 +238,7 @@ fn private_storage_remote_binds_independent_provider_before_discovery() {
     let issued = issue_grant(&node, &operator_grant(&owner), now()).unwrap();
     let mut request = PrivateStorageRemoteRequest {
         include_flow_acquire_detail: false,
+        include_challenge_read_detail: false,
         provider_key: issued.provider_key,
         grant: issued.grant,
         maintenance_turn: Vec::new(),

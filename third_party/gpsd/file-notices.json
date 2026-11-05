@@ -1,0 +1,39 @@
+[
+  {
+    "path": "clients/gpspipe.c",
+    "source_sha256": "5cc0084870d314cea5165bf0a382f7873ecd8f23c0b96cca71dffcddb83e9a18",
+    "notices": [
+      "/*\n * gpspipe\n *\n * a simple program to connect to a gpsd daemon and dump the received data\n * to stdout\n *\n * This will dump the raw NMEA from gpsd to stdout\n *      gpspipe -r\n *\n * This will dump the super-raw data (gps binary) from gpsd to stdout\n *      gpspipe -R\n *\n * This will dump the GPSD sentences from gpsd to stdout\n *      gpspipe -w\n *\n * This will dump the GPSD and the NMEA sentences from gpsd to stdout\n *      gpspipe -wr\n *\n * Original code by: Gary E. Miller <gem@rellim.com>.  Cleanup by ESR.\n *\n * This file is Copyright 2010 by the GPSD project\n * SPDX-License-Identifier: BSD-2-clause\n *\n */"
+    ]
+  },
+  {
+    "path": "gpsfake.py.in",
+    "source_sha256": "fe3d96e1089a88c572552635995f4eab328265c7e6573276aaf37095577228d3",
+    "notices": [
+      "#\n#\n# This file is Copyright 2010 by the GPSD project\n# SPDX-License-Identifier: BSD-2-clause\n"
+    ]
+  },
+  {
+    "path": "gps/fake.py",
+    "source_sha256": "377358bc16eff64ef932aa7d956810586acc4623115919d4ac99afd8aef9ee81",
+    "notices": [
+      "# This code run compatibly under Python 2 and 3.x for x >= 2.\n# Preserve this property!\n#\n# This file is Copyright 2010 by the GPSD project\n# SPDX-License-Identifier: BSD-2-Clause\n# Codacy D203 and D211 conflict, I choose D203\n# Codacy D212 and D213 conflict, I choose D212\n"
+    ]
+  },
+  {
+    "path": "gpsd/bsd_base64.c",
+    "source_sha256": "b1f535b67b109a4e8861916379f72418211842ab0f881b48da39af9b3af460d1",
+    "notices": [
+      "/*\n * Copyright 1996 by Internet Software Consortium.\n *\n * Permission to use, copy, modify, and distribute this software for any\n * purpose with or without fee is hereby granted, provided that the above\n * copyright notice and this permission notice appear in all copies.\n *\n * THE SOFTWARE IS PROVIDED \"AS IS\" AND INTERNET SOFTWARE CONSORTIUM DISCLAIMS\n * ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES\n * OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL INTERNET SOFTWARE\n * CONSORTIUM BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL\n * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR\n * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS\n * ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS\n * SOFTWARE.\n */",
+      "/*\n * Portions Copyright 1995 by International Business Machines, Inc.\n *\n * International Business Machines, Inc. (hereinafter called IBM) grants\n * permission under its copyrights to use, copy, modify, and distribute this\n * Software with or without fee, provided that the above copyright notice and\n * all paragraphs of this notice appear in all copies, and that the name of IBM\n * not be used in connection with the marketing of any product incorporating\n * the Software or modifications thereof, without specific, written prior\n * permission.\n *\n * To the extent it has a right to do so, IBM grants an immunity from suit\n * under its patents, if any, for the use, sale or manufacture of products to\n * the extent that such products are used for performing Domain Name System\n * dynamic updates in TCP/IP networks by means of the Software.  No immunity is\n * granted for any product per se or for any other function of any product.\n *\n * THE SOFTWARE IS PROVIDED \"AS IS\", AND IBM DISCLAIMS ALL WARRANTIES,\n * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A\n * PARTICULAR PURPOSE.  IN NO EVENT SHALL IBM BE LIABLE FOR ANY SPECIAL,\n * DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER ARISING\n * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE, EVEN\n * IF IBM IS APPRISED OF THE POSSIBILITY OF SUCH DAMAGES.\n */"
+    ]
+  },
+  {
+    "path": "libgps/os_compat.c",
+    "source_sha256": "31987f5abee58c975431446d5f37cdafb035f18502525b13bb28c64ab3133b76",
+    "notices": [
+      "/*\n * This file contains functions to deal with compatibility issues across OSes.\n *\n * The initial version of this file is a near-verbatim concatenation of the\n * following three source files:\n *     clock_gettime.c\n *     daemon.c\n *     strl.c\n * History of this code prior to the creation of this file can be found\n * in the histories of those files.\n *\n * This file is Copyright 2017 by the GPSD project\n * SPDX-License-Identifier: BSD-2-clause\n */",
+      "/*\n * Copyright 1998 Todd C. Miller <Todd.Miller@courtesan.com>\n *\n * Permission to use, copy, modify, and distribute this software for any\n * purpose with or without fee is hereby granted, provided that the above\n * copyright notice and this permission notice appear in all copies.\n *\n * THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\n * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\n * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR\n * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\n * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN\n * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF\n * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n */"
+    ]
+  }
+]

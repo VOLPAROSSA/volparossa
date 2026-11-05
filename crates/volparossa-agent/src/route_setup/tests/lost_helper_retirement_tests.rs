@@ -7,6 +7,7 @@ fn original_failure() -> ContentStreamOpenFailure {
         history.record_round(Some(Failure {
             stage: Stage::HelperAcquire,
             reason,
+            helper_diagnostic: None,
         }));
     }
     ContentStreamOpenFailure::from_flow_acquire(

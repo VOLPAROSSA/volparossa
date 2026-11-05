@@ -8,13 +8,34 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      maintained_zbus:
+        description: 'Opt in to exact Rust 1.89.0 Config/helper/private-bus execution only'
+        type: boolean
+        default: false
+      ctutils_compatibility:
+        description: 'Opt in to reviewed ctutils current/reference compiler and real 32-bit codegen tests'
+        type: boolean
+        default: false
+      studio_export_pack:
+        description: 'Opt in to reviewed, synthetic Silex editor/export and offline Core pack proof'
+        type: boolean
+        default: false
+      core_revision:
+        description: 'Exact 40-hex Core revision, must equal this workflow revision'
+        type: string
+        default: ''
+      studio_revision:
+        description: 'Exact reviewed 40-hex VOLPAROSSA Studio revision'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
 
 defaults:
   run:
@@ -22,11 +43,257 @@ defaults:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTSEC_ADVISORY_DB_REVISION: bf5c0d245a92671908518d7e765914d437954ed6
+  RUSTSEC_ADVISORY_DB_REVISION: 26fd2d43f7280a1fb925a3743ec463017afe7119
 
 jobs:
+  maintained-zbus:
+    name: Exact Rust 1.89.0 maintained D-Bus functional slice
+    if: github.event_name == 'workflow_dispatch' && inputs.maintained_zbus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Bind the reviewed source before any compiler installation
+        env:
+          CORE_REVISION: ${{ inputs.core_revision }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          persist-credentials: false
+      - name: Check compiler authority and versioned evidence without native execution
+        run: |
+          python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
+          python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
+      - name: Provision only the exact reviewed compiler on this disposable runner
+        run: |
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+      - name: Prepare the existing Protobuf compiler and a private D-Bus daemon
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4 dbus-daemon
+      - name: Execute real Config, helper inventory, helper entry and private D-Bus tests
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --list \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-inventory.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --lib async_fd::tests:: -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-tests.log"
+          grep -F 'test result: ok. 3 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-tests.log"
+          cargo test --locked --offline -p volparossa-linux-uapi --doc OwnedAsyncFd \
+            2>&1 | tee "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
+          grep -F 'test result: ok. 2 passed; 0 failed' "$RUNNER_TEMP/owned-async-fd-doc-tests.log"
+          for package in volparossa-config volparossa-helper-entry; do
+            cargo test --locked --offline -p "$package" -- --list \
+              2>&1 | tee "$RUNNER_TEMP/$package-inventory.log"
+            cargo test --locked --offline -p "$package" \
+              2>&1 | tee "$RUNNER_TEMP/$package-tests.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/$package-tests.log"
+          done
+          cargo test --locked --offline -p volparossa-helper --lib systemd_fdstore::tests:: -- --list \
+            2>&1 | tee "$RUNNER_TEMP/helper-fdstore-inventory.log"
+          cargo test --locked --offline -p volparossa-helper --lib systemd_fdstore::tests:: \
+            2>&1 | tee "$RUNNER_TEMP/helper-fdstore-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/helper-fdstore-tests.log"
+          cargo test --locked --offline -p volparossa-helper --lib \
+            systemd_fdstore::tests::private_dbus_typed_replies_and_errors_use_real_zbus \
+            -- --ignored --exact --nocapture --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/helper-private-bus-tests.log"
+          grep -F 'test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/helper-private-bus-tests.log"
+          git diff --exit-code
+      - name: Check upstream zbus admission and source contracts without compiling
+        run: python3 -B scripts/test-zbus-upstream.py
+      - name: Execute exact original upstream zbus tests in an isolated graph
+        env:
+          ZBUS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-zbus-upstream.py
+      - name: Preserve actual source, compiler observations and failed test output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maintained-zbus-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/volparossa-rust-1.89.0/receipt.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/zbus-upstream-proof/cargo-source-policy.json
+            ${{ runner.temp }}/*-inventory.log
+            ${{ runner.temp }}/*-tests.log
+            ${{ runner.temp }}/zbus-upstream-proof/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  ctutils-compatibility:
+    name: Opt-in ctutils Rust 1.89.0 and retained reference codegen evidence
+    if: github.event_name == 'workflow_dispatch' && inputs.ctutils_compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Bind exact reviewed revision on disposable hosted runner
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CTUTILS_CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CTUTILS_CORE_REVISION" = "$GITHUB_SHA"
+      - name: Check out exact reviewed proof source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          persist-credentials: false
+      - name: Test location guard without compiling
+        run: python3 -B scripts/test-ctutils-hosted.py
+      - name: Prepare reviewed Protobuf compiler on the disposable runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4 \
+            gcc-13-multilib
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          # Match the proof's closed GCC13/32 support prefix on this disposable runner.
+          dpkg-query --show --showformat='${binary:Package} ${Version}\n' \
+            gcc-13-multilib lib32gcc-13-dev
+      - name: Rust 1.89.0 functional execution and codegen with 1.85/1.87 references
+        env:
+          CTUTILS_CORE_REVISION: ${{ inputs.core_revision }}
+        run: python3 -B scripts/run-ctutils-hosted.py "$RUNNER_TEMP/ctutils-proof"
+      - name: Preserve exact-source results and failures for independent codegen review
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ctutils-compatibility-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ctutils-proof/receipt.json
+            ${{ runner.temp }}/ctutils-proof/cargo-source-policy.json
+            ${{ runner.temp }}/ctutils-proof/REVIEW_REQUIRED.md
+            ${{ runner.temp }}/ctutils-proof/*.log
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.s
+            ${{ runner.temp }}/ctutils-proof/codegen-*/*.ll
+          if-no-files-found: error
+          retention-days: 14
+
+  studio-export-pack:
+    name: Opt-in real Studio editor export and offline Core packaging
+    if: github.event_name == 'workflow_dispatch' && inputs.studio_export_pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Bind reviewed exact source revisions before acquisition
+        env:
+          CORE_REVISION: ${{ inputs.core_revision }}
+          STUDIO_REVISION: ${{ inputs.studio_revision }}
+          WORKFLOW_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$STUDIO_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$WORKFLOW_REVISION"
+
+      - name: Check out exact Core proof source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.core_revision }}
+          path: core
+          persist-credentials: false
+
+      - name: Check out exact reviewed Studio fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VOLPAROSSA/volparossa-studio
+          ref: ${{ inputs.studio_revision }}
+          path: studio
+          persist-credentials: false
+
+      - name: Acquire fixed Silex v3.9.0 source without executing it
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: silexlabs/Silex
+          ref: 672efed69dda04c0a1e968859239e042f00d9538
+          path: silex
+          persist-credentials: false
+
+      - name: Inert ZIP safety and fixture contract checks
+        run: |
+          python3 -B studio/integration/silex-export/test_contract.py
+          python3 -B studio/integration/silex-export/test_lifecycle.py
+          python3 -B studio/integration/silex-export/test_runtime_context.py
+          python3 -B studio/integration/silex-export/test_wrapper_guard.py core
+          sh -n core/scripts/run-isolated-test.sh
+          shellcheck core/scripts/run-isolated-test.sh
+
+      - name: Prepare pinned Core compiler and Protobuf on disposable runner
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          python3 -B core/scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            -o Acquire::Retries=2 install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Acquire locked Core dependencies and compile only the pack proof
+        working-directory: core
+        run: |
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa --test studio_site_pack --no-run
+
+      - name: Real pinned editor manual edit preview ZIP then actual offline pack and decode
+        env:
+          STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
+          STUDIO_REVISION: ${{ inputs.studio_revision }}
+        run: |
+          python3 -B studio/integration/silex-export/run.py \
+            "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/silex" \
+            "$RUNNER_TEMP/studio-export-receipt.json"
+
+      - name: Retain only bounded synthetic result including failure and cleanup status
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: studio-export-pack-${{ github.run_id }}
+          path: ${{ runner.temp }}/studio-export-receipt.json
+          if-no-files-found: warn
+          retention-days: 14
+
   quality:
-    name: Unprivileged quality gates
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -36,13 +303,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify complete committed goal preservation and fresh-export controls
+        run: |
+          python3 -B scripts/verify-goal-preservation.py --git-revision "$(git rev-parse HEAD)"
+          python3 -B scripts/test-goal-preservation.py
+
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.85.0 \
-            --profile minimal \
-            --component clippy \
-            --component rustfmt
-          rustup show active-toolchain
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          test "$(command -v rustc)" = "$RUNNER_TEMP/volparossa-rust-1.89.0/bin/rustc"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -58,11 +330,41 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(dpkg --print-architecture)" = amd64
           # Official Noble security package; signed apt metadata authenticates it.
-          # https://packages.ubuntu.com/noble/amd64/protobuf-compiler
+          # Compiler and library family from Noble security, published 2026-10-20.
+          # https://security.ubuntu.com/ubuntu/dists/noble-security/universe/binary-amd64/Packages.xz
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            protobuf-compiler=3.21.12-8.2ubuntu0.3
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
           test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Provision read-only host observation tools on the disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          packages=()
+          if ! command -v nft >/dev/null; then
+            # Noble updates: packaging uses dh_installsystemd --no-enable --no-start.
+            # Refuse an inconsistent active installation rather than restart its service.
+            if systemctl is-active --quiet nftables; then
+              printf 'Active nftables service without required observation tool\n'
+              exit 1
+            fi
+            packages+=(nftables=1.0.9-1ubuntu0.1 libnftables1=1.0.9-1ubuntu0.1)
+          fi
+          if ! command -v iptables-legacy-save >/dev/null || ! command -v ip6tables-legacy-save >/dev/null; then
+            packages+=(iptables=1.8.10-3ubuntu2)
+          fi
+          if ((${#packages[@]})); then
+            # The preceding setup refreshed authenticated official apt metadata.
+            sudo -n apt-get install --yes --no-install-recommends "${packages[@]}"
+          fi
+          for tool in ip nft iptables-legacy-save ip6tables-legacy-save awk sudo; do
+            command -v "$tool" >/dev/null || { printf 'Required DPS proof tool unavailable: %s\n' "$tool"; exit 1; }
+          done
 
       - name: Verify original ABCI schemas and inert fixture contracts
         run: |
@@ -82,7 +384,7 @@ jobs:
           sh -n tests/integration/content-provider-pressure-smoke.sh
           node --version
           node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
-          node --test tests/integration/test-weather-source-observer.mjs
+          node --test tests/integration/test-weather-source-observer.mjs tests/integration/test-descriptor-reads.mjs
           python3 -B tests/integration/test-weather-products-delivery.py
           python3 -B tests/integration/test-weather-products-hosted-wiring.py
           python3 -B tests/integration/test-weather-overmorrow-hosted-wiring.py
@@ -124,10 +426,24 @@ jobs:
           python3 -B tests/integration/test-private-storage-maintenance-smoke.py
           python3 -B tests/integration/test-private-storage-maintenance-wiring.py
           python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
+          python3 -B tests/integration/test-storage-provider-activity-sampler.py
+          python3 -B tests/integration/test-storage-consumer-network.py
+          python3 -B tests/integration/test-storage-acquire-diagnostic.py
+          python3 -B tests/integration/test-cloud-upload-maintenance-provision.py
+          python3 -B tests/integration/test-cloud-upload-maintenance-smoke.py
+          python3 -B tests/integration/test-cloud-upload-maintenance-evidence.py
+          python3 -B tests/integration/test-cloud-upload-maintenance-shell.py
+          python3 -B tests/integration/test-cloud-upload-maintenance-vm-wiring.py
+          node --test tests/integration/test-cloud-upload-maintenance.mjs
+          python3 -B scripts/test-storage-tls-close-contracts.py
+          python3 -B tests/integration/test-storage-request-stage-consumers.py
+          python3 -B tests/integration/test-storage-consumer-failure-boundary.py
+          python3 -B tests/integration/test-storage-provider-usage-snapshot.py
 
       - name: Check formatting and shell sources
         run: |
           python3 -B scripts/test-diagnose-backport-lock.py
+          python3 -B scripts/test-quality-audit-tools.py
           cargo fmt --all -- --check
           ./scripts/check-shell.sh
 
@@ -150,13 +466,27 @@ jobs:
         # In-memory duplex and real TLS only; no host sockets or namespace setup.
         run: cargo test --locked -p volparossa-tcp-proxy --test streaming
 
-      - name: Install pinned dependency-audit tools
+      - name: Prepare exact pinned audit-tool cache recipe
+        id: audit-cache
+        run: python3 -B scripts/quality-audit-tools.py prepare
+
+      - name: Restore optional own source-built audit tools
+        id: restore-audit-tools
+        # Restore-only: PRs and manual runs never publish cache entries. No
+        # prefix fallback; an inexact or damaged candidate is rebuilt below.
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.audit-cache.outputs.path }}
+          key: ${{ steps.audit-cache.outputs.key }}
+
+      - name: Validate cached tools or build pinned audit sources
+        id: audit-tools
+        env:
+          AUDIT_CACHE_KEY: ${{ steps.audit-cache.outputs.key }}
+          AUDIT_CACHE_EXACT_HIT: ${{ steps.restore-audit-tools.outputs.cache-hit }}
         run: |
-          tool_root="${RUNNER_TEMP}/cargo-tools"
-          rustup toolchain install 1.88.0 --profile minimal
-          cargo +1.88.0 install --locked --root "$tool_root" --version 0.18.6 cargo-deny
-          cargo install --locked --root "$tool_root" --version 0.22.1 cargo-audit
-          printf '%s\n' "$tool_root/bin" >>"$GITHUB_PATH"
+          python3 -B scripts/quality-audit-tools.py install
 
       - name: Fetch locked Rust dependencies
         id: fetch-dependencies
@@ -178,7 +508,7 @@ jobs:
 
       - name: Preserve failed standalone lock reconciliation
         if: ${{ failure() && steps.fetch-dependencies.outputs.backport_lock_diagnostic == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backport-lock-diagnostic-${{ github.run_id }}
           path: |
@@ -192,7 +522,7 @@ jobs:
       - name: Lint standalone fuzz package
         run: |
           cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
-          cargo clippy \
+          cargo clippy --keep-going \
             --manifest-path fuzz/Cargo.toml \
             --locked \
             --offline \
@@ -203,6 +533,14 @@ jobs:
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-rustsec-pin-review.py
+          python3 -B scripts/test-ctutils-scope.py
+          python3 -B scripts/test-ctutils-hosted.py
+          python3 -B scripts/test-provision-rust199.py
+          python3 -B scripts/test-provision-rust189.py
+          python3 -B scripts/test-cargo-source-policy.py
+          python3 -B tests/helper/test-helper-vm-environment-v2.py
+          python3 -B tests/helper/test-helper-vm-environment-v3.py
           git init "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin \
             https://github.com/RustSec/advisory-db.git
@@ -212,16 +550,54 @@ jobs:
           test "$(git -C "$RUSTSEC_ADVISORY_DB" rev-parse HEAD)" = \
             "$RUSTSEC_ADVISORY_DB_REVISION"
 
+      # Run the actual configuration boundary before advisory scans, so an
+      # unrelated denied dependency cannot hide the YAML migration's test result.
+      - name: Test configuration parsing and safety validation
+        run: cargo test --locked --offline -p volparossa-config
+
       - name: Check locked dependencies and licenses
         env:
           RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
         run: |
+          python3 -B scripts/test-dependency-scan-aggregation.py
           ./scripts/check-rust-dependencies.sh
           ./packaging/test-collect-cargo-licenses.sh
 
+      # The focused collector regression above does not exercise every resolved crate.
+      - name: Collect the full locked Core Debian amd64 dependency notice inventory
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/core-license-metadata.json"
+          notices="$RUNNER_TEMP/core-license-notices"
+          test ! -e "$metadata" && test ! -L "$metadata"
+          test ! -e "$notices" && test ! -L "$notices"
+          cargo metadata --locked --offline --all-features --filter-platform x86_64-unknown-linux-gnu --format-version 1 >"$metadata"
+          ./packaging/collect-cargo-licenses.sh "$metadata" "$notices" \
+            2>&1 | tee "$RUNNER_TEMP/core-license-collector.log"
+          (
+            cd "$notices"
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+          ) >"$RUNNER_TEMP/core-license-SHA256SUMS"
+
+      - name: Preserve full notice inventory evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: locked-license-inventory-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/core-license-metadata.json
+            ${{ runner.temp }}/cargo-source-policy.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-deny.json
+            ${{ runner.temp }}/cargo-source-policy-cargo-audit.json
+            ${{ runner.temp }}/core-license-collector.log
+            ${{ runner.temp }}/core-license-SHA256SUMS
+            ${{ runner.temp }}/core-license-notices/DEPENDENCIES.tsv
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Run strict Clippy
         run: >-
-          cargo clippy --locked --offline --workspace --all-targets
+          cargo clippy --keep-going --locked --offline --workspace --all-targets
           --all-features -- -D warnings
 
       - name: Run workspace tests
@@ -241,6 +617,94 @@ jobs:
           cargo test --locked --offline -p volparossa-content --lib
           private_storage::wire -- --test-threads=1
 
+      - name: Require isolated Storage TLS close contracts and unchanged host state
+        timeout-minutes: 8
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          # Reuse the workspace build; the helper requires both exact ignored tests
+          # to execute in disposable namespaces and independently verifies their output.
+          cargo test --locked --offline -p volparossa-agent --lib --all-features \
+            --no-run --message-format=json >"$RUNNER_TEMP/storage-tls-close-build.jsonl"
+          python3 -B scripts/storage-tls-close-contracts.py \
+            --build-receipt "$RUNNER_TEMP/storage-tls-close-build.jsonl" \
+            --output "$RUNNER_TEMP/storage-tls-close"
+
+      - name: Preserve bounded Storage TLS close evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-tls-close-${{ github.run_id }}
+          path: ${{ runner.temp }}/storage-tls-close/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Require real dormant-agent DPS IPC and unchanged host configuration
+        timeout-minutes: 6
+        env:
+          VOLPAROSSA_REQUIRE_DPS_DAEMON_PROOF: '1'
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test -z "${VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS+x}"
+          for tool in ip nft iptables-legacy-save ip6tables-legacy-save awk sudo; do
+            command -v "$tool" >/dev/null || { printf 'Required DPS proof tool unavailable: %s\n' "$tool"; exit 1; }
+          done
+          # Consume bounded test output privately; publish only the closed receipt.
+          # pipefail also preserves Cargo/test failure independently of this validator.
+          proof_validator=$(cat <<'PY'
+          import json, sys
+          maximum = 4 * 1024 * 1024
+          raw = sys.stdin.buffer.read(maximum + 1)
+          failure = {"version": 1, "status": "proof_output_invalid", "success": False}
+          try:
+              assert len(raw) <= maximum
+              lines = raw.decode("utf-8").splitlines()
+              prefix = "DPS_DAEMON_HOST_PROOF "
+              receipts = [json.loads(line[len(prefix):]) for line in lines if line.startswith(prefix)]
+              assert len(receipts) == 1
+              receipt = receipts[0]
+              expected = dict(version=1, status="passed", success=True,
+                  before_captured=True, after_captured=True, routes_unchanged=True,
+                  dns_unchanged=True, firewall_unchanged=True, sysctls_unchanged=True,
+                  parent_namespace_unchanged=True, completed_daemon_executions=1,
+                  child_stage="complete", daemon_cleanup="normal_joined_socket_and_fixture_removed",
+                  synthetic_dps_only=True, hardware_positioning_proven=False,
+                  mobile_app_authority_proven=False)
+              assert type(receipt) is dict and receipt.keys() == expected.keys()
+              assert all(type(receipt[key]) is type(value) for key, value in expected.items()
+                  if key not in ("child_stage", "daemon_cleanup"))
+              assert receipt["child_stage"] is None or (type(receipt["child_stage"]) is str and
+                  receipt["child_stage"] in ("fixture", "spawn", "readiness", "socket_permissions",
+                      "dormant_roles", "dps_exchange", "dps_quality", "shutdown", "socket_cleanup",
+                      "fixture_cleanup", "complete"))
+              assert receipt["daemon_cleanup"] is None or (type(receipt["daemon_cleanup"]) is str and
+                  receipt["daemon_cleanup"] in ("not_started", "unconfirmed", "failure_joined",
+                      "joined_but_cleanup_unconfirmed", "normal_joined_socket_and_fixture_removed"))
+              assert receipt["version"] == 1 and receipt["completed_daemon_executions"] in (0, 1)
+              assert receipt["status"] in ("passed", "before_capture_failed",
+                  "after_capture_failed", "daemon_proof_failed", "host_configuration_changed")
+              if receipt != expected:
+                  print(json.dumps(receipt, sort_keys=True))
+                  sys.exit(1)
+              summaries = [line for line in lines if line.startswith("test result:")]
+              assert len(summaries) == 1 and summaries[0].startswith(
+                  "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;")
+              assert lines.count("running 1 test") == 1
+          except (AssertionError, KeyError, TypeError, ValueError, UnicodeError):
+              print(json.dumps(failure, sort_keys=True))
+              sys.exit(1)
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+          )
+          cargo test --locked --offline -p volparossa-agent --all-features --test dps_daemon \
+            dps_daemon_startup_socket_request_and_joined_cleanup \
+            -- --ignored --exact --nocapture --test-threads=1 \
+            2>&1 | python3 -B -c "$proof_validator"
+
       - name: Report namespace-backed proof outcomes
         run: |
           cargo test --locked --offline -p volparossa-linux-uapi --lib \
@@ -257,3 +721,20 @@ jobs:
         run: |
           ./tests/netns/test-lifecycle-contract.sh
           ./tests/integration/test-harness.sh
+
+      - name: Revalidate bounded source-built tools before cache publication
+        id: audit-cache-save
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.audit-tools.outputs.source-built == 'true'
+        env:
+          AUDIT_CACHE_KEY: ${{ steps.audit-cache.outputs.key }}
+        run: python3 -B scripts/quality-audit-tools.py save-check
+
+      - name: Save own audit-tool build from successful main push only
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.audit-cache-save.outputs.cacheable == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Only two public tool binaries and their recipe/integrity receipt;
+          # helper enforces a closed inventory and a 128 MiB payload limit.
+          path: ${{ steps.audit-cache.outputs.path }}
+          key: ${{ steps.audit-cache.outputs.key }}

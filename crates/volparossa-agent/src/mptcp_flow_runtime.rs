@@ -77,7 +77,7 @@ enum ExitRuntimeEvent<A, T> {
     Accepted(A),
     FlowCompleted(Result<T, tokio::task::JoinError>),
     MaintainPaths,
-    ExtendPath(path_extension::PathCommand),
+    ExtendPath(Box<path_extension::PathCommand>),
 }
 
 fn accept_failure_ends_route(error: &MptcpAcceptError) -> bool {
@@ -249,7 +249,7 @@ impl ProductionMptcpExitRuntime {
                         &mut flows,
                         &mut maintenance,
                     ) => event,
-                    Some(command) = path_commands.recv() => ExitRuntimeEvent::ExtendPath(command),
+                    Some(command) = path_commands.recv() => ExitRuntimeEvent::ExtendPath(Box::new(command)),
                 }
             })
             .await;
@@ -313,7 +313,7 @@ impl ProductionMptcpExitRuntime {
                     // original-context expiry/destruction or replace the established route.
                     let _ = time::timeout_at(
                         maintenance_deadline,
-                        command.execute(
+                        (*command).execute(
                             &helper,
                             &mut helper_owner,
                             expires_at_ms,
@@ -551,14 +551,14 @@ impl ProductionMptcpExitCleanup {
 #[must_use = "failed MPTCP Exit activation may still require helper cleanup"]
 pub(crate) struct ProductionMptcpExitFailure {
     cause: ProductionMptcpExitError,
-    cleanup: Option<ProductionMptcpExitCleanup>,
+    cleanup: Option<Box<ProductionMptcpExitCleanup>>,
 }
 
 impl ProductionMptcpExitFailure {
     fn new(cause: ProductionMptcpExitError, cleanup: ProductionMptcpExitCleanup) -> Self {
         Self {
             cause,
-            cleanup: Some(cleanup),
+            cleanup: Some(Box::new(cleanup)),
         }
     }
 
@@ -567,7 +567,7 @@ impl ProductionMptcpExitFailure {
     }
 
     pub(crate) fn into_cleanup(mut self) -> ProductionMptcpExitCleanup {
-        self.cleanup.take().expect("MPTCP Exit cleanup owner")
+        *self.cleanup.take().expect("MPTCP Exit cleanup owner")
     }
 }
 

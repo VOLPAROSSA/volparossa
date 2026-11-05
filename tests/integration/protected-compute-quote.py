@@ -33,7 +33,7 @@ TESTS = tuple(PREFIX + name for name in (
     'quote_pending_drop_before_supervisor_poll_revokes_attachment',
     'quote_owned_owner_drop_cancels_surviving_session_without_key_access',
 ))
-ARGV = ['cargo', '+1.85.0', 'test', '--locked', '--offline', '-p',
+ARGV = ['cargo', 'test', '--locked', '--offline', '-p',
     'volparossa-content', '--lib', PREFIX, '--', '--test-threads=1']
 SCOPE = dict(signed_quote_exchange_software_tests=True, synthetic_reports=True,
     successful_firmware_quote=False, hardware_attestation=False, full_appraisal=False,

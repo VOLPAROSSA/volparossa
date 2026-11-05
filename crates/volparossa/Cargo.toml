@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
@@ -23,7 +24,6 @@ rpassword = "7.4.0"
 rustix = { workspace = true, features = ["time"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 sha2.workspace = true
 socket2.workspace = true
 tempfile.workspace = true

@@ -75,12 +75,10 @@ async fn positive_result(
     let ttl = answer.ttl_seconds();
     let mut local_reuse = false;
     let mut ttl_preserved = false;
-    if shareable {
-        if let Ok(cached) = resolver.resolve(question, scope).await {
-            local_reuse = cached.source() == DnsAnswerSource::LocalValidated
-                && cached.addresses() == answer.addresses();
-            ttl_preserved = cached.ttl_seconds() > 0 && cached.ttl_seconds() <= ttl;
-        }
+    if shareable && let Ok(cached) = resolver.resolve(question, scope).await {
+        local_reuse = cached.source() == DnsAnswerSource::LocalValidated
+            && cached.addresses() == answer.addresses();
+        ttl_preserved = cached.ttl_seconds() > 0 && cached.ttl_seconds() <= ttl;
     }
     let mut unrelated_policy = *scope.policy_hash();
     unrelated_policy[0] ^= 1;

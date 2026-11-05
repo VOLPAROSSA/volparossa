@@ -3953,17 +3953,15 @@ mod tests {
 
         let decoded = LeaseActivation::decode(legacy_wire.as_slice()).expect("legacy lease wire");
         assert_eq!(decoded, lease);
-        assert!(decoded.signed_relay_reservation.is_empty());
-        assert!(decoded.signed_client_relay_request.is_empty());
-        assert!(
-            LeaseActivation::default()
-                .signed_relay_reservation
-                .is_empty()
+        assert_eq!(decoded.signed_relay_reservation, [] as [u8; 0]);
+        assert_eq!(decoded.signed_client_relay_request, [] as [u8; 0]);
+        assert_eq!(
+            LeaseActivation::default().signed_relay_reservation,
+            [] as [u8; 0]
         );
-        assert!(
-            LeaseActivation::default()
-                .signed_client_relay_request
-                .is_empty()
+        assert_eq!(
+            LeaseActivation::default().signed_client_relay_request,
+            [] as [u8; 0]
         );
 
         let request = activate(vec![lease]);

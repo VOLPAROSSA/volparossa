@@ -1501,9 +1501,8 @@ where
     Delete: FnMut(LinkObservation) -> Result<(), VethOperationError>,
 {
     for _ in 0..MAX_RECONCILIATION_DELETE_ATTEMPTS {
-        let observed = match observe()? {
-            None => return Ok(()),
-            Some(observed) => observed,
+        let Some(observed) = observe()? else {
+            return Ok(());
         };
         if expected.is_some_and(|candidate| observed != candidate) {
             return Err(VethOperationError::Unsafe(

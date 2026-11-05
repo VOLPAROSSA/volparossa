@@ -942,10 +942,9 @@ impl DiscoveryService {
         now_ms: u64,
     ) -> Result<LocalPreselectionAuthority, DirectPreselectionResponderError> {
         if let Ok(authority) = self.local_relay_authority(policy, signer_public_key, scope, now_ms)
+            && &authority.actor == expected
         {
-            if &authority.actor == expected {
-                return Ok(authority);
-            }
+            return Ok(authority);
         }
         self.preselection_responder
             .local_advertisement_lineage()
@@ -1549,11 +1548,10 @@ mod tests {
                             connection_id,
                             endpoint,
                             ..
-                        } = event {
-                            if peer_id == client_peer {
+                        } = event
+                            && peer_id == client_peer {
                                 relay_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                 }
             }
@@ -1600,11 +1598,9 @@ mod tests {
                             endpoint,
                             ..
                         } = event
-                        {
-                            if peer_id == listening_peer {
+                            && peer_id == listening_peer {
                                 dialling_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                     event = next_other(listening) => {
                         if let SwarmEvent::ConnectionEstablished {
@@ -1613,11 +1609,9 @@ mod tests {
                             endpoint,
                             ..
                         } = event
-                        {
-                            if peer_id == dialling_peer {
+                            && peer_id == dialling_peer {
                                 listening_lineage = Some((connection_id, endpoint));
                             }
-                        }
                     }
                 }
             }
@@ -2442,10 +2436,9 @@ mod tests {
                 if let SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
                     request_response::Event::OutboundFailure { request_id, .. },
                 )) = client.next_internal_event().await
+                    && request_id == transplanted_outbound
                 {
-                    if request_id == transplanted_outbound {
-                        break;
-                    }
+                    break;
                 }
             }
         })

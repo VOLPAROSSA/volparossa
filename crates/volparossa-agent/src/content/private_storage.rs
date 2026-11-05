@@ -17,6 +17,7 @@ use volparossa_content::{
         PrivateStorageStore, StorageLimits,
         protocol::{
             GrantLimits, MAX_AUTH_SECONDS, SignedStorageGrant, StorageRights, VerifiedStorageGrant,
+            VerifiedStorageRequest,
         },
         provider::PrivateStorageProvider,
         wire::{self, StorageService},
@@ -133,8 +134,8 @@ impl ContentRuntime {
         let current = Arc::clone(&self.service)
             .try_lock_owned()
             .map_err(|_| ContentError::Busy)?;
-        if let Some(active) = current.as_ref() {
-            if active.bind != bind
+        if let Some(active) = current.as_ref()
+            && (active.bind != bind
                 || active.endpoint != endpoint
                 || active.task.is_finished()
                 || *active.stop.borrow()
@@ -142,10 +143,9 @@ impl ContentRuntime {
                     .registry
                     .try_lock()
                     .map_err(|_| ContentError::Busy)?
-                    .has_private_storage()
-            {
-                return Err(ContentError::Busy);
-            }
+                    .has_private_storage())
+        {
+            return Err(ContentError::Busy);
         }
         let provider_key = self.signer.verifying_key();
         // The blocking opener owns admission even if this caller is cancelled. It cannot
@@ -227,7 +227,8 @@ impl ContentRuntime {
         detail: &mut Option<PrivateStorageRemoteDetail>,
     ) -> Result<(), ContentError> {
         *detail = None;
-        let observation = observation::Observation::new(request.include_flow_acquire_detail);
+        let observation = observation::Observation::new(request.include_flow_acquire_detail)
+            .with_challenge_read(request.include_challenge_read_detail);
         let uid = local.peer_cred().map_err(|_| ContentError::Invalid)?.uid();
         let outcome = self.storage_outcomes.begin(uid, request_id)?;
         let turn = request.maintenance_turn.clone();
@@ -267,6 +268,9 @@ impl ContentRuntime {
         });
         // Reuse the exact original construction-time budget instant, without shifting it.
         outcome.start_operation(observation.operation_started());
+        observation
+            .fixture()
+            .start_operation(observation.operation_started(), EXCHANGE_TIMEOUT);
         let operation = Box::pin(operation);
         let result = if let Some(turn) = &request.maintenance {
             tokio::select! {
@@ -292,6 +296,27 @@ impl ContentRuntime {
             FixtureTerminal::OperationError
         });
         result
+    }
+}
+
+struct FixtureBridge<'a> {
+    outcome: &'a outcome::Guard,
+    fixture: &'a super::fixture_correlation::Guard,
+}
+
+impl wire::bridge_observation::Observer for FixtureBridge<'_> {
+    fn phase(&self, phase: wire::bridge_observation::Phase) {
+        wire::bridge_observation::Observer::phase(self.outcome, phase);
+        self.fixture.bridge_phase(phase);
+    }
+    fn deadline(&self, deadline: wire::bridge_observation::Deadline) {
+        wire::bridge_observation::Observer::deadline(self.outcome, deadline);
+    }
+    fn verified_request(&self, request: &VerifiedStorageRequest) {
+        self.fixture.bind_request(request, false);
+    }
+    fn request_flushed(&self, request: &VerifiedStorageRequest) {
+        self.fixture.bind_request(request, true);
     }
 }
 
@@ -579,6 +604,10 @@ async fn exchange(
         },
     )
     .await?;
+    let wire_observer = FixtureBridge {
+        outcome,
+        fixture: observation.fixture(),
+    };
     let transfer = wire::bridge_admitted_observed(
         local,
         &mut remote,
@@ -591,7 +620,7 @@ async fn exchange(
                 true
             }
         },
-        outcome,
+        &wire_observer,
     )
     .await
     .map_err(|error| {

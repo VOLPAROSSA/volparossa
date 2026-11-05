@@ -136,8 +136,32 @@ fn tls_close_v9_json_does_not_change_any_historical_outcome_encoding() {
             assert!(serde_json::from_value::<Diagnostics>(value).is_err());
         }
     }
+    // v10 retains this v9 outcome shape when no challenge detail is present.
+    let mut current = report();
+    current["version"] = 10.into();
+    assert_eq!(replay(current.clone()), current);
+
+    // A v9 challenge cannot be relabeled v10 without its explicit read field.
+    let mut challenge = report();
+    challenge["failures"][0] = json!({
+        "fragment_index": null, "copy_index": 0, "operation": "reserve",
+        "stage": "agent_ready", "category": "agent_rejected", "agent_code": "CONTENT_UNAVAILABLE",
+        "agent_outcome": null, "agent_detail": {
+            "stage": "challenge", "deadline_scope": "operation", "tls_failure": null,
+            "stream_failure": null, "flow_acquire": null, "challenge": {
+                "phase": "challenge_read_verify", "before_challenge": "1_to_5s",
+                "in_challenge": "90_to_120s"
+            }
+        }
+    });
+    assert_eq!(replay(challenge.clone()), challenge);
+    challenge["version"] = 10.into();
+    assert!(serde_json::from_value::<Diagnostics>(challenge.clone()).is_err());
+    challenge["failures"][0]["agent_detail"]["challenge"]["read"] = Value::Null;
+    assert_eq!(replay(challenge.clone()), challenge);
+
     let mut future = report();
-    future["version"] = 10.into();
+    future["version"] = 11.into();
     assert!(serde_json::from_value::<Diagnostics>(future).is_err());
 }
 

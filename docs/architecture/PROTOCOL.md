@@ -26,9 +26,9 @@ is a 4-byte unsigned big-endian length followed by exactly one canonical envelop
 | Client-to-control-relay exit forwarding | `/volparossa/exit-forward/4` | 512 KiB canonical protobuf; authenticated control relay |
 | Control-relay-to-exit forwarding | `/volparossa/exit-forward-upstream/4` | 512 KiB canonical protobuf; authenticated exit and relay peers |
 | Client-to-selected datapath relay | `/volparossa/datapath-relay/4` | 512 KiB canonical protobuf; authenticated selected relay |
-| CLI to agent | 1 | 256 KiB; Unix socket ownership and peer credentials |
+| CLI to agent | 2 | 256 KiB; Unix socket ownership and peer credentials |
 | Agent to helper | 3 | 128 KiB; root-owned Unix socket, peer credentials, typed allowlist |
-| Agent to native MPQUIC | 6 | 1 MiB; same-UID Unix socket, typed allowlist, process-instance and request correlation; separate production role identities remain required |
+| Agent to native MPQUIC | 7 | 1 MiB; same-UID Unix socket, typed allowlist, process-instance and request correlation; separate production role identities remain required |
 
 The retired direct reservation identifiers
 `/volparossa/reservation/exit/2`, `/volparossa/reservation/relay/2`, and
@@ -612,18 +612,15 @@ in a bounded no-live-eviction ledger together with its affine Permit owner. An e
 same authenticated control actor returns the byte-identical signed Permit without signing or
 consuming replay again; request or actor substitution fails closed.
 
-Only Permit has that production-composed caller, and it cannot currently issue in a normal runtime.
-The module-private, non-Clone Exit readiness/result owner
-still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
-`ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
-provenance or cleanup authority, and the private helper/datapath observation has no constructor.
-There is no production Ready/Result caller, helper lifecycle/cleanup owner, challenge delivery,
-live WireGuard probe, measured readiness/capacity, terminal
-helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
-each cap their own lifetime at the lower of the parent expiry and local production time plus 30
-seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
-cross-restart consumption. In particular, Permit production cannot set
-`network_address_usable = true`; the existing hard filter continues to reject its output.
+Permit alone cannot authorize route admission, measured readiness/capacity or
+`network_address_usable = true`. Exit Ready/Result production must retain a
+module-private, non-Clone phase owner, exact data-Relay identity, helper-resource
+custody, same-connection runtime provenance, challenge delivery and terminal cleanup
+ownership. A typed projection from a `Copy` `ExitEndpointLease` or raw test-seam
+identity proves none of those properties. Permit, ExitReady and ExitResult each
+cap lifetime at the earlier of the parent expiry and local time plus 30 seconds;
+phase owners retain the process-unique Exit boot incarnation and reject cross-restart
+consumption. The original narrow caller-less stage is archived, not current status.
 
 Discovery composes A1c wire protocols without changing A0 or adding a protobuf wrapper.
 `/volparossa/preselection-observation/4` carries an exact canonical Relay or forwarded
@@ -734,26 +731,12 @@ deadline and responder-disable cleanup. Its `/24` derives from explicitly inject
 lineage; it is not an external-network measurement. This is still control-plane transcript
 production only: it makes no Fresh, readiness, capacity, reservation, route or datapath claim.
 
-A production discovery owner now drives the snapshot, native-agnostic sampler, exact affine
-request/bind lineage, A1a/A1c join and opaque Prepared handoff. The private client child can consume
-that handoff only through a test seam. A separate module-private, non-Clone Exit owner can retain
-one Permit in a bounded idempotency ledger. Its sole production-composed caller binds the request
-and response channel to the exact authenticated control-Relay connection and current control/Exit
-advertisement and policy identities, but the current product has no local Exit-advertisement source
-that can satisfy the gate. ExitReady and ExitResult remain test-only; their
-data-Relay arguments still have no production connection-owned source. The typed
-`ExitEndpointLease` projection is not helper-resource custody or cleanup authority, and the result
-requires a private helper/datapath observation type with no constructor. Production client Permit
-dispatch, real same-helper custody/lifecycle and challenge providers, live dataplane evidence,
-measured readiness/capacity, usability promotion, route admission and reservation are still absent.
-The fixed alpha score remains
-**11/100 (11%)**.
-
-Tags removed during the hard migration are permanently reserved: hold-request tags 5 and 10,
-relay-request tag 2, exit-grant tag 5, relay-authorization tags 7 and 13, relay-reservation tags 7
-and 15, confirmation tag 7, finalized-path tag 5, and advertisement tag 7. The corresponding old
-names (`client_peer_id`, `relay_paths`, `overlay_prefixes`, and `wireguard`) are reserved in
-the v4 schema.
+The production discovery owner binds snapshot, sampling request lineage, exact
+A1a/A1c join and opaque Prepared evidence. A private child or Exit owner must consume
+that evidence together with exact authenticated data-Relay connection provenance;
+test-seam arguments and a Permit responder alone grant no Ready/Result, helper,
+measurement or route-admission authority. Source-bound integration evidence belongs
+in the implementation status rather than this wire contract.
 
 ## Reservation state machine
 
@@ -797,9 +780,9 @@ An exact retry before expiry returns the same signed bytes. Successful finalizat
 unused/disposable permit and its cached permit response, while retaining the one exact finalize
 response needed for byte-identical retry. A non-identical retry for the same committed path fails.
 Every finalize error before endpoint preparation leaves the hold and issued permits unchanged and
-rolls cryptographic, replay, and reservation state back atomically. Helper-backed endpoint-lease
-retirement is not yet production-wired: provider paths remain `Unavailable` until a linearly owned
-`DestroyContext` supervisor guarantees cleanup on every failure, release, expiry, and shutdown.
+rolls cryptographic, replay, and reservation state back atomically. Helper-backed
+endpoint leases require a linearly owned `DestroyContext` supervisor on every failure,
+release, expiry and shutdown; no unavailable or ambiguous result releases that duty.
 
 An ambiguous forwarding outcome permits only an exact-byte retry of the same operation and
 identifier. A detail-free rejection is definitive failure; it never substitutes for a signed
@@ -828,13 +811,13 @@ path in the finalized bundle has an exact confirmation receipt.
 The exit keeps certificate and private-key PEM in a separate non-cloneable zeroizing owner; cached
 finalization replies clone only public signed bytes. Exact full-path confirmation gates a separate
 one-shot exit authorization. Scope mismatch does not consume the owner, while success, release,
-expiry, and purge remove it. This layer validates bounds, canonical public fields, PEM framing, and
-exact ownership scope. It does **not** yet prove certificate/private-key cryptographic consistency,
-activate a listener, start an mqvpn backend, or hand the verified signed authorization affinely to
-native. The separate API-v6 runtime converts the caller-supplied wall expiry once to a
-`CLOCK_BOOTTIME` deadline, but no production caller performs that preflight or carries the
-preverified authorization affinely into the dormant route. The production identity provider and
-separate role service identities remain unavailable, so both sides still fail closed.
+expiry, and purge remove it. This authorization owner validates bounded canonical public fields, PEM framing and
+exact ownership scope. Those checks alone do not establish certificate/private-key
+cryptographic consistency, a listener, mqvpn execution or helper namespace origin.
+Native handoff must consume the independently verified signed scope affinely, bind
+both process instances and convert expiry safely to the native BOOTTIME deadline.
+The API7/native contract below describes that process boundary; self-consistent wire
+fields or a same-UID channel are not independently trusted service identities.
 
 ## Hash and receipt binding
 
@@ -922,9 +905,11 @@ are capped at 4096 entries. They contain no destination hostname/IP or private k
 
 ## Agent-to-helper protocol
 
-`HelperRequest` accepts exactly version 3, a non-zero 16-byte request ID, and one of fourteen active
-allowlisted operations at tags 20–23, 25–29, and 31–35. Versions 1, 2, zero, and future versions are
-rejected before dispatch.
+`HelperRequest` accepts exactly version 3 and a non-zero 16-byte request ID. Its
+closed allowlist is defined in [`volparossa-routing::v3`](../../crates/volparossa-routing/src/v3.rs):
+core route/ingress operations use tags 20–23, 25–29 and 31–35; typed lifecycle
+extensions use 36–53. Versions 1, 2, zero and future versions fail before dispatch.
+The tables below summarize effects; they do not permit arbitrary privileged input.
 
 | Operation | Typed effect |
 |---|---|
@@ -937,15 +922,25 @@ rejected before dispatch.
 | `AcquireTransportSocket` | tag 27: bind one exact path in a committed context to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit lease, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
-| `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |
-| `AcquireIngressSocket` | tag 32: bind one exact prepared identity to a unique receipt and exactly one separately correlated CLOEXEC descriptor; production returns `Unavailable` |
-| `ActivateClientIngress` | tag 33: require the complete eight-identity, cross-unique receipt set before activation; production returns `Unavailable` |
-| `DestroyClientIngress` | tag 34: idempotently destroy one exact client-runtime authority; production returns `Unavailable` |
+| `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; the privileged runtime owns namespace/socket transaction and rollback |
+| `AcquireIngressSocket` | tag 32: bind one exact prepared identity to a unique receipt and exactly one separately correlated CLOEXEC descriptor; repeated transfer is refused |
+| `ActivateClientIngress` | tag 33: require the complete eight-identity, cross-unique receipt set before activation |
+| `DestroyClientIngress` | tag 34: idempotently destroy one exact client-runtime authority |
 | `BindHelperRuntime` | tag 35: return the non-secret per-process runtime ID and optionally register one exact, non-network Prepare intent in that runtime |
+
+| Typed extension | Tags and ownership |
+|---|---|
+| `AcquireIngressReplySocket` | 36: one exact connected family-matched reply socket for an active ingress flow |
+| `InstallUplinkSharing`, `InspectUplinkSharing`, `DestroyUplinkSharing` | 37–39: one independently owned daemon-lifetime upload-sharing tree; route cleanup does not retire it |
+| `InstallWifiMesh`, `InspectWifiMesh`, `DestroyWifiMesh`, `UpdateWifiMeshAdmission` | 40–42, 47: the explicitly configured helper-owned local mesh interface and future peering admission only |
+| `ApplyDownlinkBudget` | 43: the exact adjacent Relay's short-lived signed grant/path budget |
+| `InstallReceiveAccounting`, `InspectReceiveAccounting`, `DestroyReceiveAccounting` | 44–46: count-only physical-underlay receive accounting with exact owner removal |
+| `PreparePathExtension`, `ActivatePathExtension`, `CommitPathExtension`, `AbortPathExtension` | 48–51: one separately owned additive path; original context/paths stay intact |
+| `UpdateMptcpSubflow`, `RetireMptcpFlow` | 52–53: one helper-derived subflow mutation or terminal retirement bound to the real Client meta-socket capability |
 
 Historical operation tags 10 (`CreateContext`), 11 (`ConfigureWireguard`), 12
 (`InstallRelayFence`), 14 (`SetLinkState`), and 24 (`InstallInterception`) are permanently reserved
-and are not among the fourteen active operations. Their protobuf variants and message types are
+and are never active operations. Their protobuf variants and message types are
 absent from the active schema and must not be reused. Any raw occurrence is rejected as unknown and
 non-canonical before dispatch.
 
@@ -1202,7 +1197,7 @@ Tags 35 and 28 still provide only same-process ambiguity containment to the agen
 functional-alpha request path reconstructs the original canonical Prepare intent from tag 35's
 immutable lineage plus the correlated batch, commits it before worker reservation, and carries its
 affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and clean same-runtime
-settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
+settlement. The route caller must retain that affine lineage. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
 it after expiry-driver and engine cleanup. Startup may durably settle never-dispatched `Intent` and
 two bounded restart states. The first is a full set of already durable `CleanupConfirmed` targets. Each
@@ -1230,11 +1225,12 @@ attempt, while selector mismatch takes nothing and genuinely ambiguous admission
 `PublicationStart`, publication/post-attestation, `SupervisorDropped`, and `DispatchOpen` terminals
 are outside this settlement path and remain fail-closed.
 
-All four client-ingress operations return `Unavailable/CLIENT_INGRESS_UNAVAILABLE` before clock,
-cache, state, backend or network access. The Linux UAPI has pure/socketpair-tested socket
-revalidation plus fail-closed TCP/UDP original-destination parsing, but no production namespace,
-listener, TPROXY/DNS/kill-switch nftables transaction, privileged per-identity transfer cache,
-rollback, or live datapath is connected.
+Client ingress dispatch uses dedicated asynchronous lifecycle handlers in the
+[production engine](../../crates/volparossa-helper/src/engine_v3.rs), including a
+separate typed reply-socket acquisition. Namespace ownership, socket shape, TPROXY/DNS/
+kill-switch state, per-identity transfer cache and rollback or quarantine remain
+privileged runtime responsibilities. UAPI/parser tests alone do not prove their
+integration or a live datapath; source-bound evidence remains in the status index.
 
 ## Agent-to-native MPQUIC API
 
@@ -1253,48 +1249,29 @@ application bytes nor useful aggregate throughput; complete application hashes a
 evidence remain necessary. See the [native implementation contract](../../native/volparossa-mpquic/README.md)
 and [current integration status](../IMPLEMENTATION_STATUS.md#warm-mpquic-growth-integration).
 
-### Historical API6 implementation notes
+<a id="historical-api6-implementation-notes"></a>
 
-The following API6 design/checkpoint notes predate the current integrated runtime. Their old
-version/domain literals and statements about dormant backends are historical, not current API7
-configuration or completion claims; current code and the integration status above take precedence.
+### Native operations and descriptor correlation
 
-`NativeRequest` contains canonical API version 6, a nonzero 16-byte nonce, a target native-process
-instance, and one operation. Versions 1 through 5 and every future version are rejected before
-dispatch. One control-socket contact carries exactly one request, with one total deadline and a
-required client write-half close before dispatch. `Preflight` is the sole operation with an empty
-target: it names the expected client or exit role and returns the native process's fresh, nonzero
-32-byte per-start instance. Every later request targets that exact instance and fails with
-`StaleInstance` after a restart; the Rust client never hides this by automatically preflighting or
-retrying retained route authority. This is process-lifetime correlation over the current same-UID
-local channel, not binary attestation or authentication against an explicitly untrusted agent.
-Production packaging must still provide separate role sockets and service identities before this
-channel can carry trusted route authority.
+The API7 request/response types are defined in
+[`volparossa-quic::control`](../../crates/volparossa-quic/src/control.rs) and the matching
+[native header](../../native/volparossa-mpquic/include/volparossa_mpquic_protocol.h).
+Each request has a nonzero 16-byte nonce and exact 32-byte per-start target instance.
+Only role-specific `Preflight` has an empty target. One framed request, write-half close
+and total deadline apply per contact; stale instances fail without automatic re-preflight
+or authority retry. Process-instance correlation is not binary attestation.
 
-The route operations are:
+Operations remain a closed allowlist: `StartSession`, `StartExitSession`, `AddPath`,
+`RemovePath`, `GetStatus`, `StopSession`, `SendDatagram` and `ReceiveDatagram`.
+Start fixes context, credential/commitment, TLS identity, MASQUE context, signed
+reservation/finalize IDs, both native instances and an expiry of at most fifteen minutes.
+Multipath requires 2–8 paths; general UDP explicitly requires one. Exit starts adopt
+one exactly bound UDP descriptor per path and use in-memory certificate/key PEM bounded
+to 64 KiB/16 KiB; no pathname or arbitrary host listener is accepted. Overlay tuples
+use `fd76:6f6c:7061::/48`, embed path 1–8 in segment six, share one `/112`, and use
+Client host 1 / Exit host 4.
 
-- `StartSession`: 16-byte context, 32-byte exit SPKI SHA-256 pin, minimum paths, non-zero MASQUE
-  context ID, explicit multipath/single-path mode, an exact 43-character base64url per-route
-  credential, exact TLS server name, and an expiry no more than fifteen minutes ahead. It also
-  carries the signed reservation/finalize IDs, bearer commitment, certificate digest, and exact
-  client/exit native instances. The client instance must equal the request target. The native check
-  establishes credential encoding syntax and commitment equality, not generator entropy;
-- `StartExitSession`: the exact context, 43-character base64url credential, expiry, one-path
-  `SinglePathGeneralUdp` shape, MASQUE context ID, nonzero exit-SPKI pin, TLS server name, path ID,
-  exact exit-listener and expected-client IPv6 overlay tuples, nonzero reservation hash, and
-  in-memory certificate-chain/private-key PEM bounded to 64 KiB/16 KiB. It carries the same signed
-  reservation/finalize, commitment, certificate and process-instance scope as `StartSession`; the
-  exit instance must equal the request target. No pathname is accepted;
-- `AddPath`: context/path ID, exact IPv6 local/remote overlay addresses, local/remote UDP ports, and
-  a 32-byte relay-reservation hash. The address pair must use `fd76:6f6c:7061::/48`, embed the path
-  ID in segment six, share one `/112`, and use fixed client host `1` and exit host `4`;
-- `RemovePath`, `GetStatus`, and `StopSession`: exact context and, where relevant, path;
-- `SendDatagram`: context, MASQUE context ID, and one already-authorized bounded IPv4/IPv6
-  datagram;
-- `ReceiveDatagram`: exact context and MASQUE context ID for one bounded reverse poll.
-
-The canonical API-v6 `StartExitSession` field tags are deliberately append-only relative to its
-old six-field shape:
+The `StartExitSession` field tags remain:
 
 | Tag | Field |
 |---:|---|
@@ -1321,85 +1298,21 @@ old six-field shape:
 | 21 | `client_native_instance_id` |
 | 22 | `exit_native_instance_id` |
 
-Before the framed protobuf, every contact sends one fixed 32-byte binding as a stream prefix.
-Because `SOCK_STREAM` may split it across reads, native assembles the complete prefix; any
-descriptor must accompany its first received byte and later ancillary data is forbidden.
-`AddPath` and `StartExitSession` each bind exactly one `SCM_RIGHTS` UDP descriptor to the
-canonical request with SHA-256 over a separate NUL-terminated API-v6 domain
-(`VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6` or `VOLPAROSSA-MPQUIC-START-EXIT-FD-V6`), the four-byte
-big-endian canonical payload length, and the payload. All other operations require an all-zero
-binding and zero descriptors. Missing, extra, incomplete, late, cross-domain, wrongly bound, or
-otherwise unexpected ancillary data is rejected and every received descriptor is closed.
+Each contact begins with a fixed 32-byte descriptor binding. `AddPath` and
+`StartExitSession` require exactly one first-byte `SCM_RIGHTS` UDP descriptor,
+bound to canonical request bytes by the separate NUL-terminated domains
+`VOLPAROSSA-MPQUIC-ADD-PATH-FD-V7` and `VOLPAROSSA-MPQUIC-START-EXIT-FD-V7`, followed
+by the four-byte big-endian payload length and payload. Other operations require
+zero descriptors and an all-zero binding. Wrong, extra, late or truncated ancillary
+data closes every received descriptor. Responses correlate the canonical request
+with `VOLPAROSSA-MPQUIC-REQUEST-V7\0`, length and bytes, plus nonce/role/instance.
 
-For `AddPath`, Rust validates the socket before transfer and the active native client backend
-repeats its UDP/tuple/overlay checks before mqvpn adoption. For `StartExitSession`, Rust requires an
-unconnected nonblocking close-on-exec IPv6-only UDP socket, exact pre-bound listener tuple, and
-disabled address/port reuse; the dormant C runtime independently repeats those current socket and
-tuple checks. Neither check proves that the overlay address was assigned by the helper or that the
-socket belongs to the attested route namespace. The native runtime consumes and closes that descriptor on every path,
-then returns `exit_listener_orchestration_unavailable`; it never binds a host listener, reads a
-secret pathname, or falls back. Both descriptor hashes prove request correlation. Only the active
-`AddPath` client backend checks a same-session namespace cookie; `StartExitSession` has no namespace
-cookie or helper-origin proof.
-Production adoption remains blocked until helper provenance and the reviewed exit backend exist.
-API v6 is intentionally incompatible with v5 and has no negotiation or downgrade. A consumed
-descriptor is never reused after success, rejection, timeout, or I/O failure; any caller-level
-retry requires a newly acquired listener, a fresh control connection and nonce, and a still-valid
-authorization. A structurally valid `StartExitSession` whose bearer matches its supplied
-commitment consumes its reservation/finalize pair before returning
-`exit_listener_orchestration_unavailable`; that pair cannot be retried in the same process.
-
-The API-v6 exit boundary validates DNS syntax for the supplied TLS name, nonzero length for the
-SPKI pin, and only nonempty/NUL-free size bounds for the purported certificate/private-key PEM
-bytes. A separate, callerless native foundation strictly parses a bounded certificate chain and
-private key, treats the first certificate as the leaf, and verifies leaf-key consistency, an exact
-non-wildcard DNS hostname match under case-insensitive X.509 DNS semantics, a caller-supplied
-trusted interval, canonical complete-leaf DER SHA-256, and leaf-SPKI DER SHA-256. Additional chain
-certificates must be canonical DER and parse completely but are not trust-path validated.
-The runtime does not call this verifier. Production integration remains blocked on an affine expiry
-handoff with overflow-safe floor-now/ceil-expiry conversion from signed Unix milliseconds, an
-independent fixed Rust/C DER-SPKI vector, parser fuzzing, and TLS trust/usage enforcement. No
-current session or datapath success claim depends on this isolated identity check.
-The bearer commitment, signed IDs, certificate digest, process instances and SPKI bytes are now
-carried together, but native does not itself verify the exit's signed final reservation bundle.
-After shape and bearer-commitment validation, native uses a fixed 128-record, no-live-eviction
-process-local ledger keyed by `(reservation_id, finalize_id)`: exact reuse is a replay, reuse of
-only one ID is a scope collision, an exact live client retry is allowed only while its original
-session remains active, and stop, expiry, or a valid exit start leaves a tombstone until the
-authorization deadline. Request nonces remain response-correlation values, not a general replay
-cache. The ledger is erased by process restart and purged at the deadline, so this is not
-independent cryptographic or durable replay verification; a production caller must verify the
-signed scope, bind both native instances, and hand it off affinely.
-
-For admission, native samples `CLOCK_BOOTTIME` before `CLOCK_REALTIME`, maintains a monotone
-effective wall-clock floor, and converts the accepted remaining wall lifetime once to a
-`CLOCK_BOOTTIME` deadline. Live-session checks thereafter read only `CLOCK_BOOTTIME`; wall-clock
-rollback cannot extend or revive an authorization, while a forward jump can only shorten it.
-Clock read failure, BOOTTIME regression, and arithmetic overflow fail closed.
-
-`NativeResponse` echoes version/nonce, requires the responding role/instance, and carries SHA-256
-over `"VOLPAROSSA-MPQUIC-REQUEST-V6\0"`, the four-byte big-endian canonical payload length, and the
-exact canonical unframed request. It returns `Ok`, `Version`, `InvalidRequest`, `NotFound`,
-`Unauthorised`, `Transport`, `InsufficientPaths`, `NoDatagram`, or `QueueOverflow`, plus a bounded
-code, an optional exactly correlated reverse datagram, and no more than eight path records.
-`StaleInstance` is a separate typed result. Only a successful `StartSession` may carry a bounded
-IPv4/optional-IPv6 tunnel assignment; every other operation rejects one. The current mqvpn backend
-deep-copies exactly one assignment while `TUNNEL_READY`, accepts only a byte-identical duplicate
-after activation, and publishes it only after mqvpn synchronously reaches `ESTABLISHED`. Rust, the
-C protocol boundary, and the backend state independently require server `10.76.0.1/32`, client
-`10.76.0.2/32` through `10.76.0.254/32`, MTU 1280..1420, and either no IPv6 address or
-`fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`. The backend rejects outbound packets
-whose source is not the retained client address and reverse packets whose destination is not that
-address, and wipes retained state on fatal transport failure. This does not prove that a production
-exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
-exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
-ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
-delivery rate, and validation/real-carriage state. The runtime now publishes an exact current path
-set only when the pinned backend supplies every required metric and a valid normalized path state.
-It uses ACKed transport bytes only for the real-carriage boolean and keeps unique delivered payload
-bytes at zero, because transport framing and retransmissions make the former unsuitable for the
-latter. These fields are necessary to prevent a native process from falsely reporting mere path
-configuration as multipath operation.
+Current native adoption, replay/expiry, tunnel assignment and transport-counter rules
+are documented in the [native contract](../../native/volparossa-mpquic/README.md).
+The original API6 notes—including their then-dormant exit backend and V6 literals—are
+preserved in the [development archive](../archive/network-architecture-notes-20261026.txt); they are not API7
+configuration or current completion claims. Source-bound acceptance remains separate
+from the request shape and descriptor checks.
 
 ## Policy manifest encoding
 

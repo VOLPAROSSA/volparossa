@@ -1,5 +1,11 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Questions and cross-project ideas
+    url: https://github.com/VOLPAROSSA/volparossa/discussions
+    about: Use central Discussions for questions; keep actionable work in the owning repository.
+  - name: Contribution and accessibility guidance
+    url: https://github.com/VOLPAROSSA/.github/blob/main/CONTRIBUTING.md
+    about: Find a useful contribution and the shared community and accessibility guidelines.
   - name: Security reporting policy
     url: https://github.com/VOLPAROSSA/volparossa/security/policy
     about: Read the private-reporting policy before sharing any security details.

@@ -280,11 +280,11 @@ async fn rejected_after_challenge(expired: bool, renewal: bool) {
 
 #[tokio::test]
 async fn expired_during_challenge_does_not_sign_any_new_operation() {
-    rejected_after_challenge(true, false).await;
+    Box::pin(rejected_after_challenge(true, false)).await;
 }
 
 #[tokio::test]
 async fn signing_does_not_rewrite_over_cap_retained_reserve_or_renew() {
-    rejected_after_challenge(false, false).await;
-    rejected_after_challenge(false, true).await;
+    Box::pin(rejected_after_challenge(false, false)).await;
+    Box::pin(rejected_after_challenge(false, true)).await;
 }

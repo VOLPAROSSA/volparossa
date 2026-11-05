@@ -30,6 +30,8 @@ install -d "$destination"
 summary=$destination/DEPENDENCIES.tsv
 printf 'name\tversion\tlicense-expression\tsource\n' > "$summary"
 package_list=$destination/.packages.tsv
+resolved_metadata=$destination/.resolved-metadata.json
+python3 -B "$repository_root/packaging/cargo-notice-closure.py" "$metadata_file" > "$resolved_metadata"
 
 jq -er '
     .workspace_members as $workspace_members
@@ -39,7 +41,7 @@ jq -er '
     | [.name, .version, (.license // "NOASSERTION"), (.license_file // "-"),
        .manifest_path, (.source // "path")]
     | @tsv
-' "$metadata_file" | LC_ALL=C sort > "$package_list"
+' "$resolved_metadata" | LC_ALL=C sort > "$package_list"
 if [ ! -s "$package_list" ]; then
     printf '%s\n' 'Cargo metadata contained no resolved third-party packages.' >&2
     exit 1
@@ -78,6 +80,27 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
             ;;
         path)
             case "$manifest_path" in
+                "$repository_root/third_party/rust/vendor/ctutils-0.4.5/Cargo.toml")
+                    if [ "$crate_name:$crate_version:$license_expression" != 'ctutils:0.4.5:Apache-2.0 OR MIT' ]; then
+                        printf '%s\n' 'Fixed ctutils package has unexpected license metadata.' >&2
+                        exit 1
+                    fi
+                    source_label='vendored-crates.io+ctutils-0.4.5-unmodified'
+                    ;;
+                "$repository_root/third_party/rust/vendor/sev-8.0.0/Cargo.toml")
+                    if [ "$crate_name:$crate_version:$license_expression" != 'sev:8.0.0:Apache-2.0' ] ||
+                        { [ "$license_file" != - ] && [ "$license_file" != LICENSE ]; } ||
+                        ! cmp -s "$repository_root/third_party/rust/vendor/sev-8.0.0/LICENSE" \
+                            "$repository_root/third_party/licenses/virtee-sev-8.0.0-Apache-2.0.txt"
+                    then
+                        printf '%s\n' 'Vendored SEV package has unexpected license metadata or bytes.' >&2
+                        exit 1
+                    fi
+                    source_label='vendored-git+sev-a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5-p384-0.14-adapter'
+                    ;;
+                "$repository_root/third_party/rust/vendor/ctutils-0.4.4/Cargo.toml")
+                    source_label='vendored-crates.io+ctutils-0.4.4-rust1.85-compatibility'
+                    ;;
                 "$repository_root/third_party/rust/vendor/hickory-proto-0.25.2/Cargo.toml")
                     source_label='vendored-crates.io+hickory-proto-0.25.2-security-backport'
                     ;;
@@ -115,13 +138,16 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
         fi
     fi
 
-    for pattern in LICENSE LICENSE-* LICENSE.* COPYING COPYING-* COPYING.* NOTICE NOTICE-* NOTICE.*; do
-        for notice_path in "$crate_directory"/$pattern; do
-            [ -f "$notice_path" ] || continue
-            notice_name=$(basename -- "$notice_path")
-            install -m 0644 "$notice_path" "$crate_destination/$notice_name"
-            copied=1
-        done
+    for notice_path in "$crate_directory"/*; do
+        [ -f "$notice_path" ] || continue
+        notice_name=$(basename -- "$notice_path")
+        normalized_notice_name=$(printf '%s' "$notice_name" | tr '[:lower:]' '[:upper:]')
+        case "$normalized_notice_name" in
+            LICENSE|LICENSE-*|LICENSE.*|COPYING|COPYING-*|COPYING.*|NOTICE|NOTICE-*|NOTICE.*)
+                install -m 0644 "$notice_path" "$crate_destination/$notice_name"
+                copied=1
+                ;;
+        esac
     done
 
     if [ "$copied" -ne 1 ] &&
@@ -158,6 +184,25 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
         if [ -n "$fallback" ]; then
             fallback_sha=$(printf '%s\n' "$fallback" | cut -f 4)
             fallback_directory=$(printf '%s\n' "$fallback" | cut -f 5)
+            fallback_vcs_path=$(printf '%s\n' "$fallback" | cut -f 7)
+            fallback_archive_sha=$(printf '%s\n' "$fallback" | cut -f 6)
+            if [ -n "$fallback_vcs_path" ]; then
+                [ "$source" = 'registry+https://github.com/rust-lang/crates.io-index' ] || {
+                    printf '%s\n' 'Reviewed license fallback requires the exact crates.io source.' >&2
+                    exit 1
+                }
+            fi
+            if [ -n "$fallback_archive_sha" ]; then
+                registry_name=$(basename -- "$(dirname -- "$crate_directory")")
+                registry_root=$(dirname -- "$(dirname -- "$(dirname -- "$crate_directory")")")
+                archive=$registry_root/cache/$registry_name/$crate_name-$crate_version.crate
+                if [ ! -f "$archive" ] || [ -L "$archive" ] ||
+                    [ "$(sha256sum "$archive" | awk '{print $1}')" != "$fallback_archive_sha" ]; then
+                    printf 'Reviewed license fallback archive mismatch: %s %s\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                fi
+            fi
             vcs_info=$crate_directory/.cargo_vcs_info.json
             jq -e --arg sha "$fallback_sha" '.git.sha1 == $sha' "$vcs_info" \
                 >/dev/null 2>&1 || {
@@ -165,6 +210,15 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
                     "$crate_name" "$crate_version" >&2
                 exit 1
             }
+            if [ -n "$fallback_vcs_path" ]; then
+                [ "$fallback_vcs_path" != . ] || fallback_vcs_path=
+                jq -e --arg path "$fallback_vcs_path" ' .path_in_vcs == $path ' \
+                    "$vcs_info" >/dev/null 2>&1 || {
+                    printf '%s %s has unexpected VCS package path.\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                }
+            fi
             if [ "$fallback_directory" != - ]; then
                 fallback_root=$repository_root/third_party/rust/licenses/registry-fallback/$fallback_directory
                 [ -d "$fallback_root" ] || {
@@ -205,4 +259,4 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
     printf '%s\t%s\t%s\t%s\n' "$crate_name" "$crate_version" "$license_expression" "$source_label" \
         >> "$summary"
 done < "$package_list"
-rm -f -- "$package_list"
+rm -f -- "$package_list" "$resolved_metadata"

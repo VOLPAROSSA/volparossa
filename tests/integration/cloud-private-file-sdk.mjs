@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lstat, readFile, realpath, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, lstat, readFile, realpath, mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -52,10 +53,21 @@ async function privateJSON(file, value) {
   await writeFile(file, JSON.stringify(value) + '\n', { flag: 'wx', mode: 0o600 });
 }
 async function publicBytes(file) {
-  const info = await lstat(file);
-  insist(info.isFile() && info.uid === 0 && !(info.mode & 0o222)
-    && info.size <= 2 * 1024 ** 2 && await realpath(file) === file);
-  return readFile(file);
+  insist(await realpath(file) === file);
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    insist(info.isFile() && info.uid === 0 && !(info.mode & 0o222) && info.size <= 2 * 1024 ** 2);
+    const bytes = Buffer.alloc(info.size + 1); let size = 0;
+    while (size < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, size, bytes.length - size, size);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+    }
+    const after = await handle.stat();
+    insist(size === info.size && ['size', 'mtimeMs', 'mode', 'uid', 'gid'].every(key => info[key] === after[key]));
+    return bytes.subarray(0, size);
+  } finally { await handle.close(); }
 }
 async function sdkProvenance() {
   const bytes = await publicBytes(`${SDK}/receipt.json`);

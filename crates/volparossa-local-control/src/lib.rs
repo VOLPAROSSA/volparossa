@@ -9,6 +9,7 @@
 
 mod browser_gateway;
 pub mod compute;
+pub mod dps;
 pub use browser_gateway::{BrowserGatewayGrantRequest, BrowserGatewayGranted};
 mod compute_control;
 mod content;
@@ -36,10 +37,13 @@ pub use custody::{
     ContentCustodyReady, ContentCustodyRequest,
 };
 pub use fixture_correlation::{
-    StorageFixtureCorrelationAction, StorageFixtureCorrelationPhase,
-    StorageFixtureCorrelationRecord, StorageFixtureCorrelationRequest,
-    StorageFixtureCorrelationResponse, StorageFixtureCorrelationRole,
-    StorageFixtureCorrelationState, StorageFixtureCorrelationTerminal,
+    StorageFixtureAcquireFailure, StorageFixtureAcquireSummary, StorageFixtureCorrelationAction,
+    StorageFixtureCorrelationPhase, StorageFixtureCorrelationRecord,
+    StorageFixtureCorrelationRequest, StorageFixtureCorrelationResponse,
+    StorageFixtureCorrelationRole, StorageFixtureCorrelationState,
+    StorageFixtureCorrelationTerminal, StorageFixtureHelperDiagnostic, StorageFixtureOperation,
+    StorageFixtureProviderStage, StorageFixtureRequestObservation, StorageFixtureReserveTiming,
+    StorageFixtureTarget, StorageFixtureWorkerState,
 };
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 pub use private_storage::{
@@ -48,10 +52,12 @@ pub use private_storage::{
     PrivateStorageReady, PrivateStorageRemoteRequest, PrivateStorageServeRequest,
 };
 pub use private_storage_detail::{
-    PrivateStorageChallengeDetail, PrivateStorageChallengePhase, PrivateStorageDeadlineScope,
-    PrivateStorageElapsedBucket, PrivateStorageFlowAcquireDetail, PrivateStorageFlowAcquireFailure,
-    PrivateStorageFlowAcquireReason, PrivateStorageFlowAcquireStage, PrivateStorageRemoteDetail,
-    PrivateStorageRemoteStage, PrivateStorageStreamFailure, PrivateStorageTlsFailure,
+    PrivateStorageChallengeDetail, PrivateStorageChallengePhase, PrivateStorageChallengeReadDetail,
+    PrivateStorageChallengeReadOutcome, PrivateStorageChallengeReadStep,
+    PrivateStorageDeadlineScope, PrivateStorageElapsedBucket, PrivateStorageFlowAcquireDetail,
+    PrivateStorageFlowAcquireFailure, PrivateStorageFlowAcquireReason,
+    PrivateStorageFlowAcquireStage, PrivateStorageRemoteDetail, PrivateStorageRemoteStage,
+    PrivateStorageStreamFailure, PrivateStorageTlsFailure,
 };
 pub use private_storage_outcome::{
     PrivateStorageAppendTiming, PrivateStorageOutcome, PrivateStorageOutcomeCategory,
@@ -89,9 +95,10 @@ pub struct ControlRequest {
     #[prost(bytes = "vec", tag = "2")]
     pub request_id: Vec<u8>,
     /// One allowlisted operation.
+    /// Fields 46 through 49 belong to retained Storage APIs; DPS uses field 64.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 64"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -109,7 +116,7 @@ pub mod control_request {
         PrivateStorageAdmissionRequest, PrivateStorageGrantRequest,
         PrivateStorageMaintenanceRequest, PrivateStorageOutcomeRequest,
         PrivateStorageRemoteRequest, PrivateStorageServeRequest, QuoteAttachRequest,
-        QuoteRemoteRequest, RoleChange, StorageFixtureCorrelationRequest,
+        QuoteRemoteRequest, RoleChange, StorageFixtureCorrelationRequest, dps::DpsAssessRequest,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -236,6 +243,9 @@ pub mod control_request {
         /// Private development-fixture correlation, additionally gated by the agent.
         #[prost(message, tag = "49")]
         StorageFixtureCorrelation(StorageFixtureCorrelationRequest),
+        /// Assess explicit local positioning claims without collecting or retaining them.
+        #[prost(message, tag = "64")]
+        DpsAssess(DpsAssessRequest),
     }
 }
 
@@ -322,9 +332,10 @@ pub struct ControlResponse {
     #[prost(message, optional, tag = "5")]
     pub private_storage_remote_detail: Option<PrivateStorageRemoteDetail>,
     /// Typed response body.
+    /// Fields 34 through 37 belong to retained Storage APIs; DPS uses field 64.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 64"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -341,6 +352,7 @@ pub mod control_response {
         PeerList, PolicySnapshot, PrivateStorageAdmission, PrivateStorageGrant,
         PrivateStorageMaintenanceReady, PrivateStorageOutcome, PrivateStorageReady, QuoteReady,
         RoleSnapshot, SessionList, StatusSnapshot, StorageFixtureCorrelationResponse,
+        dps::DpsAssessment,
     };
 
     /// Exactly one response body.
@@ -431,6 +443,9 @@ pub mod control_response {
         /// Private fixture snapshot, not a custody or acceptance receipt.
         #[prost(message, tag = "37")]
         StorageFixtureCorrelation(StorageFixtureCorrelationResponse),
+        /// Stateless input consistency and explicit positioning quality limitations.
+        #[prost(message, tag = "64")]
+        DpsAssessment(DpsAssessment),
     }
 }
 
@@ -835,6 +850,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentPolicyApply(request) => request.validate()?,
         control_request::Operation::ComputeAttach(request) => request.validate()?,
         control_request::Operation::ComputeRemote(request) => request.validate()?,
+        control_request::Operation::DpsAssess(request) => request.validate()?,
         control_request::Operation::QuoteAttach(request) => request.validate()?,
         control_request::Operation::QuoteRemote(request) => request.validate()?,
         control_request::Operation::ComputeDiscover(request) => {
@@ -899,17 +915,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::ContentProviderActivity(snapshot) => {
             validate_provider_activity_response(response, snapshot)?;
         }
-        control_response::Payload::Peers(list) => {
-            list_len(list.peers.len())?;
-            for peer in &list.peers {
-                peer_id(&peer.peer_id)?;
-                Reachability::try_from(peer.reachability)
-                    .map_err(|_| ControlProtocolError::Invalid("reachability"))?;
-                if peer.role_bits & !0b111 != 0 {
-                    return Err(ControlProtocolError::Invalid("peer role bits"));
-                }
-            }
-        }
+        control_response::Payload::Peers(list) => validate_peer_list(list)?,
         control_response::Payload::Paths(list) => {
             list_len(list.paths.len())?;
             for path in &list.paths {
@@ -975,12 +981,26 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::ComputeReady(ready) => ready.validate()?,
+        control_response::Payload::DpsAssessment(assessment) => assessment.validate()?,
         control_response::Payload::QuoteReady(ready) => ready.validate()?,
         control_response::Payload::ComputeDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::ComputeTranscript(transcript) => transcript.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_peer_list(list: &PeerList) -> Result<(), ControlProtocolError> {
+    list_len(list.peers.len())?;
+    for peer in &list.peers {
+        peer_id(&peer.peer_id)?;
+        Reachability::try_from(peer.reachability)
+            .map_err(|_| ControlProtocolError::Invalid("reachability"))?;
+        if peer.role_bits & !0b111 != 0 {
+            return Err(ControlProtocolError::Invalid("peer role bits"));
+        }
     }
     Ok(())
 }

@@ -1,0 +1,118 @@
+[
+  {
+    "browser": "chromium",
+    "width": 320,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 390,
+    "violations": []
+  },
+  {
+    "browser": "chromium",
+    "width": 390,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 768,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 1440,
+    "violations": []
+  },
+  {
+    "browser": "chromium",
+    "width": 1440,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 1920,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 2560,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 320,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 390,
+    "violations": []
+  },
+  {
+    "browser": "firefox",
+    "width": 390,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 768,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 1440,
+    "violations": []
+  },
+  {
+    "browser": "firefox",
+    "width": 1440,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 1920,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 2560,
+    "normal": "pass",
+    "textResize200": "pass",
+    "consoleErrors": 0,
+    "thirdPartyRequests": 0
+  }
+]

@@ -7,10 +7,38 @@ applications and new research projects to its shared capabilities. They are
 **development integrations and research**, not released products. Each repository records its
 own current implementation and evidence; this page explains the scope and major boundaries.
 
+The [complete agreed goal](../development/GOAL.md) preserves the full application scope;
+its [DPS section](../development/GOAL.md#dps) preserves the
+permanent cross-application positioning scope;
+the [core implementation ledger](../IMPLEMENTATION_STATUS.md#current-integration-and-active-work)
+records shared dependencies and exact acceptance evidence. Follow each application's linked
+repository for its own implementation status rather than treating this overview as another ledger.
+
 Applications should share one compatible core rather than create competing peer planners
 or storage ledgers. Closing one frontend must not stop another application's work. Access
 is scoped by user and application; system-wide operation requires an explicit choice.
 See the [shared-service contract](../architecture/APPLICATION_LIFECYCLE.md).
+
+## Studio
+
+[volparossa-studio](https://github.com/VOLPAROSSA/volparossa-studio) is the required
+Silex-based visual website editor, portable export and shared decentralized hosting
+integration. The [Studio section of the goal](../development/GOAL.md#studio)
+requires visual/manual editing, preview, explicit publication, actual independent
+availability, updates/recovery/withdrawal and shared protected AI through Core and
+supported Silex interfaces. [The architecture and initial audit](../services/STUDIO_HOSTING.md)
+separate static publishing from progressive dynamic execution and durable state.
+The initial audit started from a README/license scaffold. Current bounded
+editing/export evidence is recorded in [implementation status](../IMPLEMENTATION_STATUS.md#studio-and-shared-hosting-evidence);
+complete production publication and independently available hosting remain open.
+
+Reuse Browser discovery/rendering with existing TLS/fallback/killswitch policy;
+Cloud private project storage; Code/OpenCode editing/testing/review; explicitly
+published Image assets; authorized Mail delivery; and optional permission-scoped
+DPS/Map components. Useful Chat/Weather/Citizen/Bank integrations add no implicit
+financial, identity, voting or transaction authority. Preserve source licenses,
+Silex functionality and conventional export/hosting alternatives. Private drafts,
+photos, geographic metadata and credentials never become public automatically.
 
 ## Browser
 
@@ -18,8 +46,10 @@ See the [shared-service contract](../architecture/APPLICATION_LIFECYCLE.md).
 with protected connectivity, eligible content caching and the shared VOLPAROSSA brain.
 
 Privacy defaults include strict tracking protection; telemetry, Mozilla accounts and sponsored
-links off; and uBlock Origin, Decentraleyes and Adaptive Tab Bar Color. The browser-specific
-kill switch starts **off**, permitting visible ordinary-Internet fallback when the overlay is
+links off; and uBlock Origin, Decentraleyes, Consent-O-Matic and Adaptive Tab Bar Color.
+Consent-O-Matic remains upstream without a VOLPAROSSA fork; upstream contributions are opt-in.
+Its cooperation with uBlock Origin must preserve necessary website functions and avoid unwanted consent.
+The browser-specific kill switch starts **off**, permitting visible ordinary-Internet fallback when the overlay is
 unavailable. It must not bypass a policy denial or weaken another core consumer's defaults.
 
 Privacy/sidebar and scoped protected-TCP milestones have real browser evidence. Complete
@@ -51,14 +81,22 @@ arbitrary storage peers. Missing delivery confirmation is not automatic proof of
 
 ## Code
 
-[volparossa-code](https://github.com/VOLPAROSSA/volparossa-code) is moving to **OpenCode**, replacing
-the earlier Codex foundation. The core should organize model access, agent cooperation and
-resource allocation; OpenCode supplies coding workflows and suitable client surfaces.
+[volparossa-code](https://github.com/VOLPAROSSA/volparossa-code) now uses **OpenCode** on its
+`main` branch, replacing the earlier Codex foundation. OpenCode supplies coding workflows;
+the core handles model access, execution and resource control. Shared agent cooperation
+remains a core responsibility, not a separate network scheduler in the application.
 
-The target is actual code reading, editing and testing through network cooperation, including
-protected private projects. The migration remains on its development branch. Native runtime
-adapter checks are not proof of reliable model-driven coding, and private-peer execution is
-unfinished. A local fallback does not satisfy that network requirement.
+A [real CPU-model trial](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38824828727)
+completes two reads, an explicitly approved edit and test, and an independent check against
+unchanged original tests. The coding task takes about 37 minutes. The native backend is
+now also integrated into core `main`, with passing source checks. The trial remains bound
+to its original core pin; it has not been repeated on the newly integrated core.
+This is a bounded local workflow, not evidence of competitive performance, general coding
+reliability or a working native editor UI.
+
+The target remains code reading, editing and testing through network cooperation, including
+protected private projects. Confidential private-peer execution is unfinished; local
+execution does not satisfy that network requirement.
 
 ## Image
 
@@ -80,11 +118,24 @@ Signed traffic-snapshot validation exists; live aggregation and mobile display r
 Sharing congestion should not expose individual journeys or complete location histories.
 Licenses, freshness and uncertainty remain relevant even when data comes from nearby peers.
 
+The [DPS goal section](../development/GOAL.md#dps) define the
+permanent application scope; the [DPS service design](../services/DPS.md) records
+implementation and acceptance choices. Together they cover alternative or
+complementary location sources, including weak-GNSS, tunnel/indoor and
+manipulated-GNSS scenarios. Keep offline navigation, visible uncertainty and
+application permission boundaries. The recorded debug JNI quality slice is separate from native navigation and
+actual positioning improvement; journeys and movement histories are not shared
+automatically. No application depends on a chat attachment or conversation history
+for these requirements.
+
 ## Weather
 
 [volparossa-weather](https://github.com/VOLPAROSSA/volparossa-weather) builds an application-independent
 weather service from **direct public model data**, starting with ECMWF—not Open-Meteo.
 Useful additional models and observations can complement that source.
+
+Both Drizz.li and Overmorrow are integration targets. Precipitation and air-quality support
+remain required follow-on work; unavailable data must be shown as unavailable, never invented.
 
 Direct field decoding and a core-cache adapter exist. Distributed processing and learning
 should produce measurable forecast improvements against observations; a learned forecasting
@@ -134,6 +185,19 @@ confirmed governance rules.
 Real identity verification and uniqueness, secret verifiable voting, contestable
 proposal review, core delivery and recovery remain open. A synthetic result is
 neither a public-election security proof nor recognized legal authority.
+
+## Shared positioning integration
+
+Use the [DPS goal section](../development/GOAL.md#dps) for complete functional
+and per-application requirements, and the [shared DPS service](../services/DPS.md#application-integration-priorities)
+for versioned adapters and acceptance. Applications share that service rather
+than duplicate positioning engines. Participation grants no sensor, contribution,
+retention or training permission; each needs its own appropriate authorization.
+
+Preserve offline behavior, uncertainty, platform/origin precision limits and private
+location/media history. Unproved position claims cannot grant financial, identity,
+voting or access authority. Synthetic assessments and debug JNI quality displays do
+not prove sensor acquisition, geographic truth, navigation or measured improvement.
 
 ## Shared boundaries
 

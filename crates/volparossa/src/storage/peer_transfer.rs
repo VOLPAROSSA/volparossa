@@ -428,6 +428,7 @@ pub(super) async fn remote(
             );
             let request = PrivateStorageRemoteRequest {
                 include_flow_acquire_detail: super::diagnostics::flow_acquire_enabled(),
+                include_challenge_read_detail: super::diagnostics::challenge_read_enabled(),
                 provider_key: grant.provider_key().to_bytes().to_vec(),
                 grant: grant.signed().encode(),
                 maintenance_turn: MAINTENANCE_TURN.try_with(Clone::clone).unwrap_or_default(),

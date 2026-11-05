@@ -2,8 +2,14 @@ name: Storage retirement and closed TLS diagnostics
 
 on:
   push:
-    branches: [fix/storage-route-retirement]
+    branches: [fix/storage-route-retirement, fix/storage-provider-close-before-log-20261022]
   workflow_dispatch:
+    inputs:
+      provider_event_drain:
+        description: Run bounded provider event-drain regressions and original-behavior controls
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -82,10 +88,30 @@ jobs:
           .github/workflows/alpha-topology.yml
           docs/IMPLEMENTATION_STATUS.md
           crates/volparossa-agent/src/route_setup.rs
+          crates/volparossa-agent/src/helper_v3.rs
+          crates/volparossa-agent/src/mptcp_transport.rs
+          crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic.rs
+          crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic/tests.rs
+          crates/volparossa-agent/src/mptcp_transport/retirement/diagnostic_tests.rs
+          crates/volparossa-agent/src/route_setup/content_stream.rs
+          crates/volparossa-agent/src/content/fixture_correlation.rs
+          crates/volparossa-agent/src/content/fixture_correlation/tests.rs
+          crates/volparossa-agent/src/content/private_storage/observation.rs
+          crates/volparossa-agent/src/content/private_storage/observation/fixture_correlation_tests.rs
+          crates/volparossa-agent/src/content/private_storage/observation/flow_acquire.rs
+          crates/volparossa-agent/src/content/private_storage/observation/flow_acquire/tests.rs
+          crates/volparossa-local-control/src/fixture_correlation.rs
+          crates/volparossa-local-control/src/fixture_correlation/tests.rs
+          crates/volparossa/src/content/fixture_correlation.rs
+          crates/volparossa/src/content/fixture_correlation_tests.rs
+          tests/integration/storage-fixture-correlation-sampler.py
+          tests/integration/test-storage-fixture-correlation-sampler.py
           crates/volparossa-agent/src/route_setup/tests/lost_helper_retirement_tests.rs
           crates/volparossa-agent/src/route_setup/tests/tcp_flow_admission_tests.rs
           crates/volparossa-agent/src/content/tls.rs
           crates/volparossa-agent/src/content/tls/tests/kernel_close.rs
+          crates/volparossa-agent/src/content/tls/tests/kernel_close/repeated_egress.rs
+          scripts/run-isolated-test.sh
           crates/volparossa-agent/src/content/tls/close_diagnostic_tests.rs
           crates/volparossa-agent/src/content/private_storage.rs
           crates/volparossa-agent/src/content/private_storage/outcome.rs
@@ -126,7 +152,6 @@ jobs:
           dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
               'crates/volparossa-agent/Cargo.toml',
               'crates/volparossa-local-control/Cargo.toml', 'crates/volparossa/Cargo.toml',
-              'crates/volparossa-agent/src/mptcp_transport/acquire_diagnostic.rs',
               'crates/volparossa-helper/src/worker_transport.rs',
               'crates/volparossa-helper/src/engine_v3.rs',
               'tests/integration/agent-private-task-code.py',
@@ -139,8 +164,8 @@ jobs:
           for name in dependencies:
               assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + name)
           runner = 'scripts/run-isolated-test.sh'
-          assert git('rev-parse', 'HEAD:' + runner) == git('rev-parse', os.environ['SOURCE_BASE'] + ':' + runner)
-          assert git('rev-parse', 'HEAD:' + runner) == 'ba5c00260f42777c7fa72f46c6f9029f530a41aa'
+          assert git('rev-parse', os.environ['SOURCE_BASE'] + ':' + runner) == 'ba5c00260f42777c7fa72f46c6f9029f530a41aa'
+          assert git('rev-parse', 'HEAD:' + runner) == '14e551d91b4ac5bf8feb7a3275b6ce6e86d7f99b'
           record = dict(version=1, source_commit=os.environ['GITHUB_SHA'],
               workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], source_tree=git('rev-parse', 'HEAD^{tree}'),
               base_commit=os.environ['SOURCE_BASE'],
@@ -148,8 +173,9 @@ jobs:
               dependency_blobs={name:git('rev-parse', 'HEAD:' + name) for name in dependencies},
               runner_blob=git('rev-parse', 'HEAD:' + runner),
               scope='retained-route-retirement-tls-close-v9-and-consumer-profile-10-contracts',
-              kernel_test_scope='signed-reserve-loopback-mptcp-and-tcp-provider-close-order',
+              kernel_test_scope='signed-reserve-close-order-and-repeated-production-sni-dns-egress',
               tls_production_diagnostic_changed=True, historical_consumer_pins_unchanged=True,
+              fixture_helper_diagnostic_version=2, fixture_fragment_copy_binding=False,
               live_consumer_acceptance=False, original_timeout_cause_proven=False,
               full_relay_datapath_execution=False, feature_equivalence_to_full_workspace_proven=False)
           pathlib.Path('storage-retirement-evidence/source.json').write_text(json.dumps(record, sort_keys=True) + '\n')
@@ -158,7 +184,10 @@ jobs:
         id: toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           rustc --version --verbose
           cargo --version --verbose
       - name: Install reviewed Protobuf on disposable hosted runner
@@ -228,6 +257,7 @@ jobs:
               counts[suite] = len(passed)
               names.extend(suite + ':' + scope + ':' + name for name, scope in passed)
           assert len(names) == len(set(names))
+          assert counts['storage-fixture-correlation-sampler'] == 33
           node = (root / 'node-consumer.log').read_text()
           node_names = re.findall(r'^ok [0-9]+ - ([^\n]+)$', node, re.M)
           node_totals = re.findall(r'^# tests ([0-9]+)$', node, re.M)
@@ -261,6 +291,7 @@ jobs:
           tests = (
               'content::tls::tests::kernel_close::signed_reserve_survives_tcp_provider_and_proxy_drop_before_outer_finish',
               'content::tls::tests::kernel_close::signed_reserve_rejects_abrupt_outer_drop_after_inner_finish',
+              'content::tls::tests::kernel_close::repeated_egress::three_signed_reserves_use_reusable_production_egress_and_fragmented_hello',
           )
           for index, name in enumerate(tests):
               inventory = subprocess.check_output([str(binary), '--ignored', '--exact', name, '--list'], text=True)
@@ -345,6 +376,61 @@ jobs:
               total_disjoint_contracts=45, live_consumer_acceptance=False,
               original_timeout_cause_proven=False), sort_keys=True) + '\n')
           PY
+      - name: Inventory and execute fixture v2 and unchanged acquisition contracts
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          group() {
+            local label="$1" package="$2" filter="$3"
+            local -a target=(--lib)
+            if test "$package" = volparossa; then target=(--bin volparossa); fi
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "${target[@]}" "$filter" -- --list \
+              2>&1 | tee "storage-retirement-evidence/fixture-$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "${target[@]}" "$filter" \
+              2>&1 | tee "storage-retirement-evidence/fixture-$label-test.log"
+          }
+          group wire volparossa-local-control fixture_correlation::
+          group bank volparossa-agent fixture_correlation::
+          group observer volparossa-agent content::private_storage::observation::fixture_correlation_tests::
+          group cli volparossa content::fixture_correlation::
+          group helper volparossa-agent helper::tests::fixture_acquire_
+          group helper-legacy volparossa-agent helper::tests::acquire_transport_
+          group acquire volparossa-agent mptcp_transport::acquire_diagnostic::tests::
+          group retirement volparossa-agent mptcp_transport::retirement::tests::
+          group retirement-diagnostic volparossa-agent mptcp_transport::retirement::diagnostic_tests::
+          group content-stream volparossa-agent route_setup::content_stream::tests::
+          group projection volparossa-agent content::private_storage::observation::flow_acquire::tests::
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('storage-retirement-evidence')
+          groups = {'wire': ('volparossa-local-control', 12), 'bank': ('volparossa-agent', 33),
+              'observer': ('volparossa-agent', 7), 'cli': ('volparossa', 10),
+              'helper': ('volparossa-agent', 4), 'helper-legacy': ('volparossa-agent', 3),
+              'acquire': ('volparossa-agent', 7), 'retirement': ('volparossa-agent', 7),
+              'retirement-diagnostic': ('volparossa-agent', 4),
+              'content-stream': ('volparossa-agent', 6),
+              'projection': ('volparossa-agent', 7)}
+          all_names, counts = [], {}
+          prior = set(json.loads((root / 'rust-tests.json').read_text())['test_names'])
+          prior.update(json.loads((root / 'tls-v9-tests.json').read_text())['test_names'])
+          for label, (package, expected) in groups.items():
+              inventory = (root / f'fixture-{label}-inventory.log').read_text()
+              output = (root / f'fixture-{label}-test.log').read_text()
+              names = re.findall(r'^([^\n]+): test$', inventory, re.M)
+              assert len(names) == len(set(names)) == expected, label
+              assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.M) == [str(expected)], label
+              for name in names:
+                  assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.M)) == 1
+              assert not set(names).intersection(prior), label
+              counts[label] = expected
+              all_names.extend(package + ':' + name for name in names)
+          assert len(all_names) == len(set(all_names)) == 100
+          (root / 'fixture-v2-tests.json').write_text(json.dumps(dict(version=1, counts=counts,
+              unique_tests=100, test_names=sorted(all_names), previous_contracts=45,
+              total_disjoint_contracts=145, fixture_version=2, legacy_fixture_version=1,
+              causal_attribution=False, fragment_copy_binding=False,
+              live_consumer_acceptance=False), sort_keys=True) + '\n')
+          PY
       - name: Check firewall snapshot normalization before the isolated test
         run: |
           python3 -B - <<'PY'
@@ -386,7 +472,7 @@ jobs:
           pathlib.Path('storage-retirement-evidence/firewall-normalizer.json').write_text(
               json.dumps(dict(checks=checked, passed=True, scope='inert-normalizer-fixtures'), sort_keys=True) + '\n')
           PY
-      - name: Run both exact TLS close contracts in disposable loopback namespaces
+      - name: Run exact TLS close and production egress contracts in disposable namespaces
         run: |
           set -euo pipefail
           parent_namespace=$(readlink /proc/self/ns/net)
@@ -400,13 +486,15 @@ jobs:
           } > storage-retirement-evidence/host-before.sha256
           read -r binary < storage-retirement-evidence/binary.txt
           mapfile -t kernel_tests < <(python3 -B -c 'import json; print(*json.load(open("storage-retirement-evidence/kernel-tests.json")), sep="\n")')
-          test "${#kernel_tests[@]}" = 2
+          test "${#kernel_tests[@]}" = 3
           kernel_status=0
-          for index in 0 1; do
+          for index in 0 1 2; do
             test_name=${kernel_tests[$index]}
+            network=loopback
+            if test "$index" = 2; then network=content-egress; fi
             set +e
             VOLPAROSSA_TEST_ALLOW_SUDO_NETNS=1 scripts/run-isolated-test.sh --command \
-              "$binary" "$test_name" VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS loopback \
+              "$binary" "$test_name" VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS "$network" \
               --ignored --exact "$test_name" --nocapture \
               2>&1 | tee "storage-retirement-evidence/kernel-$index-test.log"
             status=$?
@@ -419,7 +507,7 @@ jobs:
           import json, pathlib, re
           root = pathlib.Path('storage-retirement-evidence')
           tests = json.loads((root / 'kernel-tests.json').read_text())
-          assert len(tests) == len(set(tests)) == 2
+          assert len(tests) == len(set(tests)) == 3
           for index, name in enumerate(tests):
               assert (root / f'kernel-{index}-exit.txt').read_text().strip() == '0'
               output = (root / f'kernel-{index}-test.log').read_text()
@@ -428,10 +516,13 @@ jobs:
               assert re.fullmatch(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9.]+s', summaries[0])
               assert re.findall(r'^test (.+) \.\.\. ok$', output, re.M) == [name]
           (root / 'kernel-results.json').write_text(json.dumps(dict(version=1,
-              unique_tests=2, test_names=tests, passed=True,
+              unique_tests=3, test_names=tests, passed=True,
               genuine_loopback_kernel_mptcp=True, real_loopback_tcp_provider=True,
               production_nested_tls_and_proxy=True, signed_reserve_receipt_verified=True,
               normal_close_after_peer_drop=True, abrupt_outer_close_rejected=True,
+              repeated_production_egress=True, signed_reserve_exchanges=3,
+              real_synthetic_dns_tcp=True, production_sni_prefix_inspection=True,
+              public_fixture_address_only_in_disposable_namespace=True,
               full_relay_datapath_proven=False, multiple_live_subflows_proven=False,
               live_consumer_acceptance=False, original_timeout_cause_proven=False), sort_keys=True) + '\n')
           PY
@@ -475,5 +566,423 @@ jobs:
         with:
           name: storage-route-retirement-${{ github.run_id }}
           path: storage-retirement-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  provider-close:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/fix/storage-provider-close-before-log-20261022'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PROVIDER_CLOSE_BASE: c730617af48bf2d1771b24bc91fd450afb140db4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the provider lifecycle change and unchanged dependencies
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$PROVIDER_CLOSE_BASE" HEAD
+          umask 077
+          mkdir provider-close-evidence
+          python3 -B - <<'PYCODE'
+          import json, os, pathlib, subprocess
+          def git(*args): return subprocess.check_output(['git', *args], text=True).strip()
+          base = os.environ['PROVIDER_CLOSE_BASE']
+          allowed = {'.github/workflows/storage-route-retirement.yml',
+              'crates/volparossa-agent/src/content.rs',
+              'crates/volparossa-agent/src/content/provider_session_tests.rs'}
+          changed = git('diff', '--name-only', base, 'HEAD').splitlines()
+          assert len(changed) == len(allowed) and set(changed) == allowed
+          dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+              'crates/volparossa-agent/Cargo.toml', 'crates/volparossa-content/Cargo.toml',
+              'crates/volparossa-agent/src/content/tls.rs',
+              'crates/volparossa-content/src/provider.rs', 'scripts/run-isolated-test.sh',
+              'tests/integration/storage-consumer-maintenance-pins-v10.json',
+              '.github/workflows/alpha-topology.yml')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', base + ':' + name), name
+          pathlib.Path('provider-close-evidence/source.json').write_text(json.dumps(dict(
+              version=1, source_commit=git('rev-parse', 'HEAD'), source_tree=git('rev-parse', 'HEAD^{tree}'),
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], base_commit=base,
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(allowed)},
+              dependency_blobs={name: git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              scope='actual-provider-session-close-before-event-lock',
+              live_consumer_acceptance=False, historical_cause_proven=False,
+              full_relay_datapath=False), sort_keys=True) + '\n')
+          PYCODE
+      - name: Prepare the existing pinned hosted toolchain
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          cargo fmt --all -- --check
+          cargo fetch --locked
+      - name: Record host observations before the isolated regression
+        run: |
+          set -euo pipefail
+          readlink /proc/self/ns/net > provider-close-evidence/parent-netns.txt
+          {
+            ip -4 -j route show table all | sha256sum
+            ip -6 -j route show table all | sha256sum
+            sha256sum /etc/resolv.conf
+            sudo -n env LC_ALL=C iptables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+            sudo -n env LC_ALL=C ip6tables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+          } > provider-close-evidence/host-before.sha256
+      - name: Require fixed-session success and original-session failure under the held log lock
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PYCODE'
+          import hashlib, json, os, pathlib, re, subprocess
+          root = pathlib.Path('provider-close-evidence')
+          source = pathlib.Path('crates/volparossa-agent/src/content.rs')
+          candidate = source.read_bytes()
+          original = subprocess.check_output(['git', 'show', os.environ['PROVIDER_CLOSE_BASE'] + ':' + str(source)])
+          start, end = b'async fn serve_provider_session(\n', b'\n/// FIFO admission'
+          def span(raw):
+              assert raw.count(start) == raw.count(end) == 1
+              first = raw.index(start)
+              return first, raw.index(end, first)
+          a, b = span(candidate); x, y = span(original)
+          negative = candidate[:a] + original[x:y] + candidate[b:]
+          assert negative != candidate and negative[a:a+y-x] == original[x:y]
+          names = None
+          results = {}
+          try:
+              for variant, data in (('candidate', candidate), ('original-session', negative)):
+                  source.write_bytes(data)
+                  with (root / (variant + '-build.jsonl')).open('wb') as out, (root / (variant + '-build.log')).open('wb') as err:
+                      subprocess.run(['cargo', 'test', '--locked', '--offline', '-p', 'volparossa-agent', '--lib',
+                          '--no-run', '--message-format=json'], stdout=out, stderr=err, check=True, timeout=1200)
+                  records = [json.loads(line) for line in (root / (variant + '-build.jsonl')).read_text().splitlines()]
+                  binaries = [row['executable'] for row in records if row.get('reason') == 'compiler-artifact'
+                      and row.get('target', {}).get('name') == 'volparossa_agent'
+                      and row.get('profile', {}).get('test') and row.get('executable')]
+                  assert len(binaries) == 1
+                  binary = pathlib.Path(binaries[0]).resolve(strict=True)
+                  assert binary.is_relative_to(pathlib.Path.cwd() / 'target')
+                  inventory = subprocess.check_output([str(binary), 'content::provider_session_tests::', '--ignored', '--list'], text=True, timeout=15)
+                  selected = re.findall(r'^([^\n]+): test$', inventory, re.M)
+                  assert len(selected) == len(set(selected)) == 2
+                  assert all(name.startswith('content::provider_session_tests::') for name in selected)
+                  if names is None: names = selected
+                  else: assert names == selected
+                  (root / (variant + '-inventory.log')).write_text(inventory)
+                  results[variant] = []
+                  for index, name in enumerate(names):
+                      log = root / f'{variant}-{index}.log'
+                      with log.open('wb') as out:
+                          run = subprocess.run(['scripts/run-isolated-test.sh', '--command', str(binary), name,
+                              'VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS', 'loopback', '--ignored', '--exact', name, '--nocapture'],
+                              env={**os.environ, 'VOLPAROSSA_TEST_ALLOW_SUDO_NETNS': '1'},
+                              stdout=out, stderr=subprocess.STDOUT, timeout=135)
+                      (root / f'{variant}-{index}.exit').write_text(str(run.returncode) + '\n')
+                      text = log.read_text()
+                      if variant == 'candidate':
+                          assert run.returncode == 0, (variant, name)
+                          assert re.findall(r'^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;', text, re.M)
+                          assert re.findall(r'^test (.+) \.\.\. ok$', text, re.M) == [name]
+                      else:
+                          assert run.returncode == 101, (variant, name, run.returncode)
+                          assert 'PROVIDER_STREAM_RETAINED_BEHIND_EVENT_LOCK' in text
+                          assert re.findall(r'^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; [0-9]+ filtered out;', text, re.M)
+                      results[variant].append(dict(test=name, exit=run.returncode,
+                          log_sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
+          finally:
+              source.write_bytes(candidate)
+          assert source.read_bytes() == candidate
+          (root / 'results.json').write_text(json.dumps(dict(version=1, results=results,
+              candidate_function_sha256=hashlib.sha256(candidate[a:b]).hexdigest(),
+              original_function_sha256=hashlib.sha256(original[x:y]).hexdigest(),
+              same_tests=True, actual_provider_session=True, disposable_loopback_tcp_tls=True,
+              negative_control='original-function-with-same-new-tests',
+              live_consumer_acceptance=False, historical_cause_proven=False,
+              full_relay_datapath=False), sort_keys=True) + '\n')
+          PYCODE
+      - name: Lint the restored candidate
+        run: cargo clippy --locked --offline -p volparossa-agent --all-targets --all-features -- -D warnings
+      - name: Restore source and verify host observations even after failure
+        if: always()
+        run: |
+          set -euo pipefail
+          # This runner checkout was proven clean; restore only the deliberate negative-control edit.
+          git show HEAD:crates/volparossa-agent/src/content.rs > crates/volparossa-agent/src/content.rs
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          if test -f provider-close-evidence/host-before.sha256; then
+            read -r parent_namespace < provider-close-evidence/parent-netns.txt
+            test "$(readlink /proc/self/ns/net)" = "$parent_namespace"
+            {
+              ip -4 -j route show table all | sha256sum
+              ip -6 -j route show table all | sha256sum
+              sha256sum /etc/resolv.conf
+              sudo -n env LC_ALL=C iptables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+              sudo -n env LC_ALL=C ip6tables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+            } > provider-close-evidence/host-after.sha256
+            cmp provider-close-evidence/host-before.sha256 provider-close-evidence/host-after.sha256
+          fi
+      - name: Retain bounded source and lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: provider-close-before-log-${{ github.run_id }}
+          path: provider-close-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  provider-event-drain:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.provider_event_drain &&
+      github.ref == 'refs/heads/fix/storage-provider-event-drain-20261022'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PROVIDER_DRAIN_BASE: 157908ad1e4a3dc9050179be30a970beff1ef061
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind bounded provider drain source and unchanged authority and fixture dependencies
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$PROVIDER_DRAIN_BASE" HEAD
+          umask 077
+          mkdir provider-drain-evidence
+          python3 -B - <<'PYCODE'
+          import json, os, pathlib, subprocess
+          def git(*args): return subprocess.check_output(['git', *args], text=True).strip()
+          base = os.environ['PROVIDER_DRAIN_BASE']
+          allowed = {'.github/workflows/storage-route-retirement.yml',
+              'crates/volparossa-agent/src/content.rs',
+              'crates/volparossa-agent/src/content/provider_events.rs',
+              'crates/volparossa-agent/src/content/provider_loop_tests.rs',
+              'crates/volparossa-agent/src/content/provider_session_tests.rs'}
+          changed = git('diff', '--name-only', base, 'HEAD').splitlines()
+          assert len(changed) == len(allowed) and set(changed) == allowed
+          dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+              'crates/volparossa-agent/Cargo.toml', 'crates/volparossa-content/Cargo.toml',
+              'crates/volparossa-agent/src/content/tls.rs',
+              'crates/volparossa-agent/src/content/refresh_tests.rs',
+              'crates/volparossa-agent/src/content/private_storage.rs',
+              'crates/volparossa-agent/src/route_setup.rs',
+              'crates/volparossa-agent/src/state.rs',
+              'crates/volparossa-content/src/provider.rs',
+              'crates/volparossa-content/src/private_storage/wire/diagnostic.rs',
+              'scripts/run-isolated-test.sh', '.github/workflows/alpha-topology.yml',
+              'tests/integration/storage-consumer-maintenance-pins.json',
+              *(f'tests/integration/storage-consumer-maintenance-pins-v{i}.json' for i in range(2, 11)))
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', base + ':' + name), name
+          pathlib.Path('provider-drain-evidence/source.json').write_text(json.dumps(dict(
+              version=1, source_commit=git('rev-parse', 'HEAD'), source_tree=git('rev-parse', 'HEAD^{tree}'),
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], base_commit=base,
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(allowed)},
+              dependency_blobs={name: git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              queue_capacity_batches=64, maximum_codes_per_batch=3,
+              overflow='omit-newest-saturating-counter-later-closed-marker',
+              stop_loss='discard-undrained-volatile-batches-with-count-only-tracing-warning',
+              timestamp='post-lock-emission-as-before',
+              scope='provider-session-admission-and-serving-loop-independent-of-event-lock',
+              live_consumer_acceptance=False, historical_cause_proven=False,
+              full_relay_datapath=False), sort_keys=True) + '\n')
+          PYCODE
+      - name: Prepare the existing pinned hosted toolchain
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          cargo fmt --all -- --check
+          cargo fetch --locked
+      - name: Record host observations before the isolated regressions
+        run: |
+          set -euo pipefail
+          readlink /proc/self/ns/net > provider-drain-evidence/parent-netns.txt
+          {
+            ip -4 -j route show table all | sha256sum
+            ip -6 -j route show table all | sha256sum
+            sha256sum /etc/resolv.conf
+            sudo -n env LC_ALL=C iptables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+            sudo -n env LC_ALL=C ip6tables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+          } > provider-drain-evidence/host-before.sha256
+      - name: Require candidate passes and original-behavior controls with identical tests
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PYCODE'
+          import difflib, hashlib, json, os, pathlib, re, subprocess
+          root = pathlib.Path('provider-drain-evidence')
+          source = pathlib.Path('crates/volparossa-agent/src/content.rs')
+          candidate = source.read_text()
+          original = subprocess.check_output(['git', 'show', os.environ['PROVIDER_DRAIN_BASE'] + ':' + str(source)], text=True)
+          # These controls deliberately reintroduce the ORIGINAL BLOCKING BEHAVIOR at
+          # adapted ownership boundaries. They are not exact original function/source copies.
+          original_session_wait = 'provider_failure_event(events.as_ref(), &error, storage_failure).await;'
+          assert original.count(original_session_wait) == 1
+          original_refresh_wait = 'provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING").await;'
+          assert original.count(original_refresh_wait) == 1
+          session_spawn = """                    sessions.spawn(serve_provider_session(
+                                  stream, tls, registry, activity, fixture,
+                              ));"""
+          assert candidate.count(session_spawn) == 1
+          blocked_session_spawn = """                    let events = events.clone();
+                              sessions.spawn(async move {
+                                  let batch = serve_provider_session(stream, tls, registry, activity, fixture).await;
+                                  if let (Some(events), Some(batch)) = (events, batch) {
+                                      let mut state = events.write().await;
+                                      batch.log(&mut state);
+                                  }
+                                  None
+                              });"""
+          refresh_enqueue = 'event_drain.enqueue(provider_events::Batch::one("CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING"));'
+          assert candidate.count(refresh_enqueue) == 1
+          blocked_refresh = """if let Some(events) = events.as_ref() {
+                                  let mut state = events.write().await;
+                                  provider_events::Batch::one("CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING")
+                                      .log(&mut state);
+                              }"""
+          variants = (
+              ('candidate', candidate, None),
+              ('original-session-wait-behavior', candidate.replace(session_spawn, blocked_session_spawn), 'admission'),
+              ('original-refresh-wait-behavior', candidate.replace(refresh_enqueue, blocked_refresh), 'refresh'))
+          prefix = 'content::provider_loop_tests::'
+          refresh_names = [prefix + item + '_refresh_log_lock_keeps_accept_and_stop_pollable' for item in ('busy', 'timeout')]
+          admission_name = prefix + 'four_rejected_sessions_release_admission_before_event_lock'
+          legacy_names = ['content::provider_session_tests::' + item + '_timeout_closes_before_event_lock'
+              for item in ('registry', 'selector')]
+          all_names = sorted(refresh_names + [admission_name] + legacy_names)
+          results = {}
+          try:
+              for variant, data, control in variants:
+                  patch = ''.join(difflib.unified_diff(candidate.splitlines(True), data.splitlines(True),
+                      fromfile='candidate/content.rs', tofile=variant + '/content.rs'))
+                  assert (not patch) is (control is None)
+                  (root / (variant + '.patch')).write_text(patch)
+                  source.write_text(data)
+                  with (root / (variant + '-build.jsonl')).open('wb') as out, (root / (variant + '-build.log')).open('wb') as err:
+                      subprocess.run(['cargo', 'test', '--locked', '--offline', '-p', 'volparossa-agent', '--lib',
+                          '--no-run', '--message-format=json'], stdout=out, stderr=err, check=True, timeout=1200)
+                  records = [json.loads(line) for line in (root / (variant + '-build.jsonl')).read_text().splitlines()]
+                  binaries = [row['executable'] for row in records if row.get('reason') == 'compiler-artifact'
+                      and row.get('target', {}).get('name') == 'volparossa_agent'
+                      and row.get('profile', {}).get('test') and row.get('executable')]
+                  assert len(binaries) == 1
+                  binary = pathlib.Path(binaries[0]).resolve(strict=True)
+                  assert binary.is_relative_to(pathlib.Path.cwd() / 'target')
+                  inventory = subprocess.check_output([str(binary), 'content::provider_', '--ignored', '--list'], text=True, timeout=15)
+                  assert sorted(re.findall(r'^([^\n]+): test$', inventory, re.M)) == all_names
+                  (root / (variant + '-inventory.log')).write_text(inventory)
+                  if control is None:
+                      unit = subprocess.run([str(binary), 'content::provider_events::tests::', '--nocapture'],
+                          capture_output=True, text=True, timeout=30)
+                      (root / 'queue-tests.log').write_text(unit.stdout + unit.stderr)
+                      assert unit.returncode == 0
+                      assert re.findall(r'^test result: ok\. 2 passed; 0 failed; 0 ignored;', unit.stdout, re.M)
+                  names = all_names if control is None else ([admission_name] if control == 'admission' else refresh_names)
+                  rows = []
+                  for index, name in enumerate(names):
+                      log = root / f'{variant}-{index}.log'
+                      with log.open('wb') as out:
+                          run = subprocess.run(['scripts/run-isolated-test.sh', '--command', str(binary), name,
+                              'VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS', 'loopback', '--ignored', '--exact', name, '--nocapture'],
+                              env={**os.environ, 'VOLPAROSSA_TEST_ALLOW_SUDO_NETNS': '1'},
+                              stdout=out, stderr=subprocess.STDOUT, timeout=135)
+                      (root / f'{variant}-{index}.exit').write_text(str(run.returncode) + '\n')
+                      text = log.read_text()
+                      if control is None:
+                          assert run.returncode == 0, (variant, name)
+                          assert re.findall(r'^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;', text, re.M)
+                          # --nocapture may print a success marker between libtest's prefix and its ok.
+                          clean = text.replace('PROVIDER_EVENT_DRAIN_REFRESH_PASS\n', '').replace('PROVIDER_EVENT_DRAIN_ADMISSION_PASS\n', '')
+                          assert re.findall(r'^test (.+) \.\.\. ok$', clean, re.M) == [name]
+                          if name in refresh_names: assert 'PROVIDER_EVENT_DRAIN_REFRESH_PASS' in text
+                          if name == admission_name: assert 'PROVIDER_EVENT_DRAIN_ADMISSION_PASS' in text
+                      else:
+                          marker = 'PROVIDER_EVENT_DRAIN_' + control.upper() + '_BLOCKED'
+                          assert run.returncode == 101, (variant, name, run.returncode)
+                          assert marker in text
+                          assert 'PROVIDER_EVENT_DRAIN_' + control.upper() + '_PASS' not in text
+                          assert re.findall(r'^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; [0-9]+ filtered out;', text, re.M)
+                      rows.append(dict(test=name, exit=run.returncode,
+                          log_sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
+                  results[variant] = dict(results=rows,
+                      patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+                      source_sha256=hashlib.sha256(data.encode()).hexdigest())
+          finally:
+              source.write_text(candidate)
+          assert source.read_text() == candidate
+          (root / 'results.json').write_text(json.dumps(dict(version=1, results=results,
+              same_new_tests=True, actual_provider_serving_loop=True, diagnostic_sink_present=True,
+              disposable_loopback_tcp_tls=True, held_event_lock=True,
+              negative_controls='original-behavior-reintroduction-not-original-function-copies',
+              prior_exact_original_function_proof='a41030a51471c7d7393612afe28f973d98e2301f-separate-evidence',
+              live_consumer_acceptance=False, historical_cause_proven=False,
+              full_relay_datapath=False), sort_keys=True) + '\n')
+          PYCODE
+      - name: Lint the restored candidate
+        run: cargo clippy --locked --offline -p volparossa-agent --all-targets --all-features -- -D warnings
+      - name: Restore source and verify host observations even after failure
+        if: always()
+        run: |
+          set -euo pipefail
+          # Restore only this runner's deliberate, clean-checkout control mutation.
+          git show HEAD:crates/volparossa-agent/src/content.rs > crates/volparossa-agent/src/content.rs
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          if test -f provider-drain-evidence/host-before.sha256; then
+            read -r parent_namespace < provider-drain-evidence/parent-netns.txt
+            test "$(readlink /proc/self/ns/net)" = "$parent_namespace"
+            {
+              ip -4 -j route show table all | sha256sum
+              ip -6 -j route show table all | sha256sum
+              sha256sum /etc/resolv.conf
+              sudo -n env LC_ALL=C iptables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+              sudo -n env LC_ALL=C ip6tables-save | awk "$FIREWALL_NORMALIZER" | sha256sum
+            } > provider-drain-evidence/host-after.sha256
+            cmp provider-drain-evidence/host-before.sha256 provider-drain-evidence/host-after.sha256
+          fi
+      - name: Retain bounded source and provider admission evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: provider-event-drain-${{ github.run_id }}
+          path: provider-drain-evidence/
           if-no-files-found: warn
           retention-days: 14

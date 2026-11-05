@@ -208,13 +208,12 @@ async fn advance_reserved(
         for (index, result) in selected.into_iter().zip(results) {
             let state = &mut states[index];
             reconcile(state, owners[state.owner].1, &result)?;
-            if let Err(error) = result {
-                if !follow::transient_preflight(&error)
-                    && !*cancelled.borrow()
-                    && state.verified.expires() > now()?
-                {
-                    failure.get_or_insert(error);
-                }
+            if let Err(error) = result
+                && !follow::transient_preflight(&error)
+                && !*cancelled.borrow()
+                && state.verified.expires() > now()?
+            {
+                failure.get_or_insert(error);
             }
         }
     }
@@ -262,13 +261,12 @@ async fn advance_reserved(
         let state = &mut states[index];
         state.attempted = true;
         reconcile(state, enrollment, &result)?;
-        if let Err(error) = result {
-            if !follow::transient_preflight(&error)
-                && !*cancelled.borrow()
-                && state.verified.expires() > now()?
-            {
-                failure.get_or_insert(error);
-            }
+        if let Err(error) = result
+            && !follow::transient_preflight(&error)
+            && !*cancelled.borrow()
+            && state.verified.expires() > now()?
+        {
+            failure.get_or_insert(error);
         }
     }
     if let Some(error) = failure {

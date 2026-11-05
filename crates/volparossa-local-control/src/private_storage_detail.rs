@@ -8,7 +8,9 @@ use crate::{ControlProtocolError, ControlResponse, ControlResult, control_respon
 mod challenge;
 mod flow_acquire;
 pub use challenge::{
-    PrivateStorageChallengeDetail, PrivateStorageChallengePhase, PrivateStorageElapsedBucket,
+    PrivateStorageChallengeDetail, PrivateStorageChallengePhase, PrivateStorageChallengeReadDetail,
+    PrivateStorageChallengeReadOutcome, PrivateStorageChallengeReadStep,
+    PrivateStorageElapsedBucket,
 };
 pub use flow_acquire::{
     PrivateStorageFlowAcquireDetail, PrivateStorageFlowAcquireFailure,

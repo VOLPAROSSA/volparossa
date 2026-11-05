@@ -1,0 +1,26 @@
+[package]
+name = "volparossa-ctutils-regressions"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace]
+
+[dependencies]
+ctutils = { path = "../vendor/ctutils-0.4.4" }
+hmac = "=0.13.0"
+sha2 = "=0.11.0"
+poly1305 = "=0.9.1"
+
+[patch.crates-io]
+ctutils = { path = "../vendor/ctutils-0.4.4" }
+
+# Match Core's real release optimization and LTO settings for linked inspection.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "debuginfo"

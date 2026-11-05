@@ -23,6 +23,7 @@ async fn private_storage_detail_requires_initial_operation_and_exact_correlation
             tls_failure: None,
             stream_failure: None,
             challenge: Some(PrivateStorageChallengeDetail {
+                read: None,
                 phase: PrivateStorageChallengePhase::ChallengeReadVerify as i32,
                 before_challenge: PrivateStorageElapsedBucket::Under1s as i32,
                 in_challenge: PrivateStorageElapsedBucket::AtLeast120s as i32,
@@ -63,6 +64,7 @@ async fn initial_detail_correlation_case(detail: PrivateStorageRemoteDetail) {
         let operation = if private_storage {
             Operation::PrivateStorageRemote(PrivateStorageRemoteRequest {
                 include_flow_acquire_detail: false,
+                include_challenge_read_detail: false,
                 provider_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32])
                     .verifying_key()
                     .to_bytes()

@@ -1,0 +1,43 @@
+name: Audit tool cache probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out approved main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Bind exact workflow and source
+        run: |
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Prepare the unchanged Quality recipe key
+        id: cache
+        run: python3 -B scripts/quality-audit-tools.py prepare
+
+      - name: Restore exact existing main-built tools only
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache.outputs.path }}
+          key: ${{ steps.cache.outputs.key }}
+          fail-on-cache-miss: true
+
+      - name: Measure validated warm tools without building or saving
+        env:
+          AUDIT_CACHE_KEY: ${{ steps.cache.outputs.key }}
+          AUDIT_CACHE_EXACT_HIT: ${{ steps.restore.outputs.cache-hit }}
+        run: python3 -B scripts/quality-audit-tools.py probe

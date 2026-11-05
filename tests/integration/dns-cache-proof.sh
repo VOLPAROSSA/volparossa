@@ -6,7 +6,7 @@ set -eu
 usage() {
     printf '%s\n' \
         'usage: dns-cache-proof.sh --plan' \
-        '       dns-cache-proof.sh --execute --yes --fixture ABSOLUTE_DIR --binary ABSOLUTE_BUILT_EXAMPLE --output NEW_ABSOLUTE_DIR' \
+        '       dns-cache-proof.sh --execute --yes --fixture ABSOLUTE_DIR --binary ABSOLUTE_BUILT_EXAMPLE --output NEW_ABSOLUTE_DIR [--cache-recovery]' \
         'Uses only previously collected public DNS data; downloads no binaries or code.' \
         'Creates one disposable user/network namespace; enables only its loopback.' \
         'If user namespaces are denied, explicit VOLPAROSSA_TEST_ALLOW_SUDO_NETNS=1' \
@@ -18,12 +18,13 @@ usage() {
         'This proves only collector/local-cache behavior; no ordinary Client or peer-cache pass.'
 }
 
-fixture='' binary='' output='' execute=no confirmed=no
+fixture='' binary='' output='' execute=no confirmed=no recovery=no
 while [ "$#" -gt 0 ]; do
     case $1 in
         --plan) usage; exit 0 ;;
         --execute) execute=yes; shift ;;
         --yes) confirmed=yes; shift ;;
+        --cache-recovery) recovery=yes; shift ;;
         --fixture) [ "$#" -ge 2 ] || exit 64; fixture=$2; shift 2 ;;
         --binary) [ "$#" -ge 2 ] || exit 64; binary=$2; shift 2 ;;
         --output) [ "$#" -ge 2 ] || exit 64; output=$2; shift 2 ;;
@@ -44,6 +45,19 @@ umask 077
 mkdir -m 0700 -- "$output"
 # The shared runner checks namespace identity and drops privileges before this
 # command. A failed test never retries through the explicit CI-only sudo path.
+if [ "$recovery" = yes ]; then
+    # One 35s exercise plus bounded cleanup by 39s, inside the unchanged 40s cap.
+    # shellcheck disable=SC2016
+    timeout --signal=TERM --kill-after=5s 40s \
+        "$repository_root/scripts/run-isolated-test.sh" --command /bin/sh dns_cache_builtin_root \
+            VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS loopback -eu -c '
+            [ "$(readlink /proc/self/ns/net)" != "$VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS" ]
+            exec python3 -B "$4/dns-cache-fixture.py" exercise-recovery "$1" "$2" "$3"
+        ' dns-cache-recovery "$fixture" "$binary" "$output" "$script_directory" \
+        >"$output/namespace.stdout" 2>"$output/namespace.stderr"
+    printf '%s\n' 'PASS: bounded builtin-root cache outage/recovery only; natural expiry, peer and normal Client route remain pending.'
+    exit 0
+fi
 # shellcheck disable=SC2016 # Positional arguments expand only inside the isolated child shell.
 timeout --signal=TERM --kill-after=5s 40s \
     "$repository_root/scripts/run-isolated-test.sh" --command /bin/sh dns_cache_builtin_root \

@@ -167,29 +167,30 @@ impl HelperEngine {
         let result = completion
             .filter(|value| value.binding == binding)
             .map_or(Err(BackendError::CleanupIncomplete), |value| value.result);
-        if let Ok(egress_ifindex) = result {
-            if egress_ifindex > 1 && i32::try_from(egress_ifindex).is_ok() {
-                self.inner
-                    .state
-                    .lock()
-                    .await
-                    .sharing
-                    .as_mut()
-                    .expect("reserved sharing owner")
-                    .active = true;
-                return response(
-                    request,
-                    HelperResult::Ok,
-                    "UPLINK_SHARING_INSTALLED",
-                    Some(helper_response::Outcome::InstalledUplinkSharing(
-                        InstalledUplinkSharing {
-                            sharing_runtime_id: binding.sharing_runtime_id.to_vec(),
-                            sharing_handle: binding.sharing_handle.to_vec(),
-                            egress_ifindex,
-                        },
-                    )),
-                );
-            }
+        if let Ok(egress_ifindex) = result
+            && egress_ifindex > 1
+            && i32::try_from(egress_ifindex).is_ok()
+        {
+            self.inner
+                .state
+                .lock()
+                .await
+                .sharing
+                .as_mut()
+                .expect("reserved sharing owner")
+                .active = true;
+            return response(
+                request,
+                HelperResult::Ok,
+                "UPLINK_SHARING_INSTALLED",
+                Some(helper_response::Outcome::InstalledUplinkSharing(
+                    InstalledUplinkSharing {
+                        sharing_runtime_id: binding.sharing_runtime_id.to_vec(),
+                        sharing_handle: binding.sharing_handle.to_vec(),
+                        egress_ifindex,
+                    },
+                )),
+            );
         }
         let error = result.err().unwrap_or(BackendError::Kernel);
         let complete = self.cleanup_sharing().await;
@@ -260,14 +261,14 @@ impl HelperEngine {
             Ok(value) => value,
             Err(result) => return response(request, result, "SHARING_OWNER_MISMATCH", None),
         };
-        if let Some(binding) = binding {
-            if !self.destroy_sharing_binding(binding).await {
-                return backend_response(
-                    request,
-                    BackendError::CleanupIncomplete,
-                    "UPLINK_SHARING_CLEANUP_INCOMPLETE",
-                );
-            }
+        if let Some(binding) = binding
+            && !self.destroy_sharing_binding(binding).await
+        {
+            return backend_response(
+                request,
+                BackendError::CleanupIncomplete,
+                "UPLINK_SHARING_CLEANUP_INCOMPLETE",
+            );
         }
         response(
             request,

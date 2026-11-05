@@ -11,9 +11,14 @@ src/firmware/guest/mod.rs open/get_report and linux/guest/{types,ioctl}.rs use
 SNP_GET_REPORT with a fixed report buffer, not RSA or certificate operations.
 Changes require source review, not a broader exception. This is a source/graph
 guard, not a general Rust call analyzer.
+
+The local SEV reconstruction separately authenticates the P-384 API adapters;
+its RSA certificate verifier remains byte-for-byte upstream. RUSTSEC-2026-0387
+has no exception: the dependency gate requires fixed crypto-bigint instead.
 """
 import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -21,6 +26,9 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+SEV_SPEC = importlib.util.spec_from_file_location("sev_scope", Path(__file__).with_name("check-sev-p384-scope.py"))
+SEV_SCOPE = importlib.util.module_from_spec(SEV_SPEC)
+SEV_SPEC.loader.exec_module(SEV_SCOPE)
 ADVISORY = "RUSTSEC-2023-0071"
 REVISION = "a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5"
 GIT = "https://github.com/virtee/sev"
@@ -40,7 +48,7 @@ MARKER = "  # Root-only public RSA exception: scripts/check-public-rsa-scope.py 
 SEV_MANIFEST = dict(version="=8.0.0", git=GIT, rev=REVISION, **{"default-features": False},
     features=["snp", "crypto_nossl"])
 RSA_MANIFEST = dict(version="=0.9.10", **{"default-features": False}, features=["std"])
-CRYPTO = {"p384": "0.13.1", "rsa": "0.9.10", "sha2": "0.10.9", "x509-cert": "0.2.5"}
+CRYPTO = {"p384": "0.14.0", "rsa": "0.9.10", "sha2": "0.10.9", "x509-cert": "0.2.5"}
 
 
 def require(condition):
@@ -59,6 +67,7 @@ def one(packages, name):
 
 
 def verify_repository(root):
+    SEV_SCOPE.verify_repository(root)
     require(hashlib.sha256((root / SNP).read_bytes()).hexdigest() == SNP_CHECKSUM)
     require(hashlib.sha256((root / COLLATERAL).read_bytes()).hexdigest() == COLLATERAL_CHECKSUM)
     # Only this exact reviewed firmware wrapper, never its directory or future APIs.
@@ -90,10 +99,12 @@ def verify_repository(root):
         ("Cargo.toml", ("workspace", "dependencies", "sev"), SEV_MANIFEST),
         (CONTENT.as_posix(), ("dependencies", "rsa"), {"workspace": True}),
         (CONTENT.as_posix(), ("dependencies", "sev"), {"workspace": True})])
+    require(read_toml(root / "Cargo.toml")["patch"][GIT] == {
+        "sev": {"path": SEV_SCOPE.VENDOR.as_posix()}})
     lock = read_toml(root / "Cargo.lock")["package"]
     rsa, sev = one(lock, "rsa"), one(lock, "sev")
     require((rsa["version"], rsa["source"], rsa["checksum"]) == ("0.9.10", REGISTRY, RSA_CHECKSUM))
-    require((sev["version"], sev["source"]) == ("8.0.0", SOURCE))
+    require(sev["version"] == "8.0.0" and "source" not in sev and "checksum" not in sev)
     for child, parent_names in (("rsa", ["sev", "volparossa-content"]), ("sev", ["volparossa-content"])):
         parents = [p["name"] for p in lock if any(d.split()[0] == child for d in p.get("dependencies", []))]
         require(parents == parent_names)
@@ -109,7 +120,8 @@ def verify_metadata(root, metadata, fuzz):
     require(len(ids) == len(packages) and len(nodes) == len(metadata["resolve"]["nodes"]))
     rsa, sev, content = (one(packages, name) for name in ("rsa", "sev", "volparossa-content"))
     require((rsa["version"], rsa["source"]) == ("0.9.10", REGISTRY))
-    require((sev["version"], sev["source"]) == ("8.0.0", SOURCE))
+    require(sev["version"] == "8.0.0" and sev["source"] is None
+        and sev["manifest_path"] == str(root / SEV_SCOPE.VENDOR / "Cargo.toml"))
     require(content["version"] == "0.1.0" and content["source"] is None
         and content["manifest_path"] == str(root / CONTENT) and content["id"] in metadata["workspace_members"])
     require(sorted(nodes[sev["id"]]["features"]) == ["crypto_nossl", "snp"])

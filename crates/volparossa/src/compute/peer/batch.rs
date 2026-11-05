@@ -414,10 +414,10 @@ async fn follow_status(
     mut cancelled: watch::Receiver<bool>,
 ) -> Result<rpc::JobStatus> {
     loop {
-        if let Some(current) = &status {
-            if current.state != rpc::JobState::Running {
-                return Ok(current.clone());
-            }
+        if let Some(current) = &status
+            && current.state != rpc::JobState::Running
+        {
+            return Ok(current.clone());
         }
         let cancel = *cancelled.borrow() || now()? >= handle.binding.expires_unix_seconds;
         if cancel {

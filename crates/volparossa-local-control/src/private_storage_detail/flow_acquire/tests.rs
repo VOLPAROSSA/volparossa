@@ -156,6 +156,7 @@ fn flow_acquire_wire_requires_stream_open_without_enclosing_deadline() {
         .as_mut()
         .unwrap()
         .challenge = Some(PrivateStorageChallengeDetail {
+        read: None,
         phase: 1,
         before_challenge: 1,
         in_challenge: 1,

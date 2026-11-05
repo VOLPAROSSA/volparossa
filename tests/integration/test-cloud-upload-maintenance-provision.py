@@ -175,11 +175,24 @@ class UploadProvision(unittest.TestCase):
             cloud='35598609d3fedb5d1241a479c1930c8a6b831661'))
         self.assertEqual([len(current['sources'][name]['files']) for name in ('image', 'cloud')], [3, 21])
         self.assertEqual(current['runtime'], prior['runtime'])
+        # Main's challenge-read correction advanced the prerequisite consumer,
+        # while the separate upload source retains its historical exact pin.
+        # Reuse authorizes only the runtime and binds the original provision hash.
         for name in ('image', 'cloud'):
-            self.assertEqual(current['sources'][name]['revision'], prior['sources'][name]['revision'])
-            for path in current['sources'][name]['files'].keys() & prior['sources'][name]['files'].keys():
-                self.assertEqual(current['sources'][name]['files'][path], prior['sources'][name]['files'][path])
+            self.assertEqual(current['sources'][name]['revision'], M['CLOSE_REVISIONS'][name])
+            self.assertEqual(prior['sources'][name]['revision'],
+                M['PREVIOUS']['PROVISIONER']['CHALLENGE_READ_REVISIONS'][name])
+            self.assertNotEqual(current['sources'][name]['revision'], prior['sources'][name]['revision'])
         previous = runpy.run_path(str(HERE / 'test-storage-consumer-maintenance-evidence.py'))
+        original = previous['fixture'](profile_version=10)['provision']
+        M['PREVIOUS']['validate_provision'](original)
+        for name in ('image', 'cloud'):
+            substituted = copy.deepcopy(original)
+            substituted['pins']['sources'][name]['revision'] = current['sources'][name]['revision']
+            raw = json.dumps(substituted).encode()
+            with patch.dict(M['verify_shared_runtime'].__globals__, public_file=lambda *_: raw,
+                    verify_files=Mock(side_effect=AssertionError('unexpected runtime access'))), self.assertRaises(ValueError):
+                M['verify_shared_runtime'](current, 6)
         for profile in (1, 2, 3, 4, 5, 6):
             M['validate_provision'](receipt(profile))
             self.assertEqual(M['load_pins'](profile)['runtime'], current['runtime'])

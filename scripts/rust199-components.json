@@ -1,0 +1,52 @@
+{
+  "source_url": "https://static.rust-lang.org/dist/channel-rust-1.99.1.toml",
+  "manifest_sha256": "fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463",
+  "manifest_date": "2026-10-15",
+  "rust_version": "1.99.1 (58cf8f9c3 2026-10-13)",
+  "components": [
+    {
+      "package": "rustc",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "1.99.1 (58cf8f9c3 2026-10-13)",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/rustc-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+      "xz_sha256": "2ff05ff9c08a90861e7f6e4065b40a8b87463b4576186fd613871c3e37f2091f"
+    },
+    {
+      "package": "cargo",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.100.0 (5f94df478 2026-08-27)",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/cargo-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+      "xz_sha256": "53f3521949404d595efb06a55c12c5658d4ed1c75566f33d3d514eaebe70bd8a"
+    },
+    {
+      "package": "rust-std",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "1.99.1 (58cf8f9c3 2026-10-13)",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+      "xz_sha256": "109b074225bf5b9ea3820890876bfdf4ed161adbfaf94b2b4b5984c85ee5d958"
+    },
+    {
+      "package": "rust-std",
+      "target": "i686-unknown-linux-musl",
+      "version": "1.99.1 (58cf8f9c3 2026-10-13)",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-i686-unknown-linux-musl.tar.xz",
+      "xz_sha256": "25df5dae9ead02745f709ed133f09700abdec5eb7a8027e08bb41aefb1a451a1"
+    },
+    {
+      "package": "clippy-preview",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.1.99",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/clippy-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+      "xz_sha256": "458339712a058e52cc4522ff9ef8b59cd1ea1340312216cd94194c464a3f6dc5"
+    },
+    {
+      "package": "rustfmt-preview",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "1.10.0",
+      "xz_url": "https://static.rust-lang.org/dist/2026-10-15/rustfmt-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+      "xz_sha256": "e3b36c4c7ec3486c059d8067ff48787676612007123aad7a4e8ec12c48ee9ba2"
+    }
+  ],
+  "schema_version": 1,
+  "profile": "rust-1.99.1-20261015"
+}

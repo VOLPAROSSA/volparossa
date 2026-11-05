@@ -231,22 +231,22 @@ fn provider_keys(advertisement: &NodeAdvertisement) -> BTreeSet<String> {
     if capabilities.multipath_quic {
         keys.insert(capability::MPQUIC.to_owned());
     }
-    if let Some(network) = advertisement.network.as_ref() {
-        if network.region != "unknown" {
-            for role in [roles.relay.then_some("relay"), roles.exit.then_some("exit")]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(key) = capability::region(role, &network.region) {
-                    keys.insert(key);
-                }
+    if let Some(network) = advertisement.network.as_ref()
+        && network.region != "unknown"
+    {
+        for role in [roles.relay.then_some("relay"), roles.exit.then_some("exit")]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(key) = capability::region(role, &network.region) {
+                keys.insert(key);
             }
         }
     }
-    if let Some(policy) = advertisement.policy.as_ref() {
-        if let Ok(hash) = <[u8; 32]>::try_from(policy.whitelist_hash.as_slice()) {
-            keys.insert(capability::policy(&hash));
-        }
+    if let Some(policy) = advertisement.policy.as_ref()
+        && let Ok(hash) = <[u8; 32]>::try_from(policy.whitelist_hash.as_slice())
+    {
+        keys.insert(capability::policy(&hash));
     }
     keys
 }

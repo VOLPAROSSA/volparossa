@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn https_checksum_mode_is_exclusive_bounded_and_legacy_agents_fail_closed() {
         let mut fetch = https_request();
-        assert!(fetch.checksum_path.is_empty());
+        assert_eq!(fetch.checksum_path, "");
         fetch.checksum_path = "/SHA256SUMS".into();
         assert!(fetch.validate().is_err());
         fetch.metadata_path.clear();
@@ -1345,11 +1345,7 @@ mod tests {
         assert!(ready.validate().is_ok());
         ready.origin_digest = true;
         assert!(ready.validate().is_err());
-        assert!(
-            HttpsContentTransferReady::default()
-                .checksum_path
-                .is_empty()
-        );
+        assert_eq!(HttpsContentTransferReady::default().checksum_path, "");
         assert_eq!(ContentReceipt::default().origin_authority_body_bytes, 0);
     }
 

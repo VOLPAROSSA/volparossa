@@ -1085,7 +1085,7 @@ class ConsumerOrchestration(unittest.TestCase):
     def test_preparation_enables_only_flow_opt_in_for_explicit_profile_nine(self):
         self.assert_preparation(9)
 
-    def test_preparation_enables_only_close_opt_in_for_explicit_profile_ten(self):
+    def test_preparation_enables_only_challenge_read_opt_in_for_explicit_profile_ten(self):
         self.assert_preparation(10)
 
     def assert_preparation(self, profile):
@@ -1131,10 +1131,11 @@ class ConsumerOrchestration(unittest.TestCase):
                     self.assertIs(config.pop('flowAcquireDiagnosticsV8'), True)
                 else:
                     self.assertNotIn('flowAcquireDiagnosticsV8', config)
+                self.assertNotIn('tlsCloseDiagnosticsV9', config)
                 if profile == 10:
-                    self.assertIs(config.pop('tlsCloseDiagnosticsV9'), True)
+                    self.assertIs(config.pop('challengeReadDiagnosticsV10'), True)
                 else:
-                    self.assertNotIn('tlsCloseDiagnosticsV9', config)
+                    self.assertNotIn('challengeReadDiagnosticsV10', config)
                 policy = M['private_json'](root / name / 'maintenance-policy.json')
                 self.assertEqual(config['fragmentBytes'], (size + 3) // 4)
                 self.assertEqual((config['lifetimeSeconds'], config['deadlineMs']), (1800, 1800000))
@@ -1294,6 +1295,210 @@ class ConsumerOrchestration(unittest.TestCase):
                 self.assertEqual(caught.exception.report['sampler']['operation'], 'paths_before')
                 self.assertNotIn('PRIVATE', json.dumps(caught.exception.report))
             self.assertEqual(writes, [])
+
+
+class ChallengeReadTests(unittest.TestCase):
+    def diagnostic(self):
+        return dict(version=10, omitted_failures=0, failures=[dict(fragment_index=3, copy_index=1,
+            operation='append', stage='agent_ready', category='agent_rejected',
+            agent_code='CONTENT_UNAVAILABLE', agent_outcome=None, agent_detail=dict(
+                stage='challenge', deadline_scope='operation', tls_failure=None, stream_failure=None,
+                flow_acquire=None, challenge=dict(phase='challenge_read_verify',
+                    before_challenge='1_to_5s', in_challenge='90_to_120s',
+                    read=dict(step='body_read', returned_outcome=None))))])
+
+    def test_challenge_read_accepts_finite_matrix_preserves_original_buckets_and_binding(self):
+        allowed = {'length_read': (None, 'io_eof', 'io_other', 'invalid', 'wire_timeout'),
+            'body_read': (None, 'io_eof', 'io_other', 'wire_timeout'),
+            'verification': (None, 'invalid', 'verification_rejected')}
+        for step in allowed:
+            for outcome in (None, 'io_eof', 'io_other', 'invalid', 'verification_rejected', 'wire_timeout'):
+                value = self.diagnostic()
+                value['failures'][0]['agent_detail']['challenge']['read'] = dict(step=step, returned_outcome=outcome)
+                before = copy.deepcopy(value)
+                if outcome in allowed[step]:
+                    M['validate_deposit_diagnostics'](value, 10)
+                    self.assertEqual(value, before)
+                else:
+                    with self.assertRaises(ValueError): M['validate_deposit_diagnostics'](value, 10)
+
+    def opted_failure(self):
+        value = diagnostic_failure(10)
+        value['publish_observation'].update(diagnostic_version=10, deposit_diagnostics=self.diagnostic())
+        return value
+
+    def test_profile10_read_failure_requires_explicit_mode_and_preserves_bound_attempt(self):
+        value = self.opted_failure()
+        before = copy.deepcopy(value)
+        self.assertEqual(M['validate_node_report'](value, 'publish', PROVISION, profile_version=10, challenge_read_diagnostics_v10=True), before)
+        self.assertEqual(value, before)
+        failure = value['publish_observation']['deposit_diagnostics']['failures'][0]
+        self.assertEqual((failure['fragment_index'], failure['copy_index'], failure['operation']), (3, 1, 'append'))
+        self.assertIsNone(failure['agent_detail']['challenge']['read']['returned_outcome'])
+        self.assertFalse(value['cleanup_confirmed'])
+        for mode in (False, None, True, 10, 'true'):
+            if mode is True: continue
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION,
+                profile_version=10, challenge_read_diagnostics_v10=mode)
+        value['publish_observation'].pop('diagnostic_version')
+        with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=10, challenge_read_diagnostics_v10=True)
+        legacy = diagnostic_failure(10)
+        self.assertNotIn('diagnostic_version', legacy['publish_observation'])
+        self.assertEqual(M['validate_node_report'](legacy, 'publish', PROVISION, profile_version=10), legacy)
+
+    def test_profile10_read_mode_rejects_downgrade_wrong_generation_and_noninteger_selectors(self):
+        for version in (None, True, False, '10', 9, 11):
+            value = self.opted_failure(); value['publish_observation']['diagnostic_version'] = version
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=10, challenge_read_diagnostics_v10=True)
+        legacy = diagnostic_failure(10); legacy['publish_observation']['diagnostic_version'] = 10
+        with self.assertRaises(ValueError): M['validate_node_report'](legacy, 'publish', PROVISION, profile_version=10, challenge_read_diagnostics_v10=True)
+        for profile in range(2, 10):
+            value = diagnostic_failure(profile); value['publish_observation']['diagnostic_version'] = 10
+            with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=profile)
+        value = self.opted_failure(); value['publish_observation']['private_mode'] = 'PRIVATE'
+        with self.assertRaises(ValueError): M['validate_node_report'](value, 'publish', PROVISION, profile_version=10, challenge_read_diagnostics_v10=True)
+
+    def test_profile10_node_phase_binds_mode_to_both_retained_private_configs(self):
+        for mode in (False, True):
+            for payload in ('legacy', 'v10', 'missing_marker'):
+                value = diagnostic_failure(10) if payload == 'legacy' else self.opted_failure()
+                if payload == 'missing_marker': value['publish_observation'].pop('diagnostic_version')
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary); raw = (json.dumps(value) + '\n').encode()
+                    write(root / 'storage-consumer-publish.json', raw)
+                    write(root / 'storage-consumer-prepare.json', json.dumps(prepared()).encode())
+                    for app in ('image', 'cloud'):
+                        (root / app).mkdir(mode=0o700)
+                        config = dict(challengeReadDiagnosticsV10=True) if mode else dict(tlsCloseDiagnosticsV9=True)
+                        write(root / app / 'storage.json', json.dumps(config).encode())
+                    with patch.dict(G, PROFILE_VERSION=10, run_child=lambda *_: (1, raw, b'PRIVATE-STDERR')):
+                        if (mode and payload == 'v10') or (not mode and payload == 'legacy'):
+                            with self.assertRaises(M['NodePhaseFailure']) as caught:
+                                M['node_phase'](root, 'publish', PROVISION, time.monotonic() + 1)
+                            self.assertEqual(caught.exception.report['node'], value)
+                            self.assertNotIn('PRIVATE', json.dumps(caught.exception.report))
+                        else:
+                            with self.assertRaises(ValueError) as caught:
+                                M['node_phase'](root, 'publish', PROVISION, time.monotonic() + 1)
+                            self.assertNotIsInstance(caught.exception, M['NodePhaseFailure'])
+        for invalid in ({'challengeReadDiagnosticsV10': 'true'}, {'challengeReadDiagnosticsV10': None},
+                {'challengeReadDiagnosticsV10': True, 'tlsCloseDiagnosticsV9': False},
+                {'challengeReadDiagnosticsV10': False}, {'challengeReadDiagnosticsV10': True, 'flowAcquireDiagnosticsV8': True}):
+            with self.assertRaises(ValueError): M['challenge_read_selection'](invalid, 10)
+        self.assertIs(M['challenge_read_selection'](dict(tlsCloseDiagnosticsV9=True), 10), False)
+        self.assertIs(M['challenge_read_selection'](dict(tlsCloseDiagnosticsV9=True, challengeReadDiagnosticsV10=False), 10), False)
+
+    def test_challenge_read_rejects_old_profiles_unknowns_and_other_phases(self):
+        for version in range(1, 10):
+            value = self.diagnostic(); value['version'] = version
+            with self.assertRaises(ValueError): M['validate_deposit_diagnostics'](value, version)
+        for read in ({'step': 'PRIVATE', 'returned_outcome': None}, {'step': 'body_read'},
+            {'step': 'body_read', 'returned_outcome': True},
+            {'step': 'body_read', 'returned_outcome': None, 'raw': 'PRIVATE'}):
+            value = self.diagnostic(); value['failures'][0]['agent_detail']['challenge']['read'] = read
+            with self.assertRaises(ValueError): M['validate_deposit_diagnostics'](value, 10)
+        value = self.diagnostic(); value['failures'][0]['agent_detail']['challenge']['phase'] = 'grant_write_flush'
+        with self.assertRaises(ValueError): M['validate_deposit_diagnostics'](value, 10)
+
+
+class CatalogRestoreSchema(unittest.TestCase):
+    @staticmethod
+    def observation(**delta):
+        return dict(version=1, scope='cloud_catalog_storage_restore_call', diagnostic_only=True,
+            acceptance_evidence=False, causal_attribution=False, invocation='once', completion='returned',
+            result_state='observed', result=dict(status='complete', code='ok', local_process_joined=True,
+                restore_verified=True, core_report_state='observed', core_operation_complete=True),
+            error_state='unavailable', error_code=None, **delta)
+
+    def failure(self, observation=None):
+        return dict(version=13, kind='storage-consumer-maintenance', phase='publish', passed=False,
+            provision_sha256=PROVISION, stage='cloud_catalog_create', code='catalog_materialization_failed',
+            cleanup_confirmed=False, catalog_restore=self.observation() if observation is None else observation,
+            publish_cleanup=dict(app='cloud', state='complete'))
+
+    def test_actual_call_scope_and_explicit_missing_invalid_unavailable_states(self):
+        observations = [self.observation()]
+        for invocation in ('unavailable', 'not_invoked', 'multiple', 'once'):
+            value = self.observation()
+            value.update(invocation=invocation, completion='unavailable', result_state='unavailable', result=None)
+            observations.append(value)
+        for state in ('missing', 'invalid'):
+            value = self.observation(); value.update(result_state=state, result=None)
+            observations.append(value)
+        for state in ('missing', 'invalid', 'observed'):
+            value = self.observation()
+            value.update(completion='threw', result_state='unavailable', result=None, error_state=state,
+                error_code='local_input_unavailable' if state == 'observed' else None)
+            observations.append(value)
+        for observation in observations:
+            for close in ('complete', 'failed'):
+                value = self.failure(observation); value['publish_cleanup']['state'] = close
+                self.assertEqual(M['validate_node_report'](value, 'publish', PROVISION, profile_version=10), value)
+                self.assertIs(value['cleanup_confirmed'], False)
+                self.assertIs(observation['acceptance_evidence'], False)
+
+    def test_result_projection_is_closed_and_never_promotes_partial_restore(self):
+        value = self.observation(); result = value['result']
+        for status, code, report_state, complete in [('incomplete', 'retained_operation_incomplete', 'observed', False),
+            ('failed', 'invalid_core_report', 'missing', None), ('failed', 'core_failed', 'invalid', None),
+            ('cancelled', 'cancelled', 'missing', None), ('timed_out', 'timed_out', 'missing', None)]:
+            result.update(status=status, code=code, restore_verified=False, core_report_state=report_state,
+                core_operation_complete=complete)
+            M['validate_catalog_restore'](value)
+        for mutate in [lambda r: r.update(status='PRIVATE' * 100000), lambda r: r.update(code='PRIVATE'),
+            lambda r: r.update(local_process_joined=1), lambda r: r.update(restore_verified=1),
+            lambda r: r.update(core_operation_complete=1), lambda r: r.update(core_report_state='PRIVATE'),
+            lambda r: r.update(raw='PRIVATE-PATH-KEY-JOURNAL'), lambda r: r.update(core_report_state='missing'),
+            lambda r: r.update(status='complete', restore_verified=False), lambda r: r.update(code='core_failed'),
+            lambda r: r.pop('status')]:
+            invalid = self.observation(); mutate(invalid['result'])
+            with self.assertRaises(ValueError): M['validate_catalog_restore'](invalid)
+
+    def test_invalid_combinations_and_private_unknown_fields_are_rejected(self):
+        mutations = [lambda v: v.update(version=True), lambda v: v.update(scope='PRIVATE'),
+            lambda v: v.update(diagnostic_only=False), lambda v: v.update(acceptance_evidence=True),
+            lambda v: v.update(causal_attribution=True), lambda v: v.update(invocation='not_invoked'),
+            lambda v: v.update(completion='unavailable'), lambda v: v.update(result_state='invalid'),
+            lambda v: v.update(error_state='observed', error_code='PRIVATE' * 100000),
+            lambda v: v.update(error_state='unavailable', error_code='core_spawn_failed'),
+            lambda v: v.update(error_state='missing'), lambda v: v.update(raw='PRIVATE'),
+            lambda v: v.pop('result')]
+        for mutate in mutations:
+            value = self.observation(); mutate(value)
+            with self.assertRaises(ValueError): M['validate_catalog_restore'](value)
+
+    def test_generation13_requires_exact_catalog_lifecycle_and_keeps_historical12(self):
+        original = self.failure()
+        for profile in range(1, 10):
+            with self.assertRaises(ValueError): M['validate_node_report'](original, 'publish', PROVISION, profile_version=profile)
+        for mutate in [lambda v: v.update(version=12), lambda v: v.update(version=True),
+            lambda v: v.update(stage='cloud_policy_read'), lambda v: v.update(stage='cloud_core_close'),
+            lambda v: v.update(phase='exercise'), lambda v: v.update(passed=True),
+            lambda v: v.update(cleanup_confirmed=True), lambda v: v.pop('publish_cleanup'),
+            lambda v: v['publish_cleanup'].update(app='image'), lambda v: v.update(publish_observation={}),
+            lambda v: v.update(raw='PRIVATE'), lambda v: v.pop('catalog_restore')]:
+            value = copy.deepcopy(original); mutate(value)
+            with self.assertRaises(ValueError): M['validate_node_report'](value, value['phase'], PROVISION, profile_version=10)
+        old = copy.deepcopy(original); old.pop('catalog_restore'); old['version'] = 12
+        self.assertEqual(M['validate_node_report'](old, 'publish', PROVISION, profile_version=10), old)
+
+    def test_generation13_failure_survives_actual_orchestrator_validation_and_hash_binding(self):
+        value = self.failure()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); raw = (json.dumps(value) + '\n').encode()
+            write(root / 'storage-consumer-publish.json', raw)
+            write(root / 'storage-consumer-prepare.json', json.dumps(prepared()).encode())
+            for app in ('image', 'cloud'):
+                (root / app).mkdir(mode=0o700)
+                write(root / app / 'storage.json', json.dumps(dict(challengeReadDiagnosticsV10=True)).encode())
+            with patch.dict(G, PROFILE_VERSION=10, run_child=lambda *_: (1, raw, b'PRIVATE-STDERR')):
+                with self.assertRaises(M['NodePhaseFailure']) as caught:
+                    M['node_phase'](root, 'publish', PROVISION, time.monotonic() + 1)
+            retained = caught.exception.report
+            self.assertEqual(retained['node'], value)
+            self.assertEqual(retained['node_report_sha256'], hashlib.sha256(raw).hexdigest())
+            self.assertIs(retained['cleanup_confirmed'], False)
+            self.assertNotIn('PRIVATE', json.dumps(retained))
 
 
 if __name__ == '__main__':

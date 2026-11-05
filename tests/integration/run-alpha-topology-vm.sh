@@ -1207,6 +1207,8 @@ MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", 
     "private-storage-maintenance-helper-acquire.json",
     "private-storage-provider-activity.json",
     "private-storage-fixture-correlation.json",
+    "storage-consumer-provider-usage.json",
+    "storage-consumer-failure-boundary.json",
     "private-storage-maintenance-inventory.json",
     "private-storage-maintenance-supervisor.json",
     "private-storage-maintenance-control-transition.json",
@@ -1279,10 +1281,10 @@ CLOUD_UPLOAD_OUTCOME_NAMES = {
     "private-storage-fragments-cloud_upload_deleted_usage.json",
     "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase",
 }
-# 170 exact old/new receipt names + five recovery names = 175 slots.
-# The joined correlation/helper-acquire sidecars add two strictly validated slots.
+# 172 exact old/new receipt names + five recovery names = 177 slots.
+# Main adds two strictly validated failure-boundary/provider-usage sidecars.
 # The old scenario stays at 128; byte-identical copies share only one slot.
-CLOUD_UPLOAD_FILE_COUNT_LIMIT = 175
+CLOUD_UPLOAD_FILE_COUNT_LIMIT = 177
 
 SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
@@ -1885,6 +1887,24 @@ def collect(home, opt, revision, scenario, guest_status,
         if observed is None:
             continue
         data, original_size = observed
+        if path.name == "storage-consumer-failure-boundary.json":
+            if original_size > 131072 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-consumer-failure-boundary.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if path.name == "storage-consumer-provider-usage.json":
+            if original_size > 4096 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-consumer-provider-usage.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue
         if path.name == "private-storage-fixture-correlation.json":
             if original_size > 16384 or original_size != len(data):
                 continue
@@ -2037,6 +2057,12 @@ esac
 case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|cloud-upload-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
+prepare_current_compiler() {
+    python3 -B scripts/provision-rust189.py alpha-guest
+    export CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+    export PATH="/home/vpci/.local/volparossa-rust-1.89.0/bin:$PATH"
+}
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 if [ "$scenario" = weather-decoder-abi ]; then
@@ -2125,6 +2151,7 @@ if [ "$scenario" = agent-reasoning ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-conversation ]; then
@@ -2133,6 +2160,7 @@ if [ "$scenario" = agent-private-conversation ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-conversation.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-code ]; then
@@ -2141,6 +2169,7 @@ if [ "$scenario" = agent-private-code ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code
 fi
 if [ "$scenario" = agent-private-browser ]; then
@@ -2149,6 +2178,7 @@ if [ "$scenario" = agent-private-browser ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --browser
 fi
 if [ "$scenario" = agent-private-task ]; then
@@ -2157,6 +2187,7 @@ if [ "$scenario" = agent-private-task ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] || [ "$scenario" = agent-owner-cancel ]; then
@@ -2165,6 +2196,7 @@ if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] ||
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit" --scenario "$scenario"
 fi
 if [ "$scenario" = transaction-abci ]; then
@@ -2173,6 +2205,7 @@ if [ "$scenario" = transaction-abci ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/transaction-abci-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-mesh ]; then
@@ -2181,12 +2214,13 @@ if [ "$scenario" = wifi-mesh ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-link ]; then
     guest_phase wifi-kernel
     tar -xzf source.tar.gz
-    (cd source && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
+    (cd source && prepare_current_compiler && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
 fi
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
@@ -2245,6 +2279,7 @@ if [ "$scenario" = reciprocity-private-dns ]; then
 fi
 tar -xzf source.tar.gz
 cd source
+prepare_current_compiler
 test -x tests/integration/kvm-alpha-topology.sh
 if [ "$browser_filter_manifest_sha256" != none ]; then
     guest_phase browser-filter-inputs
@@ -2307,6 +2342,9 @@ elif [ "$scenario" = browser-network ]; then
 fi
 guest_phase build
 if [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
+    # Reduce test compiler/linker memory pressure in the single-job 4-GiB guest.
+    # Reuse these profiles for the following binaries without changing assertions.
+    export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
     guest_phase storage-maintenance-targeted-tests
     # Both the actual cargo exit and bounded executed-test output must pass.
     # A stale libtest filter otherwise exits successfully with zero tests.
@@ -2527,6 +2565,14 @@ elif [ "$scenario" = cloud-upload-maintenance ]; then
         case $retained in */*|'') exit 1 ;; esac
         retained_path=/home/vpci/alpha-output/$retained
         if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
+            if [ "$retained" = storage-consumer-failure-boundary.json ]; then
+                python3 -I -B tests/integration/storage-consumer-failure-boundary.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = storage-consumer-provider-usage.json ]; then
+                python3 -I -B tests/integration/storage-consumer-provider-usage.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
             if [ "$retained" = private-storage-fixture-correlation.json ]; then
                 python3 -I -B tests/integration/storage-fixture-correlation-sampler.py validate-stdin \
                     <"$retained_path" >/dev/null 2>&1 || continue
@@ -2555,6 +2601,14 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-stor
         case $retained in */*|'') exit 1 ;; esac
         retained_path=/home/vpci/alpha-output/$retained
         if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
+            if [ "$retained" = storage-consumer-failure-boundary.json ]; then
+                python3 -I -B tests/integration/storage-consumer-failure-boundary.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = storage-consumer-provider-usage.json ]; then
+                python3 -I -B tests/integration/storage-consumer-provider-usage.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
             if [ "$retained" = private-storage-fixture-correlation.json ]; then
                 python3 -I -B tests/integration/storage-fixture-correlation-sampler.py validate-stdin \
                     <"$retained_path" >/dev/null 2>&1 || continue

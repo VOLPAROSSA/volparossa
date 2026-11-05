@@ -133,7 +133,8 @@ private_storage_consumer_private publish /synthetic/owner
         self.assertNotIn('rm -', cleanup)
         self.assertEqual([line.strip() for line in TEXT.splitlines() if 'rm -' in line],
             ['rm -f -- "$WORK/provider-activity.part" || true',
-             'rm -f -- "$WORK/fixture-correlation.part" || true'])
+             'rm -f -- "$WORK/fixture-correlation.part" || true',
+             'rm -f -- "$WORK/storage-consumer-provider-usage.part" || true'])
         self.assertNotIn('consumer-binding.json', TEXT)
         self.assertNotIn('remote_cleanup_confirmed:true', TEXT)
 

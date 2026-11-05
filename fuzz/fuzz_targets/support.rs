@@ -46,14 +46,14 @@ where
         }
     }
 
-    if let Some((second_tag, second_end)) = field_at(canonical, first_end) {
-        if first_tag != second_tag {
-            let mut reordered = Vec::with_capacity(canonical.len());
-            reordered.extend_from_slice(&canonical[first_end..second_end]);
-            reordered.extend_from_slice(&canonical[..first_end]);
-            reordered.extend_from_slice(&canonical[second_end..]);
-            assert!(decode_canonical::<T>(&reordered, maximum).is_err());
-        }
+    if let Some((second_tag, second_end)) = field_at(canonical, first_end)
+        && first_tag != second_tag
+    {
+        let mut reordered = Vec::with_capacity(canonical.len());
+        reordered.extend_from_slice(&canonical[first_end..second_end]);
+        reordered.extend_from_slice(&canonical[..first_end]);
+        reordered.extend_from_slice(&canonical[second_end..]);
+        assert!(decode_canonical::<T>(&reordered, maximum).is_err());
     }
 
     if let Some(overlong) = overlong_first_varint(canonical, maximum) {

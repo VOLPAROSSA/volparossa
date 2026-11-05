@@ -1,0 +1,89 @@
+{
+  "initial-mobile": {
+    "lighthouseVersion": "13.6.0",
+    "fetchTime": "2026-10-30T16:56:50.357Z",
+    "url": "http://127.0.0.1:8766/volparossa/",
+    "scores": {
+      "performance": 89,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100
+    },
+    "metrics": {
+      "first-contentful-paint": {
+        "value": 1205.7713,
+        "display": "1.2\u00a0s"
+      },
+      "largest-contentful-paint": {
+        "value": 3680.7713,
+        "display": "3.7\u00a0s"
+      },
+      "cumulative-layout-shift": {
+        "value": 0,
+        "display": "0"
+      },
+      "total-byte-weight": {
+        "value": 644824,
+        "display": "Total size was 630\u00a0KiB"
+      }
+    }
+  },
+  "mobile": {
+    "lighthouseVersion": "13.6.0",
+    "fetchTime": "2026-10-30T16:58:52.277Z",
+    "url": "http://127.0.0.1:8766/volparossa/",
+    "scores": {
+      "performance": 93,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100
+    },
+    "metrics": {
+      "first-contentful-paint": {
+        "value": 1204.479,
+        "display": "1.2\u00a0s"
+      },
+      "largest-contentful-paint": {
+        "value": 3154.4790000000003,
+        "display": "3.2\u00a0s"
+      },
+      "cumulative-layout-shift": {
+        "value": 0,
+        "display": "0"
+      },
+      "total-byte-weight": {
+        "value": 471377,
+        "display": "Total size was 460\u00a0KiB"
+      }
+    }
+  },
+  "desktop": {
+    "lighthouseVersion": "13.6.0",
+    "fetchTime": "2026-10-30T17:02:07.609Z",
+    "url": "http://127.0.0.1:8766/volparossa/",
+    "scores": {
+      "performance": 96,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100
+    },
+    "metrics": {
+      "first-contentful-paint": {
+        "value": 328.037,
+        "display": "0.3\u00a0s"
+      },
+      "largest-contentful-paint": {
+        "value": 1448.037,
+        "display": "1.4\u00a0s"
+      },
+      "cumulative-layout-shift": {
+        "value": 0.0006059438760359018,
+        "display": "0.001"
+      },
+      "total-byte-weight": {
+        "value": 1855052,
+        "display": "Total size was 1,812\u00a0KiB"
+      }
+    }
+  }
+}

@@ -13,6 +13,14 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd)
 gate=$repository_directory/tests/helper/require-live-worker-identity-proof.sh
 capture_library=$repository_directory/tests/helper/lib/live-worker-proof-capture.sh
 ipc_hook=$repository_directory/tests/helper/lib/production-ipc-unit-hook.sh
+python3 -B "$script_directory/test-helper-preflight-diagnostic.py"
+python3 -B "$script_directory/test-helper-worker-observation-diagnostic.py"
+python3 -B "$script_directory/test-helper-guest-source-environment.py"
+python3 -B "$script_directory/test-helper-wireguard-role-mark.py"
+python3 -B "$script_directory/test-helper-peer-topology.py"
+python3 -B "$script_directory/test-helper-wireguard-state.py"
+python3 -B "$script_directory/test-helper-relay-traffic-diagnostic.py"
+python3 -B "$script_directory/test-helper-private-ping-access.py"
 evidence_validator=$repository_directory/tests/helper/validate-helper-boundary-evidence-v1.sh
 evidence_schema=$repository_directory/tests/helper/helper-boundary-evidence-v1.schema.json
 worker_source=$repository_directory/crates/volparossa-helper/src/worker_v3.rs
@@ -530,6 +538,14 @@ done
 expected_production_start_stages=$temporary_directory/expected-production-start-stages
 printf '%s\n' \
     preflight-runtime \
+    preflight-contracts \
+    preflight-socket-wait \
+    preflight-directory-metadata \
+    preflight-socket-metadata \
+    preflight-token-metadata \
+    preflight-journal-metadata \
+    preflight-journal-lock-metadata \
+    preflight-journal-next-present \
     identity-socket \
     identity-lock \
     identity-manager \
@@ -568,6 +584,57 @@ printf '%s\n' \
     functional-probe-socket \
     functional-probe-fdstore \
     functional-worker-observation \
+    functional-worker-child \
+    functional-worker-custody \
+    functional-worker-pidfd-identity \
+    functional-worker-namespace-identity \
+    functional-worker-fdstore \
+    functional-worker-namespace-distinct \
+    functional-worker-process-revalidate \
+    functional-worker-namespace-revalidate \
+    functional-worker-namespace-open \
+    functional-worker-process-open \
+    functional-worker-namespace-stat \
+    functional-worker-namespace-pin \
+    functional-worker-process-stat \
+    functional-worker-process-pin \
+    functional-worker-custody-repeat \
+    functional-worker-custody-stability \
+    functional-worker-process-status \
+    functional-worker-helper-stability \
+    functional-worker-wireguard-interface \
+    functional-worker-wireguard-name \
+    functional-worker-peer-address \
+    functional-worker-local-address \
+    functional-worker-wireguard-state \
+    functional-worker-public-key-read \
+    functional-worker-public-key-shape \
+    functional-worker-public-key-unique \
+    functional-worker-port-read \
+    functional-worker-port-shape \
+    functional-worker-port-distinct \
+    functional-worker-counters \
+    functional-worker-custody-parent-netns \
+    functional-worker-custody-parent-netns-shape \
+    functional-worker-custody-empty \
+    functional-worker-custody-readlink \
+    functional-worker-custody-pidfd \
+    functional-worker-custody-pidfd-conflict \
+    functional-worker-custody-process-target \
+    functional-worker-custody-process \
+    functional-worker-custody-process-conflict \
+    functional-worker-custody-netns \
+    functional-worker-custody-netns-conflict \
+    functional-worker-custody-missing-pins \
+    functional-worker-fdstore-count-before-read \
+    functional-worker-fdstore-count-before \
+    functional-worker-fdstore-object \
+    functional-worker-fdstore-dump-read \
+    functional-worker-fdstore-dump-size \
+    functional-worker-fdstore-dump-exact \
+    functional-worker-fdstore-name \
+    functional-worker-fdstore-count-after-read \
+    functional-worker-fdstore-count-after \
     functional-relay-fixture \
     functional-relay-traffic \
     functional-relay-cleanup \
@@ -4949,7 +5016,7 @@ for required_contract in \
     'systemd_launch_record_is_safe "$identity_launch"' \
     'launch_image_record_is_safe' \
     'identity_starttime_prefix=process-starttime-v1=' \
-    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002031e0;filters:"' \
+    'expected_process_contract_prefix="process-status-v1=uid:0:0:0:0;gid:$agent_gid:$agent_gid:$agent_gid:$agent_gid;groups:$agent_gid;nnp:1;seccomp:2;caps:00000000002015e0;filters:"' \
     'identity_seccomp_filters=${identity_process_contract#"$expected_process_contract_prefix"}' \
     '[ "${#identity_seccomp_filters}" -gt 10 ]' \
     '[ "$identity_seccomp_filters" -gt 1024 ]' \
@@ -6180,6 +6247,64 @@ cmp -s "$expected_production_start_stages" "$observed_hook_start_stages" || {
 start_failure_stage=
 hook_stage_index=0
 while IFS= read -r hook_start_stage; do
+    # Preflight and worker details are terminal failure-only labels, not
+    # successful transitions. The exact fixed enum is checked above.
+    case $hook_start_stage in
+        preflight-contracts|preflight-socket-wait|preflight-directory-metadata|\
+        preflight-socket-metadata|preflight-token-metadata|preflight-journal-metadata|\
+        preflight-journal-lock-metadata|preflight-journal-next-present|\
+        functional-worker-child|\
+        functional-worker-custody|\
+        functional-worker-pidfd-identity|\
+        functional-worker-namespace-identity|\
+        functional-worker-fdstore|\
+        functional-worker-namespace-distinct|\
+        functional-worker-process-revalidate|\
+        functional-worker-namespace-revalidate|\
+        functional-worker-namespace-open|\
+        functional-worker-process-open|\
+        functional-worker-namespace-stat|\
+        functional-worker-namespace-pin|\
+        functional-worker-process-stat|\
+        functional-worker-process-pin|\
+        functional-worker-custody-repeat|\
+        functional-worker-custody-stability|\
+        functional-worker-process-status|\
+        functional-worker-helper-stability|\
+        functional-worker-wireguard-interface|\
+        functional-worker-wireguard-name|\
+        functional-worker-peer-address|\
+        functional-worker-local-address|\
+        functional-worker-wireguard-state|\
+        functional-worker-public-key-read|\
+        functional-worker-public-key-shape|\
+        functional-worker-public-key-unique|\
+        functional-worker-port-read|\
+        functional-worker-port-shape|\
+        functional-worker-port-distinct|\
+        functional-worker-counters|\
+        functional-worker-custody-parent-netns|\
+        functional-worker-custody-parent-netns-shape|\
+        functional-worker-custody-empty|\
+        functional-worker-custody-readlink|\
+        functional-worker-custody-pidfd|\
+        functional-worker-custody-pidfd-conflict|\
+        functional-worker-custody-process-target|\
+        functional-worker-custody-process|\
+        functional-worker-custody-process-conflict|\
+        functional-worker-custody-netns|\
+        functional-worker-custody-netns-conflict|\
+        functional-worker-custody-missing-pins|\
+        functional-worker-fdstore-count-before-read|\
+        functional-worker-fdstore-count-before|\
+        functional-worker-fdstore-object|\
+        functional-worker-fdstore-dump-read|\
+        functional-worker-fdstore-dump-size|\
+        functional-worker-fdstore-dump-exact|\
+        functional-worker-fdstore-name|\
+        functional-worker-fdstore-count-after-read|\
+        functional-worker-fdstore-count-after) continue ;;
+    esac
     hook_stage_index=$((hook_stage_index + 1))
     if [ "$hook_stage_index" -eq 1 ]; then
         [ "$hook_start_stage" = preflight-runtime ] || exit 1
@@ -6284,7 +6409,9 @@ done
 if grep -E '^[[:space:]]*(if ![[:space:]]+)?exec[[:space:]]+[0-9]+[<>]' \
     "$ipc_hook" >/dev/null \
     || [ "$(grep -Ec '^[[:space:]]*(if ![[:space:]]+)?command exec [0-9]+[<>]' \
-        "$ipc_hook")" -ne 21 ] \
+        "$ipc_hook")" -ne 22 ] \
+    || [ "$(grep -Fxc "        command exec 5<\"/proc/\$2/ns/net\" || exit 1" \
+        "$ipc_hook")" -ne 1 ] \
     || [ "$(grep -Fc "        command exec /usr/bin/setpriv \\" \
         "$ipc_hook")" -ne 1 ]; then
     printf '%s\n' 'production hook FD redirections can retain fatal special-builtin semantics' >&2
@@ -7278,7 +7405,7 @@ for required_hook_contract in \
     'probe=/run/volparossa-helper-production-ipc-probe' \
     'production_helper=/run/volparossa-helper-production' \
     'restart_launcher=/run/volparossa-helper-restart-launcher' \
-    'helper_bootstrap_capability_mask=00000000002031e0' \
+    'helper_bootstrap_capability_mask=00000000002015e0' \
     "'directory:0:0:2700'" \
     'systemd_exec_record_from_json() {' \
     "basic:'a(sasbttttuii)'|extended:'a(sasasttttuii)'" \
@@ -7439,7 +7566,9 @@ for required_hook_contract in \
     '/usr/bin/wg show "$hook_interface" allowed-ips' \
     '/usr/bin/wg show "$hook_interface" latest-handshakes' \
     '/usr/bin/wg show "$hook_interface" transfer' \
-    'worker_wireguard_interface 7' \
+    'worker_wireguard_interface 7 client' \
+    'worker_wireguard_interface 7 exit' \
+    'worker_wireguard_mark_is_exact relay' \
     'worker_client_peer_address' \
     'worker_client_local_address' \
     'worker_activated_wireguard_is_exact' \
@@ -7594,7 +7723,7 @@ functional_peer_key=MdSras7slhE3kXA3k25gcW+sVzr+lNnahKgCBEjfwRI=
 functional_interface=vpc1proof
 valid_client_address='fd766f6c70611234567800019abc0001 02 80 00 80 vpc1proof'
 link_local_address='fe80000000000000123456fffe789abc 02 40 20 80 vpc1proof'
-expected_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0002
+expected_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0004
 observed_peer_address=$(printf '%s\n%s\n' \
     "$valid_client_address" "$link_local_address" \
     | derive_client_peer_address "$functional_interface") \
@@ -7603,7 +7732,7 @@ observed_peer_address=$(printf '%s\n%s\n' \
         exit 1
     }
 if [ "$observed_peer_address" != "$expected_peer_address" ]; then
-    printf '%s\n' 'Client peer address was not derived as exact topology host ::2' >&2
+    printf '%s\n' 'Client peer address was not derived as exact topology host ::4' >&2
     exit 1
 fi
 expected_local_address=fd76:6f6c:7061:1234:5678:0001:9abc:0001
@@ -7643,7 +7772,7 @@ if printf '%s\n%s\n' "$valid_client_address" "$valid_client_address" \
 fi
 
 valid_exit_address='fd766f6c70611234567800019abc0004 02 80 00 80 vpc1proof'
-expected_exit_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0003
+expected_exit_peer_address=fd76:6f6c:7061:1234:5678:0001:9abc:0001
 observed_exit_peer_address=$(printf '%s\n%s\n' \
     "$valid_exit_address" "$link_local_address" \
     | derive_exit_peer_address "$functional_interface") || {
@@ -7651,7 +7780,7 @@ observed_exit_peer_address=$(printf '%s\n%s\n' \
         exit 1
     }
 [ "$observed_exit_peer_address" = "$expected_exit_peer_address" ] || {
-    printf '%s\n' 'Exit peer address was not derived as exact topology host ::3' >&2
+    printf '%s\n' 'Exit peer address was not derived as exact topology host ::1' >&2
     exit 1
 }
 expected_exit_local_address=fd76:6f6c:7061:1234:5678:0001:9abc:0004
@@ -7898,7 +8027,7 @@ hook_process_contract_source_is_exact() {
     hook_contract_source=$1
     [ -f "$hook_contract_source" ] && [ ! -L "$hook_contract_source" ] || return 1
     awk '
-        $0 == "helper_bootstrap_capability_mask=00000000002031e0" { mask++ }
+        $0 == "helper_bootstrap_capability_mask=00000000002015e0" { mask++ }
         /^capture_helper_process_contract\(\) \{$/ { in_contract = 1; next }
         /^capture_running_identity\(\) \{$/ {
             in_contract = 0
@@ -8007,7 +8136,7 @@ do
     hook_contract_mutant=$temporary_directory/hook-$hook_contract_mutation.sh
     case $hook_contract_mutation in
         capability-mask)
-            sed '0,/00000000002031e0/s//0000000000000000/' \
+            sed '0,/00000000002015e0/s//0000000000000000/' \
                 "$ipc_hook" >"$hook_contract_mutant"
             ;;
         group-count)
@@ -8585,6 +8714,128 @@ if grep -Ei 'capabilit(y|ies)[_-]?state|state[_-]?capabilit(y|ies)' "$ipc_hook" 
     printf '%s\n' 'functional lease proof contains a capability state file' >&2
     exit 1
 fi
+
+
+# Production retirement diagnostics classify the existing guard only. Exercise
+# exact source helpers/phase with inert ownership/manager fixtures, never systemd.
+production_retirement_functions=$temporary_directory/production-retirement-functions.sh
+for production_retirement_function in production_retirement_diagnostic_stage_is_safe \
+    report_production_retirement_diagnostic; do
+    sed -n "/^$production_retirement_function() {$/,/^}$/p" "$gate" \
+        >>"$production_retirement_functions"
+done
+# shellcheck source=/dev/null
+. "$production_retirement_functions"
+proof_failure_reason=
+for production_stage in adoption identity initial-snapshot stop-request stop-wait \
+    reset-failed reset-wait fdstore-clean post-clean final-reset collection \
+    affine-state unit-not-collected runtime-fence; do
+    driver_phase=production-retirement
+    expect_status 0 report_production_retirement_diagnostic "$production_stage"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=$production_stage"
+done
+for production_stage in '' unknown '/private/session' 'identity extra'; do
+    expect_status 1 report_production_retirement_diagnostic "$production_stage"
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+driver_phase=worker-retirement
+expect_status 1 report_production_retirement_diagnostic identity
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+expect_status 1 report_production_retirement_diagnostic
+expect_status 1 report_production_retirement_diagnostic identity extra
+driver_phase=production-retirement
+for invalid_first in unknown 'production-launch-status/private/session'; do
+    proof_failure_reason=$invalid_first proof_ok=no
+    expect_status 1 report_production_retirement_diagnostic runtime-fence
+    test ! -s "$last_stdout" && test ! -s "$last_stderr"
+done
+proof_failure_reason=production-launch-status proof_ok=yes
+expect_status 1 report_production_retirement_diagnostic runtime-fence
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+proof_failure_reason=
+production_retirement_block=$temporary_directory/production-retirement-block.sh
+sed -n '/^    production_retirement_confirmed=no$/,/^    production_retirement_confirmed=yes$/p' \
+    "$gate" >"$production_retirement_block"
+forget_unit_ownership() {
+    unit_name='' unit_owned=no unit_may_own=no unit_invocation_id='' unit_ownership_marker=''
+}
+retire_unit() {
+    retire_failure_stage=stop-wait
+    [ "$production_fixture" != retire-failed ] || return 1
+    [ "$production_fixture" = affine-retained ] || forget_unit_ownership
+}
+unit_load_state() {
+    if [ "$production_fixture" = not-collected ]; then printf '%s\n' loaded
+    else printf '%s\n' not-found; fi
+}
+retired_runtime_is_absent() {
+    [ "$1:$2:$3:$4" = "private-fixture:$production_control_group:$production_main_pid:$identity_starttime_value" ] \
+        && [ "$production_fixture" != runtime-present ]
+}
+exercise_production_retirement_diagnostic() (
+    production_fixture=$1
+    proof_failure_reason=${2:-}
+    proof_ok=yes
+    [ -z "$proof_failure_reason" ] || proof_ok=no
+    temporary_stage=$temporary_directory/retirement-fixture-$production_fixture-${2:-none}-${3:-none}
+    mkdir -m 0700 "$temporary_stage" "$temporary_stage/production-output"
+    if [ -n "${3:-}" ]; then
+        printf 'VOLPAROSSA_HELPER_V3_IPC_START_FAILURE_STAGE_V1=%s\n' "$3" \
+            >"$temporary_stage/production-output/start.failure"
+    fi
+    unit_name=private-fixture
+    unit_owned=yes unit_may_own=no unit_invocation_id=private unit_ownership_marker=private
+    production_control_group=private production_main_pid=1 identity_starttime_value=1
+    production_retirement_confirmed=no
+    # shellcheck source=/dev/null
+    . "$production_retirement_block"
+    test "$production_retirement_confirmed" = yes
+)
+for production_pair in retire-failed:stop-wait affine-retained:affine-state \
+    not-collected:unit-not-collected runtime-present:runtime-fence; do
+    expect_status 1 exercise_production_retirement_diagnostic "${production_pair%%:*}"
+    test ! -s "$last_stdout"
+    test "$(sed -n '1p' "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=${production_pair#*:}"
+    test "$(sed -n '2p' "$last_stderr")" = \
+        'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-retirement'
+    case ${production_pair%%:*} in
+        retire-failed) production_expected_fatal='production unit retirement did not settle' ;;
+        affine-retained) production_expected_fatal='production unit retirement retained affine ownership state' ;;
+        *) production_expected_fatal='production unit retirement fence did not settle' ;;
+    esac
+    test "$(sed -n '3p' "$last_stderr")" = "diagnostic failure: $production_expected_fatal"
+done
+expect_status 0 exercise_production_retirement_diagnostic success
+test ! -s "$last_stdout" && test ! -s "$last_stderr"
+
+# Earlier first reasons survive the later runtime-fence failure. Only the fixed
+# start.failure diagnostic is reused; absent/invalid private captures add no text.
+for earlier_reason in production-launch-status production-process-identity; do
+    expect_status 1 exercise_production_retirement_diagnostic runtime-present "$earlier_reason"
+    test ! -s "$last_stdout"
+    test "$(cat "$last_stderr")" = \
+        "VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=runtime-fence
+VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=$earlier_reason
+diagnostic failure: production unit retirement fence did not settle"
+done
+for earlier_stage in identity-process unknown-stage; do
+    expect_status 1 exercise_production_retirement_diagnostic runtime-present \
+        production-launch-status "$earlier_stage"
+    test ! -s "$last_stdout"
+    test "$(sed -n '2p' "$last_stderr")" = \
+        'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-launch-status'
+    if [ "$earlier_stage" = identity-process ]; then
+        test "$(sed -n '3p' "$last_stderr")" = \
+            'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=identity-process'
+        test "$(sed -n '4p' "$last_stderr")" = 'diagnostic failure: production unit retirement fence did not settle'
+    else
+        test "$(sed -n '3p' "$last_stderr")" = 'diagnostic failure: production unit retirement fence did not settle'
+        test "$(wc -l <"$last_stderr")" -eq 3
+    fi
+done
 
 printf '%s\n' \
     'PASS: live helper identity/fdstore and production IPC plus sequential Client/Exit and cross-leg Relay forwarding, bidirectional nft/WireGuard growth, Commit retry, exact peer reap, retirement, root refusal, confinement, and no-host-mutation contracts are exact.'

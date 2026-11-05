@@ -375,10 +375,10 @@ impl RouteContextCache {
                 {
                     self.active_by_scope.remove(&entry.context.scope);
                 }
-                if entry.active_flow_count == 0 {
-                    if let Some(context) = self.remove_context(&context_id) {
-                        retired.push(context);
-                    }
+                if entry.active_flow_count == 0
+                    && let Some(context) = self.remove_context(&context_id)
+                {
+                    retired.push(context);
                 }
             }
         }

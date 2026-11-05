@@ -284,7 +284,7 @@ opaque_helper_handle!(
 );
 opaque_helper_handle!(
     HelperLeaseHandle,
-    "Opaque handle for one prepared WireGuard lease owned by the privileged helper."
+    "Opaque handle for one prepared `WireGuard` lease owned by the privileged helper."
 );
 
 fn validate_lease_binding(

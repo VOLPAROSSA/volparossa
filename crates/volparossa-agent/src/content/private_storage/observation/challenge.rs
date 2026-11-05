@@ -5,11 +5,12 @@ use std::{sync::Mutex, time::Duration};
 use tokio::time::Instant;
 use volparossa_local_control::{
     PrivateStorageChallengeDetail, PrivateStorageChallengePhase as Phase,
-    PrivateStorageElapsedBucket as Bucket,
+    PrivateStorageChallengeReadDetail, PrivateStorageChallengeReadOutcome as Outcome,
+    PrivateStorageChallengeReadStep as Step, PrivateStorageElapsedBucket as Bucket,
 };
 
 #[derive(Default)]
-pub(super) struct Progress(Mutex<State>);
+pub(super) struct Progress(Mutex<State>, bool);
 
 #[derive(Default)]
 struct State {
@@ -17,9 +18,45 @@ struct State {
     entered: Option<Instant>,
     phase: Option<Phase>,
     failed_at: Option<Instant>,
+    read: Option<PrivateStorageChallengeReadDetail>,
 }
 
 impl Progress {
+    pub(super) fn enabled(mut self, enabled: bool) -> Self {
+        self.1 = enabled;
+        self
+    }
+
+    pub(super) fn read_step(&self, step: Step) {
+        if !self.1 {
+            return;
+        }
+        if let Ok(mut state) = self.0.lock()
+            && state.phase == Some(Phase::ChallengeReadVerify)
+            && state.failed_at.is_none()
+            && state
+                .read
+                .is_none_or(|read| read.returned_outcome.is_none())
+        {
+            state.read = Some(PrivateStorageChallengeReadDetail {
+                step: step as i32,
+                returned_outcome: None,
+            });
+        }
+    }
+
+    pub(super) fn read_failure(&self, outcome: Outcome) {
+        if !self.1 {
+            return;
+        }
+        if let Ok(mut state) = self.0.lock()
+            && state.failed_at.is_none()
+            && let Some(read) = &mut state.read
+        {
+            read.returned_outcome.get_or_insert(outcome as i32);
+        }
+    }
+
     pub(super) fn operation_started(&self) -> Option<Instant> {
         self.0.lock().ok()?.operation_started
     }
@@ -36,6 +73,7 @@ impl Progress {
             state.entered = None;
             state.phase = None;
             state.failed_at = None;
+            state.read = None;
         }
     }
 
@@ -44,6 +82,7 @@ impl Progress {
             state.entered = Some(Instant::now());
             state.phase = None;
             state.failed_at = None;
+            state.read = None;
         }
     }
 
@@ -71,6 +110,7 @@ impl Progress {
         let entered = state.entered?;
         let failed = state.failed_at?;
         Some(PrivateStorageChallengeDetail {
+            read: state.read,
             phase: state.phase? as i32,
             before_challenge: bucket(entered.saturating_duration_since(started)) as i32,
             in_challenge: bucket(failed.saturating_duration_since(entered)) as i32,

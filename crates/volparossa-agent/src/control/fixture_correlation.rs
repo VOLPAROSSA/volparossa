@@ -49,6 +49,7 @@ mod tests {
 
     fn request(action: Action) -> StorageFixtureCorrelationRequest {
         StorageFixtureCorrelationRequest {
+            target: None,
             version: 1,
             action: action as i32,
             epoch: vec![17; 16],

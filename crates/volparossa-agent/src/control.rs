@@ -171,10 +171,9 @@ async fn process_connection(
     mut stream: UnixStream,
     context: ControlContext,
 ) -> Result<(), ControlServerError> {
-    let request = timeout(CONTROL_TIMEOUT, read_request(&mut stream))
-        .await
-        .map_err(|_| ControlServerError::Timeout)?
-        .map_err(|_| ControlServerError::InvalidFrame)?;
+    let Some(request) = read_and_dispatch_dps(&mut stream).await? else {
+        return Ok(());
+    };
     if let Some(control_request::Operation::StorageFixtureCorrelation(query)) =
         request.operation.as_ref()
     {
@@ -392,6 +391,9 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         );
     };
     match operation {
+        control_request::Operation::DpsAssess(assessment) => {
+            dps_assessment_response(request_id, &assessment, unix_millis())
+        }
         control_request::Operation::BrowserGatewayGrant(request) => {
             match context.browser_gateway.grant(request, context).await {
                 Ok(grant) => response(
@@ -612,6 +614,72 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             )
         }
     }
+}
+
+// The intact local framing/dispatch boundary is independently exercised over Unix IPC.
+// Non-DPS requests pass unchanged to their existing context-owning operation handlers.
+async fn read_and_dispatch_dps(
+    stream: &mut UnixStream,
+) -> Result<Option<ControlRequest>, ControlServerError> {
+    let request = read_control_request(stream).await?;
+    if let Some(reply) = dps_response(&request, unix_millis()) {
+        write_dps_response(stream, &reply).await?;
+        Ok(None)
+    } else {
+        Ok(Some(request))
+    }
+}
+
+async fn read_control_request(
+    stream: &mut UnixStream,
+) -> Result<ControlRequest, ControlServerError> {
+    timeout(CONTROL_TIMEOUT, read_request(stream))
+        .await
+        .map_err(|_| ControlServerError::Timeout)?
+        .map_err(|_| ControlServerError::InvalidFrame)
+}
+
+// DPS never receives the ControlContext: no state, sensor, helper or peer access.
+fn dps_response(request: &ControlRequest, now_unix_ms: u64) -> Option<ControlResponse> {
+    let Some(control_request::Operation::DpsAssess(assessment)) = request.operation.as_ref() else {
+        return None;
+    };
+    Some(dps_assessment_response(
+        request.request_id.clone(),
+        assessment,
+        now_unix_ms,
+    ))
+}
+
+fn dps_assessment_response(
+    request_id: Vec<u8>,
+    request: &volparossa_local_control::dps::DpsAssessRequest,
+    now_unix_ms: u64,
+) -> ControlResponse {
+    match request.assess(now_unix_ms) {
+        Ok(assessment) => response(
+            request_id,
+            ControlResult::Ok,
+            "DPS_ASSESSED",
+            control_response::Payload::DpsAssessment(assessment),
+        ),
+        Err(_) => response(
+            request_id,
+            ControlResult::InvalidRequest,
+            "DPS_INVALID",
+            control_response::Payload::Ack(Empty {}),
+        ),
+    }
+}
+
+async fn write_dps_response(
+    stream: &mut UnixStream,
+    reply: &ControlResponse,
+) -> Result<(), ControlServerError> {
+    timeout(CONTROL_TIMEOUT, write_response(stream, reply))
+        .await
+        .map_err(|_| ControlServerError::Timeout)?
+        .map_err(|_| ControlServerError::InvalidFrame)
 }
 
 fn content_response(
@@ -1209,6 +1277,163 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn dps_request() -> ControlRequest {
+        use volparossa_local_control::dps::{
+            DPS_SERVICE_VERSION, DpsAssessRequest, FrameKind, PositionFrame, PositionObservation,
+        };
+        let frame = PositionFrame {
+            kind: FrameKind::Wgs84Ecef as i32,
+            local_frame_id: vec![],
+        };
+        ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![7; 16],
+            operation: Some(control_request::Operation::DpsAssess(DpsAssessRequest {
+                dps_version: DPS_SERVICE_VERSION,
+                desired_frame: Some(frame.clone()),
+                maximum_age_ms: 60_000,
+                observations: vec![PositionObservation {
+                    observation_id: vec![1; 16],
+                    source_id: vec![2; 16],
+                    declared_independence_group: vec![3; 16],
+                    frame: Some(frame),
+                    source_kind: volparossa_local_control::dps::SourceKind::Gnss as i32,
+                    x_metres: 6_378_137.0,
+                    supplied_radius_metres: 5.0,
+                    observed_at_unix_ms: unix_millis().saturating_sub(100),
+                    ..Default::default()
+                }],
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn dps_framed_local_dispatch_returns_quality_without_state_or_sensor_authority() {
+        use volparossa_local_control::{dps::AssessmentStatus, read_response, write_request};
+
+        // Real framed Unix IPC with synthetic position inputs. No hardware or full-daemon proof.
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            assert!(read_and_dispatch_dps(&mut server).await.unwrap().is_none());
+        });
+        write_request(&mut client, &dps_request()).await.unwrap();
+        let reply = read_response(&mut client).await.unwrap();
+        server_task.await.unwrap();
+        assert_eq!(reply.request_id, vec![7; 16]);
+        assert_eq!(reply.result, ControlResult::Ok as i32);
+        assert_eq!(reply.diagnostic_code, "DPS_ASSESSED");
+        let Some(control_response::Payload::DpsAssessment(assessment)) = reply.payload else {
+            panic!("typed DPS quality result");
+        };
+        assert_eq!(assessment.status, AssessmentStatus::SingleClaim as i32);
+        assert_eq!(
+            assessment
+                .unverified_input_position
+                .unwrap()
+                .x_metres
+                .to_bits(),
+            6_378_137.0_f64.to_bits()
+        );
+        // The dispatch helper has no ControlContext, AgentState, helper, sensor or peer handle.
+        let mut empty = dps_request();
+        let Some(control_request::Operation::DpsAssess(request)) = empty.operation.as_mut() else {
+            unreachable!();
+        };
+        request.observations.clear();
+        let reply = dps_response(&empty, unix_millis()).unwrap();
+        let Some(control_response::Payload::DpsAssessment(assessment)) = reply.payload else {
+            unreachable!();
+        };
+        assert_eq!(assessment.status, AssessmentStatus::Unavailable as i32);
+        assert!(assessment.unverified_input_position.is_none());
+        assert!(assessment.observations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dps_connection_boundary_preserves_non_dps_requests_unchanged() {
+        use volparossa_local_control::write_request;
+
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![8; 16],
+            operation: Some(control_request::Operation::Status(Empty {})),
+        };
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        write_request(&mut client, &request).await.unwrap();
+        let returned = read_and_dispatch_dps(&mut server).await.unwrap();
+        assert_eq!(returned, Some(request));
+    }
+
+    #[tokio::test]
+    async fn dps_wrong_version_and_oversized_claim_list_are_rejected_before_dispatch() {
+        use prost::Message;
+        use tokio::io::AsyncWriteExt;
+
+        for oversized in [false, true] {
+            let mut request = dps_request();
+            let Some(control_request::Operation::DpsAssess(input)) = request.operation.as_mut()
+            else {
+                unreachable!();
+            };
+            if oversized {
+                input.observations = (0..33)
+                    .map(|id| {
+                        let mut observation = input.observations[0].clone();
+                        observation.observation_id = vec![id; 16];
+                        observation
+                    })
+                    .collect();
+            } else {
+                input.dps_version += 1;
+            }
+            // Bypass the encoder's own validation to exercise an untrusted wire payload.
+            let payload = request.encode_to_vec();
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let server_task = tokio::spawn(async move {
+                assert!(matches!(
+                    read_and_dispatch_dps(&mut server).await,
+                    Err(ControlServerError::InvalidFrame)
+                ));
+            });
+            client
+                .write_all(&u32::try_from(payload.len()).unwrap().to_be_bytes())
+                .await
+                .unwrap();
+            client.write_all(&payload).await.unwrap();
+            server_task.await.unwrap();
+        }
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .write_all(
+                &u32::try_from(volparossa_local_control::MAX_CONTROL_FRAME + 1)
+                    .unwrap()
+                    .to_be_bytes(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_and_dispatch_dps(&mut server).await,
+            Err(ControlServerError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn dps_dispatch_never_includes_input_or_internal_errors_in_diagnostics() {
+        let request = dps_request();
+        let reply = dps_response(&request, 0).unwrap();
+        assert_eq!(reply.result, ControlResult::InvalidRequest as i32);
+        assert_eq!(reply.diagnostic_code, "DPS_INVALID");
+        assert!(matches!(
+            reply.payload,
+            Some(control_response::Payload::Ack(_))
+        ));
+        let unrelated = ControlRequest {
+            operation: Some(control_request::Operation::Status(Empty {})),
+            ..request
+        };
+        assert!(dps_response(&unrelated, 1_000_000).is_none());
+    }
 
     #[test]
     fn private_storage_detail_never_creates_an_error_frame_after_ready_started() {

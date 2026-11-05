@@ -11,8 +11,9 @@ ignore = [
   "RUSTSEC-2024-0436",
   # These versions match RustSec ranges, but their exact crates.io source and minimal upstream
   # security backports are verified before every scan by scripts/check-rust-dependencies.sh.
-  # They are not accepted as vulnerable upstream artifacts; Debian 13's Rust 1.85 cannot compile
-  # their fixed releases.
+  # They are not accepted as vulnerable upstream artifacts. These validated backports
+  # were introduced for Debian 13 Rust 1.85 and remain in the minimal F04 update;
+  # the current Rust 1.89 profile does not bypass their mandatory reconstruction checks.
   "RUSTSEC-2026-0009",
   "RUSTSEC-2026-0118",
   "RUSTSEC-2026-0119",

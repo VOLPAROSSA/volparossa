@@ -674,20 +674,19 @@ fn validate_exact_version(version: u16) -> Result<(), ConfigError> {
 }
 
 fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError> {
-    if let Some(interface) = &network.independent_egress_interface {
-        if network.uplink == NetworkUplink::LocalOnly
+    if let Some(interface) = &network.independent_egress_interface
+        && (network.uplink == NetworkUplink::LocalOnly
             || interface.is_empty()
             || interface.len() > 15
             || matches!(interface.as_str(), "." | ".." | "lo")
             || !interface
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-        {
-            return Err(validation(
-                "network.independent_egress_interface",
-                "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
-            ));
-        }
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')))
+    {
+        return Err(validation(
+            "network.independent_egress_interface",
+            "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
+        ));
     }
     validate_address_list(
         "network.listen_addresses",
@@ -727,21 +726,21 @@ fn validate_advertisement_origin(
             "must contain exactly two uppercase ASCII letters",
         ));
     }
-    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref() {
-        if !canonical_ipv4_prefix(prefix) {
-            return Err(validation(
-                "network.advertised_ipv4_prefix",
-                "must be a canonical IPv4 /24 network",
-            ));
-        }
+    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref()
+        && !canonical_ipv4_prefix(prefix)
+    {
+        return Err(validation(
+            "network.advertised_ipv4_prefix",
+            "must be a canonical IPv4 /24 network",
+        ));
     }
-    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref() {
-        if !canonical_ipv6_prefix(prefix) {
-            return Err(validation(
-                "network.advertised_ipv6_prefix",
-                "must be a canonical IPv6 /48 network",
-            ));
-        }
+    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref()
+        && !canonical_ipv6_prefix(prefix)
+    {
+        return Err(validation(
+            "network.advertised_ipv6_prefix",
+            "must be a canonical IPv6 /48 network",
+        ));
     }
     if network.uplink == NetworkUplink::IndependentInternet && (roles.relay || roles.exit) {
         if network.advertised_asn == 0 {
@@ -1599,6 +1598,60 @@ mod tests {
         let error = Config::from_yaml("routing:\n  permit_leaks: true\n")
             .expect_err("unknown field must fail");
         assert!(matches!(error, ConfigError::Yaml(_)));
+    }
+
+    #[test]
+    fn yaml_parser_rejects_ambiguous_fields_scalar_types_and_documents() {
+        for input in [
+            "runtime_mode: production\nruntime_mode: development\n",
+            "routing:\n  kill_switch: true\n  kill_switch: false\n",
+            "routing:\n  kill_switch: \"false\"\n",
+            "network:\n  protocol_version: 4.0\n",
+            "routing: [",
+            "{}\n---\n{}\n",
+        ] {
+            assert!(
+                matches!(Config::from_yaml(input), Err(ConfigError::Yaml(_))),
+                "ambiguous or malformed configuration must fail: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_aliases_still_pass_through_safety_validation() {
+        let safe = "routing:\n  kill_switch: &enabled true\npolicy:\n  fail_closed: *enabled\n";
+        assert_eq!(
+            Config::from_yaml(safe).expect("boolean alias"),
+            Config::default()
+        );
+
+        let unsafe_config = "network:\n  name: private-example-value\nrouting:\n  kill_switch: &disabled false\npolicy:\n  fail_closed: *disabled\n";
+        let error = Config::from_yaml(unsafe_config).expect_err("aliases cannot bypass validation");
+        assert!(matches!(
+            error,
+            ConfigError::Validation {
+                field: "routing.kill_switch",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("private-example-value"));
+    }
+
+    #[test]
+    fn shipped_yaml_fragments_load_from_files_and_round_trip() {
+        for example in [
+            include_str!("../../../config/examples/default.yaml"),
+            include_str!("../../../config/examples/unbound-exit.yaml"),
+            include_str!("../../../config/examples/unbound-private-exit.yaml"),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary configuration directory");
+            let path = directory.path().join("config.yaml");
+            fs::write(&path, example).expect("write configuration");
+            let config = Config::from_path(&path).expect("shipped configuration");
+            let yaml = config.to_yaml().expect("validated export");
+            assert_eq!(Config::from_yaml(&yaml).expect("export round trip"), config);
+            assert!(!config.roles.client && !config.roles.relay && !config.roles.exit);
+        }
     }
 
     #[test]

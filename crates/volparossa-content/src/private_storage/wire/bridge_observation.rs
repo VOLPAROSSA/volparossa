@@ -1,5 +1,7 @@
 //! Closed local bridge boundaries; no wire bytes, runtime IDs or inferred remote causes.
 
+use super::VerifiedStorageRequest;
+
 /// Last boundary actually polled by the bridge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
@@ -48,6 +50,10 @@ pub trait Observer: Sync {
     fn phase(&self, phase: Phase);
     /// An existing timeout elapsed; this does not imply that custody did not commit.
     fn deadline(&self, deadline: Deadline);
+    /// Optional verified target binding; no request digest may imply completed transmission.
+    fn verified_request(&self, _request: &VerifiedStorageRequest) {}
+    /// The exact signed request frame was written and flushed by the original stream.
+    fn request_flushed(&self, _request: &VerifiedStorageRequest) {}
 }
 
 pub(super) struct Unobserved;

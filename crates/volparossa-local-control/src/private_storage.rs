@@ -74,6 +74,9 @@ pub struct PrivateStorageRemoteRequest {
     /// False is omitted on the wire and preserves the historical request bytes.
     #[prost(bool, tag = "4")]
     pub include_flow_acquire_detail: bool,
+    /// Opt in to closed challenge frame-read observations; false adds no wire bytes.
+    #[prost(bool, tag = "5")]
+    pub include_challenge_read_detail: bool,
 }
 
 /// Wait for one core-coordinated background turn. No owner paths or secrets are sent.
@@ -364,6 +367,7 @@ mod tests {
             }),
             Operation::PrivateStorageRemote(PrivateStorageRemoteRequest {
                 include_flow_acquire_detail: false,
+                include_challenge_read_detail: false,
                 provider_key: public_key(),
                 grant: vec![1; 2048],
                 maintenance_turn: Vec::new(),
@@ -447,6 +451,7 @@ mod tests {
         assert!(request.validate().is_err());
         let mut remote = PrivateStorageRemoteRequest {
             include_flow_acquire_detail: false,
+            include_challenge_read_detail: false,
             provider_key: public_key(),
             grant: vec![1; 2048],
             maintenance_turn: vec![2; 32],
@@ -495,6 +500,7 @@ mod tests {
         assert!(
             PrivateStorageRemoteRequest {
                 include_flow_acquire_detail: false,
+                include_challenge_read_detail: false,
                 provider_key: vec![0; 32],
                 grant: vec![1; 128],
                 maintenance_turn: Vec::new(),
@@ -505,6 +511,7 @@ mod tests {
         assert!(
             PrivateStorageRemoteRequest {
                 include_flow_acquire_detail: false,
+                include_challenge_read_detail: false,
                 provider_key: public_key(),
                 grant: vec![1; 2049],
                 maintenance_turn: Vec::new(),
@@ -519,6 +526,36 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+    #[test]
+    fn challenge_read_request_flag_is_additive_and_false_preserves_original_bytes() {
+        #[derive(Clone, PartialEq, Message)]
+        struct Previous {
+            #[prost(bytes = "vec", tag = "1")]
+            provider_key: Vec<u8>,
+            #[prost(bytes = "vec", tag = "2")]
+            grant: Vec<u8>,
+            #[prost(bytes = "vec", tag = "3")]
+            maintenance_turn: Vec<u8>,
+            #[prost(bool, tag = "4")]
+            include_flow_acquire_detail: bool,
+        }
+        let old = Previous {
+            provider_key: public_key(),
+            grant: vec![1; 128],
+            maintenance_turn: Vec::new(),
+            include_flow_acquire_detail: true,
+        };
+        let bytes = old.encode_to_vec();
+        let mut value = PrivateStorageRemoteRequest::decode(bytes.as_slice()).unwrap();
+        assert!(!value.include_challenge_read_detail);
+        assert_eq!(value.encode_to_vec(), bytes);
+        value.include_challenge_read_detail = true;
+        value.validate().unwrap();
+        assert_eq!(
+            Previous::decode(value.encode_to_vec().as_slice()).unwrap(),
+            old
         );
     }
 }

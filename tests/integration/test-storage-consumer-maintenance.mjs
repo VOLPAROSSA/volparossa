@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, mkdir, writeFile, chmod, symlink, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,79 @@ import { fileURLToPath } from 'node:url';
 import { boundedFile, fixtureBytes, ForegroundObservation, MAX_CIPHER, PHASES, PLAIN_BYTES,
   consumerFailureReport, depositDiagnostic, parseProcStat, replacementReady, requirePublishComplete, retainedSnapshot,
   retentionAdvanced, validateAppendProfile, validateCheckpoint, validateStorage,
-  createPublishCatalog, publish, withPublishCore } from './storage-consumer-maintenance.mjs';
+  createPublishCatalog, observeCatalogRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+
+test('request-stage target uses the actual per-copy journal and manifest provider association', () => {
+  const providers = [1, 2, 3].map(value => ({ key: [...Buffer.alloc(32, value)] }));
+  for (let index = 0; index < 3; index++) {
+    const archive = [...Buffer.alloc(32, 44)];
+    const journal = { archive_id: archive, provider_key: providers[index].key };
+    const signed = { manifest: { providers, fragments: Array.from({ length: 4 }, () => ({ copies: [
+      { provider: index, archive_id: archive },
+    ] })) } };
+    const config = { providers: providers.map(value => ({ key: Buffer.from(value.key).toString('hex') })) };
+    assert.equal(requestStageTarget(journal, signed, config).provider_index, index);
+    assert.equal(requestStageTarget(journal, signed, config).target.provider_key, config.providers[index].key);
+    assert.throws(() => requestStageTarget({ ...journal, provider_key: providers[(index + 1) % 3].key }, signed, config));
+    assert.throws(() => requestStageTarget({ ...journal, archive_id: [...Buffer.alloc(32, 45)] }, signed, config));
+  }
+});
+
+test('request-stage disabled path preserves the exact operation result or error', async () => {
+  const result = { status: 'complete' }, error = new Error('private-canary');
+  assert.equal(await withRequestStage({ profileVersion: 10 }, '/unused', {}, async () => result), result);
+  await assert.rejects(withRequestStage({ profileVersion: 10 }, '/unused', {}, async () => { throw error; }), value => value === error);
+  assert.equal(requestStageOutcome(error), 'untargeted_failure');
+});
+
+test('request-stage observes only the exact failed reserve and freezes failure before diagnostic abort', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'vp-request-stage-'));
+  const app = join(root, 'image'), archive = [...Buffer.alloc(32, 44)];
+  const providers = [1, 2, 3].map(value => ({ key: [...Buffer.alloc(32, value)] }));
+  await mkdir(join(app, 'archive/fragment-0002/copy-0'), { recursive: true, mode: 0o700 });
+  const data = [
+    ['archive/fragment-0002/copy-0/archive.json', { archive_id: archive, provider_key: providers[2].key }],
+    ['archive/fragments.json', { manifest: { providers, fragments: Array.from({ length: 4 }, () => ({
+      copies: [{ provider: 2, archive_id: archive }],
+    })) } }],
+  ];
+  for (const [name, value] of data) await writeFile(join(app, name), JSON.stringify(value), { mode: 0o600 });
+  const cancel = new AbortController(), events = [];
+  const ctx = { requestStageFd: 3, profileVersion: 10, provision: 'a'.repeat(64),
+    stage: 'image_publish', signal: cancel.signal, deadline: performance.now() + 1000 };
+  class Channel extends EventEmitter {
+    write(raw) {
+      const value = JSON.parse(raw);
+      if (value.target) {
+        events.push('arm');
+        queueMicrotask(() => this.emit('data', Buffer.from('{"version":3,"state":"armed"}\n')));
+      } else {
+        events.push(value.outcome);
+        cancel.abort(); // Diagnostic teardown crosses the original outcome boundary.
+      }
+      return true;
+    }
+    destroy() { this.emit('close'); }
+  }
+  try {
+    const invalid = closeDiagnostics(); invalid.failures[0].copy_index = 0;
+    let original;
+    try {
+      requirePublishComplete({ status: 'incomplete', local_process_joined: true,
+        storage: { operation_complete: false, deposit_diagnostics: invalid } }, 'image', 'deposit', 10);
+    } catch (error) { original = error; }
+    assert.equal(requestStageOutcome(original), 'targeted_failure');
+    await assert.rejects(withRequestStage(ctx, app, { providers: providers.map(value => ({
+      key: Buffer.from(value.key).toString('hex'),
+    })) }, async () => { events.push('deposit'); throw original; }, () => new Channel()), error => {
+      const report = consumerFailureReport(ctx, 'publish', error);
+      assert.equal(report.code, 'publish_operation');
+      assert.equal(report.publish_observation.deposit_diagnostics.failures[0].copy_index, 0);
+      return true;
+    });
+    assert.deepEqual(events, ['arm', 'deposit', 'targeted_failure']);
+  } finally { await rm(root, { recursive: true }); }
+});
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const keys = [1, 2, 3].map(v => Buffer.alloc(32, v).toString('hex'));
@@ -922,6 +995,163 @@ test('actual profiles9 and10 JS failures pass Python only with their exact gener
   assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
 });
 
+const catalogBridgeResult = (delta = {}) => ({ version: 1, operation: 'restore', status: 'complete', code: 'ok',
+  local_process_joined: true, remote_cleanup_confirmed: false, restore_verified: true,
+  storage: { operation_complete: true }, ...delta });
+
+test('catalog observer preserves factory and bridge receivers, arguments and returned identity', async () => {
+  const receiver = {}, request = { private: 'PRIVATE-REQUEST' }, options = { signal: {} }, returned = catalogBridgeResult();
+  let factories = 0, restores = 0;
+  const core = { restore(...args) {
+    restores++; assert.equal(this, core); assert.deepEqual(args, [request, options]); return returned;
+  } };
+  const observer = observeCatalogRestore(function (...args) {
+    factories++; assert.equal(this, receiver); assert.deepEqual(args, ['PRIVATE-CONFIG']); return core;
+  });
+  const storage = await observer.factory.call(receiver, 'PRIVATE-CONFIG');
+  assert.equal(await storage.restore(request, options), returned);
+  assert.equal(factories, 1); assert.equal(restores, 1);
+  assert.deepEqual(observer.snapshot(), { version: 1, scope: 'cloud_catalog_storage_restore_call', diagnostic_only: true,
+    acceptance_evidence: false, causal_attribution: false, invocation: 'once', completion: 'returned',
+    result_state: 'observed', result: { status: 'complete', code: 'ok', local_process_joined: true,
+      restore_verified: true, core_report_state: 'observed', core_operation_complete: true },
+    error_state: 'unavailable', error_code: null });
+  assert.doesNotMatch(JSON.stringify(observer.snapshot()), /PRIVATE/u);
+});
+
+test('catalog observer returns missing and malformed bridge objects unchanged and excludes private fields', async () => {
+  const invalid = [42, [], 'PRIVATE'.repeat(200000),
+    catalogBridgeResult({ status: 'PRIVATE'.repeat(200000) }), catalogBridgeResult({ code: 'PRIVATE' }),
+    catalogBridgeResult({ raw: 'PRIVATE-PATH-KEY-JOURNAL' }), catalogBridgeResult({ operation: 'deposit' }),
+    catalogBridgeResult({ local_process_joined: 'true' }), catalogBridgeResult({ restore_verified: false }),
+    catalogBridgeResult({ remote_cleanup_confirmed: true }), catalogBridgeResult({ storage: { operation_complete: false } }),
+    Object.defineProperty(catalogBridgeResult(), 'code', { get() { throw new Error('PRIVATE-GETTER'); } }),
+    new Proxy({}, { ownKeys() { throw new Error('PRIVATE-PROXY'); } })];
+  for (const [value, state] of [...invalid.map(value => [value, 'invalid']), [null, 'missing'], [undefined, 'missing'], [{}, 'missing']]) {
+    const observer = observeCatalogRestore(async () => ({ restore: async () => value }));
+    assert.equal(await (await observer.factory()).restore(), value);
+    const observation = observer.snapshot();
+    assert.equal(observation.completion, 'returned'); assert.equal(observation.result_state, state);
+    assert.equal(observation.result, null); assert.doesNotMatch(JSON.stringify(observation), /PRIVATE/u);
+  }
+});
+
+test('catalog observer distinguishes incomplete, missing and invalid core summary without copying it', async () => {
+  for (const [storage, expected] of [[null, 'missing'], [{}, 'missing'], ['PRIVATE', 'invalid'],
+    [{ operation_complete: true, private_key: 'PRIVATE' }, 'observed']]) {
+    const value = catalogBridgeResult({ status: 'failed', code: 'core_failed', restore_verified: false, storage });
+    const observer = observeCatalogRestore(async () => ({ restore: async () => value }));
+    assert.equal(await (await observer.factory()).restore(), value);
+    const observation = observer.snapshot();
+    assert.equal(observation.result_state, 'observed'); assert.equal(observation.result.core_report_state, expected);
+    assert.equal(observation.result.core_operation_complete, expected === 'observed' ? true : null);
+    assert.doesNotMatch(JSON.stringify(observation), /PRIVATE|private_key/u);
+  }
+  const value = catalogBridgeResult({ status: 'incomplete', code: 'retained_operation_incomplete',
+    restore_verified: false, storage: { operation_complete: false } });
+  const observer = observeCatalogRestore(async () => ({ restore: async () => value }));
+  await (await observer.factory()).restore(); assert.equal(observer.snapshot().result.core_operation_complete, false);
+});
+
+test('catalog observer rethrows exact bridge errors and projects only bounded own data codes', async () => {
+  const cases = [
+    [Object.assign(new Error('PRIVATE-MESSAGE'), { code: 'local_input_unavailable', raw: 'PRIVATE' }), 'observed', 'local_input_unavailable'],
+    [Object.assign(new Error('PRIVATE'), { code: 'PRIVATE'.repeat(200000) }), 'invalid', null],
+    [Object.create({ code: 'local_input_unavailable' }), 'missing', null], [new Error('PRIVATE'), 'missing', null],
+    [null, 'missing', null], [NaN, 'missing', null],
+    [Object.defineProperty(new Error('PRIVATE'), 'code', { get() { throw new Error('PRIVATE-GETTER'); } }), 'invalid', null],
+    [new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('PRIVATE-PROXY'); } }), 'invalid', null],
+  ];
+  for (const [error, state, code] of cases) {
+    const observer = observeCatalogRestore(async () => ({ restore: async () => { throw error; } }));
+    try { await (await observer.factory()).restore(); assert.fail('expected original error'); }
+    catch (actual) { assert.ok(Object.is(actual, error)); }
+    const observation = observer.snapshot();
+    assert.equal(observation.completion, 'threw'); assert.equal(observation.error_state, state);
+    assert.equal(observation.error_code, code); assert.equal(observation.result_state, 'unavailable');
+    assert.doesNotMatch(JSON.stringify(observation), /PRIVATE/u);
+  }
+});
+
+test('catalog observer distinguishes unavailable, absent, multiple and unfinished invocations', async () => {
+  assert.equal(observeCatalogRestore(undefined).snapshot().invocation, 'unavailable');
+  const untouched = observeCatalogRestore(async () => ({}));
+  await untouched.factory(); assert.equal(untouched.snapshot().invocation, 'not_invoked');
+  const multiple = observeCatalogRestore(async () => ({ restore: async () => catalogBridgeResult() }));
+  const storage = await multiple.factory(); await storage.restore(); await storage.restore();
+  assert.equal(multiple.snapshot().invocation, 'multiple'); assert.equal(multiple.snapshot().result, null);
+  let finish;
+  const unfinished = observeCatalogRestore(async () => ({ restore: () => new Promise(resolve => { finish = resolve; }) }));
+  const pending = (await unfinished.factory()).restore(), frozen = unfinished.snapshot();
+  assert.equal(frozen.invocation, 'once'); assert.equal(frozen.completion, 'unavailable');
+  finish(catalogBridgeResult()); await pending; assert.deepEqual(unfinished.snapshot(), frozen);
+});
+
+test('profile10 catalog retains original failure and restore projection before close cancellation', async () => {
+  const ctx = publishContext(10), bridge = catalogBridgeResult(), catalogError = new CatalogFixtureError('MATERIALIZATION_FAILED');
+  const request = {}, signal = {}; let calls = 0, closed = 0;
+  const { error, report } = await lifecycleFailure(ctx, () => createPublishCatalog(ctx, {
+    PrivateCatalogError: CatalogFixtureError, createPrivateCatalog: async (actual, options) => {
+      calls++; assert.equal(actual, request); assert.equal(options.signal, signal);
+      assert.equal(await (await options.storageFactory('PRIVATE')).restore({}, { signal }), bridge); throw catalogError;
+    },
+  }, request, { signal, storageFactory: async () => ({ restore: async () => bridge }) }), async () => {
+    closed++; ctx.signal.aborted = true; bridge.status = 'PRIVATE'; throw new Error('PRIVATE-CLOSE');
+  });
+  assert.equal(calls, 1); assert.equal(closed, 1); assert.equal(error.cause.cause, catalogError);
+  assert.equal(report.version, 13); assert.equal(report.stage, 'cloud_catalog_create');
+  assert.equal(report.code, 'catalog_materialization_failed'); assert.equal(report.catalog_restore.result.status, 'complete');
+  assert.equal(report.publish_cleanup.state, 'failed'); assert.equal(report.cleanup_confirmed, false);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE/u);
+});
+
+test('catalog observations cannot leak into later failures or historical profiles', async () => {
+  for (const profile of [8, 9, 10]) {
+    const ctx = publishContext(profile);
+    const operation = () => createPublishCatalog(ctx, { createPrivateCatalog: async (_, options) => {
+      await (await options.storageFactory()).restore(); return { encrypted: true, sourceFallback: false, files: 1 };
+    } }, {}, { storageFactory: async () => ({ restore: async () => catalogBridgeResult() }) });
+    const { report } = await lifecycleFailure(ctx, async () => { await operation(); ctx.stage = 'cloud_policy_read'; throw new Error('PRIVATE'); });
+    assert.equal(report.version, profile + 2); assert.equal(Object.hasOwn(report, 'catalog_restore'), false);
+    const closed = await lifecycleFailure(ctx, operation, async () => { throw new Error('PRIVATE-CLOSE'); });
+    assert.equal(closed.report.stage, 'cloud_core_close'); assert.equal(Object.hasOwn(closed.report, 'catalog_restore'), false);
+  }
+});
+
+test('profile10 actual-call JS projections pass the strict generation13 Python export boundary', async () => {
+  const records = [];
+  for (const behavior of ['complete', 'incomplete', 'missing', 'invalid', 'throw', 'before_call', 'no_factory']) {
+    const ctx = publishContext(10);
+    const { report } = await lifecycleFailure(ctx, () => createPublishCatalog(ctx, {
+      PrivateCatalogError: CatalogFixtureError, createPrivateCatalog: async (_, options) => {
+        if (!['before_call', 'no_factory'].includes(behavior)) {
+          try { await (await options.storageFactory()).restore(); } catch { /* Same private-app collapse. */ }
+        }
+        throw new CatalogFixtureError('MATERIALIZATION_FAILED');
+      },
+    }, {}, behavior === 'no_factory' ? {} : { storageFactory: async () => ({ restore: async () => {
+      if (behavior === 'throw') throw Object.assign(new Error('PRIVATE'), { code: 'core_spawn_failed' });
+      if (behavior === 'missing') return undefined;
+      if (behavior === 'invalid') return { raw: 'PRIVATE' };
+      return behavior === 'incomplete' ? catalogBridgeResult({ status: 'incomplete', code: 'retained_operation_incomplete',
+        restore_verified: false, storage: { operation_complete: false } }) : catalogBridgeResult();
+    } }) }));
+    assert.equal(report.version, 13); assert.doesNotMatch(JSON.stringify(report), /PRIVATE/u); records.push(report);
+  }
+  const source = 'import json, runpy, sys\n' + 'm = runpy.run_path(sys.argv[1])\n' +
+    'for v in json.load(sys.stdin):\n' +
+    '    assert m["validate_node_report"](v, "publish", "a" * 64, profile_version=10) == v\n' +
+    '    for old in range(1, 10):\n' +
+    '        try: m["validate_node_report"](v, "publish", "a" * 64, profile_version=old)\n' +
+    '        except ValueError: pass\n' +
+    '        else: raise AssertionError("historical profile accepted catalog restore")\n';
+  const child = spawnSync('/usr/bin/python3', ['-I', '-B', '-c', source,
+    fileURLToPath(new URL('./storage-consumer-maintenance-smoke.py', import.meta.url))], {
+    input: JSON.stringify(records), encoding: 'utf8', timeout: 10000, maxBuffer: 16384,
+  });
+  assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
+});
+
 test('four explicit phases and distinct deterministic incompressible fixture identities', () => {
   assert.deepEqual(PHASES, ['prepare', 'publish', 'exercise', 'finish']);
   const image = fixtureBytes('image'), cloud = fixtureBytes('cloud');
@@ -1054,4 +1284,119 @@ test('entrypoint preserves actual app APIs, no runtime injection or reenrollment
   assert.match(exercise, /negativeAuthorization/u);
   assert.doesNotMatch(exercise, /enrollMaintenance|storePrivateFile|\.deposit\(|\.create\(|spawnProcess|openMaintenance:/u);
   assert.doesNotMatch(source, /npm|sudo|execSync|shell: true/u);
+});
+
+
+test('challenge-read v10 preserves attempt binding and whole-challenge buckets with finite returned outcomes', () => {
+  const allowed = { length_read: [null, 'io_eof', 'io_other', 'invalid', 'wire_timeout'],
+    body_read: [null, 'io_eof', 'io_other', 'wire_timeout'], verification: [null, 'invalid', 'verification_rejected'] };
+  for (const step of Object.keys(allowed)) for (const returned_outcome of [null, 'io_eof', 'io_other', 'invalid', 'verification_rejected', 'wire_timeout']) {
+    const d = challengeDiagnostics(); d.version = 10;
+    const f = d.failures[0]; Object.assign(f, { fragment_index: 3, copy_index: 1, operation: 'append' });
+    f.agent_detail.flow_acquire = null;
+    Object.assign(f.agent_detail.challenge, { before_challenge: '1_to_5s', in_challenge: '90_to_120s', read: { step, returned_outcome } });
+    if (allowed[step].includes(returned_outcome)) assert.deepEqual(depositDiagnostic(d, 10), d);
+    else assert.throws(() => depositDiagnostic(d, 10), /deposit_diagnostics/u);
+  }
+});
+
+test('challenge-read v10 rejects legacy reinterpretation, private extras and wrong phase', () => {
+  const make = () => {
+    const d = challengeDiagnostics(); d.version = 10;
+    d.failures[0].agent_detail.flow_acquire = null;
+    d.failures[0].agent_detail.challenge.read = { step: 'body_read', returned_outcome: null };
+    return d;
+  };
+  for (let version = 1; version <= 9; version++) {
+    const d = make(); d.version = version;
+    assert.throws(() => depositDiagnostic(d, version), /deposit_diagnostics/u);
+  }
+  for (const read of [{ step: 'PRIVATE', returned_outcome: null }, { step: 'body_read' },
+    { step: 'body_read', returned_outcome: true }, { step: 'body_read', returned_outcome: null, raw: 'PRIVATE' }]) {
+    const d = make(); d.failures[0].agent_detail.challenge.read = read;
+    assert.throws(() => depositDiagnostic(d, 10), /deposit_diagnostics/u);
+  }
+  const d = make(); d.failures[0].agent_detail.challenge.phase = 'grant_write_flush';
+  assert.throws(() => depositDiagnostic(d, 10), /deposit_diagnostics/u);
+});
+
+function readDiagnostics() {
+  const d = challengeDiagnostics(); d.version = 10;
+  Object.assign(d.failures[0], { fragment_index: 3, copy_index: 1, operation: 'append' });
+  d.failures[0].agent_detail.flow_acquire = null;
+  Object.assign(d.failures[0].agent_detail.challenge, { before_challenge: '1_to_5s', in_challenge: '90_to_120s',
+    read: { step: 'body_read', returned_outcome: null } });
+  return d;
+}
+
+test('profile10 challenge read opt-in is strict and exclusive while absence preserves v9 selection', () => {
+  assert.doesNotThrow(() => validateAppendProfile({ challengeReadDiagnosticsV10: true }, 10));
+  for (const value of [null, 0, 1, 'true', {}, []]) {
+    assert.throws(() => validateAppendProfile({ challengeReadDiagnosticsV10: value }, 10), /configuration/u);
+  }
+  for (const previous of ['appendDiagnosticsV7', 'flowAcquireDiagnosticsV8', 'tlsCloseDiagnosticsV9']) {
+    for (const value of [true, false]) assert.throws(() => validateAppendProfile({
+      challengeReadDiagnosticsV10: true, [previous]: value }, 10), /configuration/u);
+  }
+  for (let profile = 1; profile < 10; profile++) {
+    for (const value of [true, false]) assert.throws(() => validateAppendProfile({
+      challengeReadDiagnosticsV10: value }, profile), /configuration/u);
+  }
+  assert.doesNotThrow(() => validateAppendProfile({ tlsCloseDiagnosticsV9: true }, 10));
+  assert.doesNotThrow(() => validateAppendProfile({ tlsCloseDiagnosticsV9: true, challengeReadDiagnosticsV10: false }, 10));
+  assert.throws(() => validateAppendProfile({ challengeReadDiagnosticsV10: false }, 10), /configuration/u);
+});
+
+test('profile10 failure projection binds v10 only to explicit opt-in and rejects downgrade', () => {
+  const observe = (diagnostics, enabled) => {
+    try {
+      requirePublishComplete({ status: 'incomplete', code: 'retained_operation_incomplete', local_process_joined: true,
+        storage: { operation_complete: false, deposit_diagnostics: diagnostics } }, 'image', 'deposit', 10, enabled);
+      assert.fail('expected publish failure');
+    } catch (error) { assert.equal(error.code, 'publish_operation'); return error; }
+  };
+  const current = observe(readDiagnostics(), true);
+  assert.equal(current.observation.diagnostic_version, 10);
+  assert.equal(current.observation.deposit_diagnostics_state, 'observed');
+  assert.deepEqual(current.observation.deposit_diagnostics, readDiagnostics());
+  assert.equal(requestStageOutcome(current), 'untargeted_failure');
+  assert.equal(observe(closeDiagnostics(), true).observation.deposit_diagnostics_state, 'invalid');
+  assert.equal(observe(readDiagnostics(), false).observation.deposit_diagnostics_state, 'invalid');
+  const legacy = observe(closeDiagnostics(), false);
+  assert.equal(legacy.observation.deposit_diagnostics_state, 'observed');
+  assert.equal(Object.hasOwn(legacy.observation, 'diagnostic_version'), false);
+  for (const invalid of [null, 1, 'true']) assert.throws(() => requirePublishComplete({}, 'image', 'deposit', 10, invalid), /arguments/u);
+  assert.throws(() => requirePublishComplete({}, 'image', 'deposit', 9, true), /arguments/u);
+  assert.doesNotThrow(() => requirePublishComplete({ status: 'complete', local_process_joined: true,
+    storage: { operation_complete: true, deposit_diagnostics: { version: 10, failures: [], omitted_failures: 0 } } },
+  'image', 'deposit', 10, true));
+});
+
+test('profile10 opted-in JS failures pass Python with original lifecycle precedence and fixed target unchanged', async () => {
+  const records = [];
+  for (const app of ['image', 'cloud']) for (const closeFailed of [false, true]) {
+    const ctx = { ...publishContext(10), stage: `${app}_publish` };
+    const value = { status: 'incomplete', code: 'retained_operation_incomplete', local_process_joined: true,
+      storage: { operation_complete: false, deposit_diagnostics: readDiagnostics() } };
+    const { report } = await lifecycleFailure(ctx, () => requirePublishComplete(value, app, 'deposit', 10, true),
+      async () => { if (closeFailed) throw new Error('PRIVATE-CLOSE'); }, app);
+    assert.equal(report.code, 'publish_operation');
+    assert.equal(report.cleanup_confirmed, false);
+    assert.equal(report.publish_observation.diagnostic_version, 10);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE-CLOSE/u);
+    records.push(report);
+  }
+  const source = 'import json, runpy, sys\n' +
+    'm = runpy.run_path(sys.argv[1])\n' +
+    'for v in json.load(sys.stdin):\n' +
+    '    assert m["validate_node_report"](v, "publish", "a" * 64, profile_version=10, challenge_read_diagnostics_v10=True) == v\n' +
+    '    v["publish_observation"].pop("diagnostic_version")\n' +
+    '    try: m["validate_node_report"](v, "publish", "a" * 64, profile_version=10, challenge_read_diagnostics_v10=True)\n' +
+    '    except ValueError: pass\n' +
+    '    else: raise AssertionError("v10 accepted without mode")\n';
+  const child = spawnSync('/usr/bin/python3', ['-I', '-B', '-c', source,
+    fileURLToPath(new URL('./storage-consumer-maintenance-smoke.py', import.meta.url))], {
+    input: JSON.stringify(records), encoding: 'utf8', timeout: 10000, maxBuffer: 16384,
+  });
+  assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
 });

@@ -57,6 +57,13 @@ pub(super) async fn with_all_diagnostics<F: Future>(
     .await
 }
 
+pub(super) async fn with_challenge_read_diagnostics<F: Future>(
+    read_v10: bool,
+    work: F,
+) -> F::Output {
+    diagnostics::with_challenge_read(read_v10, work).await
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Attach an explicitly owned private store to the running agent's provider service.

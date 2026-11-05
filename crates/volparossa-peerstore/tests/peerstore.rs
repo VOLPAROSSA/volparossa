@@ -195,11 +195,11 @@ fn pruning_expired_advertisement_cascades_all_peer_history() {
             .expect("prune"),
         1
     );
-    assert!(
+    assert_eq!(
         store
             .load_candidates(UnixTime::from_secs(1_260), 200)
-            .expect("load")
-            .is_empty()
+            .expect("load"),
+        [] as [volparossa_peerstore::StoredPeer; 0]
     );
 }
 
@@ -236,11 +236,11 @@ fn oversized_provenance_is_rejected_before_any_database_write() {
         store.upsert_advertisement(&value, &oversized, UnixTime::from_secs(1_100)),
         Err(PeerStoreError::AdvertisementEnvelopeTooLarge)
     ));
-    assert!(
+    assert_eq!(
         store
             .load_candidates(UnixTime::from_secs(1_100), 1)
-            .expect("bounded load")
-            .is_empty()
+            .expect("bounded load"),
+        [] as [volparossa_peerstore::StoredPeer; 0]
     );
 }
 
@@ -343,11 +343,11 @@ fn version_one_rows_are_atomically_quarantined_until_real_provenance_replaces_th
     drop(connection);
 
     let mut migrated = PeerStore::open(&path).expect("atomic migration");
-    assert!(
+    assert_eq!(
         migrated
             .load_candidates(UnixTime::from_secs(1_100), 10)
-            .expect("quarantined load")
-            .is_empty()
+            .expect("quarantined load"),
+        [] as [volparossa_peerstore::StoredPeer; 0]
     );
     assert!(matches!(
         migrated.record_reservation_failure(&value.node_id),

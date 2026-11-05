@@ -129,7 +129,7 @@ impl DocumentDataset {
 pub(super) fn decode_source_manifest(encoded: &str) -> Result<SignedManifest, ComputeError> {
     if encoded.is_empty()
         || encoded.len() > MAX_MANIFEST_BYTES * 2
-        || encoded.len() % 2 != 0
+        || !encoded.len().is_multiple_of(2)
         || !encoded
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))

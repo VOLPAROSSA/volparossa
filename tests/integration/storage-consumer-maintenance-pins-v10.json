@@ -3,7 +3,7 @@
   "sources": {
     "image": {
       "repository": "https://github.com/VOLPAROSSA/volparossa-image",
-      "revision": "1e812ec6424a539a336d230b99ae1c11a494ca29",
+      "revision": "f51b8ace0352377c7068a93fc8f4544f18e52978",
       "files": {
         "LICENSE": {
           "bytes": 35149,
@@ -18,14 +18,14 @@
           "sha256": "ad82775c3790efaca2547eff0f7caac685efe15cba40a846ca224607bba6ecdb"
         },
         "src/core-storage.mjs": {
-          "bytes": 53352,
-          "sha256": "551a92c179f257dd90b6bf2d0c1d147d517bf8bb71e070094ec8b1464fcf4e2e"
+          "bytes": 55166,
+          "sha256": "a67e94953bc96bcb936f1a39d38e2a19ba1240815b4bca94f47c1e45131ab1fb"
         }
       }
     },
     "cloud": {
       "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-      "revision": "35598609d3fedb5d1241a479c1930c8a6b831661",
+      "revision": "5f143725fd18c98848beb61c9198a82066bfec13",
       "files": {
         "LICENSE": {
           "bytes": 35149,
@@ -89,15 +89,15 @@
         },
         "third_party/volparossa-image-source.json": {
           "bytes": 1318,
-          "sha256": "28a8f77e3dac1924b72261eb04994dc24faf310d51a592630f97151a3a2f3675"
+          "sha256": "36e1b916073721983f62a8aeff4445d710eb0e74f7ec70d25ae68977c2e575a6"
         },
         "vendor/volparossa-image/LICENSE": {
           "bytes": 35149,
           "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
         },
         "vendor/volparossa-image/core-storage.mjs": {
-          "bytes": 53352,
-          "sha256": "551a92c179f257dd90b6bf2d0c1d147d517bf8bb71e070094ec8b1464fcf4e2e"
+          "bytes": 55166,
+          "sha256": "a67e94953bc96bcb936f1a39d38e2a19ba1240815b4bca94f47c1e45131ab1fb"
         },
         "vendor/volparossa-image/immich_snapshot.py": {
           "bytes": 24955,

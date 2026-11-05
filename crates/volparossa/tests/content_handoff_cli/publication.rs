@@ -1,7 +1,13 @@
 //! Real publish CLI plus local chunk protocol; final serving receipts are a simulated agent.
 //! This does not prove an actual provider advertisement, separate UID or overlay transfer.
 
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path, process::Output, time::Duration};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{Path, PathBuf},
+    process::Output,
+    time::Duration,
+};
 
 use ed25519_dalek::VerifyingKey;
 use tokio::{io::AsyncReadExt as _, net::UnixListener};
@@ -25,6 +31,17 @@ enum Fault {
     OldReady,
     FinalNotPublished,
     FinalNotServing,
+}
+
+const PASSWORD: &[u8] = b"explicit public contribution process fixture";
+
+fn create_identity(root: &Path) -> VerifyingKey {
+    fs::write(root.join("passphrase"), PASSWORD).unwrap();
+    fs::set_permissions(root.join("passphrase"), fs::Permissions::from_mode(0o600)).unwrap();
+    let created = IdentityStore::new(root.join("identity.key"))
+        .create(&Passphrase::new(PASSWORD).unwrap())
+        .unwrap();
+    VerifyingKey::from_bytes(&created.ed25519_public_key_bytes().unwrap()).unwrap()
 }
 
 fn arguments(identity: &Path, contribute: bool) -> Vec<String> {
@@ -60,18 +77,7 @@ fn arguments(identity: &Path, contribute: bool) -> Vec<String> {
 pub(super) async fn scenario() {
     let temporary = tempfile::tempdir().expect("private user fixture");
     let identity = temporary.path();
-    let password = b"explicit public contribution process fixture";
-    fs::write(identity.join("passphrase"), password).unwrap();
-    fs::set_permissions(
-        identity.join("passphrase"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
-    let created = IdentityStore::new(identity.join("identity.key"))
-        .create(&Passphrase::new(password).unwrap())
-        .unwrap();
-    let key = VerifyingKey::from_bytes(&created.ed25519_public_key_bytes().unwrap()).unwrap();
-    drop(created);
+    let key = create_identity(identity);
     let encrypted_identity = fs::read(identity.join("identity.key")).unwrap();
     // Absence of --contribute remains completely offline even with no control listener.
     let offline = tempfile::tempdir_in(identity).unwrap();
@@ -89,7 +95,14 @@ pub(super) async fn scenario() {
         let case = tempfile::tempdir_in(identity).unwrap();
         let bytes = vec![0x41; length];
         fs::write(case.path().join("input.bin"), &bytes).unwrap();
-        let output = exchange(case.path(), arguments(identity, true), &key, fault).await;
+        let mut args = arguments(identity, true);
+        if matches!(fault, Fault::None) && length > 0 {
+            args.extend([
+                "--expected-publisher-key".into(),
+                hex::encode(key.as_bytes()),
+            ]);
+        }
+        let output = exchange(case.path(), args, &key, fault).await;
         if matches!(fault, Fault::None) {
             let report = successful(&output);
             assert_eq!(report["network_publication"], true);
@@ -153,6 +166,131 @@ pub(super) async fn scenario() {
         fs::read(identity.join("identity.key")).unwrap(),
         encrypted_identity
     );
+}
+
+pub(super) async fn publisher_binding_scenario() {
+    let identity = tempfile::tempdir().unwrap();
+    let key = create_identity(identity.path());
+    let existing = tempfile::tempdir_in(identity.path()).unwrap();
+    let original = [0x41; 80];
+    fs::write(existing.path().join("input.bin"), original).unwrap();
+    let mut args = arguments(identity.path(), false);
+    args.extend([
+        "--expected-publisher-key".into(),
+        hex::encode(key.as_bytes()),
+    ]);
+    let report = successful(&invoke(existing.path(), args).await);
+    assert_eq!(report["publisher_key_hex"], hex::encode(key.as_bytes()));
+    assert_eq!(report["network_publication"], false);
+    let signed = fs::read(existing.path().join("manifest.pb")).unwrap();
+    let verified = SignedManifest::decode(&signed)
+        .unwrap()
+        .verify(&key, now())
+        .unwrap();
+    let mut store = ChunkStore::open(&existing.path().join("user-cache"), cache_limits()).unwrap();
+    let mut bytes = Vec::new();
+    reassemble(&verified, &mut [&mut store], now(), &mut bytes).unwrap();
+    assert_eq!(bytes, original);
+    drop(store);
+
+    // Substitute the encrypted identity at the very same path after selecting the public key.
+    let replaced = IdentityStore::new(identity.path().join("replacement.key"))
+        .create(&Passphrase::new(PASSWORD).unwrap())
+        .unwrap();
+    assert_ne!(replaced.ed25519_public_key_bytes().unwrap(), key.to_bytes());
+    drop(replaced);
+    fs::rename(
+        identity.path().join("replacement.key"),
+        identity.path().join("identity.key"),
+    )
+    .unwrap();
+    let encrypted_identity = fs::read(identity.path().join("identity.key")).unwrap();
+    let fresh = tempfile::tempdir_in(identity.path()).unwrap();
+    for (case, reuse) in [(fresh.path(), false), (existing.path(), true)] {
+        fs::write(case.join("input.bin"), [0x42; 80]).unwrap();
+        let mut args = arguments(identity.path(), true);
+        let manifest = args.iter().position(|arg| arg == "--manifest").unwrap() + 1;
+        args[manifest] = "rejected.pb".into();
+        args.extend(["--quota-bytes".into(), "80".into()]);
+        if reuse {
+            args.push("--reuse-cache".into());
+        }
+        args.extend([
+            "--expected-publisher-key".into(),
+            hex::encode(key.as_bytes()),
+        ]);
+        rejected_before_side_effects(case, args.clone(), "publisher mismatch").await;
+        if reuse {
+            // A cache open would fail with its busy-lock error before reaching the pin check.
+            let locked = ChunkStore::open(&case.join("user-cache"), cache_limits()).unwrap();
+            rejected_before_side_effects(case, args.clone(), "publisher mismatch").await;
+            drop(locked);
+        }
+        for malformed in ["00".to_owned(), "x".repeat(64)] {
+            *args.last_mut().unwrap() = malformed;
+            rejected_before_side_effects(case, args.clone(), "invalid value").await;
+        }
+    }
+    assert_eq!(
+        fs::read(identity.path().join("identity.key")).unwrap(),
+        encrypted_identity
+    );
+}
+
+async fn rejected_before_side_effects(root: &Path, args: Vec<String>, reason: &str) {
+    let before = snapshot(root);
+    let listener = UnixListener::bind(root.join("control.sock")).unwrap();
+    let modified = fs::metadata(root).unwrap().modified().unwrap();
+    let output = tokio::select! {
+        output = invoke(root, args) => output,
+        _ = listener.accept() => panic!("rejected publication must not connect to the agent"),
+    };
+    assert!(!output.status.success() && output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if reason == "publisher mismatch" {
+        assert_eq!(
+            stderr.trim(),
+            "Error: content publisher does not match the expected publisher key"
+        );
+    } else {
+        assert!(stderr.contains(reason) && stderr.contains("--expected-publisher-key"));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "rejection must not connect to the agent, even with --contribute"
+    );
+    assert_eq!(
+        fs::metadata(root).unwrap().modified().unwrap(),
+        modified,
+        "rejection must not create/remove even a temporary manifest"
+    );
+    drop(listener);
+    fs::remove_file(root.join("control.sock")).unwrap();
+    assert_eq!(
+        snapshot(root),
+        before,
+        "no manifest/cache creation, eviction or mutation"
+    );
+}
+
+fn snapshot(root: &Path) -> Vec<(PathBuf, u32, Vec<u8>)> {
+    let mut result = Vec::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let bytes = if metadata.is_dir() {
+            result.extend(snapshot(&path));
+            Vec::new()
+        } else {
+            assert!(metadata.is_file(), "only regular fixture files");
+            fs::read(&path).unwrap()
+        };
+        result.push((path, metadata.permissions().mode(), bytes));
+    }
+    result.sort();
+    result
 }
 
 async fn exchange(root: &Path, args: Vec<String>, key: &VerifyingKey, fault: Fault) -> Output {

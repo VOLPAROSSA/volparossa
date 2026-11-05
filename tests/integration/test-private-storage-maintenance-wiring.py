@@ -26,6 +26,8 @@ FIXTURE = runpy.run_path(str(HERE / ('test-' + SCENARIO + '-smoke.py')))
 DIAGNOSTICS = runpy.run_path(str(HERE / 'test-private-storage-fragments-wiring.py'))['diagnostics']
 CORRELATION = runpy.run_path(str(HERE / 'storage-fixture-correlation-sampler.py'))
 ACQUIRE = runpy.run_path(str(HERE / 'storage-acquire-diagnostic.py'))
+USAGE = runpy.run_path(str(HERE / 'storage-consumer-provider-usage.py'))
+BOUNDARY = runpy.run_path(str(HERE / 'storage-consumer-failure-boundary.py'))
 
 
 def correlation_fixture(home, roots):
@@ -42,6 +44,54 @@ def acquire_fixture(home, roots):
     helper.write_bytes((HERE / helper.name).read_bytes())
     data = ACQUIRE['encoded'](ACQUIRE['empty']('absent'))
     for root in roots: (root / ACQUIRE['NAME']).write_bytes(data)
+
+
+def usage_fixture(home, roots):
+    helper = home / 'source/tests/integration/storage-consumer-provider-usage.py'
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes((HERE / helper.name).read_bytes())
+    data = USAGE['encoded'](USAGE['report']([USAGE['empty'](role) for role in USAGE['ROLES']]))
+    for root in roots:
+        path = root / USAGE['NAME']
+        path.write_bytes(data); path.chmod(0o600)
+
+
+def failure_boundary_fixture(home, roots):
+    """Synthetic absent observations, validated through the real fixed modules.
+
+    No capture/query entry point is called. Stage only the validator's import
+    closure; neither a provisioner nor any runtime operation is invoked.
+    """
+    directory = home / 'source/tests/integration'
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in (
+            'storage-consumer-failure-boundary.py', 'storage-acquire-diagnostic.py',
+            'private-storage-maintenance-smoke.py', 'private-storage-fragments-smoke.py',
+            'private-storage-replicas-smoke.py', 'private-storage-peer-smoke.py',
+            'content-provider-https-smoke.py', 'content-network-smoke.py',
+            'private-storage-log-sampler.py', 'storage-consumer-maintenance-evidence.py',
+            'storage-consumer-maintenance-smoke.py', 'storage-provider-activity-sampler.py',
+            'storage-fixture-correlation-sampler.py', 'storage-consumer-maintenance-provision.py',
+            'image-snapshot-provision.py'):
+        (directory / name).write_bytes((HERE / name).read_bytes())
+    with tempfile.TemporaryDirectory(prefix='synthetic-boundary-') as temporary:
+        frozen = Path(temporary)
+        for node in BOUNDARY['NODES']:
+            path = frozen / f'logs-{node}-cleanup-status.private'
+            path.write_bytes(b'1\n'); path.chmod(0o600)
+        value = dict(version=1, kind='storage-consumer-failure-boundary', phase='publish',
+            capture_point='after_application_observer_return_before_failure_cleanup',
+            diagnostic_only=True, **{key: False for key in BOUNDARY['FALSE']},
+            query_seconds=BOUNDARY['QUERY_SECONDS'], query_budget_seconds=BOUNDARY['QUERY_BUDGET'],
+            query_byte_limit=BOUNDARY['QUERY_BYTES'],
+            queries={node: dict(state='socket_absent') for node in BOUNDARY['NODES']},
+            inputs={key: 'absent' for key in BOUNDARY['INPUTS']},
+            provider_events=M['provider_events'](frozen, 'storage-consumer-publish', '0', version=3),
+            route=M['route_diagnostic'](frozen), helper_acquire=ACQUIRE['empty']('absent'))
+        data = BOUNDARY['encoded'](value, M, ACQUIRE)
+    for root in roots:
+        path = root / BOUNDARY['NAME']
+        path.write_bytes(data); path.chmod(0o600)
 
 
 def retained_private_fixture(root, pending=True):
@@ -133,6 +183,7 @@ class Wiring(unittest.TestCase):
         names = ('private-storage-maintenance-smoke.sh', 'private-storage-maintenance-smoke.py',
             'private-storage-log-sampler.py', 'content-provider-readiness.py', 'storage-provider-activity-sampler.py',
             'storage-fixture-correlation-sampler.py', 'storage-acquire-diagnostic.py',
+            'storage-provider-usage-snapshot.py', 'storage-consumer-provider-usage.py',
             'storage-consumer-maintenance-smoke.sh', 'storage-consumer-maintenance-smoke.py',
             'storage-consumer-maintenance.mjs', 'storage-consumer-maintenance-pins.json', 'storage-consumer-maintenance-pins-v2.json',
             'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
@@ -271,6 +322,26 @@ private_storage_fragments_run() {
                 f'download_sharing:\n  enabled: true\n  interface: {interface}\n'
                 f'  total_download_mbps: 100\n  contribution_download_ceiling_mbps: {ceiling}\n')
 
+    def test_failure_boundary_fixture_uses_real_validator_and_fixed_module_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            published = home / 'alpha-output'
+            published.mkdir()
+            failure_boundary_fixture(home, (published,))
+            directory = home / 'source/tests/integration'
+            data = (published / BOUNDARY['NAME']).read_bytes()
+            command = ['/usr/bin/python3', '-I', '-B',
+                str(directory / 'storage-consumer-failure-boundary.py'), 'validate-stdin']
+            def validate(raw):
+                return subprocess.run(command, input=raw, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=2).returncode
+            self.assertEqual(validate(data), 0)
+            self.assertNotEqual(validate(b'{}'), 0)
+            # Missing fixed imports remain a hard validation failure, never a
+            # reason to bypass the validator or loosen expected archive names.
+            (directory / 'private-storage-log-sampler.py').unlink()
+            self.assertNotEqual(validate(data), 0)
+
     def test_closed_export_parity_and_private_sentinels(self):
         diagnostics = DIAGNOSTICS()
         names = set(M['EXPORT_NAMES'])
@@ -286,6 +357,8 @@ private_storage_fragments_run() {
                 (published / name).write_text('{}')
             correlation_fixture(home, (published,))
             acquire_fixture(home, (published,))
+            usage_fixture(home, (published,))
+            failure_boundary_fixture(home, (published,))
             for name in ('maintenance-owner-lifecycle.private', 'lifecycle-result.json',
                     'identity.key', 'enrollment.json', 'checkpoint.json', 'logs-client.txt',
                     'private-storage-maintenance-selection-route-diagnostic.json',
@@ -318,6 +391,8 @@ private_storage_fragments_run() {
                 (root / 'consumer-binding.json').write_text('PRIVATE_MUST_NOT_EXPORT')
             correlation_fixture(home, (published, work))
             acquire_fixture(home, (published, work))
+            usage_fixture(home, (published, work))
+            failure_boundary_fixture(home, (published, work))
             distinct = 'storage-consumer-finish.json'
             (work / distinct).write_text('{"passed":false}\n')
             archive = diagnostics['collect'](home, opt, 'a' * 40, SCENARIO, 124,
@@ -345,6 +420,7 @@ private_storage_fragments_run() {
                 # Never export an unfinished JSON object or its truncated tail.
                 (root / 'storage-consumer-prepare.json').write_text('{"partial":')
                 (root / 'storage-consumer-publish.json').write_text('x' * (diagnostics['FILE_LIMIT'] + 1))
+            failure_boundary_fixture(home, roots)
             archive = diagnostics['collect'](home, opt, 'a' * 40, SCENARIO, 124,
                 cgroups=base / 'missing-cgroups', proc=base / 'missing-proc')
             with tarfile.open(archive, 'r:gz') as bundle:
@@ -352,6 +428,7 @@ private_storage_fragments_run() {
                 self.assertLessEqual(len(receipt['diagnostics']['files']), 128)
                 self.assertLessEqual(receipt['diagnostics']['captured_bytes'], diagnostics['TOTAL_LIMIT'])
                 self.assertTrue(all(not item['truncated'] for item in receipt['diagnostics']['files']))
+                self.assertIn('published/' + BOUNDARY['NAME'], bundle.getnames())
                 for label in ('published', *(f'work-{i}' for i in range(1, 5))):
                     for name in ('storage-consumer-finish.json', 'private-storage-maintenance-lifecycle-failure.json',
                             'private-storage-fragments-consumer_deleted_usage.json'):
@@ -950,6 +1027,78 @@ with target.open('xb') as stream:
                 self.assertEqual(result.returncode == 0, passed)
                 if passed:
                     self.assertEqual(json.loads(result.stdout)['required_passed'], 13)
+
+    def test_guest_build_profiles_are_scoped_and_preserve_commands_and_failures(self):
+        source = (HERE / 'run-alpha-topology-vm.sh').read_text()
+        start = source.index('guest_phase build\nif [ "$scenario" = private-storage-maintenance ]; then')
+        block = source[start:source.index('\nif [ "$scenario" = dns-cache ]; then', start)]
+        commands = [
+            ['test', '--locked', '-p', 'volparossa', '--bin', 'volparossa',
+                'storage::peer::replicas::fragments::maintenance', '--', '--color', 'never'],
+            ['test', '--locked', '-p', 'volparossa-agent', '--lib', 'maintenance'],
+            ['test', '--locked', '-p', 'volparossa-content', '--lib', 'private_storage::wire'],
+            ['build', '--locked', '-p', 'volparossa', '--bin', 'volparossa',
+                '-p', 'volparossa-agent', '--bin', 'volparossa-agent',
+                '-p', 'volparossa-helper-entry', '--bin', 'volparossa-helper',
+                '-p', 'volparossa-policy', '--example', 'acceptance-policy-fixture',
+                '-p', 'volparossa-test-support', '--example', 'http3-acceptance-fixture',
+                '-p', 'volparossa-test-support', '--example', 'tls-policy-acceptance-fixture'],
+        ]
+        profile_keys = ('CARGO_PROFILE_DEV_DEBUG', 'CARGO_PROFILE_TEST_DEBUG', 'CARGO_INCREMENTAL')
+        cases = [('private-storage-maintenance', '', 4, 0, True),
+            ('datapath', '', 1, 0, True), ('datapath', '', 1, 0, False),
+            ('private-storage-maintenance', 'volparossa', 1, 1, True),
+            ('private-storage-maintenance', 'volparossa-agent', 2, 7, True),
+            ('private-storage-maintenance', 'volparossa-content', 3, 7, True),
+            ('private-storage-maintenance', 'build', 4, 1, True)]
+        for scenario, fail, count, status, inherited in cases:
+            with self.subTest(scenario=scenario, fail=fail, inherited=inherited), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shim = root / 'cargo'
+                shim.write_text('#!/usr/bin/python3\nimport json,os,sys\nfrom pathlib import Path\n'
+                    'tool = Path(sys.argv[0]).name\n'
+                    'keys = ("CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "CARGO_PROFILE_DEV_DEBUG", '
+                    '"CARGO_PROFILE_TEST_DEBUG", "CARGO_INCREMENTAL")\n'
+                    'with open(os.environ["TEST_CALLS"], "a") as calls:\n'
+                    '    calls.write(json.dumps(dict(tool=tool,args=sys.argv[1:], '
+                    'env={key:os.environ.get(key) for key in keys})) + "\\n")\n'
+                    'if tool == "timeout":\n'
+                    '    os.execvp(sys.argv[4], sys.argv[4:])\n'
+                    'operation = "build" if sys.argv[1] == "build" else sys.argv[4]\n'
+                    'if operation == "volparossa":\n'
+                    '    sys.stdout.buffer.write(Path(os.environ["TEST_OUTPUT"]).read_bytes())\n'
+                    'sys.exit(7 if operation == os.environ["TEST_FAIL"] else 0)\n')
+                shim.chmod(0o700)
+                (root / 'timeout').write_bytes(shim.read_bytes())
+                (root / 'timeout').chmod(0o700)
+                (root / 'output').write_bytes(self.owner_test_stdout())
+                actual = block.replace('tests/integration/private-storage-maintenance-smoke.py',
+                    str(HERE / 'private-storage-maintenance-smoke.py')).replace('/home/vpci', str(root))
+                env = dict(PATH=f'{root}:/usr/bin:/bin', scenario=scenario, TEST_CALLS=str(root / 'calls'),
+                    TEST_OUTPUT=str(root / 'output'), TEST_FAIL=fail)
+                if inherited:
+                    env.update(dict.fromkeys(profile_keys, '1'))
+                result = subprocess.run(['sh', '-eu', '-c', 'guest_phase() { :; }\n' + actual],
+                    capture_output=True, timeout=5, env=env)
+                self.assertEqual(result.returncode, status, result.stderr)
+                owner_status = root / 'storage-maintenance-tests.status'
+                self.assertEqual(owner_status.exists(), scenario == SCENARIO)
+                if scenario == SCENARIO:
+                    self.assertEqual(owner_status.read_text(), '7\n' if fail == 'volparossa' else '0\n')
+                calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+                cargo_calls = [call for call in calls if call['tool'] == 'cargo']
+                self.assertEqual(len(cargo_calls), count)
+                selected = commands[:count] if scenario == SCENARIO else commands[-1:]
+                self.assertEqual([call['args'] for call in cargo_calls], selected)
+                for call in cargo_calls:
+                    expected_profile = '0' if scenario == SCENARIO else '1' if inherited else None
+                    self.assertEqual(call['env'], dict(CARGO_BUILD_JOBS='2' if call['args'][0] == 'build' else '1',
+                        CARGO_TARGET_DIR=str(root / 'target'), **dict.fromkeys(profile_keys, expected_profile)))
+                timeout_calls = [call['args'] for call in calls if call['tool'] == 'timeout']
+                self.assertEqual(timeout_calls, [
+                    ['--signal=TERM', '--kill-after=15s', deadline, 'cargo', *command]
+                    for deadline, command in zip(('1200s', '900s', '600s'), commands[:min(count, 3)])
+                ] if scenario == SCENARIO else [])
 
     def test_route_diagnostic_export_does_not_replace_primary_failed_report(self):
         script = r'''

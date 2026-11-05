@@ -5,11 +5,30 @@ VOLPAROSSA is a developing **Decentralized Intelligent Cooperative Network**;
 the documentation describes both implemented milestones and intended capabilities.
 
 [Project introduction](../README.md) · [Applications](applications/APPLICATIONS.md) ·
-[Common questions](FAQ.md) · [Detailed implementation status](IMPLEMENTATION_STATUS.md)
+[Common questions](FAQ.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
+
+## Sources of truth
+
+Each question has one owning reference. Summaries link to it instead of maintaining
+another copy of requirements, current failures or the integration queue.
+
+| Question | Owning reference |
+| --- | --- |
+| What are we building? | [GOAL](development/GOAL.md), including DPS and Studio/hosting. |
+| How must a component behave? | Its architecture, network, service or application contract below. |
+| What exists and what has actually passed? | [Implementation status](IMPLEMENTATION_STATUS.md), with exact source and evidence links; application-specific evidence stays in its repository. |
+| Which repository or retained PR should we work on next? | [Organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md); confirm live PR heads and checks before integration. |
+| How do we change and verify it? | [AGENTS](../AGENTS.md), [shared workflow](development/CODEX_WORKFLOW.md) and [testing](development/TESTING.md). |
+| Where is the earlier evidence? | [Archive](archive/README.md); historical instructions and pending states are not current authority. |
+
+The README and websites introduce the project; they are not additional execution
+ledgers. The maintenance index coordinates work without changing requirements or
+turning a retained experiment into an accepted feature.
 
 ## Find the right folder
 
-The top level keeps this guide, the FAQ and the implementation-status ledger.
+The top level keeps this guide, the FAQ and compact implementation status.
+Historical source records live in `archive/`.
 Technical documents are grouped by subject so the folder itself is easier to browse:
 
 | Folder | Contents |
@@ -18,9 +37,11 @@ Technical documents are grouped by subject so the folder itself is easier to bro
 | [network/](network/) | Peer discovery, local links, routing, multipath transports and DNS. |
 | [services/](services/) | Cache, private storage, message custody, cooperative compute and software maintenance. |
 | [applications/](applications/) | Application family and browser-network integration. |
+| [community/](community/) | Project overview for contributors and practical ways to support the work. |
 | [privacy/](privacy/) | Privacy boundaries, threat model and destination policy. |
 | [development/](development/) | Building, operating and testing the project. |
 | [assets/](assets/) | Images used by the documentation. |
+| [archive/](archive/README.md) | Original sources and dated evidence, outside the normal reading path. |
 
 The folders organize the documentation; they do not represent separate daemons or
 different completion levels. Follow the reading paths below for an introduction,
@@ -30,18 +51,33 @@ or go directly to a topic when you already know what you need.
 
 ### I am new to the project
 
-1. Read the [project introduction](../README.md) for the four layers and seven virtues.
+1. Read the [project introduction](../README.md) for the five layers and seven virtues.
 2. Explore the [application family](applications/APPLICATIONS.md) to see what each integration is for.
 3. Check the [development summary](../README.md#development-status) and [FAQ](FAQ.md)
    before trying a build. This is not a supported end-user release.
 
 ### I want to build or contribute
 
-1. Read [Contributing](../CONTRIBUTING.md) and the repository's [engineering instructions](../AGENTS.md).
-2. Follow the [architecture](architecture/ARCHITECTURE.md) and the relevant topic guide below.
-3. Use the [read-only prerequisite checks](development/OPERATIONS.md#read-only-prerequisites), then
+1. Start with the [community overview](community/OVERVIEW.md) and
+   [supporting the project](community/SUPPORTING.md) for contribution paths and current needs.
+   The organization-wide [contribution guide](https://github.com/VOLPAROSSA/.github/blob/main/CONTRIBUTING.md),
+   [Code of Conduct](https://github.com/VOLPAROSSA/.github/blob/main/CODE_OF_CONDUCT.md),
+   [support guide](https://github.com/VOLPAROSSA/.github/blob/main/SUPPORT.md) and
+   [accessibility guide](https://github.com/VOLPAROSSA/.github/blob/main/ACCESSIBILITY.md)
+   apply across repositories.
+2. Read the repository's [engineering instructions](../AGENTS.md) and
+   [current implementation status](IMPLEMENTATION_STATUS.md). For a full project
+   resumption, read the [complete agreed goal](development/GOAL.md), including
+   its DPS and Studio/hosting sections. For a bounded task,
+   load the relevant requirements; the complete scope remains authoritative.
+3. Follow the status links for retained work, exact revisions, acceptance evidence
+   and dependencies. Read historical records only when the task needs them.
+4. Follow the [architecture](architecture/ARCHITECTURE.md) and relevant topic guide below.
+   Use [Contributing](../CONTRIBUTING.md) and the [shared development workflow](development/CODEX_WORKFLOW.md)
+   when preparing scoped work or transferring it between clients or sessions.
+5. Use the [read-only prerequisite checks](development/OPERATIONS.md#read-only-prerequisites), then
    the [build instructions](development/OPERATIONS.md#build-and-package).
-4. Choose [focused tests](development/TESTING.md#unprivileged-quality-gate) for your change. Network
+6. Choose [focused tests](development/TESTING.md#unprivileged-quality-gate) for your change. Network
    tests run only in disposable namespaces or the documented VM, never on your active network.
 
 ### I want to evaluate the claims and privacy
@@ -72,25 +108,36 @@ or go directly to a topic when you already know what you need.
 
 | Guide | What you will find |
 | --- | --- |
+| [Studio and hosting](services/STUDIO_HOSTING.md) | Silex audit, shared publishing/AI contracts, static and dynamic acceptance. |
 | [Content network](services/CONTENT_NETWORK_PROPOSAL.md) | Cache chunks, publishing, HTTPS authority and offline delivery. |
 | [Private storage](services/PRIVATE_STORAGE.md) | Encrypted fragments, redundancy, retention, usage and recovery. |
 | [Transaction layer](services/TRANSACTION_LAYER.md) | Durable test-unit API, executable example, settlement boundaries and remaining work. |
+| [Decentralized positioning](services/DPS.md) | Shared local positioning/integrity design, sensor research, privacy and phased acceptance. |
 | [Mailbox import confirmation](services/MAILBOX_IMPORT_CONFIRMATION.md) | When an application may confirm message import. |
 | [Unbound fallback](network/UNBOUND_FALLBACK.md) | Resolver lifecycle and bounded DNS-cache misses. |
 | [Decentralized agents](services/DECENTRALIZED_AGENTS.md) | Training, public peer tasks, models, privacy and mutual review. |
 | [Protected compute preparation](development/PROTECTED_COMPUTE_VERIFIER.md) | Public attestation fixtures, limited evidence and the missing private-worker acceptance path. |
-| [Cooperative Code evidence](COOPERATIVE_CODE.md) | Passed bounded public code repair and the separate incomplete native OpenCode trial. |
+| [Cooperative Code evidence](COOPERATIVE_CODE.md) | Public peer-repair evidence and the historical two-peer document trial; the [current native coding milestone](IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence) is recorded separately. |
 | [Cooperative browser evidence](COOPERATIVE_BROWSER.md) | Public peer execution, source-bound trials and remaining answer-completion limits. |
 | [Whitelist](privacy/WHITELIST.md) | Current destination-policy authority and enforcement. |
 | [Repository maintenance](services/REPOSITORY_MAINTENANCE.md) | Autonomous maintenance and authorized client-update design. |
 
 ## Operations and project reference
 
+- [Agreed goal](development/GOAL.md): effective complete objective and integrated amendments.
+- [DPS](development/GOAL.md#dps) and [Studio/hosting](development/GOAL.md#studio): integrated sections of the same complete goal.
+- [Documentation archive](archive/README.md): original requirements, dated audits and detailed historical evidence; not startup reading.
+- [Requirement preservation](development/TESTING.md#requirement-preservation): checks when requirements change.
+- [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
+- [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
-- [Implementation status](IMPLEMENTATION_STATUS.md): detailed evidence ledger, including failed trials.
+- [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.
+- [Historical evidence](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md): preserved detailed checkpoints, including failed trials; not default startup reading.
 - [Execution plan](IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones): next milestones, shared dependencies and current blockers.
 - [Applications](applications/APPLICATIONS.md): boundaries and links for the application repositories.
+- [Community overview](community/OVERVIEW.md): project entry point and contributor routes.
+- [Supporting the project](community/SUPPORTING.md): contributions, funding readiness and partnership boundaries.
 - [Contributing](../CONTRIBUTING.md): how to propose and verify a useful change.
 - [Security policy](../SECURITY.md): private vulnerability reporting.
 - [License](../LICENSE) and [third-party notices](../THIRD_PARTY_LICENSES.md): reuse and provenance.
@@ -101,10 +148,10 @@ or go directly to a topic when you already know what you need.
 every usage scenario works. **Verified** refers to a stated source revision and test scope.
 **Pending** remains unfinished, even when adjacent components pass.
 
-The detailed status file is an evidence ledger, not a quick-start guide. Its older records
-are retained so a failed experiment is not silently turned into a success. A historical
-checkpoint does not qualify a newer build; a passing small-model task does not establish
-reliable reasoning; a connector does not establish a complete application.
+The status index links to detailed evidence without repeating the full history.
+Older records retain failed experiments. A historical checkpoint does not qualify a
+newer build; a passing small-model task does not establish reliable reasoning; a
+connector does not establish a complete application.
 
 Start with the concise README, follow the topic guide when needed, and use the ledger for
 the exact claim. Feature branches may contain work not yet integrated into `main`.

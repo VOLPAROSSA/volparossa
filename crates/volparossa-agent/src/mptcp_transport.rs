@@ -404,10 +404,15 @@ impl ClientMptcpTransport {
             let request = client_acquire_request(signal, self.context_handle.clone(), local_port)
                 .map_err(|error| observation.transport_error(Stage::Material, error))?;
             slot.begin_acquire();
+            let mut diagnostic = None;
             let acquired = helper
-                .acquire_transport_socket(request)
+                .acquire_transport_socket_observed(request, &mut diagnostic)
                 .await
-                .map_err(|error| slot.acquire_failed_classified(error, observation))?;
+                .map_err(|error| {
+                    let error = slot.acquire_failed_classified(error, observation);
+                    observation.helper_diagnostic(diagnostic);
+                    error
+                })?;
             let flow = acquired.metadata().mptcp_flow_handle.clone();
             let retirement = slot.bind(
                 volparossa_routing::RetireMptcpFlow {

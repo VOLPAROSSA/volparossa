@@ -23,6 +23,7 @@ SAMPLER = runpy.run_path(str(HERE / 'private-storage-log-sampler.py'))
 ACTIVITY = runpy.run_path(str(HERE / 'storage-provider-activity-sampler.py'))
 CORRELATION = runpy.run_path(str(HERE / 'storage-fixture-correlation-sampler.py'))
 FIXTURE_CORRELATION = False
+REQUEST_STAGE = False
 PROVISIONER = runpy.run_path(str(HERE / 'storage-consumer-maintenance-provision.py'))
 NODE = Path('/opt/volparossa-node/bin/node')
 PROVISION = Path('/opt/volparossa-storage-consumers/provision.json')
@@ -56,6 +57,10 @@ CATALOG_FAILURE_CODES = {'catalog_materialization_failed', 'catalog_restore_vali
     'catalog_file_version_changed', 'catalog_receipt_validation', 'catalog_crypto_timeout',
     'catalog_crypto_unavailable', 'catalog_crypto_failed', 'catalog_crypto_report_invalid',
     'catalog_cleanup_failed', 'catalog_stage_changed', 'catalog_cancelled'}
+CATALOG_RESTORE_ERRORS = {'invalid_request', 'storage_closed', 'operation_in_progress',
+    'foreground_cleanup_unconfirmed', 'maintenance_cleanup_unconfirmed', 'cancelled', 'core_spawn_failed',
+    'local_verification_failed', 'local_input_unavailable', 'private_file_required', 'private_directory_required',
+    'output_exists', 'invalid_core_executable', 'invalid_control_socket'}
 CANCELLED = False
 PROFILE_VERSION = 1
 NETWORK_VERSION = 1
@@ -238,15 +243,15 @@ def validate_flow_acquire(value):
 def validate_agent_outcome(value, stage, version=4, operation=None):
     if value is None:
         return
-    keys(value, ('status', 'detail', *(('append_timing',) if version in (7, 8, 9) else ()),
-        *(('tls_close_failure',) if version == 9 else ())))
+    keys(value, ('status', 'detail', *(('append_timing',) if version in (7, 8, 9, 10) else ()),
+        *(('tls_close_failure',) if version >= 9 else ())))
     require(stage in ('wire_receipt', 'agent_terminal', 'deadline')
         and value['status'] in ('observed', 'missing', 'pending', 'expired', 'query_failed', 'query_timeout'), 'deposit_diagnostics')
     if value['status'] != 'observed':
         require(value['detail'] is None, 'deposit_diagnostics')
-        if version in (7, 8, 9):
+        if version in (7, 8, 9, 10):
             require(value['append_timing'] is None, 'deposit_diagnostics')
-        if version == 9:
+        if version >= 9:
             require(value['tls_close_failure'] is None, 'deposit_diagnostics')
         return
     detail = value['detail']
@@ -257,7 +262,7 @@ def validate_agent_outcome(value, stage, version=4, operation=None):
         and ((detail['category'] == 'timeout') == (detail['deadline_scope'] != 'none'))
         and (detail['deadline_scope'] != 'bridge' or detail['phase'] in OUTCOME_PHASES[1:15])
         and (detail['deadline_scope'] != 'remote_wire' or detail['phase'] in OUTCOME_PHASES[6:13]), 'deposit_diagnostics')
-    if version in (7, 8, 9) and value['append_timing'] is not None:
+    if version in (7, 8, 9, 10) and value['append_timing'] is not None:
         timing = value['append_timing']
         keys(timing, ('before_payload', 'in_payload_write_flush', 'in_receipt_read'))
         buckets = ('under_1s', '1_to_5s', '5_to_15s', '15_to_30s',
@@ -266,15 +271,27 @@ def validate_agent_outcome(value, stage, version=4, operation=None):
             and timing['before_payload'] in buckets and timing['in_payload_write_flush'] in buckets
             and (timing['in_receipt_read'] is None if detail['phase'] == 'remote_payload_write'
                 else timing['in_receipt_read'] in buckets), 'deposit_diagnostics')
-    if version == 9:
+    if version >= 9:
         require(value['tls_close_failure'] is None or (
             value['tls_close_failure'] in ('shutdown_io', 'read_io', 'trailing_data', 'internal_deadline')
             and detail['phase'] == 'transport_tls_close' and detail['category'] == 'unavailable'
             and detail['deadline_scope'] == 'none' and value['append_timing'] is None), 'deposit_diagnostics')
 
 
+def validate_challenge_read(value, phase):
+    if value is None:
+        return
+    keys(value, ('step', 'returned_outcome'))
+    allowed = {'length_read': ('io_eof', 'io_other', 'invalid', 'wire_timeout'),
+        'body_read': ('io_eof', 'io_other', 'wire_timeout'),
+        'verification': ('invalid', 'verification_rejected')}
+    require(phase == 'challenge_read_verify' and type(value['step']) is str and value['step'] in allowed
+        and (value['returned_outcome'] is None or (type(value['returned_outcome']) is str
+            and value['returned_outcome'] in allowed[value['step']])), 'deposit_diagnostics')
+
+
 def validate_deposit_diagnostics(value, version=1):
-    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8, 9), 'deposit_diagnostics')
+    require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 'deposit_diagnostics')
     keys(value, ('version', 'failures', 'omitted_failures'))
     require(type(value['version']) is int and value['version'] == version
         and type(value['omitted_failures']) is int and value['omitted_failures'] == 0
@@ -318,7 +335,7 @@ def validate_deposit_diagnostics(value, version=1):
                     'deposit_diagnostics')
             if version >= 6 and detail['challenge'] is not None:
                 challenge = detail['challenge']
-                keys(challenge, ('phase', 'before_challenge', 'in_challenge'))
+                keys(challenge, ('phase', 'before_challenge', 'in_challenge', *(('read',) if version == 10 else ())))
                 buckets = ('under_1s', '1_to_5s', '5_to_15s', '15_to_30s',
                     '30_to_60s', '60_to_90s', '90_to_120s', 'at_least_120s')
                 require(challenge['phase'] in ('selector_write_flush', 'grant_write_flush', 'challenge_read_verify')
@@ -326,6 +343,8 @@ def validate_deposit_diagnostics(value, version=1):
                     and detail['stage'] == 'challenge' and detail['tls_failure'] is None
                     and detail['stream_failure'] is None and failure['agent_code'] == 'CONTENT_UNAVAILABLE',
                     'deposit_diagnostics')
+                if version == 10:
+                    validate_challenge_read(challenge['read'], challenge['phase'])
             if version >= 8 and detail['flow_acquire'] is not None:
                 validate_flow_acquire(detail['flow_acquire'])
                 require(detail['stage'] == 'stream_open' and detail['deadline_scope'] == 'none'
@@ -339,7 +358,55 @@ def validate_deposit_diagnostics(value, version=1):
         seen.add(identity)
 
 
-def validate_node_report(value, phase, provision, prepared=None, *, profile_version=None):
+def validate_catalog_restore(value):
+    keys(value, ('version', 'scope', 'diagnostic_only', 'acceptance_evidence', 'causal_attribution',
+        'invocation', 'completion', 'result_state', 'result', 'error_state', 'error_code'))
+    require(type(value['version']) is int and value['version'] == 1
+        and value['scope'] == 'cloud_catalog_storage_restore_call'
+        and value['diagnostic_only'] is True and value['acceptance_evidence'] is False
+        and value['causal_attribution'] is False, 'catalog_restore')
+    require(value['invocation'] in ('unavailable', 'not_invoked', 'once', 'multiple')
+        and value['completion'] in ('unavailable', 'returned', 'threw')
+        and value['result_state'] in ('unavailable', 'missing', 'invalid', 'observed')
+        and value['error_state'] in ('unavailable', 'missing', 'invalid', 'observed'), 'catalog_restore')
+    once = value['invocation'] == 'once'
+    require(once or (value['completion'] == 'unavailable' and value['result_state'] == 'unavailable'
+        and value['error_state'] == 'unavailable'), 'catalog_restore')
+    returned, threw = value['completion'] == 'returned', value['completion'] == 'threw'
+    require((value['result_state'] != 'unavailable') == returned
+        and (value['error_state'] != 'unavailable') == threw, 'catalog_restore')
+    # No claim of a typed exception: this is only an allowlisted own code field.
+    if value['error_state'] == 'observed':
+        require(type(value['error_code']) is str and value['error_code'] in CATALOG_RESTORE_ERRORS, 'catalog_restore')
+    else:
+        require(value['error_code'] is None, 'catalog_restore')
+    if value['result_state'] != 'observed':
+        require(value['result'] is None, 'catalog_restore')
+        return
+    result = value['result']
+    keys(result, ('status', 'code', 'local_process_joined', 'restore_verified',
+        'core_report_state', 'core_operation_complete'))
+    require(result['status'] in ('complete', 'incomplete', 'failed', 'cancelled', 'timed_out')
+        and result['code'] in ('ok', 'retained_operation_incomplete', 'invalid_core_report', 'core_failed',
+            'cancelled', 'timed_out', 'report_too_large', 'restore_verification_failed')
+        and type(result['local_process_joined']) is bool and type(result['restore_verified']) is bool
+        and result['core_report_state'] in ('missing', 'invalid', 'observed'), 'catalog_restore')
+    complete = result['core_operation_complete']
+    require((type(complete) is bool) if result['core_report_state'] == 'observed' else complete is None,
+        'catalog_restore')
+    if result['status'] == 'complete':
+        require(result['code'] == 'ok' and result['local_process_joined'] is True
+            and result['restore_verified'] is True and complete is True, 'catalog_restore')
+    else:
+        require(result['restore_verified'] is False, 'catalog_restore')
+    if result['status'] == 'incomplete':
+        require(result['code'] == 'retained_operation_incomplete' and complete is False, 'catalog_restore')
+
+
+def validate_node_report(value, phase, provision, prepared=None, *, profile_version=None,
+        challenge_read_diagnostics_v10=False):
+    require(type(challenge_read_diagnostics_v10) is bool
+        and (not challenge_read_diagnostics_v10 or profile_version == 10), 'publish_profile')
     require(phase in PHASES and type(value) is dict and type(value.get('passed')) is bool, 'node_report')
     expected_version = 1
     if not value['passed']:
@@ -355,7 +422,8 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
             require(profile_version is None or observation_version == profile_version, 'publish_profile')
             keys(observed, ('version', 'app', 'operation', 'status', 'code', 'local_process_joined',
                 'core_report_present', 'core_operation_complete',
-                *(('deposit_diagnostics_state', 'deposit_diagnostics') if diagnostic else ())))
+                *(('deposit_diagnostics_state', 'deposit_diagnostics') if diagnostic else ()),
+                *(('diagnostic_version',) if challenge_read_diagnostics_v10 else ())))
             require(type(observed['version']) is int and observed['version'] == observation_version
                 and observed['app'] in ('image', 'cloud') and observed['operation'] in ('create', 'deposit')
                 and phase == 'publish' and value['stage'] == observed['app'] + '_publish'
@@ -369,12 +437,15 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
                 and (observed['core_report_present'] or observed['core_operation_complete'] is None)
                 and (diagnostic or not (observed['status'] == 'complete' and observed['local_process_joined'] is True)),
                 'publish_observation')
+            if challenge_read_diagnostics_v10:
+                require(observation_version == 10 and type(observed['diagnostic_version']) is int
+                    and observed['diagnostic_version'] == 10, 'publish_profile')
             if diagnostic:
                 state, deposit = observed['deposit_diagnostics_state'], observed['deposit_diagnostics']
                 require(state in ('observed', 'missing', 'invalid', 'not_applicable')
                     and (state == 'not_applicable') == (observed['operation'] == 'create'), 'deposit_diagnostics')
                 if state == 'observed':
-                    validate_deposit_diagnostics(deposit, observation_version - 1)
+                    validate_deposit_diagnostics(deposit, 10 if challenge_read_diagnostics_v10 else observation_version - 1)
                     require(observed['core_report_present'] and observed['core_operation_complete'] in (True, False)
                         and (observed['core_operation_complete'] is False or not deposit['failures']), 'deposit_diagnostics')
                 else:
@@ -382,16 +453,25 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
                 require(not (observed['status'] == 'complete' and observed['local_process_joined'] is True)
                     or (observed['operation'] == 'deposit' and state in ('missing', 'invalid')), 'deposit_diagnostics')
         lifecycle = 'publish_cleanup' in value
+        catalog_restore = 'catalog_restore' in value
+        if catalog_restore:
+            fields += ('catalog_restore',)
+            require(lifecycle and type(value['version']) is int and value['version'] == 13
+                and phase == 'publish' and profile_version in (None, 10)
+                and value['stage'] == 'cloud_catalog_create' and 'publish_observation' not in value,
+                'catalog_restore')
+            validate_catalog_restore(value['catalog_restore'])
         if lifecycle:
             fields += ('publish_cleanup',)
             cleanup = value['publish_cleanup']
             keys(cleanup, ('app', 'state'))
-            lifecycle_profile = value['version'] - 2 if type(value['version']) is int else None
+            lifecycle_profile = 10 if catalog_restore else value['version'] - 2 if type(value['version']) is int else None
             require(phase == 'publish' and profile_version in (None, lifecycle_profile)
                 and lifecycle_profile in (8, 9, 10)
                 and cleanup['app'] in ('image', 'cloud') and cleanup['state'] in ('complete', 'failed'),
                 'publish_cleanup')
             app = cleanup['app']
+            require(not catalog_restore or app == 'cloud', 'catalog_restore')
             stages = {f'{app}_{step}' for step in ('publish', 'enroll', 'policy_read', 'core_close')}
             if app == 'cloud':
                 stages |= {'cloud_catalog_prepare', 'cloud_catalog_create', 'cloud_catalog_validate'}
@@ -405,7 +485,7 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
             if value['stage'].endswith('_core_close') or value['code'] == 'core_close_failed':
                 require(value['stage'] == f'{app}_core_close' and cleanup['state'] == 'failed'
                     and value['code'] in ('core_close_failed', 'phase_deadline'), 'publish_lifecycle')
-            expected_version = lifecycle_profile + 2
+            expected_version = 13 if catalog_restore else lifecycle_profile + 2
         keys(value, fields)
         require((lifecycle or (value['stage'] in STAGES and value['code'] in FAILURE_CODES))
             and value['cleanup_confirmed'] is False, 'failure_report')
@@ -462,15 +542,22 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
     return value
 
 
-def run_child(command, deadline, *, limit=MAX_REPORT):
+def run_child(command, deadline, *, limit=MAX_REPORT, request_stage=None):
     """Bounded pipes, actual child join, graceful Node-owned descendant shutdown.
 
     A forced kill or undrained inherited pipe is failure, never a cleanup proof.
     No raw stdout/stderr escapes this private reader on failure.
     """
     require(not CANCELLED and time.monotonic() < deadline, 'deadline')
+    environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
+    inherited = {}
+    if request_stage is not None:
+        descriptor = request_stage.child.fileno()
+        require(descriptor >= 3, 'fixture_request_stage')
+        environment['STORAGE_PROOF_REQUEST_STAGE_FD'] = str(descriptor)
+        inherited['pass_fds'] = (descriptor,)
     process = subprocess.Popen(list(map(str, command)), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, start_new_session=True, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'})
+        stderr=subprocess.PIPE, start_new_session=True, env=environment, **inherited)
     selector = None
     output, errors = bytearray(), bytearray()
     stopped, forced, stop_at, exited_at, sent = None, False, None, None, None
@@ -489,6 +576,7 @@ def run_child(command, deadline, *, limit=MAX_REPORT):
             pass
 
     try:
+        if request_stage is not None: request_stage.child.close()
         selector = selectors.DefaultSelector()
         for stream, target in ((process.stdout, output), (process.stderr, errors)):
             os.set_blocking(stream.fileno(), False)
@@ -565,16 +653,38 @@ def validate_locations(root, binary, client, providers=None):
     return binary, client
 
 
-def node_phase(root, phase, provision, deadline):
+def challenge_read_selection(config, profile_version):
+    # Read the retained private configuration; a report marker cannot opt itself in.
+    require(type(config) is dict and type(profile_version) is int and 1 <= profile_version <= 10,
+        'publish_profile')
+    read = config.get('challengeReadDiagnosticsV10', False)
+    require(type(read) is bool and ('challengeReadDiagnosticsV10' not in config or profile_version == 10),
+        'publish_profile')
+    for flag, selected in (('appendDiagnosticsV7', profile_version == 8),
+            ('flowAcquireDiagnosticsV8', profile_version == 9),
+            ('tlsCloseDiagnosticsV9', profile_version == 10 and not read)):
+        require(config.get(flag) is True if selected else flag not in config, 'publish_profile')
+    return read
+
+
+def node_phase(root, phase, provision, deadline, request_stage=None):
     command = [NODE, HERE / 'storage-consumer-maintenance.mjs', phase, root]
     if PROFILE_VERSION in (2, 3, 4, 5, 6, 7, 8, 9, 10):
         command += ['--profile-version', str(PROFILE_VERSION)]
-    status, output, _ = run_child(command, deadline)
+    status, output, _ = (run_child(command, deadline) if request_stage is None else
+        run_child(command, deadline, request_stage=request_stage))
     value = json.loads(output)
     prepared = None if phase == 'prepare' else private_json(root / 'storage-consumer-prepare.json')
     if prepared is not None:
         validate_node_report(prepared, 'prepare', provision)
-    validate_node_report(value, phase, provision, prepared, profile_version=PROFILE_VERSION)
+    read = False
+    if phase == 'publish' and PROFILE_VERSION == 10:
+        modes = [challenge_read_selection(private_json(root / app / 'storage.json'), PROFILE_VERSION)
+            for app in ('image', 'cloud')]
+        require(modes[0] == modes[1], 'publish_profile')
+        read = modes[0]
+    validate_node_report(value, phase, provision, prepared, profile_version=PROFILE_VERSION,
+        challenge_read_diagnostics_v10=read)
     require(status == (0 if value['passed'] else 1), 'node_exit')
     retained = file_bytes(root / f'storage-consumer-{phase}.json', MAX_REPORT)
     require(json.loads(retained) == value, 'retained_node_report')
@@ -619,7 +729,8 @@ def prepare(root, binary, client, providers, provider_keys, provision, deadline)
         elif PROFILE_VERSION == 9:
             config['flowAcquireDiagnosticsV8'] = True
         elif PROFILE_VERSION == 10:
-            config['tlsCloseDiagnosticsV9'] = True
+            # This exact reviewed fixture source opts in; an absent SDK flag remains legacy v9.
+            config['challengeReadDiagnosticsV10'] = True
         policy = dict(enrollment=str(app / 'maintenance'), fromProviderKey=provider_keys[0], providers=selected[1:],
             authorizationSeconds=6000, lifetimeSeconds=3600, renewBeforeSeconds=7200,
             maximumChargedBytes=3 * size, maximumTurnBytes=8388608)
@@ -640,6 +751,10 @@ def phase(root, selected, exit_socket, flow_root, provision, deadline):
     cloud = private_json(root / 'cloud/storage.json')
     require(image['coreBinary'] == cloud['coreBinary'] and image['controlSocket'] == cloud['controlSocket'], 'shared_core')
     binary, client = validate_locations(root, image['coreBinary'], image['controlSocket'])
+    if REQUEST_STAGE:
+        with CORRELATION['capture_request'](binary, root.parents[1], root, deadline) as observer:
+            return phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client,
+                request_stage=observer)
     correlation = CORRELATION['capture'](binary, root.parents[1], root, selected) if (
         FIXTURE_CORRELATION and PROFILE_VERSION in (9, 10) and NETWORK_VERSION == 2) else nullcontext()
     # Fix the original application/network/deadline outcome before optional
@@ -648,7 +763,7 @@ def phase(root, selected, exit_socket, flow_root, provision, deadline):
         return phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client)
 
 
-def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client):
+def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline, binary, client, request_stage=None):
     require(Path(exit_socket) == root.parents[1] / 'runtime-exit/control/agent.sock'
         and Path(flow_root) == root.parents[1] / 'client-fixtures/private-storage-user', 'flow_locations')
     private_directory(Path(flow_root))
@@ -672,7 +787,8 @@ def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline,
         with activity, sampler['capture'](
                 binary, Path(exit_socket), baseline, minimum, client=client,
                 **{('scope' if NETWORK_VERSION == 1 else 'policy'): scope}, diagnostic=diagnostic) as coverage:
-            value, report_hash = node_phase(root, selected, provision, deadline)
+            value, report_hash = (node_phase(root, selected, provision, deadline) if request_stage is None else
+                node_phase(root, selected, provision, deadline, request_stage=request_stage))
     except sampler_failure:
         if NETWORK_VERSION == 2: raise NetworkPhaseFailure(selected, diagnostic) from None
         raise
@@ -768,9 +884,12 @@ def cleanup(root):
 
 
 def main(arguments):
-    global PROFILE_VERSION, NETWORK_VERSION, FIXTURE_CORRELATION
+    global PROFILE_VERSION, NETWORK_VERSION, FIXTURE_CORRELATION, REQUEST_STAGE
     PROFILE_VERSION = 1
     NETWORK_VERSION = 1
+    REQUEST_STAGE = bool(arguments and arguments[-1] == '--fixture-request-stage')
+    if REQUEST_STAGE:
+        arguments = arguments[:-1]
     FIXTURE_CORRELATION = bool(arguments and arguments[-1] == '--fixture-correlation')
     if FIXTURE_CORRELATION:
         arguments = arguments[:-1]
@@ -782,6 +901,8 @@ def main(arguments):
         arguments = arguments[:-2]
     require(not FIXTURE_CORRELATION or (PROFILE_VERSION in (9, 10) and NETWORK_VERSION == 2
         and arguments and arguments[0] in CORRELATION['PHASES']), 'fixture_correlation_scope')
+    require(not REQUEST_STAGE or (not FIXTURE_CORRELATION and PROFILE_VERSION == 10
+        and NETWORK_VERSION == 2 and arguments and arguments[0] == 'publish'), 'fixture_request_stage_scope')
     if len(arguments) == 2 and arguments[0] == 'flow-minimum':
         require(arguments[1] in FLOW_MINIMUM, 'phase')
         print(FLOW_MINIMUM[arguments[1]])
@@ -791,7 +912,10 @@ def main(arguments):
     require(len(arguments) >= 2, 'arguments')
     selected = arguments[0]
     root = owner_root(arguments[1], missing=selected == 'cleanup')
-    if selected == 'cleanup' and len(arguments) == 2:
+    if selected == 'quiesced' and len(arguments) == 2:
+        no_fixture_processes(root)
+        result = dict(version=1, consumer_processes_observed_quiesced=True, remote_cleanup_proven=False)
+    elif selected == 'cleanup' and len(arguments) == 2:
         result = cleanup(root)
     else:
         deadline = time.monotonic() + WORK_SECONDS

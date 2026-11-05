@@ -1,0 +1,24 @@
+name: RustSec pin review
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test comparison without network access
+        run: python3 -B scripts/test-rustsec-pin-review.py
+      - name: Compare official RustSec main and emit a reviewable candidate
+        # Exit 1 makes an available update visible; no branch, PR or pin is written.
+        run: python3 -B scripts/review-rustsec-pin.py

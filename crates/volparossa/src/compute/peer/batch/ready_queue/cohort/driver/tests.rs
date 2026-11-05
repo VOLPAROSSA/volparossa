@@ -228,7 +228,7 @@ async fn package_receipt_is_yielded_while_other_exact_handle_future_is_alive() {
             };
             GroupEvent::Finished {
                 package: index,
-                handle,
+                handle: Box::new(handle),
                 result: Ok(status),
                 new_submission: true,
             }

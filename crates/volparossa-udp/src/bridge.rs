@@ -10,9 +10,9 @@ use crate::{PinnedUdpFlow, QuicUdpAssociation, UdpError};
 /// Fixed datagram-size and count bounds for one association bridge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DatagramLimits {
-    maximum_payload_bytes: usize,
-    maximum_tunnel_to_destination_datagrams: u64,
-    maximum_destination_to_tunnel_datagrams: u64,
+    payload_bytes: usize,
+    tunnel_to_destination_datagrams: u64,
+    destination_to_tunnel_datagrams: u64,
 }
 
 impl DatagramLimits {
@@ -34,16 +34,16 @@ impl DatagramLimits {
             return Err(UdpError::ResourceLimit);
         }
         Ok(Self {
-            maximum_payload_bytes,
-            maximum_tunnel_to_destination_datagrams,
-            maximum_destination_to_tunnel_datagrams,
+            payload_bytes: maximum_payload_bytes,
+            tunnel_to_destination_datagrams: maximum_tunnel_to_destination_datagrams,
+            destination_to_tunnel_datagrams: maximum_destination_to_tunnel_datagrams,
         })
     }
 
     /// Return the receive-allocation and payload-size limit.
     #[must_use]
     pub const fn maximum_payload_bytes(self) -> usize {
-        self.maximum_payload_bytes
+        self.payload_bytes
     }
 }
 
@@ -143,7 +143,7 @@ impl ExitUdpBridge {
             destination_socket,
             limits,
         } = self;
-        let mut buffer = vec![0_u8; limits.maximum_payload_bytes];
+        let mut buffer = vec![0_u8; limits.payload_bytes];
         let mut statistics = UdpBridgeStats::default();
 
         let result = async {
@@ -151,12 +151,12 @@ impl ExitUdpBridge {
                 tokio::select! {
                 tunneled = association.receive_payload() => {
                     let payload = tunneled?;
-                    if payload.len() > limits.maximum_payload_bytes {
+                    if payload.len() > limits.payload_bytes {
                         return Err(UdpError::ResourceLimit);
                     }
                     increment(
                         &mut statistics.tunnel_to_destination_datagrams,
-                        limits.maximum_tunnel_to_destination_datagrams,
+                        limits.tunnel_to_destination_datagrams,
                     )?;
                     destination_socket.send(&payload).await?;
                     add_bytes(&mut statistics.tunnel_to_destination_bytes, payload.len())?;
@@ -165,16 +165,16 @@ impl ExitUdpBridge {
                     let length = received?;
                     increment(
                         &mut statistics.destination_to_tunnel_datagrams,
-                        limits.maximum_destination_to_tunnel_datagrams,
+                        limits.destination_to_tunnel_datagrams,
                     )?;
                     association.send_payload(&buffer[..length])?;
                     add_bytes(&mut statistics.destination_to_tunnel_bytes, length)?;
                 }
                 }
                 if statistics.tunnel_to_destination_datagrams
-                    == limits.maximum_tunnel_to_destination_datagrams
+                    == limits.tunnel_to_destination_datagrams
                     && statistics.destination_to_tunnel_datagrams
-                        == limits.maximum_destination_to_tunnel_datagrams
+                        == limits.destination_to_tunnel_datagrams
                 {
                     // The final QUIC DATAGRAM is only queued by `send_payload`.
                     // Retain the connection until the Client observes it and

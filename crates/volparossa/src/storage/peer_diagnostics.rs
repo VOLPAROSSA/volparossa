@@ -16,6 +16,8 @@ use volparossa_local_control::{
 
 use super::outcome::{AgentOutcome, AppendOutcome};
 
+#[path = "peer_challenge_read.rs"]
+mod challenge_read;
 #[path = "peer_flow_acquire.rs"]
 mod flow_acquire;
 #[path = "peer_tls_close.rs"]
@@ -27,6 +29,15 @@ tokio::task_local! {
     static APPEND_TIMING: bool;
     static FLOW_ACQUIRE: bool;
     static TLS_CLOSE: bool;
+    static CHALLENGE_READ: bool;
+}
+
+pub(super) fn challenge_read_enabled() -> bool {
+    CHALLENGE_READ.try_with(|enabled| *enabled).unwrap_or(false)
+}
+
+pub(super) async fn with_challenge_read<F: Future>(enabled: bool, work: F) -> F::Output {
+    CHALLENGE_READ.scope(enabled, work).await
 }
 
 pub(super) fn tls_close_enabled() -> bool {
@@ -261,6 +272,7 @@ impl ChallengeDetail {
 
     fn wire(&self) -> PrivateStorageChallengeDetail {
         PrivateStorageChallengeDetail {
+            read: None,
             phase: self.phase as i32,
             before_challenge: self.before_challenge as i32,
             in_challenge: self.in_challenge as i32,
@@ -490,6 +502,7 @@ pub(super) struct Diagnostics {
     failures: Vec<Failure>,
     // Parallel bounded storage keeps every historical serde DTO unchanged.
     flow_acquire: [Option<flow_acquire::Detail>; MAX_FAILURES],
+    challenge_read: [Option<challenge_read::Detail>; MAX_FAILURES],
     omitted_failures: usize,
 }
 
@@ -498,18 +511,29 @@ pub(super) struct Diagnostics {
 enum CurrentFailure {
     V8(flow_acquire::Failure),
     V9(tls_close::Failure),
+    V10(serde_json::Value),
 }
 
 impl Diagnostics {
-    fn current_failure(&self, index: usize, failure: &Failure) -> CurrentFailure {
-        if self.version == 9 {
+    fn current_failure(
+        &self,
+        index: usize,
+        failure: &Failure,
+    ) -> Result<CurrentFailure, serde_json::Error> {
+        Ok(if self.version == 10 {
+            CurrentFailure::V10(challenge_read::project(
+                failure,
+                self.flow_acquire[index],
+                self.challenge_read[index],
+            )?)
+        } else if self.version == 9 {
             CurrentFailure::V9(tls_close::Failure::new(failure, self.flow_acquire[index]))
         } else {
             CurrentFailure::V8(flow_acquire::Failure::new(
                 failure,
                 self.flow_acquire[index],
             ))
-        }
+        })
     }
 }
 
@@ -527,7 +551,9 @@ fn decode_current_failure(
 impl Default for Diagnostics {
     fn default() -> Self {
         Self {
-            version: if tls_close_enabled() {
+            version: if challenge_read_enabled() {
+                10
+            } else if tls_close_enabled() {
                 9
             } else if flow_acquire_enabled() {
                 8
@@ -538,6 +564,7 @@ impl Default for Diagnostics {
             },
             failures: Vec::new(),
             flow_acquire: [None; MAX_FAILURES],
+            challenge_read: [None; MAX_FAILURES],
             omitted_failures: 0,
         }
     }
@@ -622,13 +649,14 @@ impl Serialize for Diagnostics {
         } else if self.version == 7 {
             let current: Vec<_> = self.failures.iter().map(AppendFailure::from).collect();
             value.serialize_field("failures", &current)?;
-        } else if matches!(self.version, 8 | 9) {
+        } else if matches!(self.version, 8..=10) {
             let current: Vec<_> = self
                 .failures
                 .iter()
                 .enumerate()
                 .map(|(index, failure)| self.current_failure(index, failure))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(serde::ser::Error::custom)?;
             value.serialize_field("failures", &current)?;
         } else {
             value.serialize_field("failures", &self.failures)?;
@@ -664,28 +692,35 @@ impl Failure {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wire {
+    version: u8,
+    failures: Vec<serde_json::Value>,
+    omitted_failures: usize,
+}
+
 impl<'de> Deserialize<'de> for Diagnostics {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            version: u8,
-            failures: Vec<serde_json::Value>,
-            omitted_failures: usize,
-        }
         let wire = Wire::deserialize(deserializer)?;
-        if !matches!(wire.version, 1..=9) || wire.failures.len() > MAX_FAILURES {
+        if !matches!(wire.version, 1..=10) || wire.failures.len() > MAX_FAILURES {
             return Err(serde::de::Error::custom(
                 "diagnostic version or failure bound",
             ));
         }
         let mut flow_acquire = [None; MAX_FAILURES];
+        let mut challenge_read = [None; MAX_FAILURES];
         let failures = wire
             .failures
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                let failure = if wire.version >= 8 {
+                let failure = if wire.version == 10 {
+                    let (failure, flow, read) = challenge_read::decode(value)?;
+                    flow_acquire[index] = flow;
+                    challenge_read[index] = read;
+                    failure
+                } else if wire.version >= 8 {
                     let (failure, detail) = decode_current_failure(wire.version, value)?;
                     flow_acquire[index] = detail;
                     failure
@@ -759,6 +794,7 @@ impl<'de> Deserialize<'de> for Diagnostics {
             version: wire.version,
             failures,
             flow_acquire,
+            challenge_read,
             omitted_failures: wire.omitted_failures,
         })
     }
@@ -789,6 +825,20 @@ impl Diagnostics {
         )
         .then(|| error.downcast_ref::<AgentOutcome>().copied())
         .flatten();
+        if self.version == 10 && matches!(boundary.stage, Stage::AgentReady) {
+            self.challenge_read[self.failures.len()] = error
+                .downcast_ref::<crate::control::AgentRejected>()
+                .and_then(|rejected| {
+                    let detail = rejected.private_storage_remote_detail?;
+                    detail
+                        .validate_rejection(ControlResult::Unavailable, &rejected.diagnostic_code)
+                        .ok()?;
+                    detail
+                        .challenge?
+                        .read
+                        .and_then(challenge_read::Detail::from_wire)
+                });
+        }
         if self.version >= 8 && matches!(boundary.stage, Stage::AgentReady) {
             self.flow_acquire[self.failures.len()] = error
                 .downcast_ref::<crate::control::AgentRejected>()
@@ -832,6 +882,7 @@ impl Diagnostics {
             } else {
                 failure.fragment_index = Some(fragment_index);
                 self.flow_acquire[self.failures.len()] = child.flow_acquire[index];
+                self.challenge_read[self.failures.len()] = child.challenge_read[index];
                 self.failures.push(failure);
             }
         }
@@ -896,3 +947,7 @@ mod tests;
 #[cfg(test)]
 #[path = "peer_tls_close_tests.rs"]
 mod tls_close_tests;
+
+#[cfg(test)]
+#[path = "peer_challenge_read_tests.rs"]
+mod challenge_read_tests;

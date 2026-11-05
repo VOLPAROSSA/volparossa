@@ -1,0 +1,256 @@
+[
+  {
+    "package": "libp2p-metrics-0.17.0",
+    "url": "https://raw.githubusercontent.com/libp2p/rust-libp2p/7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23/LICENSE",
+    "sha256": "e10098b8c52fd18ad0f116aac2c0dba1e99ca125d6848640c00688e160a3ee7d",
+    "vcs": {
+      "git": {
+        "sha1": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23"
+      },
+      "path_in_vcs": "misc/metrics"
+    }
+  },
+  {
+    "package": "libp2p-upnp-0.5.0",
+    "url": "https://raw.githubusercontent.com/libp2p/rust-libp2p/7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23/LICENSE",
+    "sha256": "e10098b8c52fd18ad0f116aac2c0dba1e99ca125d6848640c00688e160a3ee7d",
+    "vcs": {
+      "git": {
+        "sha1": "7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23"
+      },
+      "path_in_vcs": "protocols/upnp"
+    }
+  },
+  {
+    "package": "prometheus-client-derive-encode-0.4.2",
+    "url": "https://raw.githubusercontent.com/prometheus/client_rust/9d4ba09ec5bfc15522eb75145a5e850efd6fb628/LICENSE-APACHE",
+    "sha256": "2f1947dc952374ef4bf326c7c576a0287fb10a8c069dc6bdef981a7ea0a0cf1a",
+    "vcs": {
+      "git": {
+        "sha1": "9d4ba09ec5bfc15522eb75145a5e850efd6fb628"
+      },
+      "path_in_vcs": "derive-encode"
+    }
+  },
+  {
+    "package": "prometheus-client-derive-encode-0.4.2",
+    "url": "https://raw.githubusercontent.com/prometheus/client_rust/9d4ba09ec5bfc15522eb75145a5e850efd6fb628/LICENSE-MIT",
+    "sha256": "0fd830000a45d0c472e06b2a3718b070c902ee9a71a6abc1647ce66920de2eb5",
+    "vcs": {
+      "git": {
+        "sha1": "9d4ba09ec5bfc15522eb75145a5e850efd6fb628"
+      },
+      "path_in_vcs": "derive-encode"
+    }
+  },
+  {
+    "package": "r-efi-5.3.0",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+    "vcs": {
+      "git": {
+        "sha1": "97b55bed1c2c91dcbf787674849f05337ff80b33"
+      },
+      "path_in_vcs": ""
+    }
+  },
+  {
+    "package": "r-efi-6.0.0",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+    "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+    "vcs": {
+      "git": {
+        "sha1": "7e1b0322d31d625f81a5656096330934f9cd835d"
+      },
+      "path_in_vcs": ""
+    }
+  },
+  {
+    "package": "valuable-0.1.1",
+    "url": "https://raw.githubusercontent.com/tokio-rs/valuable/9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE",
+    "sha256": "ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44",
+    "vcs": {
+      "git": {
+        "sha1": "9efc29b6e58cef28f6566a47aa7e142a55fead77"
+      },
+      "path_in_vcs": "valuable"
+    }
+  },
+  {
+    "package": "libp2p-gossipsub-0.49.5",
+    "archive_url": "https://static.crates.io/crates/libp2p-gossipsub/libp2p-gossipsub-0.49.5.crate",
+    "archive_sha256": "3573f3d8e30bd62cda336df5c7c1041a1caa40a648376b8e1e274d585c0ed25c",
+    "published_vcs": {
+      "git": {
+        "sha1": "d6a16b6a88959d1b25e9807d89959b2f9127724c"
+      },
+      "path_in_vcs": "protocols/gossipsub"
+    },
+    "upstream_git_object_accessible": false,
+    "notice_origin": "unchanged published Rust source files with original headers; all .rs files retained",
+    "files": [
+      {
+        "archive_path": "src/backoff.rs",
+        "notice_file": "SOURCE-src--backoff.rs",
+        "sha256": "0af5e555567d7788602f8ad1ff977ce0a9214585a13d88a86421be40a661aa22",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/behaviour/tests.rs",
+        "notice_file": "SOURCE-src--behaviour--tests.rs",
+        "sha256": "aea98e969f23e7e69786d000c9ae693c91e8d5a062ff3b32af3729cb69a4f28d",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/behaviour.rs",
+        "notice_file": "SOURCE-src--behaviour.rs",
+        "sha256": "494714fb728d6c5b3dd3c0ceb115372dbcd2fd26367d4a882fd0b4af75130225",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/config.rs",
+        "notice_file": "SOURCE-src--config.rs",
+        "sha256": "78433a00e1272a673d9794179f292e72f0c128cc0f03b164accc9f74b31064ed",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/error.rs",
+        "notice_file": "SOURCE-src--error.rs",
+        "sha256": "4151bee368a96ac01338ca765618ef4d44c3bb864b63444301ddd8d846dfffe0",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/generated/compat/mod.rs",
+        "notice_file": "SOURCE-src--generated--compat--mod.rs",
+        "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+        "full_mit_header": false
+      },
+      {
+        "archive_path": "src/generated/compat/pb.rs",
+        "notice_file": "SOURCE-src--generated--compat--pb.rs",
+        "sha256": "20ec3660d700f07aa29813222b5899217ad175993c786e6f1ab01f818e0b3354",
+        "full_mit_header": false
+      },
+      {
+        "archive_path": "src/generated/gossipsub/mod.rs",
+        "notice_file": "SOURCE-src--generated--gossipsub--mod.rs",
+        "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+        "full_mit_header": false
+      },
+      {
+        "archive_path": "src/generated/gossipsub/pb.rs",
+        "notice_file": "SOURCE-src--generated--gossipsub--pb.rs",
+        "sha256": "01e1679d6a9ed0a939327a72594970df8efbe2942f67c38628466a7607c56d83",
+        "full_mit_header": false
+      },
+      {
+        "archive_path": "src/generated/mod.rs",
+        "notice_file": "SOURCE-src--generated--mod.rs",
+        "sha256": "fb32d5c38ecdb43a5a63a58e59ed0405df640fc6ad2eb60702dcf32f26fd0944",
+        "full_mit_header": false
+      },
+      {
+        "archive_path": "src/gossip_promises.rs",
+        "notice_file": "SOURCE-src--gossip_promises.rs",
+        "sha256": "0ca8fea2cf104fe8549cb4981dd7fbd2633bd9865733e5895011952e99931a64",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/handler.rs",
+        "notice_file": "SOURCE-src--handler.rs",
+        "sha256": "32ff1b36444486984fb6a431ef97c62391061139ee75325a4d7482e3696e1d83",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/lib.rs",
+        "notice_file": "SOURCE-src--lib.rs",
+        "sha256": "70bab73b87d8b809b20c11c5e086f0d15b3cb56aaa0fca26c79413ceb191ca7a",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/mcache.rs",
+        "notice_file": "SOURCE-src--mcache.rs",
+        "sha256": "ecc6d605222d6a56035f974df4cacf80beee8fa98c16c96f4c8aa3d5a94b77b7",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/metrics.rs",
+        "notice_file": "SOURCE-src--metrics.rs",
+        "sha256": "387681b4d9e9952523e68eb2b67f427bd3d21499d78b9d9699d91d954246ffbb",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/peer_score/params.rs",
+        "notice_file": "SOURCE-src--peer_score--params.rs",
+        "sha256": "e7a59baa4e72044a5123e355e655fb578ecc3718aa237af1ba76a3b2b1b1c88a",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/peer_score/tests.rs",
+        "notice_file": "SOURCE-src--peer_score--tests.rs",
+        "sha256": "7da4eff4ff7fe8b7f417730bb63c8002f964bca4e9c6af892c2b7c8c772c0cf1",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/peer_score.rs",
+        "notice_file": "SOURCE-src--peer_score.rs",
+        "sha256": "87fe77e4c82e8a2a4f9cc352a7300ad5ed54dce2bdf9792c538356ea4468e225",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/protocol.rs",
+        "notice_file": "SOURCE-src--protocol.rs",
+        "sha256": "b2b447220a3c1aeb8bd56a92f7c6c2920d959ceefcd1a7035fd1ec4b433eb95b",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/rpc.rs",
+        "notice_file": "SOURCE-src--rpc.rs",
+        "sha256": "9f0b94b8fb5e1052aecc642cf145c47d41b7fb7096e7c8d94cab6de622061039",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/rpc_proto.rs",
+        "notice_file": "SOURCE-src--rpc_proto.rs",
+        "sha256": "47e1b7d87d3c7b5dc23add7ab6015caca14a119e4b5a7f1ee6cccd6956ecf100",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/subscription_filter.rs",
+        "notice_file": "SOURCE-src--subscription_filter.rs",
+        "sha256": "4eaac8cb45edc1c2f2b9710dead664d4ddee73b5ec2b6c3ffea019cbd310dea8",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/time_cache.rs",
+        "notice_file": "SOURCE-src--time_cache.rs",
+        "sha256": "5ea122f02a33cc2f7ed29842906368f6d0031b12aedd0c44b01c69bd3ad750af",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/topic.rs",
+        "notice_file": "SOURCE-src--topic.rs",
+        "sha256": "0249c4bd950c2a9340127b395f82b7a55fa8fd8339dd67c35b0b8f8f26b6082d",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/transform.rs",
+        "notice_file": "SOURCE-src--transform.rs",
+        "sha256": "43cd9ffcb62adee8d868bb7c972da8f8b0fd944b876dab7558850ee0ade6e8b9",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "src/types.rs",
+        "notice_file": "SOURCE-src--types.rs",
+        "sha256": "00f6e2ae34e30400736e24bc973303cb936b0a4b798b9fd1d39c90b3f0da24a9",
+        "full_mit_header": true
+      },
+      {
+        "archive_path": "tests/smoke.rs",
+        "notice_file": "SOURCE-tests--smoke.rs",
+        "sha256": "6935da6d8fbb4b501d3f621a11b2892d5c8c5c2ad1555dfb4bcff2e866ed7617",
+        "full_mit_header": true
+      }
+    ]
+  }
+]

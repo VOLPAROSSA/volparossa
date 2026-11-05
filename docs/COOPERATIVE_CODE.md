@@ -1,9 +1,12 @@
 # OpenCode to real cooperative execution
 
-Two separate trials cover different application boundaries. The newer public
+These historical trials cover two different application boundaries: the public
 single-file owner-helper trial passes; the original native OpenCode / two-peer
-document trial below still fails answer completion. Neither proves protected
-execution of private code on other clients.
+document trial below fails answer completion. A later, separate
+[native coding trial](IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence)
+passes model-driven reading, editing and testing through the core's local CPU backend.
+It does not change the original document trial's outcome. None of these results proves
+protected execution of private code on other clients.
 
 ## Public single-file proposal: passed development milestone
 
@@ -48,11 +51,10 @@ remains open.
 
 The private planning turns are deliberately synthetic in this fixture. The
 public-core endpoint, peer workers, fragment execution and returned result must
-be real. This separates the network integration from the independent, currently
-unsuccessful Qwen coding trial; neither is evidence of confidential peer execution
-or general coding quality.
+be real. This separates the network integration from the independent native coding
+workflow; neither is evidence of confidential peer execution or general coding quality.
 
-## Current live result
+## Original two-peer result
 
 VM01 returned the original public tool result through actual OpenCode, without
 injecting public results. Two providers ran eleven observed workers; all eleven

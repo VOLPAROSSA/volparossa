@@ -327,23 +327,21 @@ impl WarmGrowth {
                 probe.last_useful = now;
             }
         }
-        if safe_to_retire {
-            if let Some(probe) = self
+        if safe_to_retire
+            && let Some(probe) = self
                 .probes
                 .values()
                 .find(|probe| now.duration_since(probe.last_useful) >= PROBE_GRACE)
-            {
-                return Decision::RetireExtra(probe.added);
-            }
+        {
+            return Decision::RetireExtra(probe.added);
         }
-        if let (Some(risky), Some(warm)) = (candidate, warm) {
-            if self
+        if let (Some(risky), Some(warm)) = (candidate, warm)
+            && self
                 .probes
                 .values()
                 .all(|probe| now.duration_since(probe.last_useful) >= PROBE_GRACE)
-            {
-                return Decision::Activate { warm, risky };
-            }
+        {
+            return Decision::Activate { warm, risky };
         }
         Decision::Hold
     }

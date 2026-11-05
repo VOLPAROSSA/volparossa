@@ -328,6 +328,9 @@ pub(crate) struct Publish {
     /// Existing encrypted identity file; defaults to the normal node identity path.
     #[arg(long)]
     identity: Option<PathBuf>,
+    /// Require the unlocked identity to match this independently selected publisher key.
+    #[arg(long, value_parser = parse_publisher_key)]
+    expected_publisher_key: Option<VerifyingKey>,
     /// Existing strict 0600 passphrase file; otherwise prompt without echo.
     #[arg(long)]
     passphrase_file: Option<PathBuf>,
@@ -391,6 +394,7 @@ impl Publish {
             lifetime_seconds: MAX_VALIDITY_SECONDS,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),
+            expected_publisher_key: None,
             passphrase_file: Some(args.passphrase_file),
             limits: args.limits,
         }
@@ -412,6 +416,7 @@ impl Publish {
             lifetime_seconds: args.lifetime_seconds,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),
+            expected_publisher_key: None,
             passphrase_file: Some(args.passphrase_file),
             limits: args.limits,
         }
@@ -780,6 +785,12 @@ fn publish(args: &Publish) -> Result<Published> {
     let now = now_seconds()?;
     let expires = args.expiry(now)?;
     let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
+    if args
+        .expected_publisher_key
+        .is_some_and(|expected| expected != signer.verifying_key())
+    {
+        bail!("content publisher does not match the expected publisher key");
+    }
     let expected_public = signer.verifying_key().to_bytes();
     let mut manifest_output = tempfile::NamedTempFile::new_in(output_parent(&args.manifest))?;
     let limits = args.limits.cache_limits()?;
@@ -1502,6 +1513,7 @@ mod tests {
             lifetime_seconds: 300,
             expires_not_after: None,
             identity: Some(identity_path.clone()),
+            expected_publisher_key: None,
             passphrase_file: Some(password_file),
             limits: limits(),
         };

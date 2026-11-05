@@ -36,11 +36,9 @@ records the unchanged `482e33d0` build passing A01--A15, including the real rout
 privacy captures and crash cleanup. This is scoped functional evidence, not a release
 security audit or completion of every later extension.
 
-Earlier helper-only and dormant-planner notes are retained below in clearly marked
-historical records. Their old **11/100 (11%)** score and statements that a production
-caller was absent describe those milestones; they are not the current project score or
-an assertion that the later demonstrated route does not exist. Current progress and
-remaining failures belong in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
+Earlier helper-only and dormant-planner stages are archived below; their old score
+and missing-caller claims do not describe the accepted later route. Current progress
+and remaining failures belong in [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
 
 ## Path invariant
 
@@ -101,167 +99,8 @@ Unix stream. A failure before the first Prepare-frame write is definitive for ne
 every error after the first Prepare write is polled is ambiguous and carries the complete same-runtime
 reconciliation authority.
 
-<details>
-<summary>Historical staged planner and ownership development</summary>
-
-These are earlier implementation-stage notes, not a second route-setup procedure to follow.
-The original dormant/fake-only limits are retained as the scope of those stages.
-
-The crate now has a dormant in-process boundary for the beginning of steps 1-4. A bounded command
-asks the single-owner discovery actor for an immutable candidate snapshot. The actor purges expiry,
-captures exact policy lineage, re-verifies persisted signatures/fingerprints, and joins only exact
-remote direct-relay and forwarded-exit capabilities. It returns neither serialized messages nor
-dispatch authority. Stored reachability, RTT, and advertised capacity do not become fresh route
-evidence. Each projected advertisement and direct capability retain the same opaque exact
-`SignedEnvelope.payload_hash`; a forwarded capability retains separate control-relay and exit
-hashes. Those hashes are equality bindings, not authority, and the UI-facing usable-candidate count
-stays zero.
-
-The dormant fake-only phase-A planner now consumes one non-cloneable observation batch that exactly
-matches the snapshot's direct-relay and forwarded-exit capability union. Every record is bound to a
-non-zero batch ID, role, full actor identity/key/sequence/expiry/payload hash, transport, family,
-policy lineage, observation time, explicit validity, one normalized public IPv4 /24 or IPv6 /48,
-and a conservative preselection capacity ceiling; an exit also carries the exact forwarded control
-tuple including its advertisement hash, while a relay carries none. The ceiling and prefix are
-test-only local selection inputs and convey no offer, hold, reservation, admission, provenance or
-dispatch authority. The trusted clock must remain inside every freshness and
-policy/advertisement/capability lifetime. The planner applies the complete relay policy, selects
-the forwarded exit first, then
-chooses 1-8 prospective relays using the selector's real peer-only 70/20/10 bands. It does not
-fabricate or accept complete-path scalars.
-
-Control, exit and prospective relays are hard-diverse by node, Peer ID, operator, ASN and one
-normalized public IPv4 /24 or IPv6 /48. The prefix-native plan and actor proof retain no full
-observed host IP. Legacy full-origin selector APIs normalize at their boundary and then use the
-same filter, scoring, banding, RNG and diversity kernels; no second selection algorithm exists.
-Canonical ordering makes a fixed random seed independent of input order, while different seeds may
-choose different valid slates and exploration is retained.
-Hard diversity limits any observed cluster to one slate slot but does not eliminate Sybil identity
-multiplicity before sampling. An exit with multiple otherwise valid control-relay pairs is still
-excluded entirely until an actor-owned selected-control primitive exists.
-
-The resulting private plan is non-cloneable, non-serializable and not debug-printable. It retains
-only exact actor identity and advertisement-payload-hash bindings, route scope/policy, short-lived
-peer capacity/quality/history, prefix-native operator/ASN and /24-or-/48 diversity, each actor's
-explicit evidence-validity window, and their exact minimum. It retains no full observed host IP,
-dialable endpoint/port, envelope, hostname, destination, application/flow history, route-session ID
-or dispatch authority. Its legacy `CandidateEvidence.observed_network_origin` field is `None`. C1
-consumes the plan before expiry; future dispatch must consume the C1 continuation and re-resolve
-actor capabilities before any RPC.
-
-The dormant phase-C1 consume boundary now moves this plan into one private pre-probe continuation.
-It structurally checks the retained control, exit and relay node-to-key bindings, non-zero
-advertisement sequences and payload hashes, global node/Peer/key uniqueness, actor and evidence
-expiries, capacity/reachability/prefix/diversity, route policy, replay bound, setup/hard wall windows and
-helper second-floor limits. It allocates stable prospective path IDs `1..N` and one Tokio deadline,
-projected from a monotonic sample conservatively taken before the trusted wall sample and bounded by
-the minimum of setup timeout and the remaining setup/evidence window. Only after every check and
-path allocation does it mint a non-zero distinct reservation/context pair and exactly one in-memory
-`ReservationSession`. A mint failure returns no continuation. It does not re-authenticate an
-advertisement or re-resolve actor capability.
-
-The pre-probe continuation has no clone, copy, debug, serialization, getter or decomposition API.
-Dropping it is pre-dispatch cancellation by abandonment: there is no RPC, task, helper frame,
-external state, rollback or journal write. This proves no full memory wipe for the reservation
-session; only the separate route-authority ID arrays have an explicit zeroizing drop.
-
-The previous scalar complete-path phase remains a dormant test boundary only and is not called or
-trusted by the new plan. The existing private, dormant `RouteSetupTransaction` now has an internal
-phase-B ownership split: `measure_owned` moves its exact session, hold and original verified probe
-objects into a non-cloneable measured continuation, and `finish_owned` consumes that continuation
-with the same reservation/context IDs and original absolute deadline. A measurement error returns
-the original transaction for one rollback. Cancellation or deadline expiry at the handoff is
-checked before a retirement slot or helper `Prepare`; finalization is signed once, after `Prepare`,
-and ambiguous retries reuse that exact frame.
-
-The dormant phase-B request prerequisite is flat, role-hint-free and affine. Each prospective entry
-retains its explicit path ID plus one private actor-bound proof. The legacy bridge consumes the full
-`Candidate` before request construction and the proof cross-binds the evidence batch, exact relay
-node/Peer/key/advertisement sequence, actor and policy expiries, static selection scope, exact
-advertisement payload hash, forwarded control/exit identities and only an observed `/24` or `/48`
-prefix. The request and its
-path/proof values have no `Clone`, `Debug` or serialization surface and retain no advertised control
-endpoint, raw observed-origin IP, hostname, destination or full advertisement. The constructor
-accepts only caller order `1..N`, never sorts or renumbers it, and requires 1-8 entries and at least
-the policy minimum. Probe-slate size is independent of the final policy target: a UDP policy with
-final counts `1/1/1` may probe several prospective paths and still finalize one.
-`RouteSetupRequest` carries no per-path roles; phase B assigns final roles only after verified
-probes.
-
-One private, non-derived `UnmeasuredRouteSetup` owns the assembled transaction and its absolute
-Tokio deadline. The legacy phase-B manager entry accepts only this wrapper; the separate dormant
-C2c entry accepts `PreProbeContinuation` and produces the wrapper within its single task. Measurement
-consumes the wrapper deadline without a replacement and passes the same value into
-`MeasuredRouteSetup`. The sole assembly function takes the protocol and deadline together, rejects
-a deadline beyond the setup-timeout budget, and permits an already-expired value only so the first
-live check can fail before any protocol, transport, retirement or helper event. The old
-resolving/generating transaction constructor and its product `ReservationSession` remint path are
-removed.
-
-Post-probe selection no longer treats the pre-probe active/warm labels as measurement authority.
-Immediately before scoring, every proof is revalidated at the later trusted time against its exact
-static scope, evidence batch and actor/policy windows. Complete-path measurements borrow the opaque,
-value-only projection and enter the same private canonical selector core used by the legacy API;
-there is no synthetic `Candidate`, advertisement or signature bit. Any eligible measured path may
-satisfy the minimum. Paths beyond that minimum still require the canonical unique-throughput-gain
-or meaningful-failover rule; warm backups are then taken only from the remaining bounded set.
-Unknown or duplicate probe IDs fail before capacity filtering. On successful selection the request
-proofs are consumed once and only proof-free selected relay bindings continue; a measurement error
-returns the original transaction and all proofs for one rollback. The route-level protocol no
-longer requires its probe type to implement `Clone`, and the private measured handoff has no
-`Clone`, `Debug` or serialization implementation. This is an internal ownership property, not an
-end-to-end affine claim about public reservation `Verified*` types; the public
-`VerifiedRelayProbe` remains cloneable for API compatibility.
-
-A dormant C2c adapter now consumes the C1 continuation inside one private manager task and watch.
-It first rechecks cancellation, the carried Tokio deadline and trusted wall/evidence windows, then
-recomputes the exact policy/advertisement/capability and per-actor evidence ceilings. It consumes
-the existing authority and ordered actor-bound proofs into the endpoint-free `RouteSetupRequest`
-without restoring role hints, sorting or renumbering paths. Request construction precedes one
-bounded borrowed `RouteSetupAuthorities::resolve`; the same owned combined resolver/transport value
-then moves into the later reservation phase, and the adapter accepts no second handle between
-these phases. The resolve future borrows the request and owns neither the route authority nor the
-reservation session.
-
-After resolve, C2c rejects cancellation, deadline expiry, a backwards or expired wall clock, stale
-proofs and any changed control/exit/relay capability, including its exact advertisement payload
-hash. It then moves the same `ReservationSession`,
-route/context IDs, limits, stable path IDs and absolute deadline into `UnmeasuredRouteSetup`, whose
-existing phase-B flow carries them through measurement and finish without a remint or reset. A
-pending resolve cancelled by the watch, a call timeout or dropping its handle drops the resolver
-future before reservation dispatch and needs no rollback, helper cleanup or ownership-journal
-entry. The dormant bridge now builds a `Candidate` whose legacy observed-origin field is `None` and
-pairs it with the opaque normalized prefix before consuming both into a bounded projection. No full
-host IP is reconstructed or retained; the existing local quality/history and advertised control
-endpoint remain outside the projection and request.
-
-This is still dormant infrastructure, not a production route. The private C2c entry has no
-production caller, and the fake-only phase-A evidence has no production producer. A real evidence
-producer, production probe verifier/handler and production-owned orchestration remain absent; tests
-are the only callers. C1 construction itself still performs no RPC, helper call, provider update,
-host/network mutation or ownership-journal write. C2c adds no new wire, provider or helper
-implementation and has no production caller/orchestration, so it causes no production dispatch or
-mutation. These fake-only prefix boundaries remain disconnected from A1a transport evidence.
-
-A separate dormant lifecycle prerequisite now provides one private, affine route-attempt ownership
-slot. It can retain either one already-running `RouteSetupHandle` or one `EstablishedRoute`; it
-does not start a manager, spawn a task, mint authority, admit work before spawn or prevent a second
-task from already having dispatched. An occupied slot returns the supplied second handle intact.
-Pending settlement consumes the owner and yields an established owner on success. A settled
-failure reported with cleanup `NotRequired` or `Destroyed` returns a vacant owner for explicit
-reuse, whereas `Quarantined` remains terminal and rejects another adoption.
-
-Settlement and drain both consume the owner, so cancelling either future cannot expose a reusable
-vacant value. Pending drain cancels and waits; a completion race is immediately torn down instead
-of published as established. Established drain tears down explicitly. Dropping a pending owner
-delegates cancellation to the retained handle, while dropping an established owner passively
-publishes its existing retirement ownership. The owner neither owns nor shuts down the route
-manager: a future production lifecycle must drain it before manager shutdown. Tests are the only
-callers and exercise first/last probe cancellation, late success, future drop, quarantine retry,
-destroy-before-release ordering and shutdown fencing. Production admission, lifecycle ownership
-and orchestration remain absent.
-
-</details>
+Earlier staged implementation notes are retained in the
+[development archive](../archive/network-architecture-notes-20261026.txt); they do not add a second route-setup procedure.
 
 ## Addressing and keys
 
@@ -273,66 +112,8 @@ agent receives an opaque lease handle plus the kernel-proven public key and publ
 Interface names are derived, bounded to Linux's 15-character limit, and never accepted from the
 agent.
 
-<details>
-<summary>Historical single-path helper implementation and retained trials</summary>
-
-The following record describes the early isolated helper boundary. Its unavailable
-production-route and 11% statements must not be read as the current integration state.
-
-The production functional-alpha backend now runs Prepare, Activate, Probe/Commit and Destroy
-for exactly one process-owned Client/Exit singleton or one ordered `RelayClient` + `RelayExit`
-endpoint pair. It verifies the exact nested relay/exit grant and binds it to helper-owned
-context/path/role/expiry. For Relay it additionally verifies the exact client-session-signed request,
-its embedded signed ClientSessionCapability and ExitReservation, and the relay grant's SHA-256
-commitment to those request bytes. All five signed request/capability/reservation/grant/authorization
-records form one rollback-capable replay transaction with complete capability, exit, session,
-policy, transport, rate, path and lifetime scope binding. Client binds its generated
-key and installs only the signed relay-client peer. Exit binds its complete generated
-key/public-underlay/listen-port tuple to the dual-signed exit endpoint and installs only the
-relay-signed relay-exit peer. Relay atomically binds both prepared local tuples to the relay-signed
-endpoints, installs only the client-request peer and nested exit-signed peer on their respective
-roles, and rolls back the complete pair on failure. Every lease uses only its helper-derived `/128`
-route and retains the activation counter baseline. Relay activation additionally replaces the
-policy-drop baseline with two exact ifindex- and `/128`-bound accept rules guarded by one singleton
-timeout set and realtime cutoff, followed by terminal drop. Commit re-proves the complete lease set,
-requires a handshake no older than activation plus strict RX/TX growth for every lease and, for
-Relay, growth of both forwarding counters; neither leg commits alone. Destroy restores policy-drop
-before removing the interfaces and proves the complete pair and fence absent. This remains an
-isolated helper-internal single-path seam. Each successfully committed valid request for a committed
-Client or Exit singleton can acquire one helper-internal unconnected QUIC UDP socket; MPTCP and Relay socket
-acquisition, multi-path routing, a production route-manager caller, ingress and every usable product
-datapath remain unavailable.
-
-The disposable helper-boundary gate exercises these singleton roles sequentially in private
-namespaces. The Client cycle creates a temporary relay-side peer, carries bounded ICMPv6 across the
-client-to-relay leg, proves the recent handshake and strict bidirectional growth, removes that
-fixture exactly, requires an identical cached Commit retry and destroys the context. Exact-main run
-33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f` retained that scoped Client evidence. Exit
-exact-main [run 33296892632](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632) at
-`1ca51fe0d2a2be855adb182e85c229d1d12bc017` retained the fresh worker/namespace proof as artifact
-[9727739271](https://github.com/VOLPAROSSA/volparossa/actions/runs/33296892632/artifacts/9727739271),
-over a distinct `vpre0` relay-to-exit leg before Exit Commit retry and Destroy. Retained exact-main
-run 33301595311 at `0095b113e450a0ab29da853fafa53b2b130f05fc` separately proves one simultaneous
-Relay endpoint pair, before forwarding was implemented. Non-retained branch smoke [run
-33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
-`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` proves bounded `::1` to `::4` traffic through both live
-WireGuard legs, growth of all four peer counter views and both nftables forwarding counters, Commit
-retry, teardown and unchanged host state, but retains no artifact. Exact-main
-[run 33309109220](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220) at
-`1f3cee798787ed4673a3ba28d88931947800ca22` reproduced that proof and retained the 39,915-byte
-[artifact 9731470248](https://github.com/VOLPAROSSA/volparossa/actions/runs/33309109220/artifacts/9731470248),
-named `helper-boundary-evidence-1f3cee798787ed4673a3ba28d88931947800ca22` and expiring
-`2026-11-28T11:30:49Z`. Its streamed report is overall `PASS` from the exact clean source SHA on
-Debian 13 amd64 (`x86_64`) with systemd 257, with all 16 checks `PASS` and identical before/after
-host-state SHA-256 `2209ca5e63388fe23b8bf54c072cd2be5aa289e7e68293841150bce93ff59698`. Its scope is explicitly
-`helper_boundary_only=true`, `datapath=false`, `restart_recovery=false`,
-`acceptance_a01_a15=false`, `cleanup_owned=false`, and `installed_package=false`. It proves no
-trusted selection/policy authority, production simultaneous route, transport descriptor, ingress,
-usable VPN/datapath or crash recovery. Its cryptographically bound request/response authority is not
-an independent discovery/connection trust anchor. Keys are never persisted and are destroyed with
-the worker context; the fixed alpha score remains **11/100 (11%)**.
-
-</details>
+Earlier staged implementation notes are retained in the
+[development archive](../archive/network-architecture-notes-20261026.txt); they do not add a second route-setup procedure.
 
 ## Privileged helper boundary
 
@@ -434,67 +215,5 @@ active host network.
 
 ## Historical helper-boundary evidence
 
-<details>
-<summary>Original early evidence boundary, preserved with its limitations</summary>
-
-This was the evidence boundary of the early helper/preselection milestones. The fixed 11%
-score and missing production integration below are historical, not current status. Later
-acceptance does not turn these narrower tests into broader proof.
-
-The v4 wire types, service state machines, forwarding codecs, helper plan/call/commit supervisor, and
-authorization binding have unprivileged tests. They are not proof of a live route. The production
-two-leg probe producer does not exist. The actor-linearized candidate snapshot and staged preflight
-described above are dormant and report no production-usable candidates. The no-argument production
-helper can now execute the exact Client/Exit-singleton-or-Relay-pair
-Bind/Prepare/Activate/Probe-Commit/Destroy subset. The retained gate exercises Client and Exit
-sequentially in private namespaces and retained run 33301595311 proves the simultaneous Relay pair
-before forwarding. Non-retained run 33306523739 first proved the current exact single-path
-cross-leg fence, traffic, counter evidence, teardown and host-state boundary; retained exact-main
-run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced it as artifact 9731470248.
-The current 18-check exact-head contract additionally requires active Client/Exit/Relay FD-store
-counts `[2, 2, 2]` bound to exact pidfd/network-namespace identities, settled counts `[0, 0, 0]`, and
-exactly three stable `Absent(RecoveredMayOwn)` journal tombstones for the Client, ordered Relay pair
-and Exit plans. Exact-main
-[run 33318629099](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099) at
-`63e405119ca1266499fef145fbeff7348cef5562` proved all 18 checks on privileged Debian 13 KVM and
-retained
-[artifact 9734273695](https://github.com/VOLPAROSSA/volparossa/actions/runs/33318629099/artifacts/9734273695).
-Its scope remains helper-boundary only; A01--A15, datapath, cleanup ownership, installed-package and
-restart-recovery evidence remain explicitly false. The older 16-check artifact remains historical
-helper-boundary evidence.
-The production manager does not call that helper-backed transaction. A boot-scoped, secret-free
-canonical/CAS ownership actor starts before
-cleanup-token or socket publication and shuts down after engine cleanup. Functional Prepare now
-reconstructs and registers tag 35's exact canonical intent before worker reservation, then carries
-its affine owner through systemd custody, durable dispatch and same-runtime clean settlement. A
-restart may retire an already durable all-`CleanupConfirmed` set: exact-present pairs first chain
-canonical descriptorless baseline-minus-pair removals, then a fresh stable exact-empty manager
-observation supplies full-set actor evidence. It may also reap one exact-present, same-boot,
-same-helper-image, single-path `MayOwnCustody` or active `MayOwnPrepare` namespace. The fixed authenticated child
-accepts only role-specific baseline state and the exact restricted Relay fence; it never deletes a
-WireGuard link or changes forwarding. After exact child reap, the startup actor crosses only that
-record to `CleanupConfirmed`, then reuses the existing removal/absence chain. The general cleanup
-executor still leaves `MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical and
-blocks startup. There is no broad inherited-custody recovery backend or cross-runtime tag-28 proof.
-The parent requires waitable default `SIGCHLD`, default lifecycle-signal dispositions, and a pidfd
-for the normal transcript. A bounded reserve-FD
-retry covers descriptor exhaustion; if pinning still fails, no cleanup record is sent and only
-normal direct-child EOF/reap may return an error. A stopped or stuck unpinned child invokes fixed
-non-coredumping `exit_group(70)` under the attested exact systemd
-`simple/no/main/control-group/SIGKILL/45s/terminate` retirement contract, publishes no socket and
-authorizes no journal transition. No numeric-PID signal is used.
-Journal absence is not cleanup proof. Client ingress is also
-blocked. Consequently no production route-manager path can reach finalize or `Commit`; only the
-helper's isolated endpoint-lifecycle path reaches Probe/Commit. Route-level end-to-end configuration and
-Destroy-first cleanup, A12/A13 privacy, MPTCP, and MPQUIC remain unproved. Retained run 33294974441
-proves the Client-only client-to-relay leg. Retained run 33296892632 at
-`1ca51fe0d2a2be855adb182e85c229d1d12bc017`, artifact 9727739271, separately proves the Exit
-relay-to-exit leg; both cover
-bounded ICMPv6, recent handshake, strict RX/TX growth, cached Commit retry, normal process-owned
-Destroy and sequential capacity reuse. They have no trusted selection/policy authority, production
-simultaneous route, transport descriptor, ingress, usable VPN/datapath or crash/restart recovery. The
-forwarding proof is retained exact-main helper-boundary evidence, not acceptance evidence. None of
-these results closes an A01--A15 result or changes the **11/100 (11%)** alpha score. See
-[IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md).
-
-</details>
+Earlier staged implementation notes are retained in the
+[development archive](../archive/network-architecture-notes-20261026.txt); they do not add a second route-setup procedure.

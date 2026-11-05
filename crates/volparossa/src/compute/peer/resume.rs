@@ -225,34 +225,32 @@ pub(super) async fn report_with_activity(
         // Never retain a watch borrow across the awaited discovery: the owner must be
         // able to send cancellation while only these read-only probes are in flight.
         let cancelled = *activity.borrow();
-        if work.is_none() {
-            if let Some(authorization) = &args.replacement_discovery {
-                let allowed = discovery.begin(
-                    observed.state,
-                    observed.handle.binding.expires_unix_seconds,
-                    now()?,
-                    cancelled,
-                );
-                if allowed {
-                    if let Ok(selected) =
-                        executors::discover(authorization, socket, &activity).await
-                    {
-                        // This admission survives a crash before any new handle/Submit.
-                        // Discovery never renews an original lease.
-                        executors::admit(&args.output, authorization, &selected)?;
-                        discovery.providers = selected.providers;
-                        work = replacement(
-                            socket,
-                            args,
-                            &source,
-                            &observed.handle,
-                            &discovery.providers,
-                            &mut used,
-                            &activity,
-                        )
-                        .await?;
-                    }
-                }
+        if work.is_none()
+            && let Some(authorization) = &args.replacement_discovery
+        {
+            let allowed = discovery.begin(
+                observed.state,
+                observed.handle.binding.expires_unix_seconds,
+                now()?,
+                cancelled,
+            );
+            if allowed
+                && let Ok(selected) = executors::discover(authorization, socket, &activity).await
+            {
+                // This admission survives a crash before any new handle/Submit.
+                // Discovery never renews an original lease.
+                executors::admit(&args.output, authorization, &selected)?;
+                discovery.providers = selected.providers;
+                work = replacement(
+                    socket,
+                    args,
+                    &source,
+                    &observed.handle,
+                    &discovery.providers,
+                    &mut used,
+                    &activity,
+                )
+                .await?;
             }
         }
         let Some(work) = work else {

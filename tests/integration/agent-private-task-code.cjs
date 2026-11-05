@@ -14,6 +14,22 @@ function save(name, value) {
   assert(Buffer.byteLength(data) <= 65536);
   fs.writeFileSync(path.join(root, name), data, { flag: 'wx', mode: 0o600 });
 }
+function readPrivateInput(file) {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const info = fs.fstatSync(fd);
+    assert(info.isFile() && info.uid === process.getuid() && (info.mode & 0o7777) === 0o600 && info.size <= 65536);
+    const bytes = Buffer.alloc(info.size + 1); let size = 0;
+    while (size < bytes.length) {
+      const count = fs.readSync(fd, bytes, size, bytes.length - size, size);
+      if (count === 0) break;
+      size += count;
+    }
+    const after = fs.fstatSync(fd);
+    assert(size === info.size && ['size', 'mtimeMs', 'mode', 'uid', 'gid'].every(key => info[key] === after[key]));
+    return bytes.subarray(0, size);
+  } finally { fs.closeSync(fd); }
+}
 async function main() {
   assert.equal(root, '/home/vpci/private-code');
   assert.equal(process.getuid(), process.geteuid());
@@ -22,9 +38,7 @@ async function main() {
   assert.notEqual(fs.readlinkSync('/proc/self/ns/net'), parentNetwork);
   assert(Object.keys(os.networkInterfaces()).every(name => name === 'lo'));
   const { PrivateCompute } = require(path.join(root, 'src/private-compute.cjs'));
-  const info = fs.lstatSync(inputPath);
-  assert(info.isFile() && info.uid === process.getuid() && (info.mode & 0o7777) === 0o600 && info.size <= 65536);
-  const input = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+  const input = JSON.parse(readPrivateInput(inputPath));
   assert.equal(input.version, 1);
   assert.equal(input.visibility, 'private_local');
   assert.equal(input.question, 'What string does testIdentifier return? Answer with only the string.');

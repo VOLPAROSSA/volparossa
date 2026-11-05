@@ -2,22 +2,39 @@
 
 # Project VOLPAROSSA
 
-**DICN — Decentralized Intelligent Cooperative Network**
+**Useful digital tools, built on resources we share.**
 
-A participant-operated network for **protected connections, shared content, private storage
-and cooperative AI**. Instead of treating these as separate services, VOLPAROSSA is building
-one reusable core that applications can share.
+Keeping in touch, looking after your files and getting help from AI often means relying on
+separate services—or running their backends yourself. VOLPAROSSA is building a shared,
+participant-operated foundation for open-source applications: **connectivity, reusable content,
+private storage and cooperative computation**, with one core coordinating the work.
 
-The ambition goes beyond a VPN: people contribute the connectivity, storage and computation
-they can spare, and benefit from the network they build together. The device owner's activity
-comes first.
+The goal is practical choice: familiar applications supported by infrastructure people can
+inspect, contribute to and help improve. A modest device should be an entry point to shared
+capabilities. Making that useful, dependable and safe is the engineering work ahead.
+
+One concrete result: [installed Overmorrow Android retrieved real forecasts through peers](https://github.com/VOLPAROSSA/volparossa/actions/runs/38717988016)
+in an emulator, then refreshed from cache. The broader network and application family remain
+in development; there is no supported end-user release.
+
+[**See what works**](#development-status) ·
+[**Build an integration**](#developing-volparossa) ·
+[**Support the shared work**](docs/community/SUPPORTING.md)
+
+The architecture is a **DICN — Decentralized Intelligent Cooperative Network**.
 
 [Explore the layers](#five-layers-in-one-network) ·
 [Applications](#one-core-multiple-applications) ·
 [7 Virtues](#governed-by-7-virtues) ·
 [Development status](#development-status) ·
 [Documentation](docs/README.md) ·
-[Contribute](CONTRIBUTING.md)
+[FAQ](docs/FAQ.md) ·
+[Community](docs/community/OVERVIEW.md) ·
+[Support](docs/community/SUPPORTING.md) ·
+[Contribute](CONTRIBUTING.md) ·
+[Code of Conduct](https://github.com/VOLPAROSSA/.github/blob/main/CODE_OF_CONDUCT.md) ·
+[Accessibility](https://github.com/VOLPAROSSA/.github/blob/main/ACCESSIBILITY.md) ·
+[Discussions](https://github.com/VOLPAROSSA/volparossa/discussions)
 
 > **Development preview · Initial core target: Debian 13 amd64 · GPL-3.0-only**
 >
@@ -28,13 +45,22 @@ comes first.
 
 ## Why a DICN
 
-- **Decentralized:** participants run the same node software. Discovery contacts are
-  replaceable peers, not central authorities.
-- **Intelligent:** the aim is for agents across participating devices to divide tasks,
-  combine their results and learn together. Measured outcomes guide improvements to
-  shared models and to the way agents coordinate their work.
-- **Cooperative:** participants give as well as take, according to available capabilities.
-  Shared resources must respect foreground activity and resource budgets.
+- **Give applications a shared foundation.** A messaging app, a photo library and a coding
+  assistant need different features, but can reuse connectivity, storage and task coordination.
+  The aim is to let an improvement to a shared service benefit several integrations instead
+  of rebuilding the same infrastructure for each one.
+- **Make more possible from a modest device.** Shared models and suitable work on other
+  participants' devices could extend what one device can do. Useful quality, latency and
+  resource cost still need measurement; confidential execution of private tasks on peers
+  remains unfinished.
+- **Make control inspectable.** Open code, scoped application permissions and explicit
+  relay/exit boundaries give contributors concrete behavior to examine and challenge.
+  Replaceable discovery contacts are introductions, not central authorities. These choices
+  do not create an unconditional privacy or availability guarantee.
+- **Share responsibilities as well as benefits.** Joining is voluntary. Production consumers
+  contribute nonzero relay capacity, plus exit service when they have an independent Internet
+  uplink. Resource budgets must give the owner's activity priority. Sponsorship is separate
+  from these contribution duties.
 
 One compatible background core should serve several applications without duplicating the
 network. Closing a frontend should not end the node's accepted responsibilities. Application
@@ -43,31 +69,47 @@ access and explicitly chosen system-wide operation remain separate permissions.
 
 ## Development status
 
-**Demonstrated in scoped development trials:**
+**Selected development milestones.** Working milestones exist across all five
+layers, but they do not yet form a complete, supported service. The distinction matters
+especially for private data and applications that depend on several layers at once.
 
-- Protected WireGuard routes carrying real MPTCP, UDP/MASQUE and Multipath QUIC traffic;
-  later trials also carry data on three parallel paths.
-- Verified peer-content retrieval, selected HTTPS sharing, DNS-cache sharing and public
-  publication, including retrieval while an original publisher is offline.
-- Real weather, precipitation and particulate forecasts delivered through protected peers
-  into the Drizz.li and Overmorrow web clients, with initial display and refresh checks.
-  These web trials retrieve the first products before opening the UI.
-- The installed Overmorrow Android app fetching real forecasts on demand through the core
-  in an emulator, with initial data, tap-refresh and background/resume checks. Expiry with
-  real products, physical phones and iOS remain open.
-- Private fragment storage and provider-loss recovery, including native Signal backup
-  export/import, encrypted Image snapshots and OpenCloud file recovery.
-- Actual adapter training and reuse, public tasks on peer workers, and selected
-  model-review and signed policy-enforcement flows.
-- Signed TEST-unit transfers in a separate four-validator transaction trial, including
-  conflicting-spend rejection, partitions, rejoining and replay after a committed transfer.
+| Area | Demonstrated in scoped trials | Important remaining boundary |
+| --- | --- | --- |
+| Network and cache | Protected WireGuard routes carrying genuine MPTCP, UDP/MASQUE and Multipath QUIC traffic, including three-path trials; verified peer retrieval, selected HTTPS/DNS sharing and publication while the original publisher is offline. | This is not automatic caching of arbitrary HTTPS traffic or proof on every device and network. |
+| Weather applications | Real weather, precipitation and particulate forecasts displayed and refreshed in Drizz.li and Overmorrow web clients; on-demand retrieval, refresh and background/resume in installed Overmorrow Android in an emulator. | Web trials obtain the first products before opening the UI. Expiry with real products, physical phones and iOS remain open. |
+| Private storage | Fragment storage and provider-loss recovery; separate application trials include native Signal backup export/import, encrypted Image snapshots and OpenCloud file recovery. | The joined Image/Cloud publication, maintenance, repeated restore and deletion lifecycle is not yet accepted. Automatic reciprocal accounting and safe capacity reduction remain unfinished. |
+| Compute and Code | Actual adapter training and reuse, public tasks on peer workers, selected model-review flows and an OpenCode model-driven read/edit/test task. | A successful bounded task is not general coding reliability. Confidential execution of private tasks on other people's devices remains unfinished. |
+| Transactions | Signed TEST-unit transfers across four validators, conflicting-spend rejection, partitions, rejoining and replay without a second debit. | Fixed membership and fictitious assets; not live payments, external settlement or a Bank-to-distributed-ledger integration. |
 
-**Still in development:** complete application integrations, protected execution of private
-tasks on other people's devices, dependable AI reasoning, automatic reciprocal storage
-maintenance, the complete immune system and authorized automatic software updates.
-Current integration work concentrates on shared storage maintenance with Image/Cloud,
-actual coding-agent execution and the prerequisites for confidential peer computation.
-Android expiry and broader device support remain part of the integration work.
+[Citizen](https://github.com/VOLPAROSSA/volparossa-citizen) separately provides an executable
+referendum-procedure simulation with fictional identities, not verified real-person voting
+or recognized public authority. The [application guide](docs/applications/APPLICATIONS.md)
+explains the scope of all ten integrations.
+
+The [OpenCode trial](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38824828727)
+completed its coding task in about **37 minutes**. The Code integration and native core
+backend are now on their respective `main` branches. The trial remains bound to its
+original pinned core revision; the newly integrated core has passed source checks,
+not a repeat model trial. It demonstrates a local model-driven workflow, not competitive
+performance, general coding reliability or confidential execution on other people's devices.
+
+### Current integration work
+
+The next shared dependencies are **private-storage maintenance with Image/Cloud** and
+**protected peer computation**, while preserving the demonstrated coding workflow.
+Joined storage publication, repair, repeated restore and deletion remain open.
+Public model trials do not establish confidential hardware or authorize private tasks.
+The [current implementation status](docs/IMPLEMENTATION_STATUS.md) owns the latest
+recorded results and blockers; [original failures](docs/archive/README.md) remain
+preserved with their source revisions. The
+[organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md)
+coordinates retained branches and integration work across repositories.
+
+Complete applications, dependable shared reasoning, the full immune system and authorized
+automatic software updates also remain in development. The
+[execution plan](docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
+tracks the current blockers and next usable milestones without treating feature branches
+as released functionality.
 
 These results belong to their recorded revisions and test conditions. The original
 [A01–A15 transport acceptance run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
@@ -126,6 +168,15 @@ flowchart LR
     class C,R1,R2,R3,RN peer;
     class E,D endpoint;
 ```
+
+The diagram starts with your node in the client role: Path 1 reaches Peer A over local
+Wi-Fi, Path 2 reaches Peer B over the existing Internet, and Path 3 reaches Peer C over
+local Ethernet. These different relays each connect over WireGuard to the same selected
+exit peer. The dotted route shows additional local or Internet paths through further
+relays and WireGuard links to that same exit, when useful and supported. The exit's
+independent uplink reaches the allowed Internet destination. Each normal path remains
+client → exactly one relay → exit → destination, with payloads encrypted from client
+to exit; local links do not permit a direct client-to-exit dataplane.
 
 The diagram shows **several parallel routes**. Within each route, one WireGuard link
 connects your node to its relay, and a second connects that relay to the selected exit.
@@ -248,8 +299,11 @@ able to use permitted Internet sources for tasks, research, learning and mainten
 access rights and resource budgets. These are development goals, not completed capabilities.
 
 Real development milestones include local adapter training, signed exchange and reuse,
-public peer tasks and selected model-review/recovery loops. **Successful execution is not
-the same as sound reasoning**; current small models still make factual errors.
+public peer tasks and selected model-review/recovery loops. A bounded OpenCode task now
+also demonstrates real model-driven reading, editing and testing through the core's local
+CPU backend. **Successful execution is not the same as sound reasoning**; current small
+models still make factual errors, and this coding result is not evidence of distributed
+private computation.
 
 Private network tasks also need protection against the executing device's operator—not
 just encrypted transport. That required capability is unfinished. Current public-peer
@@ -303,6 +357,7 @@ and compute coordination belongs in the core.
 | [Chat](https://github.com/VOLPAROSSA/volparossa-chat) | Signal | Encrypted messages, calls and private backups. |
 | [Mail](https://github.com/VOLPAROSSA/volparossa-mail) | Thunderbird + Stalwart | Existing accounts, decentralized delivery and self-hosting. |
 | [Code](https://github.com/VOLPAROSSA/volparossa-code) | OpenCode | Coding agents using core-managed models and collaboration. |
+| [Studio](https://github.com/VOLPAROSSA/volparossa-studio) | Silex | Visual website editing, portable export, explicit publication and shared hosting/AI. |
 | [Image](https://github.com/VOLPAROSSA/volparossa-image) | Immich | Private photo/video libraries and recoverable state. |
 | [Map](https://github.com/VOLPAROSSA/volparossa-map) | Organic Maps | Offline maps, shared distribution and traffic information. |
 | [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct ECMWF/NOAA data; Drizz.li + Overmorrow clients | Shared forecasts, client delivery and measured forecast improvement. |
@@ -384,6 +439,14 @@ neither absolute safety nor immunity from legal risk.
 Start with the [documentation guide](docs/README.md). The initial core target is
 **Debian 13 Trixie, amd64**, with systemd, kernel WireGuard, kernel MPTCP and nftables.
 
+- **Explore first:** the [FAQ](docs/FAQ.md) answers questions about participation,
+  privacy, shared AI and storage.
+- **Integrate an application:** read the [shared-service lifecycle](docs/architecture/APPLICATION_LIFECYCLE.md)
+  and [application boundaries](docs/applications/APPLICATIONS.md).
+- **Build or verify a milestone:** follow [Contributing](CONTRIBUTING.md), the
+  [operations guide](docs/development/OPERATIONS.md) and the
+  [source-bound evidence ledger](docs/IMPLEMENTATION_STATUS.md).
+
 Read-only prerequisite and dependency-plan checks:
 
 ```sh
@@ -408,6 +471,13 @@ Network experiments belong in disposable namespaces or the documented VM topolog
 Want to help? Improve a guide, reproduce a bounded example, report a bug with its revision,
 or propose a usable feature slice. Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 Report sensitive vulnerabilities through [SECURITY.md](SECURITY.md), not a public issue.
+
+For **application developers**, the opportunity is a reusable service boundary to integrate
+with. For **researchers**, it is a set of explicit privacy, discovery and recovery assumptions
+to test against recorded results. For **prospective supporters**, the next shared Storage
+and protected-compute work can advance several applications; the
+[support guide](docs/community/SUPPORTING.md) explains the priorities without promising
+finished services or delivery dates. GitHub Sponsors remains pending.
 
 ## Boundaries and license
 

@@ -49,8 +49,8 @@ APPEND_REVISIONS = dict(image='10c46b9d6424929748e324fdd188a2f5ca77851a',
     cloud='dda7a21818ece774445cf63d6e9a01fe0f2803b2')
 FLOW_REVISIONS = dict(image='9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
     cloud='47b0f03b84913761570c3de7037ba5509b848c23')
-TLS_CLOSE_REVISIONS = dict(image='1e812ec6424a539a336d230b99ae1c11a494ca29',
-    cloud='35598609d3fedb5d1241a479c1930c8a6b831661')
+CHALLENGE_READ_REVISIONS = dict(image='f51b8ace0352377c7068a93fc8f4544f18e52978',
+    cloud='5f143725fd18c98848beb61c9198a82066bfec13')
 FILES = {
     'image': frozenset(('scripts/immich_snapshot.py', 'scripts/snapshot-storage.mjs',
         'src/core-storage.mjs', 'LICENSE')),
@@ -76,7 +76,7 @@ def pins_path(profile_version=1):
 def source_revisions(profile_version=1):
     pins_path(profile_version)  # Reject bools and unknown profile selectors first.
     return {1: REVISIONS, 2: DIAGNOSTIC_REVISIONS, 3: DETAIL_REVISIONS, 4: TLS_REVISIONS,
-        5: OUTCOME_REVISIONS, 6: STREAM_REVISIONS, 7: CHALLENGE_REVISIONS, 8: APPEND_REVISIONS, 9: FLOW_REVISIONS, 10: TLS_CLOSE_REVISIONS}[profile_version]
+        5: OUTCOME_REVISIONS, 6: STREAM_REVISIONS, 7: CHALLENGE_REVISIONS, 8: APPEND_REVISIONS, 9: FLOW_REVISIONS, 10: CHALLENGE_READ_REVISIONS}[profile_version]
 
 
 def load_pins(profile_version=1):

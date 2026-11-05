@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "kind": "synthetic-local-cartesian-native-quality",
+  "abi_version": 1,
+  "dps_version": 1,
+  "input_bound_bytes": 16384,
+  "maximum_canonical_v1_bytes": 4156,
+  "synthetic_only": true,
+  "actual_android_acceptance": false,
+  "physical_positioning_acceptance": false,
+  "vectors": [
+    {
+      "file": "relative_consistent.pb",
+      "bytes": 267,
+      "sha256": "31a678b65f2a24e7016cf6cf1d9438f721632bcf3f2c0c8ae77b4c3c7ca07fa7",
+      "now_unix_ms": 1000000,
+      "summary": {
+        "abi_version": 1,
+        "dps_version": 1,
+        "status": 2,
+        "frame_kind": 2,
+        "observation_count": 2,
+        "eligible_count": 2,
+        "excluded_count": 0,
+        "conflict_count": 0,
+        "limitations_mask": 127
+      }
+    },
+    {
+      "file": "relative_conflict.pb",
+      "bytes": 267,
+      "sha256": "375ca58ebd4049babb3d5f535639088d7872270deafebe5f8c77afdb280494a9",
+      "now_unix_ms": 1000000,
+      "summary": {
+        "abi_version": 1,
+        "dps_version": 1,
+        "status": 3,
+        "frame_kind": 2,
+        "observation_count": 2,
+        "eligible_count": 2,
+        "excluded_count": 0,
+        "conflict_count": 1,
+        "limitations_mask": 127
+      }
+    },
+    {
+      "file": "stale.pb",
+      "bytes": 147,
+      "sha256": "2a3138c6a851dd2538cdcd3a4e4173253a1dcbb43e9f23bbfe11ab742eb1cd17",
+      "now_unix_ms": 1000000,
+      "summary": {
+        "abi_version": 1,
+        "dps_version": 1,
+        "status": 0,
+        "frame_kind": 2,
+        "observation_count": 1,
+        "eligible_count": 0,
+        "excluded_count": 1,
+        "conflict_count": 0,
+        "limitations_mask": 127
+      }
+    },
+    {
+      "file": "empty.pb",
+      "bytes": 27,
+      "sha256": "26d85fcdd131798b0e130b3c0b66ec1e8fa58913c102bd5b2994e9b1e7d7dbe1",
+      "now_unix_ms": 1000000,
+      "summary": {
+        "abi_version": 1,
+        "dps_version": 1,
+        "status": 0,
+        "frame_kind": 2,
+        "observation_count": 0,
+        "eligible_count": 0,
+        "excluded_count": 0,
+        "conflict_count": 0,
+        "limitations_mask": 127
+      }
+    }
+  ]
+}

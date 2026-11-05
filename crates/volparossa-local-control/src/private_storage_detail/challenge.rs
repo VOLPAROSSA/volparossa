@@ -66,6 +66,9 @@ pub struct PrivateStorageChallengeDetail {
     /// Elapsed time within that challenge boundary when failure was observed.
     #[prost(enumeration = "PrivateStorageElapsedBucket", tag = "3")]
     pub in_challenge: i32,
+    /// Opt-in frame-read detail, only within the existing `ChallengeReadVerify` phase.
+    #[prost(message, optional, tag = "4")]
+    pub read: Option<PrivateStorageChallengeReadDetail>,
 }
 
 impl PrivateStorageChallengeDetail {
@@ -78,6 +81,88 @@ impl PrivateStorageChallengeDetail {
         for value in [self.before_challenge, self.in_challenge] {
             let bucket = PrivateStorageElapsedBucket::try_from(value).map_err(|_| invalid())?;
             if bucket == PrivateStorageElapsedBucket::Unobserved {
+                return Err(invalid());
+            }
+        }
+        if let Some(read) = self.read {
+            if phase != PrivateStorageChallengePhase::ChallengeReadVerify {
+                return Err(invalid());
+            }
+            read.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Last original read step entered; verification remains synchronous.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(i32)]
+pub enum PrivateStorageChallengeReadStep {
+    /// Reserved and rejected.
+    Unobserved = 0,
+    /// Reading the original four-byte frame length.
+    LengthRead = 1,
+    /// Reading the bounded frame body after length validation.
+    BodyRead = 2,
+    /// Synchronous challenge decoding and signature/authority verification.
+    Verification = 3,
+}
+
+/// An error actually returned by the existing wire exchange, never a remote cause.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(i32)]
+pub enum PrivateStorageChallengeReadOutcome {
+    /// Reserved and rejected; absence means no returned wire outcome observed.
+    Unobserved = 0,
+    /// The original read returned `UnexpectedEof`.
+    IoEof = 1,
+    /// Another original I/O error returned.
+    IoOther = 2,
+    /// Original frame/clock validation returned invalid input.
+    Invalid = 3,
+    /// Original challenge decoding or authentication returned rejection.
+    VerificationRejected = 4,
+    /// The wire exchange's existing timeout returned.
+    WireTimeout = 5,
+}
+
+/// No exact timestamps, sizes, frame bytes, identifiers or error text.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct PrivateStorageChallengeReadDetail {
+    /// Last observed original step.
+    #[prost(enumeration = "PrivateStorageChallengeReadStep", tag = "1")]
+    pub step: i32,
+    /// Absent means only that no returned wire outcome was observed.
+    #[prost(
+        enumeration = "PrivateStorageChallengeReadOutcome",
+        optional,
+        tag = "2"
+    )]
+    pub returned_outcome: Option<i32>,
+}
+
+impl PrivateStorageChallengeReadDetail {
+    pub(super) fn validate(self) -> Result<(), ControlProtocolError> {
+        use PrivateStorageChallengeReadOutcome as Outcome;
+        use PrivateStorageChallengeReadStep as Step;
+        let invalid = || ControlProtocolError::Invalid("private storage challenge read detail");
+        let step = Step::try_from(self.step).map_err(|_| invalid())?;
+        if step == Step::Unobserved {
+            return Err(invalid());
+        }
+        if let Some(outcome) = self.returned_outcome {
+            let outcome = Outcome::try_from(outcome).map_err(|_| invalid())?;
+            let valid = match outcome {
+                Outcome::IoEof | Outcome::IoOther | Outcome::WireTimeout => {
+                    step != Step::Verification
+                }
+                Outcome::Invalid => step != Step::BodyRead,
+                Outcome::VerificationRejected => step == Step::Verification,
+                Outcome::Unobserved => false,
+            };
+            if !valid {
                 return Err(invalid());
             }
         }

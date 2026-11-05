@@ -17,14 +17,14 @@ M = runpy.run_path(str(HERE / 'storage-consumer-maintenance-provision.py'))
 
 
 class ConsumerProvision(unittest.TestCase):
-    def test_profile_ten_pins_exact_close_adapters_without_changing_historical_runtime(self):
+    def test_profile_ten_pins_exact_read_adapters_without_changing_historical_runtime(self):
         previous, current = M['load_pins'](9), M['load_pins'](10)
         self.assertEqual(current['version'], 10)
         self.assertEqual(current['runtime'], previous['runtime'])
         self.assertEqual(len({M['pins_path'](v) for v in range(1, 11)}), 10)
         node = (HERE / 'storage-consumer-maintenance.mjs').read_text()
         for name in ('image', 'cloud'):
-            self.assertEqual(current['sources'][name]['revision'], M['TLS_CLOSE_REVISIONS'][name])
+            self.assertEqual(current['sources'][name]['revision'], M['CHALLENGE_READ_REVISIONS'][name])
             self.assertIn(current['sources'][name]['revision'], node)
             self.assertNotEqual(current['sources'][name]['revision'], previous['sources'][name]['revision'])
             self.assertEqual(set(current['sources'][name]['files']), set(previous['sources'][name]['files']))
@@ -32,7 +32,14 @@ class ConsumerProvision(unittest.TestCase):
                 if record != previous['sources'][name]['files'][p]}
             self.assertEqual(changed, {'src/core-storage.mjs'} if name == 'image' else {
                 'vendor/volparossa-image/core-storage.mjs', 'third_party/volparossa-image-source.json', 'THIRD_PARTY_LICENSES.md'})
+        sdk = dict(bytes=55166, sha256='a67e94953bc96bcb936f1a39d38e2a19ba1240815b4bca94f47c1e45131ab1fb')
+        self.assertEqual(current['sources']['image']['files']['src/core-storage.mjs'], sdk)
+        self.assertEqual(current['sources']['cloud']['files']['vendor/volparossa-image/core-storage.mjs'], sdk)
         invalids = [M['load_pins'](v) for v in range(1, 10)]
+        for app, old in dict(image='1e812ec6424a539a336d230b99ae1c11a494ca29',
+                cloud='35598609d3fedb5d1241a479c1930c8a6b831661').items():
+            value = copy.deepcopy(current); value['sources'][app]['revision'] = old
+            invalids.append(value)
         for name in ('image', 'cloud'):
             value = copy.deepcopy(current); value['sources'][name]['revision'] = previous['sources'][name]['revision']
             invalids.append(value)

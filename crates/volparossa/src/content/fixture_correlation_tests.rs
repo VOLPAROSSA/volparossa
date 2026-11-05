@@ -26,12 +26,126 @@ fn snapshot() -> StorageFixtureCorrelationResponse {
         state: State::Observed as i32,
         incomplete: false,
         records: vec![StorageFixtureCorrelationRecord {
+            request_observation: None,
+            flow_acquire: None,
             role: Role::Provider as i32,
             fingerprint: Some(vec![0xcd; 32]),
             phase: Phase::StorageChallengeWriteFlush as i32,
             terminal: Terminal::Active as i32,
         }],
     }
+}
+
+#[test]
+fn fixture_v2_cli_closed_summary_is_not_a_raw_code_or_provider_match() {
+    use volparossa_local_control::PrivateStorageFlowAcquireFailure;
+    let failure = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            stage: PrivateStorageFlowAcquireStage::HelperAcquire as i32,
+            reason: PrivateStorageFlowAcquireReason::HelperCleanupIncomplete as i32,
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::FlowIdentityUnavailable as i32),
+    };
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0] = StorageFixtureCorrelationRecord {
+        request_observation: None,
+        role: Role::Client as i32,
+        fingerprint: None,
+        phase: Phase::FlowAcquire as i32,
+        terminal: Terminal::OperationError as i32,
+        flow_acquire: Some(StorageFixtureAcquireSummary {
+            rounds: 1,
+            first: Some(failure),
+            last: Some(failure),
+        }),
+    };
+    let mut value = input("clients");
+    value["version"] = json!(2);
+    let request = parse(&value).unwrap();
+    let projected = project(&response, &request).unwrap();
+    assert_eq!(projected["version"], 2);
+    assert_eq!(projected["records"][0]["fingerprint"], Value::Null);
+    assert_eq!(
+        projected["records"][0]["flow_acquire"]["first"],
+        json!({
+            "stage": "helper_acquire", "reason": "helper_cleanup_incomplete",
+            "helper_diagnostic": "flow_identity_unavailable",
+        })
+    );
+    assert!(
+        !String::from_utf8(render(&projected).unwrap())
+            .unwrap()
+            .contains("MPTCP_FLOW_IDENTITY_UNAVAILABLE")
+    );
+    response.records[0].flow_acquire = None;
+    assert_eq!(
+        project(&response, &request).unwrap()["records"][0]["flow_acquire"],
+        Value::Null
+    );
+}
+
+#[test]
+fn fixture_cli_keeps_request_local_poll_timeout_before_cleanup_failure() {
+    use volparossa_local_control::PrivateStorageFlowAcquireFailure;
+    let first = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            stage: PrivateStorageFlowAcquireStage::HelperAcquire as i32,
+            reason: PrivateStorageFlowAcquireReason::HelperKernel as i32,
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut as i32),
+    };
+    let last = StorageFixtureAcquireFailure {
+        failure: Some(PrivateStorageFlowAcquireFailure {
+            reason: PrivateStorageFlowAcquireReason::HelperCleanupIncomplete as i32,
+            ..first.failure.unwrap()
+        }),
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::CleanupIncomplete as i32),
+    };
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0] = StorageFixtureCorrelationRecord {
+        request_observation: None,
+        role: Role::Client as i32,
+        fingerprint: None,
+        phase: Phase::FlowAcquire as i32,
+        terminal: Terminal::OperationError as i32,
+        flow_acquire: Some(StorageFixtureAcquireSummary {
+            rounds: 2,
+            first: Some(first),
+            last: Some(last),
+        }),
+    };
+    let mut value = input("clients");
+    value["version"] = json!(2);
+    let projected = project(&response, &parse(&value).unwrap()).unwrap();
+    let summary = &projected["records"][0]["flow_acquire"];
+    assert_eq!(
+        summary["first"]["helper_diagnostic"],
+        "mptcp_connect_poll_timed_out"
+    );
+    assert_eq!(summary["first"]["reason"], "helper_kernel");
+    assert_eq!(summary["last"]["helper_diagnostic"], "cleanup_incomplete");
+    assert_eq!(projected["acceptance_evidence"], false);
+    assert!(
+        !String::from_utf8(render(&projected).unwrap())
+            .unwrap()
+            .contains("MPTCP_CONNECT_POLL_TIMED_OUT")
+    );
+}
+
+#[test]
+fn fixture_v2_cli_rejects_downgrade_and_unknown_enum_before_rendering() {
+    let mut value = input("providers");
+    value["version"] = json!(2);
+    let request = parse(&value).unwrap();
+    assert!(project(&snapshot(), &request).is_err());
+    value["version"] = json!(4);
+    assert!(parse(&value).is_err());
+    let mut response = snapshot();
+    response.version = 2;
+    response.records[0].phase = 999;
+    assert!(project(&response, &request).is_err());
 }
 
 #[test]
@@ -165,6 +279,8 @@ fn fixture_cli_null_client_and_maximum_reply_remain_bounded() {
     let request = parse(&input("clients")).unwrap();
     let mut response = snapshot();
     response.records[0] = StorageFixtureCorrelationRecord {
+        request_observation: None,
+        flow_acquire: None,
         role: Role::Client as i32,
         fingerprint: None,
         phase: Phase::FlowAcquire as i32,
@@ -280,4 +396,54 @@ async fn fixture_cli_socket_roundtrip_rejects_cross_request_and_cross_action_dat
         }
         task.await.unwrap();
     }
+}
+
+#[test]
+fn fixture_v3_cli_keeps_target_private_and_rejects_unknown_request_metadata() {
+    let mut value = input("clients");
+    value["version"] = json!(3);
+    value["target"] = json!({"archive_id": "31".repeat(32), "provider_key": "32".repeat(32), "operation": "reserve"});
+    let request = parse(&value).unwrap();
+    let mut response = snapshot();
+    response.version = 3;
+    response.records[0].role = Role::Client as i32;
+    response.records[0].phase = Phase::ClientExchange as i32;
+    response.records[0].request_observation = Some(StorageFixtureRequestObservation {
+        request_digest: Some(vec![0x33; 32]),
+        operation: StorageFixtureOperation::Reserve as i32,
+        ..Default::default()
+    });
+    let projected = project(&response, &request).unwrap();
+    let encoded = String::from_utf8(render(&projected).unwrap()).unwrap();
+    assert!(!encoded.contains(&"31".repeat(32)));
+    assert!(!encoded.contains(&"32".repeat(32)));
+    assert!(!encoded.contains(&"ab".repeat(16)));
+    assert_eq!(
+        projected["records"][0]["request_observation"]["request_digest"],
+        "33".repeat(32)
+    );
+    assert_eq!(
+        projected["records"][0]["request_observation"]["provider_stage"],
+        "unobserved"
+    );
+    assert_eq!(projected["acceptance_evidence"], false);
+    assert_eq!(projected["target_scoped"], true);
+    assert_eq!(projected["complete_phase_history"], false);
+    for key in ["archive_id", "provider_key", "operation"] {
+        let mut missing = value.clone();
+        missing["target"].as_object_mut().unwrap().remove(key);
+        assert!(parse(&missing).is_err());
+    }
+    value["target"]["extra"] = json!("private-canary");
+    assert!(parse(&value).is_err());
+    value["target"].as_object_mut().unwrap().remove("extra");
+    value["target"]["operation"] = json!("private-canary");
+    let error = parse(&value).unwrap_err().to_string();
+    assert!(!error.contains("private-canary"));
+    response.records[0]
+        .request_observation
+        .as_mut()
+        .unwrap()
+        .provider_stage = 999;
+    assert!(project(&response, &request).is_err());
 }

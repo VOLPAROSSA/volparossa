@@ -1199,7 +1199,7 @@ fi
 if [ "$private_storage_maintenance" = yes ]; then
     for maintenance_fixture in private-storage-maintenance-smoke.sh private-storage-maintenance-smoke.py \
         private-storage-log-sampler.py content-provider-readiness.py storage-provider-activity-sampler.py storage-fixture-correlation-sampler.py \
-        storage-acquire-diagnostic.py \
+        storage-acquire-diagnostic.py storage-provider-usage-snapshot.py storage-consumer-provider-usage.py \
         storage-consumer-maintenance-smoke.sh storage-consumer-maintenance-smoke.py \
         storage-consumer-maintenance.mjs storage-consumer-maintenance-pins.json storage-consumer-maintenance-pins-v2.json \
         storage-consumer-maintenance-pins-v3.json storage-consumer-maintenance-pins-v4.json storage-consumer-maintenance-pins-v5.json \
@@ -3134,6 +3134,7 @@ fi
 if [ "$private_storage_maintenance" = yes ]; then
     for maintenance_script in private-storage-maintenance-smoke.py private-storage-log-sampler.py content-provider-readiness.py \
         storage-provider-activity-sampler.py storage-fixture-correlation-sampler.py storage-acquire-diagnostic.py \
+        storage-provider-usage-snapshot.py storage-consumer-provider-usage.py storage-consumer-failure-boundary.py \
         storage-consumer-maintenance-smoke.py storage-consumer-maintenance.mjs \
         storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
         storage-consumer-control-underlay.py storage-consumer-network.py storage-consumer-route-sampler.py \

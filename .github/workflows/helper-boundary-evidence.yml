@@ -405,8 +405,8 @@ jobs:
               helper-boundary-evidence-v1.json.sha256|\
               helper-restart-exact-present-evidence-v1.json|\
               helper-restart-exact-present-evidence-v1.json.sha256|\
-              helper-restart-vm-environment-v1.json|\
-              vm-environment-v1.json|\
+              helper-restart-vm-environment-v3.json|\
+              vm-environment-v3.json|\
               vm-console.log|\
               helper-boundary-proof.stderr.log)
                 return 0
@@ -476,11 +476,11 @@ jobs:
                 helper-restart-exact-present-evidence-v1.json.sha256)
                   test "$size" -eq 112
                   ;;
-                helper-restart-vm-environment-v1.json)
+                helper-restart-vm-environment-v3.json)
                   test "$size" -ge 1
                   test "$size" -le 32768
                   ;;
-                vm-environment-v1.json)
+                vm-environment-v3.json)
                   test "$size" -ge 1
                   test "$size" -le 32768
                   ;;
@@ -506,7 +506,7 @@ jobs:
             printf '%s\n' 'any=false' >>"$GITHUB_OUTPUT"
           fi
 
-          if test -f "$retained_dir/vm-environment-v1.json" \
+          if test -f "$retained_dir/vm-environment-v3.json" \
               || test -f "$retained_dir/vm-console.log" \
               || test -f "$retained_dir/helper-boundary-proof.stderr.log"; then
             printf '%s\n' 'diagnostics_any=true' >>"$GITHUB_OUTPUT"
@@ -526,8 +526,8 @@ jobs:
           report_hash="$retained_dir/helper-boundary-evidence-v1.json.sha256"
           restart_report="$retained_dir/helper-restart-exact-present-evidence-v1.json"
           restart_report_hash="$retained_dir/helper-restart-exact-present-evidence-v1.json.sha256"
-          restart_environment="$retained_dir/helper-restart-vm-environment-v1.json"
-          environment="$retained_dir/vm-environment-v1.json"
+          restart_environment="$retained_dir/helper-restart-vm-environment-v3.json"
+          environment="$retained_dir/vm-environment-v3.json"
           console="$retained_dir/vm-console.log"
           proof_stderr="$retained_dir/helper-boundary-proof.stderr.log"
           validator_stdout="$RUNNER_TEMP/helper-boundary-validator.stdout"
@@ -577,7 +577,7 @@ jobs:
           )
           environment_validator_stdout="$RUNNER_TEMP/vm-environment-validator.stdout"
           environment_validator_stderr="$RUNNER_TEMP/vm-environment-validator.stderr"
-          tests/helper/validate-helper-boundary-vm-environment-v1.sh \
+          tests/helper/validate-helper-boundary-vm-environment-v3.sh \
             "$environment" \
             "$report" \
             "$GITHUB_SHA" \
@@ -606,7 +606,7 @@ jobs:
           )
           restart_environment_validator_stdout="$RUNNER_TEMP/restart-environment-validator.stdout"
           restart_environment_validator_stderr="$RUNNER_TEMP/restart-environment-validator.stderr"
-          tests/helper/validate-helper-restart-vm-environment-v1.sh \
+          tests/helper/validate-helper-restart-vm-environment-v3.sh \
             "$restart_environment" \
             "$restart_report" \
             "$GITHUB_SHA" \
@@ -658,13 +658,13 @@ jobs:
           steps.vm_proof.outputs.exit_code == '0' &&
           steps.host_validation.outcome == 'success' &&
           steps.verify_kvm_state.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: helper-boundary-evidence-${{ github.sha }}
           path: |
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-evidence-v1.json.sha256
-            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error
@@ -679,11 +679,11 @@ jobs:
           steps.host_validation.outcome != 'success' ||
           steps.verify_kvm_state.outcome != 'success') &&
           steps.retained_artifacts.outputs.diagnostics_any == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: helper-boundary-diagnostics-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error
@@ -697,13 +697,13 @@ jobs:
           steps.vm_proof.outputs.exit_code == '0' &&
           steps.host_validation.outcome == 'success' &&
           steps.verify_kvm_state.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: helper-restart-exact-present-evidence-${{ github.sha }}
           path: |
             ${{ runner.temp }}/helper-boundary-retained/helper-restart-exact-present-evidence-v1.json
             ${{ runner.temp }}/helper-boundary-retained/helper-restart-exact-present-evidence-v1.json.sha256
-            ${{ runner.temp }}/helper-boundary-retained/helper-restart-vm-environment-v1.json
+            ${{ runner.temp }}/helper-boundary-retained/helper-restart-vm-environment-v3.json
             ${{ runner.temp }}/helper-boundary-retained/vm-console.log
             ${{ runner.temp }}/helper-boundary-retained/helper-boundary-proof.stderr.log
           if-no-files-found: error

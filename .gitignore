@@ -40,3 +40,4 @@ native/**/build/
 *.sqlite3
 config/local.yaml
 config/development/generated-keys/
+**/__pycache__/

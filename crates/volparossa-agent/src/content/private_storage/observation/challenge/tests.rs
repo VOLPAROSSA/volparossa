@@ -6,6 +6,74 @@ use volparossa_content::private_storage::wire::begin_observation::{Observer, Pha
 use super::super::{ContentError, Deadline, Observation, Stage};
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn challenge_read_opt_in_retains_original_deadline_and_freezes_only_observed_steps() {
+    use volparossa_content::private_storage::wire::begin_observation::ReadStep;
+    for enabled in [false, true] {
+        let observation = Observation::default().with_challenge_read(enabled);
+        let started = Instant::now();
+        let operation = observation.budget(Deadline::Operation, Duration::from_secs(120), async {
+            observation
+                .boundary(Stage::Challenge, async {
+                    observation.phase(WirePhase::ChallengeReadVerify);
+                    observation.read_step(ReadStep::BodyRead);
+                    pending::<Result<(), ContentError>>().await
+                })
+                .await
+        });
+        advance(Duration::from_secs(3)).await;
+        assert!(matches!(operation.await, Err(ContentError::Unavailable)));
+        assert_eq!(started.elapsed(), Duration::from_secs(120));
+        let detail = observation.detail().unwrap();
+        assert_eq!(detail.deadline_scope, Deadline::Operation as i32);
+        let challenge = detail.challenge.unwrap();
+        assert_eq!(challenge.before_challenge, Bucket::S1To5 as i32);
+        assert_eq!(challenge.in_challenge, Bucket::S90To120 as i32);
+        assert_eq!(challenge.read.is_some(), enabled);
+        if let Some(read) = challenge.read {
+            assert_eq!(read.step, Step::BodyRead as i32);
+            assert!(read.returned_outcome.is_none());
+        }
+        observation.read_failure(
+            volparossa_content::private_storage::wire::begin_observation::ReadFailure::IoOther,
+        );
+        assert_eq!(observation.detail().unwrap(), detail);
+        observation.reset();
+        assert!(observation.detail().is_none());
+    }
+}
+
+#[tokio::test]
+async fn challenge_read_records_only_a_returned_wire_error_within_read_verify() {
+    let observation = Observation::default().with_challenge_read(true);
+    observation.challenge.start_operation(Instant::now());
+    let result = observation
+        .boundary(Stage::Challenge, async {
+            observation.phase(WirePhase::ChallengeReadVerify);
+            observation.read_step(
+                volparossa_content::private_storage::wire::begin_observation::ReadStep::LengthRead,
+            );
+            observation.read_failure(
+                volparossa_content::private_storage::wire::begin_observation::ReadFailure::IoEof,
+            );
+            Err::<(), _>(ContentError::Unavailable)
+        })
+        .await;
+    assert!(result.is_err());
+    let detail = observation.detail().unwrap();
+    assert_eq!(detail.deadline_scope, Deadline::None as i32);
+    assert_eq!(
+        detail.challenge.unwrap().read.unwrap().returned_outcome,
+        Some(Outcome::IoEof as i32)
+    );
+    observation.boundary(Stage::Challenge, async {
+        observation.phase(WirePhase::ChallengeReadVerify);
+        observation.read_step(volparossa_content::private_storage::wire::begin_observation::ReadStep::Verification);
+        Ok(())
+    }).await.unwrap();
+    assert!(observation.detail().is_none());
+}
+
 #[test]
 fn challenge_elapsed_bucket_boundaries_are_exact_and_finite() {
     let bounds = [
@@ -171,13 +239,16 @@ async fn challenge_requester_cancellation_clears_progress_without_failure_projec
     let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
     let (started, running) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
-        let observation = Observation::default();
+        let observation = Observation::default().with_challenge_read(true);
         let result = observation
             .budget(
                 Deadline::Operation,
                 Duration::from_secs(120),
                 observation.requester_boundary(Stage::Challenge, &mut server, async {
-                    observation.phase(WirePhase::GrantWriteFlush);
+                    observation.phase(WirePhase::ChallengeReadVerify);
+                    observation.read_step(
+                        volparossa_content::private_storage::wire::begin_observation::ReadStep::BodyRead,
+                    );
                     started.send(()).unwrap();
                     pending::<Result<(), ContentError>>().await
                 }),

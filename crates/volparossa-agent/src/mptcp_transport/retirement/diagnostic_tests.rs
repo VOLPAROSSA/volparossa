@@ -93,6 +93,7 @@ fn flow_acquire_classification_precedes_ambiguous_mapping_without_clearing_poiso
             Some(Failure {
                 stage: Stage::HelperAcquire,
                 reason,
+                helper_diagnostic: None,
             }),
         );
         assert_eq!(

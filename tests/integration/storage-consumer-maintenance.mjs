@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readdir, readlink, realpath, unlink } from 'node:fs/promises';
 import http from 'node:http';
+import { Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -37,8 +38,8 @@ const APPEND_REVISIONS = Object.freeze({ image: '10c46b9d6424929748e324fdd188a2f
   cloud: 'dda7a21818ece774445cf63d6e9a01fe0f2803b2' });
 const FLOW_REVISIONS = Object.freeze({ image: '9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
   cloud: '47b0f03b84913761570c3de7037ba5509b848c23' });
-const TLS_CLOSE_REVISIONS = Object.freeze({ image: '1e812ec6424a539a336d230b99ae1c11a494ca29',
-  cloud: '35598609d3fedb5d1241a479c1930c8a6b831661' });
+const CHALLENGE_READ_REVISIONS = Object.freeze({ image: 'f51b8ace0352377c7068a93fc8f4544f18e52978',
+  cloud: '5f143725fd18c98848beb61c9198a82066bfec13' });
 const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'working', 'paused',
   'enrollment_expired', 'core_unavailable', 'core_turn_revoked', 'turn_completed', 'retry_pending']);
 const SQL = Buffer.from('-- VOLPAROSSA synthetic quiesced snapshot\nCREATE TABLE fixture (id integer);\nINSERT INTO fixture VALUES (1);\n');
@@ -126,15 +127,15 @@ function flowAcquire(value) {
 function agentOutcome(value, stage, version = 4, operation = null) {
   if (value === null) return null;
   check(['wire_receipt', 'agent_terminal', 'deadline'].includes(stage)
-    && closedKeys(value, ['status', 'detail', ...([7, 8, 9].includes(version) ? ['append_timing'] : []),
-      ...(version === 9 ? ['tls_close_failure'] : [])])
+    && closedKeys(value, ['status', 'detail', ...([7, 8, 9, 10].includes(version) ? ['append_timing'] : []),
+      ...(version >= 9 ? ['tls_close_failure'] : [])])
     && ['observed', 'missing', 'pending', 'expired', 'query_failed', 'query_timeout'].includes(value.status), 'deposit_diagnostics');
   if (value.status !== 'observed') {
     check(value.detail === null, 'deposit_diagnostics');
-    if ([7, 8, 9].includes(version)) check(value.append_timing === null, 'deposit_diagnostics');
-    if (version === 9) check(value.tls_close_failure === null, 'deposit_diagnostics');
-    return { status: value.status, detail: null, ...([7, 8, 9].includes(version) ? { append_timing: null } : {}),
-      ...(version === 9 ? { tls_close_failure: null } : {}) };
+    if ([7, 8, 9, 10].includes(version)) check(value.append_timing === null, 'deposit_diagnostics');
+    if (version >= 9) check(value.tls_close_failure === null, 'deposit_diagnostics');
+    return { status: value.status, detail: null, ...([7, 8, 9, 10].includes(version) ? { append_timing: null } : {}),
+      ...(version >= 9 ? { tls_close_failure: null } : {}) };
   }
   const d = value.detail;
   check(closedKeys(d, ['phase', 'category', 'deadline_scope']) && OUTCOME_PHASES.includes(d.phase)
@@ -144,7 +145,7 @@ function agentOutcome(value, stage, version = 4, operation = null) {
     && (d.deadline_scope !== 'bridge' || OUTCOME_PHASES.slice(1, 15).includes(d.phase))
     && (d.deadline_scope !== 'remote_wire' || OUTCOME_PHASES.slice(6, 13).includes(d.phase)), 'deposit_diagnostics');
   let timing = null;
-  if ([7, 8, 9].includes(version) && value.append_timing !== null) {
+  if ([7, 8, 9, 10].includes(version) && value.append_timing !== null) {
     const t = value.append_timing;
     check(closedKeys(t, ['before_payload', 'in_payload_write_flush', 'in_receipt_read'])
       && operation === 'append' && ['remote_payload_write', 'remote_receipt_read'].includes(d.phase)
@@ -154,21 +155,21 @@ function agentOutcome(value, stage, version = 4, operation = null) {
     timing = { before_payload: t.before_payload, in_payload_write_flush: t.in_payload_write_flush,
       in_receipt_read: t.in_receipt_read };
   }
-  if (version === 9) {
+  if (version >= 9) {
     check(value.tls_close_failure === null || (
       ['shutdown_io', 'read_io', 'trailing_data', 'internal_deadline'].includes(value.tls_close_failure)
       && d.phase === 'transport_tls_close' && d.category === 'unavailable' && d.deadline_scope === 'none'
       && value.append_timing === null), 'deposit_diagnostics');
   }
   return { status: value.status, detail: { phase: d.phase, category: d.category, deadline_scope: d.deadline_scope },
-    ...([7, 8, 9].includes(version) ? { append_timing: timing } : {}),
-    ...(version === 9 ? { tls_close_failure: value.tls_close_failure } : {}) };
+    ...([7, 8, 9, 10].includes(version) ? { append_timing: timing } : {}),
+    ...(version >= 9 ? { tls_close_failure: value.tls_close_failure } : {}) };
 }
 
 // This proof has exactly four fragments/two initial copies. The bridge already
 // checks general archive geometry; revalidate the narrower exported trial here.
 export function depositDiagnostic(value, version = 1) {
-  check([1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version), 'deposit_diagnostics');
+  check([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(version), 'deposit_diagnostics');
   check(closedKeys(value, ['version', 'failures', 'omitted_failures']) && value.version === version
     && Array.isArray(value.failures) && value.failures.length <= 8 && value.omitted_failures === 0, 'deposit_diagnostics');
   const seen = new Set(), failures = value.failures.map(failure => {
@@ -207,13 +208,14 @@ export function depositDiagnostic(value, version = 1) {
       }
       if (version >= 6) {
         const c = value.challenge;
-        check(c === null || (closedKeys(c, ['phase', 'before_challenge', 'in_challenge'])
+        check(c === null || (closedKeys(c, ['phase', 'before_challenge', 'in_challenge', ...(version === 10 ? ['read'] : [])])
           && CHALLENGE_PHASES.has(c.phase) && ELAPSED_BUCKETS.has(c.before_challenge)
           && ELAPSED_BUCKETS.has(c.in_challenge) && value.stage === 'challenge'
           && value.tls_failure === null && value.stream_failure === null
           && failure.agent_code === 'CONTENT_UNAVAILABLE'), 'deposit_diagnostics');
         detail.challenge = c === null ? null : { phase: c.phase,
-          before_challenge: c.before_challenge, in_challenge: c.in_challenge };
+          before_challenge: c.before_challenge, in_challenge: c.in_challenge,
+          ...(version === 10 ? { read: challengeRead(c.read, c.phase) } : {}) };
       }
       if (version >= 8) {
         const flow = value.flow_acquire;
@@ -232,6 +234,16 @@ export function depositDiagnostic(value, version = 1) {
   });
   return { version, failures, omitted_failures: 0 };
 }
+
+function challengeRead(value, phase) {
+  if (value === null) return null;
+  check(phase === 'challenge_read_verify' && closedKeys(value, ['step', 'returned_outcome'])
+    && ['length_read', 'body_read', 'verification'].includes(value.step), 'deposit_diagnostics');
+  const allowed = { length_read: ['io_eof', 'io_other', 'invalid', 'wire_timeout'],
+    body_read: ['io_eof', 'io_other', 'wire_timeout'], verification: ['invalid', 'verification_rejected'] };
+  check(value.returned_outcome === null || allowed[value.step].includes(value.returned_outcome), 'deposit_diagnostics');
+  return { step: value.step, returned_outcome: value.returned_outcome };
+}
 class PublishFailure extends Error {
   constructor(observation) {
     super('publish_operation');
@@ -242,9 +254,10 @@ class PublishFailure extends Error {
 
 // Observe only the closed bridge result returned by this exact call. Never
 // copy its raw storage report, paths, exceptions or private journal to evidence.
-export function requirePublishComplete(value, app, operation, profileVersion = 1) {
+export function requirePublishComplete(value, app, operation, profileVersion = 1, challengeReadDiagnosticsV10 = false) {
   check(['image', 'cloud'].includes(app) && ['create', 'deposit'].includes(operation), 'arguments');
   check([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(profileVersion), 'arguments');
+  check(typeof challengeReadDiagnosticsV10 === 'boolean' && (!challengeReadDiagnosticsV10 || profileVersion === 10), 'arguments');
   const report = value?.storage;
   const present = report !== null && typeof report === 'object' && !Array.isArray(report);
   let state = 'not_applicable', diagnostic = null;
@@ -252,7 +265,7 @@ export function requirePublishComplete(value, app, operation, profileVersion = 1
     state = 'missing';
     if (present && Object.hasOwn(report, 'deposit_diagnostics')) {
       try {
-        diagnostic = depositDiagnostic(report.deposit_diagnostics, profileVersion - 1);
+        diagnostic = depositDiagnostic(report.deposit_diagnostics, challengeReadDiagnosticsV10 ? 10 : profileVersion - 1);
         check(report.operation_complete === false || (report.operation_complete === true && diagnostic.failures.length === 0),
           'deposit_diagnostics');
         check(value.status !== 'complete' || report.operation_complete === true, 'deposit_diagnostics');
@@ -263,6 +276,7 @@ export function requirePublishComplete(value, app, operation, profileVersion = 1
   if (value?.status === 'complete' && value.local_process_joined === true
     && (profileVersion === 1 || operation === 'create' || (state === 'observed' && diagnostic.failures.length === 0))) return;
   throw new PublishFailure({ version: profileVersion, app, operation,
+    ...(challengeReadDiagnosticsV10 ? { diagnostic_version: 10 } : {}),
     status: PUBLISH_STATUSES.has(value?.status) ? value.status : 'unknown',
     code: PUBLISH_CODES.has(value?.code) ? value.code : 'unknown',
     local_process_joined: observedBoolean(value?.local_process_joined),
@@ -272,8 +286,10 @@ export function requirePublishComplete(value, app, operation, profileVersion = 1
 }
 
 export function consumerFailureReport(ctx, phase, error) {
+  if (error instanceof RequestStageFailure) return error.primary;
   if (error instanceof PublishLifecycleFailure) {
-    return { ...error.primary, version: ctx.profileVersion + 2, publish_cleanup: error.cleanup };
+    return { ...error.primary, version: error.catalogRestore ? 13 : ctx.profileVersion + 2,
+      ...(error.catalogRestore ? { catalog_restore: error.catalogRestore } : {}), publish_cleanup: error.cleanup };
   }
   const publish = error instanceof PublishFailure;
   return { version: publish ? error.observation.version + 1 : 1, kind: 'storage-consumer-maintenance', phase, passed: false,
@@ -285,10 +301,18 @@ export function consumerFailureReport(ctx, phase, error) {
 }
 
 class PublishLifecycleFailure extends Error {
-  constructor(primary, cleanup, cause) {
+  constructor(primary, cleanup, cause, catalogRestore) {
     super('publish_lifecycle_failed', { cause });
     this.primary = Object.freeze(primary);
     this.cleanup = Object.freeze(cleanup);
+    this.catalogRestore = catalogRestore;
+  }
+}
+
+class RequestStageFailure extends Error {
+  constructor(primary, cause) {
+    super('request_stage_original_failure', { cause });
+    this.primary = Object.freeze(primary);
   }
 }
 
@@ -299,13 +323,20 @@ export async function withPublishCore(ctx, app, core, operation) {
     try { return await operation(); } finally { await core.close(); }
   }
   check(['image', 'cloud'].includes(app), 'arguments');
-  let result, primary, cause;
+  // Only this lifecycle can consume its catalog observation. Never carry it
+  // into a later policy read, application, phase, or independent close failure.
+  catalogRestoreFailures.delete(ctx);
+  let result, primary, cause, catalogRestore;
   try { result = await operation(); }
   catch (error) {
     cause = error;
+    const observed = catalogRestoreFailures.get(ctx);
+    if (app === 'cloud' && ctx.profileVersion === 10 && ctx.stage === 'cloud_catalog_create'
+        && observed && Object.is(observed.error, error)) catalogRestore = observed.observation;
     try { primary = consumerFailureReport(ctx, 'publish', error); }
     catch { primary = consumerFailureReport(ctx, 'publish', undefined); }
   }
+  catalogRestoreFailures.delete(ctx);
   const beforeClose = ctx.stage;
   ctx.stage = `${app}_core_close`;
   let state = 'complete';
@@ -317,24 +348,226 @@ export async function withPublishCore(ctx, app, core, operation) {
       primary = consumerFailureReport(ctx, 'publish', { code: 'core_close_failed' });
     }
   }
-  if (primary) throw new PublishLifecycleFailure(primary, { app, state }, cause);
+  if (primary) throw new PublishLifecycleFailure(primary, { app, state }, cause, catalogRestore);
   ctx.stage = beforeClose;
   return result;
 }
 
+export function requestStageTarget(journal, signed, config) {
+  const hex = value => {
+    check(Array.isArray(value) && value.length === 32 && value.every(byte => integer(byte, 0, 255)), 'configuration');
+    return Buffer.from(value).toString('hex');
+  };
+  const manifest = signed?.manifest, copy = manifest?.fragments?.[2]?.copies?.[0];
+  check(config.providers?.length === 3 && manifest?.providers?.length === 3 && manifest?.fragments?.length === 4
+    && integer(copy?.provider, 0, 2), 'configuration');
+  const provider = hex(journal.provider_key), archive = hex(journal.archive_id), index = copy.provider;
+  check(hex(copy.archive_id) === archive && hex(manifest.providers[index].key) === provider
+    && config.providers[index].key === provider && new Set(config.providers.map(value => value.key)).size === 3,
+  'configuration');
+  return { version: 3, target: { archive_id: archive, provider_key: provider, operation: 'reserve' }, provider_index: index };
+}
+
+export function requestStageOutcome(error) {
+  const value = error instanceof PublishFailure ? error.observation : null;
+  const failures = value?.deposit_diagnostics?.failures;
+  return value?.app === 'image' && value.operation === 'deposit' && value.local_process_joined === true
+    && value.deposit_diagnostics_state === 'observed' && value.deposit_diagnostics.omitted_failures === 0
+    && failures?.length === 1 && failures[0].fragment_index === 2 && failures[0].copy_index === 0
+    && failures[0].operation === 'reserve' ? 'targeted_failure' : 'untargeted_failure';
+}
+
+// Only the disposable profile owner can inherit this private pipe. No identifier
+// appears in argv/env or public receipts. SDK operation limits stay unchanged;
+// this handshake spends time from the existing enclosing phase budget.
+export async function withRequestStage(ctx, app, config, operation,
+  channelFactory = fd => new Socket({ fd, readable: true, writable: true })) {
+  if (!Number.isSafeInteger(ctx.requestStageFd) || ctx.profileVersion !== 10) return operation();
+  let channel, read, finish, stop;
+  try {
+    channel = channelFactory(ctx.requestStageFd);
+    stop = () => channel.destroy();
+    let bytes = Buffer.alloc(0), pending, closed = false;
+    channel.on('error', () => stop());
+    channel.on('close', () => { closed = true; if (pending) pending(); });
+    channel.on('end', stop);
+    channel.on('data', block => {
+      if (bytes.length + block.length > 4096) { stop(); return; }
+      bytes = Buffer.concat([bytes, block]);
+      if (pending) pending();
+    });
+    ctx.signal.addEventListener('abort', stop, { once: true });
+    if (ctx.signal.aborted) stop();
+    read = capMs => new Promise((resolve, reject) => {
+      const timer = setTimeout(stop, Math.max(0, Math.min(capMs, ctx.deadline - performance.now())));
+      pending = () => {
+        if (closed) { clearTimeout(timer); pending = null; reject(new Error('diagnostic_unavailable')); return; }
+        if (!bytes.includes(10)) return;
+        clearTimeout(timer); pending = null;
+        try {
+          check(bytes.at(-1) === 10 && bytes.indexOf(10) === bytes.length - 1, 'configuration');
+          const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+          bytes = Buffer.alloc(0);
+          check(closedKeys(value, ['version', 'state']) && value.version === 3, 'configuration');
+          resolve(value.state);
+        } catch { reject(new Error('diagnostic_unavailable')); }
+      };
+      pending();
+    });
+    finish = async outcome => {
+      try {
+        channel.write(`${JSON.stringify({ version: 3, outcome })}\n`);
+        check(await read(30000) === 'closed', 'configuration');
+      }
+      catch { /* Diagnostic unavailability never replaces the operation result. */ }
+      finally { ctx.signal.removeEventListener('abort', stop); channel.destroy(); }
+    };
+    const target = requestStageTarget(
+      await json(join(app, 'archive/fragment-0002/copy-0/archive.json')),
+      await json(join(app, 'archive/fragments.json')), config);
+    channel.write(`${JSON.stringify(target)}\n`);
+    check(['armed', 'unavailable'].includes(await read(15000)), 'configuration');
+  } catch {
+    if (channel) channel.destroy();
+    if (stop) ctx.signal.removeEventListener('abort', stop);
+    finish = null;
+  }
+  try {
+    const result = await operation();
+    if (finish) await finish('complete');
+    return result;
+  } catch (error) {
+    // Freeze the original phase outcome before optional query/disarm latency can
+    // cross its deadline. No diagnostic error can replace this failure receipt.
+    let primary;
+    try { primary = consumerFailureReport(ctx, 'publish', error); }
+    catch { primary = consumerFailureReport(ctx, 'publish', undefined); }
+    if (finish) await finish(requestStageOutcome(error));
+    throw new RequestStageFailure(primary, error);
+  }
+}
+
+const catalogRestoreFailures = new WeakMap();
+const CATALOG_RESTORE_ERRORS = new Set(['invalid_request', 'storage_closed', 'operation_in_progress',
+  'foreground_cleanup_unconfirmed', 'maintenance_cleanup_unconfirmed', 'cancelled', 'core_spawn_failed',
+  'local_verification_failed', 'local_input_unavailable', 'private_file_required', 'private_directory_required',
+  'output_exists', 'invalid_core_executable', 'invalid_control_socket']);
+const catalogCode = (value, allowed) => typeof value === 'string' && value.length <= 64 && allowed.has(value);
+function dataField(value, name) {
+  const field = Object.getOwnPropertyDescriptor(value, name);
+  if (!field) return { state: 'missing' };
+  return Object.hasOwn(field, 'value') ? { state: 'observed', value: field.value } : { state: 'invalid' };
+}
+function catalogRestoreResult(value) {
+  if (value === null || value === undefined) return { state: 'missing', result: null };
+  try {
+    if (typeof value !== 'object' || Array.isArray(value)) return { state: 'invalid', result: null };
+    const names = ['version', 'operation', 'status', 'code', 'local_process_joined',
+      'remote_cleanup_confirmed', 'restore_verified', 'storage'];
+    // Inspect only own data fields; getters, unknown fields and oversized strings
+    // cannot become evidence. Never stringify or copy a bridge report.
+    const own = Reflect.ownKeys(value);
+    if (own.length > names.length || own.some(key => !names.includes(key))) return { state: 'invalid', result: null };
+    const fields = names.map(name => dataField(value, name));
+    if (fields.some(field => field.state === 'invalid')) return { state: 'invalid', result: null };
+    if (fields.some(field => field.state === 'missing')) return { state: 'missing', result: null };
+    const [version, operation, status, code, joined, cleanup, verified, storage] = fields.map(field => field.value);
+    if (version !== 1 || operation !== 'restore' || !catalogCode(status, PUBLISH_STATUSES)
+        || !catalogCode(code, PUBLISH_CODES) || typeof joined !== 'boolean' || cleanup !== false
+        || typeof verified !== 'boolean') return { state: 'invalid', result: null };
+    let coreState = 'missing', complete = null;
+    if (storage !== null && storage !== undefined) {
+      if (typeof storage !== 'object' || Array.isArray(storage)) coreState = 'invalid';
+      else {
+        const field = dataField(storage, 'operation_complete');
+        coreState = field.state;
+        if (coreState === 'observed') {
+          if (typeof field.value === 'boolean') complete = field.value;
+          else coreState = 'invalid';
+        }
+      }
+    }
+    if ((status === 'complete' && (code !== 'ok' || !joined || !verified || complete !== true))
+        || (status !== 'complete' && verified)
+        || (status === 'incomplete' && (code !== 'retained_operation_incomplete' || complete !== false))) {
+      return { state: 'invalid', result: null };
+    }
+    return { state: 'observed', result: Object.freeze({ status, code, local_process_joined: joined,
+      restore_verified: verified, core_report_state: coreState, core_operation_complete: complete }) };
+  } catch { return { state: 'invalid', result: null }; }
+}
+
+// This wraps the existing catalog-only factory and the SAME bridge restore
+// method. It grants no new authority and neither retries nor changes arguments,
+// receiver, returned object or thrown error. A projection failure is diagnostic.
+export function observeCatalogRestore(storageFactory) {
+  let invocation = typeof storageFactory === 'function' ? 'not_invoked' : 'unavailable';
+  let completion = 'unavailable', resultState = 'unavailable', result = null;
+  let errorState = 'unavailable', errorCode = null, frozen = false;
+  const factory = typeof storageFactory !== 'function' ? storageFactory : async function (...args) {
+    const storage = await Reflect.apply(storageFactory, this, args);
+    return { get restore() {
+      const method = storage.restore;
+      if (typeof method !== 'function') return method;
+      return async function (...restoreArgs) {
+        if (!frozen) invocation = invocation === 'not_invoked' ? 'once' : 'multiple';
+        try {
+          const value = await Reflect.apply(method, storage, restoreArgs);
+          if (!frozen && invocation === 'once') {
+            completion = 'returned';
+            const projected = catalogRestoreResult(value);
+            resultState = projected.state; result = projected.result;
+          }
+          return value;
+        } catch (error) {
+          if (!frozen && invocation === 'once') {
+            completion = 'threw';
+            try {
+              if ((typeof error !== 'object' && typeof error !== 'function') || error === null) errorState = 'missing';
+              else {
+                const field = dataField(error, 'code');
+                errorState = field.state;
+                if (errorState === 'observed') {
+                  if (catalogCode(field.value, CATALOG_RESTORE_ERRORS)) errorCode = field.value;
+                  else errorState = 'invalid';
+                }
+              }
+            } catch { errorState = 'invalid'; }
+          }
+          throw error;
+        }
+      };
+    } };
+  };
+  return { factory, snapshot() {
+    frozen = true;
+    // Multiple invocations cannot be represented as one bound result.
+    const single = invocation === 'once';
+    return Object.freeze({ version: 1, scope: 'cloud_catalog_storage_restore_call', diagnostic_only: true,
+      acceptance_evidence: false, causal_attribution: false, invocation,
+      completion: single ? completion : 'unavailable', result_state: single ? resultState : 'unavailable',
+      result: single ? result : null, error_state: single ? errorState : 'unavailable', error_code: single ? errorCode : null });
+  } };
+}
+
 export async function createPublishCatalog(ctx, m, request, options) {
   if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_create';
+  const observer = ctx.profileVersion === 10 ? observeCatalogRestore(options.storageFactory) : null;
+  const catalogOptions = observer ? { ...options, storageFactory: observer.factory } : options;
   let created;
-  try { created = await m.createPrivateCatalog(request, options); }
+  try { created = await m.createPrivateCatalog(request, catalogOptions); }
   catch (error) {
+    let primary = error;
     if ([8, 9, 10].includes(ctx.profileVersion) && typeof m.PrivateCatalogError === 'function'
       && error instanceof m.PrivateCatalogError
       && Object.hasOwn(CATALOG_CODES, error.code)) {
       const code = CATALOG_CODES[error.code];
-      throw Object.assign(new Error(code, { cause: error }), { code });
+      primary = Object.assign(new Error(code, { cause: error }), { code });
     }
-    throw error;
+    if (observer) catalogRestoreFailures.set(ctx, { error: primary, observation: observer.snapshot() });
+    throw primary;
   }
+  if (observer) observer.snapshot();
   if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_validate';
   check(created.encrypted === true && created.sourceFallback === false && created.files === 1, 'catalog_creation');
   return created;
@@ -676,7 +909,7 @@ async function guard(root, profileVersion) {
     && provision.kind === 'storage-consumer-maintenance-runtime-provision'
     && provision.success === true && provision.guest_only === true && provision.shared_adapter_verified === true,
   'provision');
-  const revisions = profileVersion === 10 ? TLS_CLOSE_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
+  const revisions = profileVersion === 10 ? CHALLENGE_READ_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
     : profileVersion === 4 ? TLS_REVISIONS : profileVersion === 3 ? DETAIL_REVISIONS
     : profileVersion === 2 ? DIAGNOSTIC_REVISIONS : REVISIONS;
   for (const [name, source] of Object.entries(provision.pins.sources)) {
@@ -706,10 +939,13 @@ async function receipt(app, name) {
   return r;
 }
 export function validateAppendProfile(value, profileVersion) {
-  check([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(profileVersion)
+  const read = profileVersion === 10 && value.challengeReadDiagnosticsV10 === true;
+  check((!Object.hasOwn(value, 'challengeReadDiagnosticsV10')
+      || (profileVersion === 10 && typeof value.challengeReadDiagnosticsV10 === 'boolean'))
+    && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(profileVersion)
     && (profileVersion === 8 ? value.appendDiagnosticsV7 === true : !Object.hasOwn(value, 'appendDiagnosticsV7'))
     && (profileVersion === 9 ? value.flowAcquireDiagnosticsV8 === true : !Object.hasOwn(value, 'flowAcquireDiagnosticsV8'))
-    && (profileVersion === 10 ? value.tlsCloseDiagnosticsV9 === true : !Object.hasOwn(value, 'tlsCloseDiagnosticsV9')),
+    && (profileVersion === 10 && !read ? value.tlsCloseDiagnosticsV9 === true : !Object.hasOwn(value, 'tlsCloseDiagnosticsV9')),
   'configuration');
 }
 async function config(app, profileVersion) {
@@ -764,10 +1000,15 @@ export async function publish(ctx, m) {
       const factory = async path => { check(path === join(app, 'storage.json'), 'configuration'); return core; };
       let deposited;
       for (const operation of ['create', 'deposit']) {
-        const value = name === 'image'
-          ? await m.runSnapshotStorage({ operation, config: join(app, 'storage.json'), bundle: join(app, 'bundle') }, { signal: ctx.signal, storageFactory: factory })
-          : await m.storePrivateFile(operation, { config: join(app, 'storage.json'), bundle: join(app, 'bundle') }, { signal: ctx.signal, storageFactory: factory });
-        requirePublishComplete(value, name, operation, ctx.profileVersion);
+        const execute = async () => {
+          const value = name === 'image'
+            ? await m.runSnapshotStorage({ operation, config: join(app, 'storage.json'), bundle: join(app, 'bundle') }, { signal: ctx.signal, storageFactory: factory })
+            : await m.storePrivateFile(operation, { config: join(app, 'storage.json'), bundle: join(app, 'bundle') }, { signal: ctx.signal, storageFactory: factory });
+          requirePublishComplete(value, name, operation, ctx.profileVersion, c.challengeReadDiagnosticsV10 === true);
+          return value;
+        };
+        const value = name === 'image' && operation === 'deposit'
+          ? await withRequestStage(ctx, app, c, execute) : await execute();
         if (operation === 'deposit') deposited = validateStorage(value, r.cipher_bytes, 'published');
       }
       if (name === 'cloud') {
@@ -928,6 +1169,10 @@ export async function main(argv) {
   for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, abort);
   const timer = setTimeout(abort, 1800000);
   const ctx = { root, provision, profileVersion, cancel, signal: cancel.signal, deadline: performance.now() + 1800000, stage: 'phase_start' };
+  const requestFd = process.env.STORAGE_PROOF_REQUEST_STAGE_FD;
+  if (phase === 'publish' && profileVersion === 10 && /^[0-9]{1,5}$/u.test(requestFd ?? '') && Number(requestFd) >= 3) {
+    ctx.requestStageFd = Number(requestFd);
+  }
   try {
     await absent(join(root, `storage-consumer-${phase}.json`));
     if (phase !== 'prepare') {

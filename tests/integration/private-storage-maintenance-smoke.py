@@ -44,6 +44,8 @@ EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     'private-storage-maintenance-helper-acquire.json',
     'private-storage-provider-activity.json',
     'private-storage-fixture-correlation.json',
+    'storage-consumer-provider-usage.json',
+    'storage-consumer-failure-boundary.json',
     'private-storage-maintenance-inventory.json',
     'private-storage-maintenance-supervisor.json',
     'private-storage-fragments-lifecycle-live-selection.json',
@@ -2188,6 +2190,11 @@ def main(args):
             correlation['validate'](value)
         except Exception:
             names.remove('private-storage-fixture-correlation.json')
+        try:
+            usage = runpy.run_path(str(Path(__file__).with_name('storage-consumer-provider-usage.py')))
+            usage['read'](Path(args[1]) / usage['NAME'])
+        except Exception:
+            names.remove('storage-consumer-provider-usage.json')
         print('\n'.join(names)); return
     if len(args) == 2 and args[0] == 'preselection-diagnostic':
         work = Path(args[1])

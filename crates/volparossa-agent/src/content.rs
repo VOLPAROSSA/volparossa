@@ -21,6 +21,11 @@ mod object_policy;
 mod parallel;
 mod private_storage;
 mod provider_activity;
+mod provider_events;
+#[cfg(all(test, target_os = "linux"))]
+mod provider_loop_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod provider_session_tests;
 mod quote;
 mod quote_remote;
 mod recent;
@@ -125,10 +130,9 @@ async fn serve_provider_session(
     stream: tokio::net::TcpStream,
     tls: tls::ContentTlsServer,
     registry: Arc<Mutex<PublicationRegistry>>,
-    events: Option<Arc<RwLock<AgentState>>>,
     activity: provider_activity::Session,
     fixture: fixture_correlation::Guard,
-) {
+) -> Option<provider_events::Batch> {
     use volparossa_local_control::StorageFixtureCorrelationTerminal as Terminal;
     let observer = fixture_correlation::ProviderObserver {
         activity: &activity,
@@ -136,7 +140,7 @@ async fn serve_provider_session(
     };
     let stream = fixture_correlation::Observed::provider(stream, &fixture);
     let Ok(mut stream) = tls.accept_observed(stream, &fixture).await else {
-        return;
+        return None;
     };
     observer.enter(Stage::RegistrySnapshot);
     // Snapshot at most 64 explicit registrations; never hold the metadata
@@ -145,8 +149,11 @@ async fn serve_provider_session(
     let Ok(registry) = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT).await else {
         fixture.finish(Terminal::OperationError);
         observer.enter(Stage::Closing);
-        provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_TIMEOUT").await;
-        return;
+        // Event-state contention must not retain an already rejected connection.
+        drop(stream);
+        return Some(provider_events::Batch::one(
+            "CONTENT_PROVIDER_REGISTRY_TIMEOUT",
+        ));
     };
     let mut storage_failure = None;
     let result = serve_publication_with_activity(
@@ -169,8 +176,13 @@ async fn serve_provider_session(
             } else {
                 Terminal::OperationError
             });
+            None
         }
-        Err(error) => provider_failure_event(events.as_ref(), &error, storage_failure).await,
+        Err(error) => {
+            // Close and return all diagnostics before releasing the session admission slot.
+            drop(stream);
+            Some(provider_failure_event(&error, storage_failure))
+        }
     }
 }
 
@@ -544,6 +556,7 @@ impl ContentRuntime {
             fixture,
         } = server;
         let mut sessions = JoinSet::new();
+        let mut event_drain = provider_events::Drain::default();
         refresh.tick().await;
         let mut registration_pending = false;
         // Keep the bounded discovery RPC owned here, not inside a select branch or
@@ -578,7 +591,7 @@ impl ContentRuntime {
                         ProviderRefresh::InvalidOffer => break,
                         ProviderRefresh::Registered(Ok(())) => {
                             if registration_pending {
-                                provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RECOVERED").await;
+                                event_drain.enqueue(provider_events::Batch::one("CONTENT_PROVIDER_REGISTRATION_RECOVERED"));
                             }
                             registration_pending = false;
                         }
@@ -588,10 +601,10 @@ impl ContentRuntime {
                             // clients still verify their independently signed offer's TTL.
                             // Retry only on the next existing tick, never by restarting work.
                             registration_pending = true;
-                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING").await;
+                            event_drain.enqueue(provider_events::Batch::one("CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING"));
                         }
                         ProviderRefresh::Registered(Err(_)) => {
-                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRATION_FAILED").await;
+                            event_drain.enqueue(provider_events::Batch::one("CONTENT_PROVIDER_REGISTRATION_FAILED"));
                             break;
                         }
                     }
@@ -603,21 +616,29 @@ impl ContentRuntime {
                     }
                     let registry = Arc::clone(&registry);
                     let tls = tls.clone();
-                    let events = events.clone();
                     let activity = activity.begin();
                     let fixture = fixture.provider();
                     sessions.spawn(serve_provider_session(
-                        stream, tls, registry, events, activity, fixture,
+                        stream, tls, registry, activity, fixture,
                     ));
                 }
-                Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
+                Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                    if let Ok(Some(batch)) = result {
+                        event_drain.enqueue(batch);
+                    }
+                }
+                () = event_drain.flush(events.as_ref()), if event_drain.has_pending() => {}
             }
         }
         // Close any outstanding RPC reply before withdrawing the listener's offer.
         drop(refresh_work);
         drop(listener);
         sessions.abort_all();
-        while sessions.join_next().await.is_some() {}
+        while let Some(result) = sessions.join_next().await {
+            if let Ok(Some(batch)) = result {
+                event_drain.enqueue(batch);
+            }
+        }
         let _ = discovery.withdraw_content_offer().await;
     }
 
@@ -966,45 +987,19 @@ async fn content_event(context: &ControlContext, code: &'static str) {
     );
 }
 
-async fn provider_event(state: Option<&Arc<RwLock<AgentState>>>, code: &'static str) {
-    if let Some(state) = state {
-        state.write().await.log(
-            volparossa_local_control::LogLevel::Info,
-            code,
-            unix_millis(),
-        );
-    }
-}
-
-async fn provider_failure_event(
-    state: Option<&Arc<RwLock<AgentState>>>,
+fn provider_failure_event(
     error: &ProviderError,
     storage_failure: Option<volparossa_content::private_storage::wire::diagnostic::Failure>,
-) {
-    if let Some(state) = state {
-        let mut state = state.write().await;
-        // Preserve the historical category and V1 tuple, adding at most one closed
-        // APPEND I/O tuple under the same lock. No new await, sink or identifier is added.
-        state.log(
-            volparossa_local_control::LogLevel::Info,
-            provider_error_code(error),
-            unix_millis(),
-        );
-        if let Some(failure) = storage_failure {
-            state.log(
-                volparossa_local_control::LogLevel::Info,
-                failure.event_code(),
-                unix_millis(),
-            );
-            if let Some(code) = failure.payload_io_event_code() {
-                state.log(
-                    volparossa_local_control::LogLevel::Info,
-                    code,
-                    unix_millis(),
-                );
-            }
-        }
-    }
+) -> provider_events::Batch {
+    // One fixed batch preserves the historical category and both closed diagnostic tuples.
+    provider_events::Batch::new([
+        Some(provider_error_code(error)),
+        storage_failure
+            .map(volparossa_content::private_storage::wire::diagnostic::Failure::event_code),
+        storage_failure.and_then(
+            volparossa_content::private_storage::wire::diagnostic::Failure::payload_io_event_code,
+        ),
+    ])
 }
 
 // Closed categories only: never format an error containing a path, chunk ID or peer input.

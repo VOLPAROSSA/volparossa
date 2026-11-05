@@ -198,21 +198,27 @@ class Wiring(unittest.TestCase):
         self.assertNotIn(b'PRIVATE_EXPORT_CANARY', result.stdout)
         return set(result.stdout.decode('ascii').splitlines())
 
-    def expected_exports(self, activity):
+    def expected_exports(self, activity, usage=False):
         maintenance = runpy.run_path(str(HERE / 'private-storage-maintenance-smoke.py'))
         names = set(maintenance['EXPORT_NAMES']) - {maintenance['PROVIDER_EVENTS_NAME'],
             'private-storage-fixture-correlation.json', 'private-storage-maintenance-helper-acquire.json'}
+        if not usage: names.remove('storage-consumer-provider-usage.json')
         return names if activity else names - {M['NAME']}
 
     def test_actual_exporter_includes_valid_optional_activity_in_each_phase(self):
-        for phase in M['PHASES']:
-            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temp:
+        for phase, usage_present in ((phase, present) for phase in M['PHASES'] for present in (False, True)):
+            with self.subTest(phase=phase, usage_present=usage_present), tempfile.TemporaryDirectory() as temp:
                 work = Path(temp)
                 samples = M['Samples'](phase); samples.rounds = 1
                 samples.add('a', 'observed', snapshot(), True)
                 M['publish'](work, phase, samples.report())
                 work.joinpath(M['private_name'](phase)).rename(work / M['NAME'])
-                self.assertEqual(self.export_names(work), self.expected_exports(True))
+                if usage_present:
+                    usage = runpy.run_path(str(HERE / 'storage-consumer-provider-usage.py'))
+                    value = usage['report']([usage['empty'](role) for role in usage['ROLES']])
+                    path = work / usage['NAME']
+                    path.write_bytes(usage['encoded'](value)); path.chmod(0o600)
+                self.assertEqual(self.export_names(work), self.expected_exports(True, usage_present))
 
     def test_actual_exporter_rejects_malformed_and_authority_changed_activity(self):
         invalid = M['Samples']('publish').report()

@@ -74,6 +74,11 @@ impl Observation {
         }
     }
 
+    pub(super) fn with_challenge_read(mut self, enabled: bool) -> Self {
+        self.challenge = self.challenge.enabled(enabled);
+        self
+    }
+
     pub(super) fn operation_started(&self) -> Option<Instant> {
         self.challenge.operation_started()
     }
@@ -83,6 +88,7 @@ impl Observation {
     }
 
     pub(super) fn reset(&self) {
+        self.fixture.flow_acquire(None);
         self.challenge.reset();
         self.flow_acquire.reset();
         self.stage
@@ -134,6 +140,8 @@ impl Observation {
                 == PrivateStorageStreamFailure::FlowAcquire as i32
         {
             self.flow_acquire.record(summary);
+            self.fixture
+                .flow_acquire(summary.map(flow_acquire::fixture_detail));
         }
     }
 
@@ -223,6 +231,7 @@ impl Observation {
             if let Ok(result) = operation.await {
                 result
             } else {
+                self.fixture.flow_acquire(None);
                 self.fixture.finish(FixtureTerminal::OperationError);
                 self.challenge.fail();
                 self.flow_acquire.reset();
@@ -242,6 +251,28 @@ impl Observation {
 }
 
 impl Observer for Observation {
+    fn read_step(&self, step: begin_observation::ReadStep) {
+        use begin_observation::ReadStep as Wire;
+        use volparossa_local_control::PrivateStorageChallengeReadStep as Step;
+        self.challenge.read_step(match step {
+            Wire::LengthRead => Step::LengthRead,
+            Wire::BodyRead => Step::BodyRead,
+            Wire::Verification => Step::Verification,
+        });
+    }
+
+    fn read_failure(&self, failure: begin_observation::ReadFailure) {
+        use begin_observation::ReadFailure as Wire;
+        use volparossa_local_control::PrivateStorageChallengeReadOutcome as Outcome;
+        self.challenge.read_failure(match failure {
+            Wire::IoEof => Outcome::IoEof,
+            Wire::IoOther => Outcome::IoOther,
+            Wire::Invalid => Outcome::Invalid,
+            Wire::VerificationRejected => Outcome::VerificationRejected,
+            Wire::WireTimeout => Outcome::WireTimeout,
+        });
+    }
+
     fn phase(&self, phase: begin_observation::Phase) {
         if self.stage.load(Ordering::Relaxed) == Stage::Challenge as i32 {
             self.fixture.enter(FixturePhase::ClientChallenge);

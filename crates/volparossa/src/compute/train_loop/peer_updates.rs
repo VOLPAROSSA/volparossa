@@ -241,17 +241,15 @@ pub(super) fn restore(
         .pending
         .clone()
         .filter(|round| round.phase == Phase::Evaluating)
-    {
-        if round_root(args, round.sequence)?
+        && round_root(args, round.sequence)?
             .join("comparison/quarantine.json")
             .try_exists()?
-        {
-            // The immutable observation may have reached disk just before the
-            // coordinator checkpoint. Restore it without executing the artifact
-            // again or renewing its original source/worker admission.
-            verify_quarantine_round(args, &registry, &round)?;
-            finish(args, &mut registry, Phase::Quarantined)?;
-        }
+    {
+        // The immutable observation may have reached disk just before the
+        // coordinator checkpoint. Restore it without executing the artifact
+        // again or renewing its original source/worker admission.
+        verify_quarantine_round(args, &registry, &round)?;
+        finish(args, &mut registry, Phase::Quarantined)?;
     }
     if registry.active.is_some() {
         active(args, &registry, state.latest)?;

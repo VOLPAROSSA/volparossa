@@ -1,0 +1,480 @@
+name: DPS native quality ABI contracts
+
+on:
+  push:
+    branches: [feature/dps-native-quality-20261021]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Historical ABI proof, current compiler, or explicit GPSD adapter proof
+        required: true
+        type: choice
+        default: historical
+        options: [historical, current-compiler, gpsd-preflight, gpsd-adapter]
+      core_revision:
+        description: Exact reviewed 40-hex Core commit for either explicit current source mode
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dps-native-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_BASE: 797f24fdf53ffcc39156bbf59507ef6be40792a4
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  DPS_MODE: ${{ inputs.mode || 'historical' }}
+  CORE_REVISION: ${{ inputs.core_revision }}
+
+jobs:
+  gpsd-preflight:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'gpsd-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the exact guard-only source and run the existing bounded contracts
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          output="$RUNNER_TEMP/dps-gpsd-preflight-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$output"
+          printf 'DPS_GPSD_PREFLIGHT=%s\n' "$output" >> "$GITHUB_ENV"
+          python3 -B scripts/check-dps-gpsd-source.py > "$output/source.json"
+          sh -n scripts/run-isolated-test.sh
+          shellcheck -s sh scripts/run-isolated-test.sh
+          python3 -B scripts/test-dps-gpsd-wrapper.py
+          python3 -B tests/dps/gpsd/test_proof.py
+          python3 -B scripts/test-cargo-source-policy.py
+          git diff --exit-code HEAD
+          printf '%s\n' '{"schema_version":1,"kind":"guard-only-preflight","checks_passed":true,"native_runtime_acceptance":false,"compiler_or_native_build":false}' > "$output/preflight.json"
+
+      - name: Retain guard-only evidence without a native runtime claim
+        if: always() && env.DPS_GPSD_PREFLIGHT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dps-gpsd-preflight-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ env.DPS_GPSD_PREFLIGHT }}/*.json
+
+  gpsd-adapter:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'gpsd-adapter'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the explicit GPSD route without changing historical ABI claims
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          test "$DPS_MODE" = gpsd-adapter
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          gpsd_evidence="$RUNNER_TEMP/dps-gpsd-evidence-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$gpsd_evidence"
+          printf 'DPS_GPSD_EVIDENCE=%s\n' "$gpsd_evidence" >> "$GITHUB_ENV"
+          python3 -B scripts/check-dps-gpsd-source.py > "$gpsd_evidence/source.json"
+          python3 -B scripts/test-dps-gpsd-wrapper.py
+          python3 -B tests/dps/gpsd/test_proof.py
+          python3 -B scripts/test-cargo-source-policy.py
+          sh -n scripts/run-isolated-test.sh
+
+      - name: Use authenticated compiler and unchanged public Cargo source policy
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" "$DPS_GPSD_EVIDENCE/cargo-source-policy.json"
+          rustc --version --verbose > "$DPS_GPSD_EVIDENCE/rust.txt"
+          cargo --version --verbose >> "$DPS_GPSD_EVIDENCE/rust.txt"
+          cargo fetch --locked
+
+      - name: Compile and test the actual one-shot CLI before native downloads
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline -p volparossa --bin volparossa dps::gpsd::tests:: \
+            2>&1 | tee "$DPS_GPSD_EVIDENCE/rust-tests.log"
+          python3 -B - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['DPS_GPSD_EVIDENCE'])
+          with (root / 'rust-tests.log').open('rb') as stream:
+              raw = stream.read(4 * 1024 * 1024 + 1)
+          assert len(raw) <= 4 * 1024 * 1024
+          log = raw.decode('utf-8', errors='strict')
+          names = re.findall(r'^test (dps::gpsd::tests::\S+) \.\.\. ok$', log, re.M)
+          assert len(names) == len(set(names)) == 17
+          assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured;', log, re.M) == ['17']
+          receipt = dict(schema_version=1, source_commit=os.environ['GITHUB_SHA'],
+              passed=17, ignored=0, test_names=sorted(names), physical_positioning_acceptance=False)
+          with (root / 'rust-tests.json').open('x') as stream:
+              json.dump(receipt, stream, sort_keys=True)
+              stream.write('\n')
+          PY
+          cargo build --locked --offline -p volparossa --bin volparossa
+          cargo clippy --locked --offline -p volparossa --bin volparossa --tests -- -D warnings
+          rustfmt --edition 2024 --config skip_children=true --check \
+            crates/volparossa/src/dps.rs crates/volparossa/src/dps/gpsd.rs crates/volparossa/src/dps/gpsd/tests.rs
+          git diff --exit-code HEAD
+
+      - name: Record the disposable parent host and compile pinned patched GPSD privately
+        run: |
+          set -euo pipefail
+          python3 -B scripts/dps-gpsd-host-state.py "$DPS_GPSD_EVIDENCE/host-before.json"
+          python3 -B tests/dps/gpsd/build.py --evidence-dir "$DPS_GPSD_EVIDENCE" --source-revision "$GITHUB_SHA"
+
+      - name: Run upstream checks and real normal and sanitized sensor chains in isolation
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          scripts/run-isolated-test.sh --dps-gpsd-command "$GITHUB_WORKSPACE/target/debug/volparossa" \
+            "$DPS_GPSD_EVIDENCE" "$DPS_GPSD_EVIDENCE/build-receipt.json"
+
+      - name: Verify the parent host after the proof, including on failure
+        if: always() && env.DPS_GPSD_EVIDENCE != ''
+        run: |
+          set -euo pipefail
+          if [ -f "$DPS_GPSD_EVIDENCE/host-before.json" ]; then
+            python3 -B scripts/dps-gpsd-host-state.py "$DPS_GPSD_EVIDENCE/host-after.json" \
+              --compare "$DPS_GPSD_EVIDENCE/host-before.json"
+          fi
+          git diff --exit-code HEAD
+
+      - name: Retain bounded public synthetic GPSD evidence
+        if: always() && env.DPS_GPSD_EVIDENCE != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dps-gpsd-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.json
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.log
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.txt
+            ${{ env.DPS_GPSD_EVIDENCE }}/*-PUBLIC-SYNTHETIC.nmea
+
+  native-contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      ((github.ref == 'refs/heads/feature/dps-native-quality-20261021' &&
+        (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'historical'))) ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'current-compiler'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind exact new ABI source and unchanged shared service
+        id: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          case "$DPS_MODE" in
+            historical)
+              test "$GITHUB_REF" = refs/heads/feature/dps-native-quality-20261021
+              case "$GITHUB_EVENT_NAME" in push|workflow_dispatch) ;; *) exit 1 ;; esac ;;
+            current-compiler)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+              test "$CORE_REVISION" = "$GITHUB_SHA" ;;
+            *) exit 1 ;;
+          esac
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          if [ "$DPS_MODE" = current-compiler ]; then
+            python3 -B scripts/check-dps-current-source.py --check
+          fi
+          umask 077
+          mkdir dps-native-evidence
+          if [ "$DPS_MODE" = current-compiler ]; then
+            python3 -B scripts/test-dps-current-source.py
+            python3 -B scripts/check-dps-current-source.py
+          else
+          python3 -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import tomllib
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          base = os.environ['SOURCE_BASE']
+          assert base == '797f24fdf53ffcc39156bbf59507ef6be40792a4'
+          assert re.fullmatch('[0-9a-f]{40}', os.environ['GITHUB_SHA'])
+          prefix = 'crates/volparossa-dps-ffi/'
+          files = {'Cargo.toml', 'README.md', 'src/lib.rs', 'src/ffi.rs', 'src/ffi/tests.rs',
+              'include/volparossa_dps.h', 'tests/contracts.rs', 'tests/native_smoke.c',
+              'tests/fixtures/manifest.json', 'tests/fixtures/relative_consistent.pb',
+              'tests/fixtures/relative_conflict.pb', 'tests/fixtures/stale.pb', 'tests/fixtures/empty.pb'}
+          allowed = {prefix + name for name in files} | {'Cargo.lock', '.github/workflows/dps-native-quality.yml'}
+          changed = git('diff', '--name-only', base, 'HEAD').splitlines()
+          assert len(allowed) == 15 and len(changed) == 15 and set(changed) == allowed
+          old_lock = tomllib.loads(git('show', base + ':Cargo.lock'))
+          new_lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          added = [row for row in new_lock['package'] if row['name'] == 'volparossa-dps-ffi']
+          assert added == [dict(name='volparossa-dps-ffi', version='0.1.0',
+              dependencies=['prost', 'volparossa-local-control'])]
+          new_lock['package'].remove(added[0])
+          assert new_lock == old_lock, 'existing locked dependencies changed'
+          workspace = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']
+          package = tomllib.loads(pathlib.Path(prefix + 'Cargo.toml').read_text())
+          expected_lints = workspace['lints']
+          assert expected_lints['rust']['unsafe_code'] == 'forbid'
+          expected_lints['rust']['unsafe_code'] = 'deny'
+          assert package['lints'] == expected_lints
+          assert package['dependencies'] == {'prost': {'workspace': True},
+              'volparossa-local-control': {'path': '../volparossa-local-control', 'version': '=0.1.0'}}
+          shared = ('Cargo.toml', 'rust-toolchain.toml',
+              'crates/volparossa-local-control/Cargo.toml',
+              'crates/volparossa-local-control/src/lib.rs',
+              'crates/volparossa-local-control/src/dps.rs',
+              'crates/volparossa-local-control/src/dps/tests.rs')
+          for name in shared:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', base + ':' + name)
+          manifest = json.loads(pathlib.Path(prefix + 'tests/fixtures/manifest.json').read_text())
+          assert manifest['schema'] == manifest['abi_version'] == manifest['dps_version'] == 1
+          assert manifest['input_bound_bytes'] == 16384 and manifest['maximum_canonical_v1_bytes'] == 4156
+          assert manifest['synthetic_only'] is True
+          assert manifest['actual_android_acceptance'] is manifest['physical_positioning_acceptance'] is False
+          vectors = manifest['vectors']
+          assert [row['file'] for row in vectors] == ['relative_consistent.pb', 'relative_conflict.pb', 'stale.pb', 'empty.pb']
+          for row in vectors:
+              data = pathlib.Path(prefix + 'tests/fixtures/' + row['file']).read_bytes()
+              assert len(data) == row['bytes'] and hashlib.sha256(data).hexdigest() == row['sha256']
+              assert row['now_unix_ms'] == 1000000
+              assert row['summary']['limitations_mask'] == 127 and row['summary']['frame_kind'] == 2
+          rust = pathlib.Path(prefix + 'src/lib.rs').read_text()
+          assert rust.count('#[allow(unsafe_code)]') == 1 and '#![deny(unsafe_code)]' in rust
+          assert '#[allow(unsafe_code)]\nmod ffi;' in rust
+          for name in ('src/lib.rs', 'tests/contracts.rs'):
+              assert re.search(r'\bunsafe\s*(?:\{|fn\b|extern\b)', pathlib.Path(prefix + name).read_text()) is None
+          receipt = dict(schema=1, source_commit=os.environ['GITHUB_SHA'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'], source_tree=git('rev-parse', 'HEAD^{tree}'),
+              base_commit=base, source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in sorted(allowed)},
+              shared_blobs={name: git('rev-parse', 'HEAD:' + name) for name in shared},
+              scope='synthetic-core-native-quality-abi', actual_android_acceptance=False,
+              physical_positioning_acceptance=False)
+          pathlib.Path('dps-native-evidence/source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+          fi
+
+      - name: Check existing hosted native tools and install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          test "$(lsb_release -is)" = Ubuntu
+          test "$(lsb_release -rs)" = 24.04
+          command -v clang
+          command -v clang++
+          clang --version > dps-native-evidence/c-compiler.txt
+          clang++ --version > dps-native-evidence/cxx-compiler.txt
+          # Official Noble packages only; never upgrade the runner's installed libc.
+          hosted_libc_version=$(dpkg-query -W -f='${Version}' libc6:amd64)
+          timeout --kill-after=5s 180s sudo -n apt-get update
+          timeout --kill-after=5s 180s sudo -n apt-get install --yes --no-upgrade --no-install-recommends \
+            valgrind=1:3.22.0-0ubuntu3 "libc6-dbg:amd64=$hosted_libc_version"
+          test "$(dpkg-query -W -f='${Version}' libc6:amd64)" = "$hosted_libc_version"
+          test "$(dpkg-query -W -f='${Version}' valgrind)" = 1:3.22.0-0ubuntu3
+          test "$(dpkg-query -W -f='${Version}' libc6-dbg:amd64)" = "$hosted_libc_version"
+          test "$(valgrind --version)" = valgrind-3.22.0
+          dpkg-query -W valgrind libc6:amd64 libc6-dbg:amd64 > dps-native-evidence/native-packages.txt
+          valgrind --version >> dps-native-evidence/native-packages.txt
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" dps-native-evidence/cargo-source-policy.json
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          rustc --version --verbose > dps-native-evidence/rust.txt
+          cargo --version --verbose >> dps-native-evidence/rust.txt
+          cargo fetch --locked
+
+      - name: Execute exact Rust inventories and build the real static library
+        run: |
+          set -euo pipefail
+          rust_group() {
+            local name="$1" target="$2"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-dps-ffi \
+              "$target" -- --list > "dps-native-evidence/$name-inventory.log" 2>&1
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-dps-ffi \
+              "$target" > "dps-native-evidence/$name-tests.log" 2>&1
+          }
+          # --test needs its separate positional target name; keep invocations explicit.
+          rust_group unit --lib
+          timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-dps-ffi \
+            --test contracts -- --list > dps-native-evidence/contracts-inventory.log 2>&1
+          timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-dps-ffi \
+            --test contracts > dps-native-evidence/contracts-tests.log 2>&1
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('dps-native-evidence')
+          names = []
+          for group in ('unit', 'contracts'):
+              inventory = (root / (group + '-inventory.log')).read_text()
+              output = (root / (group + '-tests.log')).read_text()
+              tests = re.findall(r'^([^\n]+): test$', inventory, re.M)
+              assert len(tests) == len(set(tests)) == 6
+              assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;', output, re.M) == ['6']
+              for name in tests:
+                  assert re.findall(r'^test ' + re.escape(name) + r' \.\.\. (\w+)$', output, re.M) == ['ok']
+              names.extend(group + ':' + name for name in tests)
+          assert len(names) == len(set(names)) == 12
+          (root / 'rust-tests.json').write_text(json.dumps(dict(tests=12, test_names=sorted(names)), sort_keys=True) + '\n')
+          PY
+          cargo build --locked --offline -p volparossa-dps-ffi --lib
+          cargo clippy --locked --offline -p volparossa-dps-ffi --all-targets --all-features -- -D warnings
+          rustfmt --edition 2024 --config skip_children=true --check \
+            crates/volparossa-dps-ffi/src/lib.rs crates/volparossa-dps-ffi/src/ffi.rs \
+            crates/volparossa-dps-ffi/src/ffi/tests.rs crates/volparossa-dps-ffi/tests/contracts.rs
+
+      - name: Run real C11 and C++17 callers with sanitizers and full-library Memcheck
+        run: |
+          set -euo pipefail
+          export ASAN_OPTIONS=detect_leaks=1:abort_on_error=1
+          export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          fixture=crates/volparossa-dps-ffi
+          native_libs=(-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc)
+          sanitizer=(-g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+          clang -std=c11 -Wall -Wextra -Werror "${sanitizer[@]}" -I "$fixture/include" \
+            "$fixture/tests/native_smoke.c" target/debug/libvolparossa_dps_ffi.a \
+            "${native_libs[@]}" -o dps-native-evidence/c-smoke
+          clang++ -x c++ -std=c++17 -Wall -Wextra -Werror "${sanitizer[@]}" -I "$fixture/include" \
+            "$fixture/tests/native_smoke.c" -x none target/debug/libvolparossa_dps_ffi.a \
+            "${native_libs[@]}" -o dps-native-evidence/cxx-smoke
+          timeout --signal=TERM --kill-after=5s 30s dps-native-evidence/c-smoke "$fixture/tests/fixtures" \
+            > dps-native-evidence/c-receipt.json 2> dps-native-evidence/c-sanitizer.log
+          timeout --signal=TERM --kill-after=5s 30s dps-native-evidence/cxx-smoke "$fixture/tests/fixtures" \
+            > dps-native-evidence/cxx-receipt.json 2> dps-native-evidence/cxx-sanitizer.log
+          # Separate unsanitized executables let Memcheck observe actual Rust
+          # library instruction accesses too, rather than combining incompatible tools.
+          clang -std=c11 -Wall -Wextra -Werror -gdwarf-4 -O1 -fno-omit-frame-pointer -I "$fixture/include" \
+            "$fixture/tests/native_smoke.c" target/debug/libvolparossa_dps_ffi.a \
+            "${native_libs[@]}" -o dps-native-evidence/c-memcheck
+          clang++ -x c++ -std=c++17 -Wall -Wextra -Werror -gdwarf-4 -O1 -fno-omit-frame-pointer -I "$fixture/include" \
+            "$fixture/tests/native_smoke.c" -x none target/debug/libvolparossa_dps_ffi.a \
+            "${native_libs[@]}" -o dps-native-evidence/cxx-memcheck
+          for language in c cxx; do
+            timeout --signal=TERM --kill-after=5s 120s valgrind --tool=memcheck --error-exitcode=99 \
+              --leak-check=full --errors-for-leak-kinds=definite,indirect,possible --show-leak-kinds=all \
+              --log-file="dps-native-evidence/$language-memcheck.log" \
+              "dps-native-evidence/$language-memcheck" "$fixture/tests/fixtures" \
+              > "dps-native-evidence/$language-memcheck-receipt.json" \
+              2> "dps-native-evidence/$language-memcheck-stderr.log"
+          done
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('dps-native-evidence')
+          expected = dict(schema=1, abi=1, service=1, native_cases=18, golden_cases=4,
+              synthetic_only=True, actual_android_acceptance=False, physical_positioning_acceptance=False)
+          for language in ('c', 'cxx'):
+              assert json.loads((root / (language + '-receipt.json')).read_text()) == expected
+              assert (root / (language + '-sanitizer.log')).read_bytes() == b''
+              assert json.loads((root / (language + '-memcheck-receipt.json')).read_text()) == expected
+              assert (root / (language + '-memcheck-stderr.log')).read_bytes() == b''
+              log = (root / (language + '-memcheck.log')).read_text()
+              assert re.findall(r'ERROR SUMMARY: (\d+) errors from (\d+) contexts', log) == [('0', '0')]
+          (root / 'native-tests.json').write_text(json.dumps(dict(c_cases=18, cxx_cases=18,
+              memcheck_cases=36, memcheck_zero_errors=True, caller_sanitizers=['address', 'undefined'],
+              rust_sanitizer_instrumented=False), sort_keys=True) + '\n')
+          PY
+
+      - name: Bind completed native contracts to the same source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          python3 -B - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          root = pathlib.Path('dps-native-evidence')
+          source = json.loads((root / 'source.json').read_text())
+          assert source['source_commit'] == os.environ['GITHUB_SHA'] == git('rev-parse', 'HEAD')
+          assert source['workflow_commit'] == os.environ['GITHUB_WORKFLOW_SHA']
+          assert source['source_tree'] == git('rev-parse', 'HEAD^{tree}')
+          assert len(source['source_blobs']) == (23 if os.environ['DPS_MODE'] == 'current-compiler' else 15)
+          for name, blob in {**source['source_blobs'], **source['shared_blobs']}.items():
+              assert git('rev-parse', 'HEAD:' + name) == blob
+          assert all(name.startswith('dps-native-evidence/') for name in git('ls-files', '--others', '--exclude-standard').splitlines())
+          assert json.loads((root / 'rust-tests.json').read_text())['tests'] == 12
+          assert json.loads((root / 'native-tests.json').read_text()) == dict(c_cases=18, cxx_cases=18,
+              memcheck_cases=36, memcheck_zero_errors=True, caller_sanitizers=['address', 'undefined'],
+              rust_sanitizer_instrumented=False)
+          receipt = dict(source, completed=True, rust_tests=12, c_cases=18, cxx_cases=18,
+              caller_sanitizers=['address', 'undefined'], rust_sanitizer_instrumented=False,
+              memcheck_cases=36, memcheck_zero_errors=True,
+              actual_android_acceptance=False, physical_positioning_acceptance=False)
+          (root / 'final.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+
+      - name: Retain only source-bound receipts and diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: dps-native-quality-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dps-native-evidence/*.json
+            dps-native-evidence/cargo-source-policy.json
+            dps-native-evidence/*.log
+            dps-native-evidence/*.txt

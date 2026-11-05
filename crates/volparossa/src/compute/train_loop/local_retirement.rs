@@ -418,15 +418,14 @@ pub(super) fn protected_sequences(store: &Store, state: &State) -> Result<BTreeS
         if let Some(previous) = record.predecessor {
             protected.insert(previous);
         }
-    } else if allows_empty_latest(store, state)? {
-        if let Some(cycle) = state
+    } else if allows_empty_latest(store, state)?
+        && let Some(cycle) = state
             .cycles
             .iter()
             .filter(|cycle| cycle.retirement.is_some())
             .max_by_key(|cycle| cycle.sequence)
-        {
-            protected.insert(cycle.sequence);
-        }
+    {
+        protected.insert(cycle.sequence);
     }
     Ok(protected)
 }

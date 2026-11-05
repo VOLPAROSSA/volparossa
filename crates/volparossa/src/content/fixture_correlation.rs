@@ -9,10 +9,14 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use volparossa_local_control::{
+    PrivateStorageElapsedBucket, PrivateStorageFlowAcquireReason, PrivateStorageFlowAcquireStage,
+    StorageFixtureAcquireFailure, StorageFixtureAcquireSummary,
     StorageFixtureCorrelationAction as Action, StorageFixtureCorrelationPhase as Phase,
     StorageFixtureCorrelationRequest, StorageFixtureCorrelationResponse,
     StorageFixtureCorrelationRole as Role, StorageFixtureCorrelationState as State,
-    StorageFixtureCorrelationTerminal as Terminal, control_request::Operation,
+    StorageFixtureCorrelationTerminal as Terminal, StorageFixtureHelperDiagnostic,
+    StorageFixtureOperation, StorageFixtureProviderStage, StorageFixtureRequestObservation,
+    StorageFixtureTarget, StorageFixtureWorkerState, control_request::Operation,
     control_response::Payload,
 };
 
@@ -26,6 +30,15 @@ struct Input {
     action: InputAction,
     epoch: String,
     fingerprints: Vec<String>,
+    target: Option<InputTarget>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputTarget {
+    archive_id: String,
+    provider_key: String,
+    operation: StorageFixtureOperation,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +81,16 @@ fn read_input(reader: impl Read) -> Result<StorageFixtureCorrelationRequest> {
             InputAction::Disarm => Action::Disarm,
         } as i32,
         epoch: decode_hex(&input.epoch, 16)?,
+        target: input
+            .target
+            .map(|target| {
+                Ok::<_, anyhow::Error>(StorageFixtureTarget {
+                    archive_id: decode_hex(&target.archive_id, 32)?,
+                    provider_key: decode_hex(&target.provider_key, 32)?,
+                    operation: target.operation as i32,
+                })
+            })
+            .transpose()?,
         fingerprints: input
             .fingerprints
             .iter()
@@ -115,22 +138,79 @@ fn project(
         .records
         .iter()
         .map(|record| {
-            Ok(json!({
+            let mut value = json!({
                 "role": Role::try_from(record.role)?,
                 "fingerprint": record.fingerprint.as_ref().map(hex::encode),
                 "phase": Phase::try_from(record.phase)?,
                 "terminal": Terminal::try_from(record.terminal)?,
-            }))
+            });
+            if response.version >= 2 {
+                value["flow_acquire"] = record
+                    .flow_acquire
+                    .map(project_acquire)
+                    .transpose()?
+                    .unwrap_or(Value::Null);
+            }
+            if response.version == 3 {
+                value["request_observation"] = record
+                    .request_observation
+                    .as_ref()
+                    .map(project_request)
+                    .transpose()?
+                    .unwrap_or(Value::Null);
+            }
+            Ok(value)
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({
-        "version": 1,
+    let mut projected = json!({
+        "version": response.version,
         "kind": "storage-fixture-correlation",
         "state": State::try_from(response.state)?,
         "incomplete": response.incomplete,
         "records": records,
         "diagnostic_only": true,
         "acceptance_evidence": false,
+    });
+    if response.version == 3 {
+        projected["target_scoped"] = json!(true);
+        projected["complete_phase_history"] = json!(false);
+    }
+    Ok(projected)
+}
+
+fn project_request(value: &StorageFixtureRequestObservation) -> Result<Value> {
+    let timing = value.reserve_timing.map(|timing| -> Result<Value> {
+        Ok(json!({
+            "before_request_flush_elapsed": PrivateStorageElapsedBucket::try_from(timing.before_request_flush_elapsed)?,
+            "before_request_flush_remaining": PrivateStorageElapsedBucket::try_from(timing.before_request_flush_remaining)?,
+            "receipt_wait_elapsed": timing.receipt_wait_elapsed.map(PrivateStorageElapsedBucket::try_from).transpose()?,
+            "receipt_wait_remaining": timing.receipt_wait_remaining.map(PrivateStorageElapsedBucket::try_from).transpose()?,
+        }))
+    }).transpose()?;
+    Ok(json!({
+        "request_digest": value.request_digest.as_ref().map(hex::encode),
+        "operation": StorageFixtureOperation::try_from(value.operation)?,
+        "provider_stage": StorageFixtureProviderStage::try_from(value.provider_stage)?,
+        "worker_state": StorageFixtureWorkerState::try_from(value.worker_state)?,
+        "worker_returned_after_terminal": value.worker_returned_after_terminal,
+        "reserve_timing": timing,
+    }))
+}
+
+fn project_acquire(value: StorageFixtureAcquireSummary) -> Result<Value> {
+    let project = |value: Option<StorageFixtureAcquireFailure>| -> Result<Value> {
+        let value = value.ok_or_else(invalid_input)?;
+        let failure = value.failure.ok_or_else(invalid_input)?;
+        Ok(json!({
+            "stage": PrivateStorageFlowAcquireStage::try_from(failure.stage)?,
+            "reason": PrivateStorageFlowAcquireReason::try_from(failure.reason)?,
+            "helper_diagnostic": value.helper_diagnostic.map(StorageFixtureHelperDiagnostic::try_from).transpose()?,
+        }))
+    };
+    Ok(json!({
+        "rounds": value.rounds,
+        "first": project(value.first)?,
+        "last": project(value.last)?,
     }))
 }
 

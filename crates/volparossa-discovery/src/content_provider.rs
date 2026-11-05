@@ -118,10 +118,11 @@ fn resolved_content_addresses(
             .iter()
             .take(crate::MAX_DISCOVERY_ADDRESSES_PER_PEER)
         {
-            if let Ok(canonical) = crate::prepare_discovery_address(local, peer, address) {
-                if crate::private_address_is_local(&canonical) && !addresses.contains(&canonical) {
-                    addresses.push(canonical);
-                }
+            if let Ok(canonical) = crate::prepare_discovery_address(local, peer, address)
+                && crate::private_address_is_local(&canonical)
+                && !addresses.contains(&canonical)
+            {
+                addresses.push(canonical);
             }
         }
         break;

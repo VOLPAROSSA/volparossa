@@ -1,11 +1,13 @@
 # Protected compute: public verifier fixtures
 
-The four public cryptographic fixtures pass. This is a preparatory compatibility
-test, **not protected remote execution**.
-The core must eventually verify another node's execution environment before
-releasing private task context. No suitable confidential-computing server is
-currently available for that end-to-end test. The existing local private service
-and public peer-task admission remain unchanged.
+This guide describes the supported public verifier profile and software quote
+flow. Recorded public-fixture success is compatibility evidence, **not protected
+remote execution**. The core must verify another node's execution environment
+before releasing private task context. The existing local private service and
+public peer-task admission retain their own authority boundaries. Consult
+[implementation status](../IMPLEMENTATION_STATUS.md) for current source-bound
+results; the recorded software trials do not supply confidential-hardware or
+two-node private-workload acceptance.
 
 ## What this trial checks
 
@@ -63,39 +65,32 @@ The original bounded log, both pipeline exit statuses and compiler-version
 outputs are retained separately. Log overflow fails the trial; an earlier
 success receipt cannot be overwritten by a new execution.
 
-[Hosted run 38324431627](https://github.com/VOLPAROSSA/volparossa/actions/runs/38324431627)
-at exact core revision `5c4ecba25700ef75dacbddae920c8c819a496ef4` passes
-source verification, locked acquisition, offline compilation and all four named
-fixtures. None are failed, ignored or filtered; both pipeline exit codes are
-zero. Its original six-file artifact and schema-two receipt have been
-independently validated against the source and effective-lock pins. Compilation
-took 12.99 seconds and the four tests took 0.21 seconds on that hosted runner;
-these are not remote-task performance measurements.
+The source-bound public fixture and follow-up software runs are indexed in
+[implementation status](../IMPLEMENTATION_STATUS.md#protected-compute-verifier-preparation).
+Their original revisions, positive/negative test counts, failed attempts, artifact
+digests and timing observations remain in the
+[development archive](../archive/development-notes-20261026.txt). Fixture compilation
+or execution timing is not remote-task performance evidence.
 
-Twenty-two inert harness tests also pass locally and on that runner. They use
-synthetic output, small text-only Git repositories and harmless shell functions;
-they do not substitute for the four actual cryptographic tests. Earlier failed
-workspace, context and original-lock attempts remain recorded in the
-[implementation ledger](../IMPLEMENTATION_STATUS.md#protected-compute-verifier-preparation).
+Inert harness controls use synthetic output, small text-only Git repositories
+and harmless shell functions; they cannot substitute for the four actual
+cryptographic tests or authorize worker admission.
 
 This passing run establishes compatibility with the selected public fixtures,
 not a trustworthy worker or confidential task.
 
 ## Core integration
 
-The separate [core module](../../crates/volparossa-content/src/provider/compute/attestation.rs)
-verifies exact received report bytes and binds a fresh, finite owner challenge
-to a proposed session key. [Core trial 38439280941](https://github.com/VOLPAROSSA/volparossa/actions/runs/38439280941)
-passes fourteen tests and targeted Clippy. The tests combine real public
-signature fixtures with explicitly synthetic session-state checks; they do
-not prove a guest possesses the proposed key or can execute a private task.
+The [core module](../../crates/volparossa-content/src/provider/compute/attestation.rs)
+verifies exact received report bytes and binds a fresh finite owner challenge to
+a proposed session key. Public signature fixtures and synthetic session-state
+checks do not prove that a guest possesses that key or can execute a private task.
 
-The workspace adopts that trial's exact resolved lockfile. The current
-[core workflow](../../.github/workflows/protected-compute-admission.yml) fetches
-with `--locked`, requires the committed source and lockfile to remain unchanged,
-then checks actual resolved features and runs tests offline. Schema-two core
-receipts distinguish this fixed-lock verification from historical schema-one
-dependency resolution. Broader workspace integration remains a separate gate.
+The [core workflow](../../.github/workflows/protected-compute-admission.yml)
+fetches with `--locked`, requires its committed source/lockfile to remain unchanged,
+checks the actual resolved features and runs tests offline. Receipt schemas
+retain the distinction between fixed-lock verification and historical dependency
+resolution; broader workspace integration is a separate gate.
 
 The public-key-only use of the RSA dependency has an explicit, mechanically
 checked [advisory scope](../../THIRD_PARTY_LICENSES.md#rsa-advisory-scope);
@@ -117,15 +112,11 @@ noncritical AMD extensions. Additional extensions and other report/product
 profiles need separate review. A version-two report cannot establish a CPUID
 stepping comparison.
 
-Eight additional tests cover valid public evidence, incomplete/duplicate
-extensions, encoding and range errors, identity/component mismatches and refusal
-to bypass actual signatures. Synthetic certificate edits test consistency only,
-not authentication. [Trial 38455979301](https://github.com/VOLPAROSSA/volparossa/actions/runs/38455979301)
-on `2ebf27af` passes all 22 named Rust tests and targeted Clippy with the committed
-lockfile unchanged. Quality and CodeQL also pass; PR238 is merged. Schema-three
-receipts identify that set separately from the earlier 14-test schemas. All five
-remaining appraisal obligations stay explicit; this check supplies neither
-private-input release nor worker admission.
+Regression coverage includes valid public evidence, incomplete/duplicate
+extensions, encoding/range errors, identity/component mismatches and refusal to
+bypass actual signatures. Synthetic certificate edits test consistency, not
+authentication. This binding supplies neither private-input release nor worker
+admission; the outstanding appraisal obligations remain explicit below.
 
 ## Checking certificate algorithm declarations
 
@@ -144,33 +135,17 @@ Absent and NULL SHA-384 parameters are supported. Trailer 1 may be omitted or
 explicit, as in the public AMD fixture; other values are rejected. Unknown,
 duplicate, reordered, implicit or trailing fields do not extend this profile.
 
-Six new tests join the existing 22. Five real API-negative cases retain the
-original signed certificate bytes and signature while changing its outer
-algorithm declaration. Separate synthetic structures exercise malformed
-parameters and key encodings; these edited certificates authenticate nothing.
-Schema-four receipts require exactly 28 named tests and preserve explicit replay
-of schemas one through three. The 51 inert harness checks and ten public-RSA
-scope checks pass. [Trial 38466325432](https://github.com/VOLPAROSSA/volparossa/actions/runs/38466325432)
-on `bb8d49c0` compiles and passes all 28 actual Rust tests with zero failed or
-ignored, but fails targeted Clippy on three similar-name warnings, duplicate
-match arms and a missing statement semicolon. Its schema-four report correctly
-remains failed. The correction changes names and equivalent statement style,
-not profile checks or test cases. The original 15-file artifact matches SHA-256
-`4a8d1b218b1a2dc0fdd5b04d4c138d40a40994b155a3cf0c473fb0aa15b8c350`.
+Real API-negative cases retain original signed certificate bytes/signatures
+while changing the outer algorithm declaration. Separate synthetic structures
+exercise malformed parameters and key encodings; they authenticate nothing.
+Receipt schemas keep the named test set distinct and historical schemas
+replayable. The original Clippy-failed run and its corrected follow-up remain
+separate source-bound results in the
+[development archive](../archive/development-notes-20261026.txt).
 
-[Trial 38467309647](https://github.com/VOLPAROSSA/volparossa/actions/runs/38467309647)
-on corrected candidate `530d3c81` passes all 28 named Rust tests and targeted
-Clippy. Its original 15-file artifact matches SHA-256
-`971fd9f8a12979fa42ac02df48e8391189e1b22fc0c5eab6d0398749fc9431e0`;
-the committed, original and effective lockfiles are byte-identical. CodeQL
-`38467310454` passes all four analyses and its separate aggregate check. Quality
-`38467316376` passes strict workspace Clippy and 3,595 workspace tests, with zero
-failures and seven ignored tests, plus six successful child invocations. The
-tested merge tree is identical to the candidate; all 28 attestation tests pass.
-PR240 is merged. The internally skipped namespace probes do not prove live
-datapaths.
-No dependencies, features, lockfile, appraisal obligations or execution
-permissions change. This is not complete certificate-path validation.
+These checks do not establish a complete general-purpose certificate path or
+live datapath. Dependencies, features, appraisal obligations and execution
+permissions do not expand merely because a public-fixture test passes.
 
 ## Supplied certificate path and revocation checks
 
@@ -204,34 +179,16 @@ authorized workload/key origin. A valid ASK-scope list is not proof that a VCEK
 is unrevoked or that no newer vendor information exists.
 
 The public AMD CRL fixture's real signature verifies independently with
-OpenSSL. Twelve new Rust tests cover that signature, tampering, path and scope
-rejection, revocation entries and finite session binding. Synthetic negative
-certificates and session facts do not authenticate a worker. Schema-five
-receipts require all forty named tests, unchanged committed dependencies and
-targeted Clippy; historical schemas one through four remain replayable.
-The 58 inert receipt/harness checks and eleven RSA-scope checks pass locally.
-The [first hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/38480770163)
-on `1fd84495` compiles but fails seven of forty tests at `Endorsement`; 33 pass,
-none are ignored, and Clippy is not reached. Its original 13-member artifact
-has SHA-256 `323c16d00c1d09197e32d8b813bc23de2963ca9892768de5b64b6dce57ad55e6`.
-Source inspection and the pinned DER encoder identify the ASK KeyUsage
-re-encoding mismatch above. The correction adds an explicit positive pinned
-path before synthetic mutations, a normalization regression and rejection of
-other encodings, rights and CA roles. That failed run remains failed.
+OpenSSL. Regressions cover tampering, path/scope refusal, revocation entries,
+finite session binding and the pinned ASK KeyUsage normalization boundary.
+Synthetic negative certificates/session facts authenticate no worker.
+Source/lock-bound receipt schemas retain historical replay without treating
+synthetic cases as hardware acceptance.
 
-The corrected [trial 38483434858](https://github.com/VOLPAROSSA/volparossa/actions/runs/38483434858)
-on `3e6eff6f` passes all forty named Rust tests with zero failures or ignored
-tests, plus targeted Clippy. Its original 15-member artifact matches API SHA-256
-`1f568bfa29db59c1d7054a2d899b9a578944849063b2e6b511bf95a055428a7f`.
-Source and lockfile bindings remain unchanged. [Quality `38483440876`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38483440876) passes
-strict workspace Clippy and the same forty tests. It reports 3,607 unfiltered workspace
-passes, zero failures and seven ignored tests, plus six successful child
-invocations. Its internally skipped namespace probes are not live datapath
-proof. [CodeQL `38483436114`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38483436114)
-also passes. PR242 is merged as `05b21e1c`, whose tree
-`c4030377567d9f179e64c5fa3331d9608c2ca022` matches the targeted source and
-Quality's synthetic merge checkout. These results verify the stated public
-collateral and synthetic session cases, not a protected worker.
+The original Endorsement-failed trial and subsequent corrected positive path
+are retained with their exact source/tree/artifact and Quality/CodeQL results in
+the [development archive](../archive/development-notes-20261026.txt). A later
+software pass does not overwrite that failure or establish a protected worker.
 
 See [the collateral provenance](../../THIRD_PARTY_LICENSES.md#supplied-milan-revocation-list)
 for the fixture's exact digest, issuer and validity window. This change adds no
@@ -240,19 +197,15 @@ release. The hardware trial below remains required.
 
 ## Explicit owner local policy
 
-Merged [PR244](https://github.com/VOLPAROSSA/volparossa/pull/244) adds immutable
-`LocalPolicy` expectations to `SessionOwner`:
-an exact public measurement, minimum guest SVN, four independently selected TCB
-minima and an explicit SMT choice. It has no production defaults. Each minimum
-contains bootloader, TEE, SNP and microcode security-version components; every
-component must meet its own floor. A larger earlier component cannot compensate
-for a smaller later one. Debug and migration-agent permission remain forbidden.
-The [original hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/38491020699)
-on `761d72b1` passes Rust compilation, all 52 named tests and targeted Clippy.
-Its independently reconstructed evidence, plus the separate Quality and CodeQL
-results, is retained in the [implementation ledger](../IMPLEMENTATION_STATUS.md#explicit-local-policy-for-protected-compute).
-This establishes the local comparisons and challenge binding, not a protected
-worker or current vendor-security decision.
+`LocalPolicy` supplies immutable expectations to `SessionOwner`: an exact
+public measurement, minimum guest SVN, four independently selected TCB minima
+and an explicit SMT choice. There are no production defaults. Every minimum
+contains bootloader, TEE, SNP and microcode components; each component must meet
+its own floor. A larger earlier component cannot compensate for a smaller later
+one. Debug and migration-agent permission remain forbidden. Source-bound
+local-policy proof is indexed in
+[implementation status](../IMPLEMENTATION_STATUS.md#explicit-local-policy-for-protected-compute);
+it is not a protected worker or current vendor-security decision.
 
 The supported Milan report fields are distinct:
 
@@ -285,12 +238,11 @@ reject rather than inherit defaults. No challenge, attempt or collateral expiry
 is extended, and policy rejection consumes its attempt.
 
 The unchanged public signed report has TCB components `(3, 0, 8, 115)` at all
-four stages and permits/enables SMT. Its positive comparison uses an explicitly
-fixture-only policy. Sixteen raised-floor cases compare that same authentic
-report against each stage/component separately. Other named cases are synthetic
-policy/session mutations, not new hardware evidence. The schema-six runner
-requires all 52 exact test names, the unchanged committed lock and targeted
-Clippy; historical schemas one through five remain separately replayable.
+four stages and permits/enables SMT. Its positive comparison is fixture-only.
+Raised-floor regressions compare that same authentic report against every
+stage/component separately; other policy/session mutations are synthetic,
+not new hardware reports. Receipt validation retains exact source/lock binding,
+named tests and historical-schema separation.
 
 Numeric floors cannot establish current platform security.
 [AMD-SB-3015](https://www.amd.com/en/resources/product-security/bulletin/amd-sb-3015.html)
@@ -313,13 +265,9 @@ and the real protected-worker trial remain separate requirements.
 
 ## Guest-side session candidate
 
-The `provider::compute::guest` module adds the other side of the existing
-challenge protocol. Original hosted run
-[`38502691198`](https://github.com/VOLPAROSSA/volparossa/actions/runs/38502691198)
-on `62261f3e` passes compilation, 52 existing appraisal tests, targeted Clippy and
-16 new software lifecycle tests. This is not an admitted private worker.
-No suitable SNP hardware is currently available for a successful firmware or
-two-node private-task trial.
+The `provider::compute::guest` module implements the other side of this
+challenge protocol. Its source-bound software lifecycle tests do not admit a
+private worker or provide a firmware/two-node private-task hardware trial.
 
 A `GuestSessionOwner` has an explicit expiry, a finite attempt budget and at most
 one active session. It accepts only the existing canonical version-two challenge,
@@ -346,17 +294,14 @@ a response does not create verified evidence, task authority or permission to
 release private input. Raw reports can contain hardware identifiers and must not
 be logged, publicly cached or published as routine diagnostics.
 
-Sixteen new Rust tests exercise canonical request/response bounds, fresh keys,
-replay and attempt limits, cancellation during collection, expiry, report rejection
-and separation from the real verifier. Positive collection cases use an explicitly
-test-only synthetic source; production uses only firmware. The separate hosted
-software receipt requires the existing 52 appraisal tests and targeted Clippy first
-and retains their source/lock binding. Historical appraisal receipts keep their
-original scope. Both original artifacts have been independently checked against
-the exact source tree, unchanged committed lockfile, test names and joined command
-processes. The [implementation ledger](../IMPLEMENTATION_STATUS.md#guest-owned-protected-compute-session-candidate)
-retains the artifact hashes and earlier failed attempts; neither software success
-nor a compiled firmware call proves execution inside an approved confidential guest.
+Software lifecycle coverage includes canonical request/response bounds,
+fresh keys, replay/attempt limits, cancellation during collection, expiry,
+report rejection and separation from the real verifier. Positive collection
+uses an explicitly test-only synthetic source; production uses firmware only.
+Receipts retain source/lock binding and joined command processes. Neither
+software success nor a compiled firmware call proves execution inside an
+approved confidential guest; original failures and artifacts remain in the
+[development archive](../archive/development-notes-20261026.txt).
 
 The integrated quote-only service below connects an authorized caller to this
 module over the existing protected provider stream. An approved guest image and
@@ -370,18 +315,12 @@ and the [Linux SEV guest interface](https://www.kernel.org/doc/html/latest/virt/
 
 ## Authorized quote exchange candidate
 
-The quote-only service and CLI are integrated through
-[PR247](https://github.com/VOLPAROSSA/volparossa/pull/247), merge `17afa3f0`, with
-the exact tested tree of `09b0d3cc`. They do not admit a worker or send a private
-task. Original hosted run `38512217556` passes all 52 appraisal tests, 16 guest
-tests and twelve quote tests, plus targeted content Clippy. Quality `38512223814`
-also executes all eight new agent/control/CLI tests and passes; CodeQL
-`38512218075` passes. Independent reconstruction and root replay bind these
-results to original artifacts, source and the unchanged lockfile. Earlier failed
-attempts retain their revision-specific evidence in the implementation ledger.
-These are software checks, not proof of a working production quote route or
-confidential hardware. Suitable hardware is still unavailable for the required
-protected-execution trial.
+The integrated quote-only service and CLI exercise the existing protected
+stream without admitting a worker or sending a private task. Recorded software
+checks cover appraisal, guest lifecycle, quote handling and typed agent/control/
+CLI integration. Original source/lock bindings, artifacts and failed attempts
+remain in the [development archive](../archive/development-notes-20261026.txt).
+Production-route and confidential-hardware acceptance remain separate gates.
 
 ### Operator authority and cancellation
 
@@ -429,21 +368,17 @@ processes the report in memory; this exchange is not anonymous quote disclosure.
 
 ### Software evidence and remaining route proof
 
-Twelve content regressions cover message separation, exact authorization,
-bounded framing, retained-key expiry, delivery failure, cancellation during
-firmware work, late results, policy loss and finite attempts. These twelve tests
-pass in the hosted run above. Eight more tests cover the agent, local control
-messages and CLI policy/output; their workspace execution also passes.
-Synthetic firmware is test-only and cannot be selected by production configuration.
+Regressions cover message separation, exact authorization, bounded framing,
+retained-key expiry, delivery failure, cancellation during firmware work, late
+results, policy loss, finite attempts and typed agent/control/CLI policy/output.
+Synthetic firmware is test-only and cannot be selected in production config.
 
-The separate quote software receipt requires the original source and lock binding,
-52 appraisal tests, targeted Clippy and 16 guest tests before accepting the exact
-twelve quote results. It does not treat these tests as proof of production-route
+The quote software receipt requires the original source/lock binding and its
+named appraisal, guest and quote test sets. These do not establish production-route
 execution, confidential hardware, complete appraisal or private-task execution.
-The [implementation ledger](../IMPLEMENTATION_STATUS.md#authorized-quote-exchange-candidate)
-tracks software integration separately from the outstanding route and hardware
-proofs. A follow-up signed device-refusal candidate does not turn lack of
-attestation into permission to run a private task.
+[Implementation status](../IMPLEMENTATION_STATUS.md#authorized-quote-exchange-candidate)
+tracks those boundaries separately. An authenticated device-refusal candidate
+cannot turn lack of attestation into permission for private work.
 
 ### Explicit key confirmation
 
@@ -472,10 +407,10 @@ approved confidential guest. Authenticated device-unavailable refusal retains
 its separate conservative result. Raw reports, keys and transcripts are not
 printed or made public.
 
-Targeted software checks pass on `6bc31925`: 97 Rust cases, 233 Python cases,
-formatting and strict Clippy. Positive firmware facts in these tests are
-synthetic and test-only. Full integration and suitable-hardware trials remain
-outstanding; see the [current evidence](../IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence--15-october).
+The key-confirmation software result retains its exact source and synthetic
+firmware scope in the [development archive](../archive/development-notes-20261026.txt).
+Full integration and suitable-hardware trials remain separate open acceptance
+requirements.
 
 ## What is still needed before private tasks can run remotely
 

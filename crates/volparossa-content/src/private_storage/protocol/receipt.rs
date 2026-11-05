@@ -198,7 +198,7 @@ fn validate(
         .is_some_and(|lease| lease != result.lease_id)
         || result.stored_bytes > target.ciphertext_bytes
         || (result.stored_bytes != target.ciphertext_bytes
-            && result.stored_bytes % CHUNK_BYTES as u64 != 0)
+            && !result.stored_bytes.is_multiple_of(CHUNK_BYTES as u64))
         || result.range_sha256.is_some()
             != matches!(request.operation(), StorageOperation::ReadRange { .. })
     {

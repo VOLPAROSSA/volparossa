@@ -271,7 +271,7 @@ where
         deadline.ensure_remaining()?;
         match open_pidfd() {
             Ok(pidfd) => return Ok(pidfd),
-            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => {}
             Err(error)
                 if matches!(
                     error.raw_os_error(),
@@ -623,7 +623,7 @@ fn reap_pidfd_exact(
         deadline.ensure_remaining()?;
         match waitid(Id::PIDFd(pidfd), WaitPidFlag::WEXITED) {
             Ok(status) => return Ok(status),
-            Err(Errno::EINTR) => continue,
+            Err(Errno::EINTR) => {}
             Err(_) => return Err(RestartReaperError::CleanupIncomplete),
         }
     }

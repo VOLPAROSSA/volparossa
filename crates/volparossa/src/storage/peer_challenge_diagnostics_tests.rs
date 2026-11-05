@@ -215,6 +215,7 @@ async fn diagnostic_v6_real_correlated_response_preserves_challenge_and_fragment
                     tls_failure: None,
                     stream_failure: None,
                     challenge: Some(PrivateStorageChallengeDetail {
+                        read: None,
                         phase: i32::try_from(phase_index + 1).unwrap(),
                         before_challenge: i32::try_from(bucket_index + 1).unwrap(),
                         in_challenge: i32::try_from(8 - bucket_index).unwrap(),

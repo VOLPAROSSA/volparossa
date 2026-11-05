@@ -168,17 +168,18 @@ impl ParallelDownload {
             .peers
             .iter()
             .position(|peer| peer.state == PeerState::Active && peer.probing);
-        if let Some(probe) = probe {
-            if self.measured_batch() && self.peers[probe].pending.is_none() {
-                // A shared bottleneck can redistribute rates without adding total capacity.
-                // Require an observed aggregate gain; an incomplete batch cannot justify
-                // opening yet another stream. Genuine missing-chunk coverage is separate.
-                let rate = self.measurement.rate();
-                let gain = self.probe_baseline.is_some_and(|baseline| {
-                    baseline > 0 && u128::from(rate) * 10 >= u128::from(baseline) * 11
-                });
-                self.finish_probe(probe, gain);
-            }
+        if let Some(probe) = probe
+            && self.measured_batch()
+            && self.peers[probe].pending.is_none()
+        {
+            // A shared bottleneck can redistribute rates without adding total capacity.
+            // Require an observed aggregate gain; an incomplete batch cannot justify
+            // opening yet another stream. Genuine missing-chunk coverage is separate.
+            let rate = self.measurement.rate();
+            let gain = self.probe_baseline.is_some_and(|baseline| {
+                baseline > 0 && u128::from(rate) * 10 >= u128::from(baseline) * 11
+            });
+            self.finish_probe(probe, gain);
         }
     }
 }

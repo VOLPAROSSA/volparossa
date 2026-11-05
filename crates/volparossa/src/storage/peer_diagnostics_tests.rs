@@ -300,6 +300,7 @@ async fn correlated_projection_case(
         &socket,
         control_request::Operation::PrivateStorageRemote(PrivateStorageRemoteRequest {
             include_flow_acquire_detail: false,
+            include_challenge_read_detail: false,
             provider_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32])
                 .verifying_key()
                 .to_bytes()

@@ -44,6 +44,8 @@ use volparossa_tcp_proxy::{
 };
 use volparossa_test_support::{SignedRouteFixture, verified_development_manifest};
 
+mod repeated_egress;
+
 const EXIT_NAME: &str = "exit.volparossa.invalid";
 const PROVIDER_PORT: u16 = 18080;
 const SCENARIO_LIMIT: Duration = Duration::from_secs(10);
@@ -108,6 +110,7 @@ impl Fixture {
 }
 
 struct Outer {
+    signed: SignedRouteFixture,
     route: VerifiedMptcpRoute,
     policy: VerifiedManifest,
     opening: Vec<u8>,
@@ -154,6 +157,7 @@ impl Outer {
         let mut roots = RootCertStore::empty();
         roots.add(certificate.clone()).unwrap();
         Self {
+            signed: fixture,
             route,
             policy,
             opening,

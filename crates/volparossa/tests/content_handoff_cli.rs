@@ -52,6 +52,14 @@ fn public_publish_contribution_requires_explicit_live_service_receipt() {
     );
 }
 
+#[test]
+fn public_publish_binds_the_selected_identity_before_cache_or_contribution() {
+    isolated(
+        "public_publish_binds_the_selected_identity_before_cache_or_contribution",
+        publication::publisher_binding_scenario(),
+    );
+}
+
 fn isolated(test_name: &str, scenario: impl Future<Output = ()>) {
     let current = fs::read_link("/proc/self/ns/net").expect("current namespace");
     if let Some(parent) = std::env::var_os(INNER) {

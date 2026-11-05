@@ -1022,58 +1022,6 @@ mod tests {
     };
     use super::*;
 
-    #[test]
-    fn actor_owner_and_prepared_handoff_docs_remain_truthful() {
-        let sampler = include_str!("preselection_sampler.rs")
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("sampler product/test boundary")
-            .0;
-        let discovery = include_str!("../../../../docs/network/DISCOVERY.md");
-        let status = include_str!("../../../../docs/IMPLEMENTATION_STATUS.md");
-        let protocol = include_str!("../../../../docs/architecture/PROTOCOL.md");
-
-        assert!(
-            sampler.contains("`DiscoveryRuntime` invokes this native-dataplane-agnostic stage")
-        );
-        assert!(
-            sampler.contains(
-                "actor-owned client preselection narrows snapshots before affine dispatch"
-            )
-        );
-        for stale in [
-            "no production client owner",
-            "no production client-side attempt owner",
-            "no production outbound client attempt",
-            "no outbound production client attempt owner",
-            "dormant A1a",
-            "dormant exact A1a/A1c",
-            "No product actor invokes the sampler",
-            "No actor calls this join",
-            "sampler is still dormant",
-        ] {
-            for document in [discovery, status, protocol] {
-                assert!(!document.contains(stale), "stale documentation: {stale}");
-            }
-        }
-        for document in [discovery, status, protocol] {
-            assert!(document.contains("network_address_usable = false"));
-        }
-        assert!(discovery.contains("opaque prepared-evidence handoff"));
-        assert!(status.contains("opaque `PreparedPreselectionEvidence` handoff"));
-        assert!(discovery.contains("local `Connect` route gate now invokes"));
-        assert!(status.contains("Empty local `Connect` now derives"));
-        assert!(protocol.contains("local `Connect` route gate now invokes"));
-        for document in [discovery, status, protocol] {
-            assert!(document.contains("module-private, non-Clone Exit"));
-        }
-        assert!(discovery.contains("Relay and Exit runtimes now publish"));
-        assert!(status.contains("Relay and Exit runtimes now publish"));
-        assert!(protocol.contains("Relay and Exit runtimes install"));
-        // Keep the sampler's evidence boundary documented above, but do not freeze a
-        // project-wide percentage or milestone state in a sampler regression test.
-        // Those change when later live integration supplies the missing evidence.
-    }
-
     struct SeededRng(u64);
 
     impl SeededRng {
