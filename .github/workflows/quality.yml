@@ -308,6 +308,51 @@ jobs:
           python3 -B scripts/verify-goal-preservation.py --git-revision "$(git rev-parse HEAD)"
           python3 -B scripts/test-goal-preservation.py
 
+      - name: Check Storage consumer diagnostic profiles without network access
+        run: |
+          # These are source-only Python/Node/shell contracts; fail before compiler
+          # provisioning, while retaining every independent suite's result.
+          for tool in python3 node jq tar sh; do command -v "$tool"; done
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+          storage_contract_failures=0
+          run_contract() {
+            local contract_status
+            printf '::group::Storage contract: %s\n' "$*"
+            if "$@"; then
+              contract_status=0
+            else
+              contract_status=$?
+              storage_contract_failures=$((storage_contract_failures + 1))
+            fi
+            printf '::endgroup::\n'
+            if [ "$contract_status" -ne 0 ]; then
+              printf '::error::Storage contract failed (%s): %s\n' "$contract_status" "$*"
+            fi
+          }
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
+          run_contract node --test tests/integration/test-storage-consumer-maintenance.mjs
+          run_contract python3 -B tests/integration/test-private-storage-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+          run_contract python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
+          run_contract python3 -B tests/integration/test-storage-provider-activity-sampler.py
+          run_contract python3 -B tests/integration/test-storage-consumer-network.py
+          run_contract python3 -B tests/integration/test-storage-acquire-diagnostic.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-provision.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-evidence.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-shell.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-vm-wiring.py
+          run_contract node --test tests/integration/test-cloud-upload-maintenance.mjs
+          run_contract python3 -B scripts/test-storage-tls-close-contracts.py
+          run_contract python3 -B tests/integration/test-storage-request-stage-consumers.py
+          run_contract python3 -B tests/integration/test-storage-consumer-failure-boundary.py
+          run_contract python3 -B tests/integration/test-storage-provider-usage-snapshot.py
+
+          test "$storage_contract_failures" -eq 0
+
       - name: Install pinned Rust toolchain
         run: |
           python3 -B scripts/provision-rust189.py runner
@@ -416,29 +461,6 @@ jobs:
           python3 -B tests/integration/test-alpha-vm-diagnostics.py
           sh -n tests/integration/run-alpha-topology-vm.sh
 
-      - name: Check Storage consumer diagnostic profiles without network access
-        run: |
-          python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
-          node --test tests/integration/test-storage-consumer-maintenance.mjs
-          python3 -B tests/integration/test-private-storage-maintenance-smoke.py
-          python3 -B tests/integration/test-private-storage-maintenance-wiring.py
-          python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
-          python3 -B tests/integration/test-storage-provider-activity-sampler.py
-          python3 -B tests/integration/test-storage-consumer-network.py
-          python3 -B tests/integration/test-storage-acquire-diagnostic.py
-          python3 -B tests/integration/test-cloud-upload-maintenance-provision.py
-          python3 -B tests/integration/test-cloud-upload-maintenance-smoke.py
-          python3 -B tests/integration/test-cloud-upload-maintenance-evidence.py
-          python3 -B tests/integration/test-cloud-upload-maintenance-shell.py
-          python3 -B tests/integration/test-cloud-upload-maintenance-vm-wiring.py
-          node --test tests/integration/test-cloud-upload-maintenance.mjs
-          python3 -B scripts/test-storage-tls-close-contracts.py
-          python3 -B tests/integration/test-storage-request-stage-consumers.py
-          python3 -B tests/integration/test-storage-consumer-failure-boundary.py
-          python3 -B tests/integration/test-storage-provider-usage-snapshot.py
 
       - name: Check formatting and shell sources
         run: |
