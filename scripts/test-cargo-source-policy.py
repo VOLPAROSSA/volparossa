@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -268,6 +270,32 @@ class PublicSources(unittest.TestCase):
                 for name in ('GIT_CONFIG_GLOBAL','GIT_CONFIG_COUNT','GIT_ASKPASS','SSH_ASKPASS','GIT_SSH_COMMAND'):
                     with self.subTest(name=name), self.assertRaises(P['PolicyError']):
                         P['activate']('runner',env={'HOME':str(account),name:'/untrusted'},cwd=parent,home=parent/'other')
+
+    def test_alpha_ssh_metadata_is_dropped_before_provisioning_but_authority_still_rejects(self):
+        alpha=(ROOT/'tests/integration/run-alpha-topology-vm.sh').read_text()
+        function='prepare_current_compiler() {'+alpha.split('prepare_current_compiler() {',1)[1].split('\n}',1)[0]+'\n}'
+        # Substitute only the compiler command: execute the actual caller shell
+        # and strict environment check without installing Rust or running Cargo.
+        code=('import os,runpy; p=runpy.run_path('+repr(str(ROOT/'scripts/cargo-source-policy.py'))+');'
+              'p["check_environment"](dict(os.environ));'
+              'assert "SSH_CLIENT" not in os.environ and "SSH_CONNECTION" not in os.environ')
+        script=('set -eu\npython3() {\n'
+                '  test "$#" = 3 && test "$1" = -B && test "$2" = scripts/provision-rust189.py && test "$3" = alpha-guest\n'
+                '  command '+shlex.quote(sys.executable)+' -c '+shlex.quote(code)+'\n}\n'
+                +function+'\nprepare_current_compiler\n')
+        with tempfile.TemporaryDirectory() as directory:
+            env={'HOME':directory,'PATH':os.defpath,'SSH_CLIENT':'127.0.0.1 1 22',
+                 'SSH_CONNECTION':'127.0.0.1 1 127.0.0.2 22'}
+            with self.assertRaises(P['PolicyError']): P['check_environment'](env)
+            accepted=subprocess.run(['sh','-c',script],env=env,capture_output=True,text=True,timeout=5)
+            self.assertEqual(accepted.returncode,0,accepted.stderr)
+            for name in ('SSH_AUTH_SOCK','SSH_ASKPASS','GIT_CONFIG_COUNT','GIT_SSH_COMMAND','SSH_UNEXPECTED'):
+                with self.subTest(name=name):
+                    rejected=subprocess.run(['sh','-c',script],env=dict(env,**{name:'PRIVATE-CANARY'}),
+                                            capture_output=True,text=True,timeout=5)
+                    self.assertNotEqual(rejected.returncode,0)
+                    self.assertIn('CARGO_PUBLIC_SOURCE_POLICY_V1=environment',rejected.stderr)
+                    self.assertNotIn('PRIVATE-CANARY',rejected.stdout+rejected.stderr)
 
     def test_scope_artifact_paths_are_fixed_and_do_not_publish_cargo_homes(self):
         raw=(ROOT/'.github/workflows/quality.yml').read_text()

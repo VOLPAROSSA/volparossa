@@ -187,7 +187,11 @@ rotation fixture to current main. It also keeps version-4 failure diagnostics
 compact through export and revalidation, and records only the validated closed
 diagnostic in job logs. The original run's seven-day artifacts have expired;
 its retained logs do not establish the failure substage. A fresh source-bound
-maintenance trial is required before upload acceptance. Historical consumer
+trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
+on `e50af83d` stops before Storage: the guest compiler source policy rejects its
+environment. Alpha's SSH caller now drops only the two transport metadata
+variables already removed by the helper VM; credentials/configuration remain
+rejected. This caller correction still needs a new actual trial. Historical consumer
 profile 10 pins remain unchanged, so that trial cannot accept the later
 Image/Cloud draft heads by implication.
 
