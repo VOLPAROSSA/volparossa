@@ -182,6 +182,15 @@ system value; these priorities impose no fixed application/model/agent order.
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
 
+The central continuation on 5 November reapplies PR339's bounded ordinary
+rotation fixture to current main. It also keeps version-4 failure diagnostics
+compact through export and revalidation, and records only the validated closed
+diagnostic in job logs. The original run's seven-day artifacts have expired;
+its retained logs do not establish the failure substage. A fresh source-bound
+maintenance trial is required before upload acceptance. Historical consumer
+profile 10 pins remain unchanged, so that trial cannot accept the later
+Image/Cloud draft heads by implication.
+
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
 requires the complete consumer profile, finite authority, actual enrollment,
