@@ -2571,236 +2571,354 @@ class MainHostedAdmission(Inert):
 
 
 class ReceiptAndBindings(Inert):
-    def test_main_actual_route_requires_exact_pin_and_successful_contracts(self):
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
+    @staticmethod
+    def _resident_workflow():
+        return (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
+
+    @classmethod
+    def _workflow_python(cls, delimiter):
+        import textwrap
+        return textwrap.dedent(cls._resident_workflow().split("python3 -B - <<'"+delimiter+"'\n",1)[1]
+            .split('\n          '+delimiter,1)[0])
+
+    def _composition_fixture(self, defect=None):
+        tree = ast.parse(self._workflow_python('PYBIND'))
+        function = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='bind_composition')
+        namespace = {}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'inert-composition-binding','exec'),namespace)
+        values = {n.targets[0].id:ast.literal_eval(n.value) for n in function.body
+            if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and
+            n.targets[0].id in ('main','feature','checkpoint','expected')}
+        expected = values['expected']
+        self.assertEqual(expected, {
+            '.github/workflows/protected-resident-model.yml':'M',
+            '.github/workflows/resident-current-main.yml':'D',
+            '.github/workflows/resident-installer-io.yml':'D',
+            '.github/workflows/resident-pinned-compiler.yml':'D',
+            'docs/IMPLEMENTATION_STATUS.md':'M',
+            'scripts/test-cargo-source-policy.py':'M',
+            'tests/integration/test-protected-resident-model-run.py':'M'})
+        changes = [status+'\t'+name for name,status in expected.items()]
+        if defect == 'missing': changes.pop()
+        if defect == 'extra': changes.append('M\tcrates/volparossa/src/main.rs')
+        if defect == 'dependency': changes[-1] = 'M\tCargo.lock'
+        if defect == 'duplicate': changes[-1] = changes[0]
+        if defect == 'status': changes[0] = changes[0].replace('M\t','A\t')
+        if defect == 'rename': changes[0] = 'R100\told.yml\tnew.yml'
+        public = self._resident_workflow().split('\n  public-model:\n',1)[1]
+        historical = public.replace('refs/heads/integration/resident-model-main-20261022',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
+        calls = []
+        def git(*args):
+            calls.append(args)
+            if args[:2] == ('merge-base','--is-ancestor'):
+                self.assertIn(args[2],(values['feature'],values['main']))
+                self.assertEqual(args[3],'HEAD')
+                if defect == args[2] or defect == 'ancestry': raise AssertionError('ancestry')
+                return ''
+            if args == ('log','--first-parent','--format=%T','HEAD'):
+                return 'a'*40 if defect == 'checkpoint' else values['checkpoint']
+            if args == ('diff','--no-renames','--name-status',values['checkpoint'],'HEAD'):
+                return '\n'.join(changes)
+            if args == ('show',values['feature']+':.github/workflows/resident-pinned-compiler.yml'):
+                return 'contracts: historical\n  public-model:\n'+historical
+            self.fail(args)
+        return namespace['bind_composition'],git,public,values,calls
+
+    def test_maintained_actual_route_requires_exact_pin_and_successful_contracts(self):
+        workflow = self._resident_workflow()
         def condition(job):
-            body = workflow.split('\n  '+job+':\n', 1)[1]
-            expression = ' '.join(body.split('    if: >-\n', 1)[1].split('\n    runs-on:', 1)[0].splitlines())
-            return compile(expression.replace('&&',' and ').replace('||',' or ').strip(), 'inert-main-route', 'eval')
-        contracts, main, feature = (condition(job) for job in ('contracts','public-model-main','public-model'))
-        main_body = workflow.split('\n  public-model-main:\n',1)[1].split('\n  public-model:\n',1)[0]
-        self.assertTrue(main_body.startswith('    needs: contracts\n'))
-        self.assertNotIn('always()', main_body.split('    runs-on:',1)[0])
+            body = workflow.split('\n  '+job+':\n',1)[1]
+            expression = ' '.join(body.split('    if: >-\n',1)[1].split('\n    runs-on:',1)[0].splitlines())
+            return compile(expression.replace('&&',' and ').replace('||',' or ').strip(),'inert-resident-route','eval')
+        contracts,public = condition('contracts'),condition('public-model')
+        public_body = workflow.split('\n  public-model:\n',1)[1]
+        self.assertTrue(public_body.startswith('    needs: contracts\n'))
+        self.assertNotIn('always()',public_body.split('    runs-on:',1)[0])
         target = 'refs/heads/integration/resident-model-main-20261022'
-        for repository in ('VOLPAROSSA/volparossa', 'other/repository'):
-            for branch in (target, target+'-other', 'refs/heads/main', 'refs/pull/1/merge',
-                'refs/heads/integration/resident-main-runtime-20261023', 'refs/heads/feature/protected-resident-model'):
+        branches = (target,target+'-other','refs/heads/main','refs/pull/1/merge',
+            'refs/heads/feature/protected-resident-model',
+            'refs/heads/diagnostic/protected-export-inventory-20261021',
+            'refs/heads/fix/protected-result-failure-20261021',
+            'refs/heads/fix/protected-socket-diagnostic-20261021',
+            'refs/heads/fix/protected-native-exit-observation-20261021',
+            'refs/heads/fix/protected-bwrap-stage-20261022',
+            'refs/heads/fix/protected-model-root-transition-20261022',
+            'refs/heads/fix/model-corruption-transition-20261022',
+            'refs/heads/fix/resident-connect-observation-20261023',
+            'refs/heads/integration/resident-current-main-20261028',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
+        for repository in ('VOLPAROSSA/volparossa','other/repository'):
+            for branch in branches:
                 for event in ('push','pull_request','workflow_dispatch'):
-                    for scenario in ('source-contracts','public-model','private-model'):
-                        for pin in ('', 'b'*40, 'a'*40):
+                    for scenario in ('source-contracts','public-model','private-model',''):
+                        for pin in ('','b'*40,'a'*40):
                             for result in ('success','failure','skipped','cancelled'):
                                 context = dict(github=types.SimpleNamespace(repository=repository,ref=branch,event_name=event,sha='a'*40),
                                     inputs=types.SimpleNamespace(scenario=scenario,expected_source=pin),
                                     needs=types.SimpleNamespace(contracts=types.SimpleNamespace(result=result)))
                                 eligible = repository=='VOLPAROSSA/volparossa' and branch==target and event=='workflow_dispatch'
                                 actual = eligible and scenario=='public-model' and pin=='a'*40
-                                self.assertEqual(eval(main,context), actual and result=='success')
-                                if branch==target:
-                                    self.assertEqual(eval(contracts,context), eligible and (scenario=='source-contracts' or actual))
-                                    self.assertFalse(eval(feature,context))
+                                self.assertEqual(eval(public,context),actual and result=='success')
+                                self.assertEqual(eval(contracts,context),eligible and (scenario=='source-contracts' or actual))
 
-    def test_current_inventories_match_both_source_refs_without_expanding_execution_authority(self):
-        import re
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        rust_step = workflow.split('      - name: Test grants TLS lifecycle and unchanged native supervision\n', 1)[1].split('      - name: Lint affected code\n', 1)[0]
-        self.assertNotIn('GITHUB_REF', rust_step)
-        self.assertIn('          run_group startup volparossa compute::supervise::tests::public_bubblewrap_stage\n', rust_step)
-        def python_tree(step):
-            return ast.parse(textwrap.dedent(step.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0]))
-        rust = python_tree(rust_step)
-        labels = next(n for n in rust.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and n.targets[0].id == 'labels')
-        group_guard = next(n for n in rust.body if isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)
-                           and isinstance(n.test.left, ast.Name) and n.test.left.id == 'groups')
-        rust_gate = compile(ast.Module(body=[labels, group_guard], type_ignores=[]), 'inert-current-rust-inventory', 'exec')
-        controller_step = workflow.split('      - name: Offline installer immutable assembly and controller contracts\n', 1)[1]
-        controller = python_tree(controller_step)
-        expected = next(n for n in controller.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and n.targets[0].id == 'expected')
-        count_loop = next(n for n in controller.body if isinstance(n, ast.For))
-        controller_gate = compile(ast.Module(body=[expected, count_loop], type_ignores=[]), 'inert-current-python-inventory', 'exec')
-        class Logs:
-            def __init__(self, count): self.count = count
-            def __truediv__(self, name):
-                count = {'model-install.log': 58, 'model-assemble.log': 29, 'model-run.log': self.count}[name]
-                return types.SimpleNamespace(read_text=lambda: f'Ran {count} tests in 0.1s\n\nOK\n')
-        def authority(job):
-            condition = workflow.split('\n  ' + job + ':\n', 1)[1].split('    if: >-\n', 1)[1].split('\n    runs-on:', 1)[0]
-            expression = ' '.join(condition.splitlines()).replace('&&', ' and ').replace('||', ' or ').strip()
-            return compile(expression, 'inert-workflow-authority', 'eval')
-        contracts, public = authority('contracts'), authority('public-model')
-        groups = dict(grant=22, guest=42, resident=41, local=30, startup=2)
-        for branch in ('refs/heads/fix/protected-model-root-transition-20261022',
-                       'refs/heads/fix/model-corruption-transition-20261022',
-                       'refs/heads/fix/protected-bwrap-stage-20261022', 'refs/heads/feature/protected-resident-model'):
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), groups=groups)
-            exec(rust_gate, namespace)
-            self.assertEqual(namespace['labels'], ('grant', 'guest', 'resident', 'local', 'startup'))
-            self.assertEqual(sum(groups.values()), 137)
-            for stale in (dict(grant=22, guest=38, resident=41, local=30, startup=2), dict(grant=22, guest=42, resident=41, local=30)):
-                with self.assertRaises(AssertionError): exec(rust_gate, dict(namespace, groups=stale))
-            for count in (247, 246, 243, 242):
-                current = dict(os=namespace['os'], root=Logs(count), re=re, counts={})
-                if count == 247:
-                    exec(controller_gate, current)
-                    self.assertEqual(current['counts'], dict(install=58, assemble=29, run=247))
-                else:
-                    with self.assertRaises(AssertionError): exec(controller_gate, current)
-            for event, scenario in (('push', 'source-contracts'), ('workflow_dispatch', 'source-contracts'), ('workflow_dispatch', 'public-model')):
-                context = dict(github=types.SimpleNamespace(repository='VOLPAROSSA/volparossa', ref=branch, event_name=event),
-                               inputs=types.SimpleNamespace(scenario=scenario))
-                retained = branch == 'refs/heads/feature/protected-resident-model'
-                self.assertEqual(eval(contracts, context), retained or scenario == 'source-contracts')
-                self.assertEqual(eval(public, context), retained and event == 'workflow_dispatch' and scenario == 'public-model')
-        for repository, branch in (('VOLPAROSSA/volparossa', 'refs/heads/not-authorized'),
-                                   ('unapproved/repository', 'refs/heads/feature/protected-resident-model')):
-            context = dict(github=types.SimpleNamespace(repository=repository, ref=branch, event_name='workflow_dispatch'),
-                           inputs=types.SimpleNamespace(scenario='public-model'))
-            self.assertFalse(eval(contracts, context)); self.assertFalse(eval(public, context))
+    def test_maintained_composition_requires_both_parents_exact_tree_and_closed_changes(self):
+        bind,git,public,values,calls = self._composition_fixture()
+        receipt = bind(git,public)
+        self.assertEqual(receipt['main_parent'],values['main'])
+        self.assertEqual(receipt['feature_parent'],'812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e')
+        self.assertEqual(receipt['normal_merge_tree'],values['checkpoint'])
+        self.assertEqual(calls[:2],[('merge-base','--is-ancestor',values[p],'HEAD') for p in ('feature','main')])
+        self.assertTrue(receipt['source_contracts_only'])
+        for key in ('actual_model_execution','guest_boot','private_workload_acceptance','hardware_attestation'):
+            self.assertFalse(receipt[key])
+        for defect in ('missing','extra','dependency','duplicate','status','rename','checkpoint',values['main'],values['feature']):
+            with self.subTest(defect=defect),self.assertRaises(AssertionError):
+                bind,git,public,_,_ = self._composition_fixture(defect)
+                bind(git,public)
 
-    def test_main_integration_binds_both_sources_and_preserves_source_only_authority(self):
+    def test_maintained_public_recipe_cannot_change_budget_cleanup_inputs_or_authority(self):
+        bind,git,public,_,_ = self._composition_fixture()
+        self.assertTrue(bind(git,public)['actual_recipe_preserved'])
+        mutations = (
+            ('timeout-minutes: 300','timeout-minutes: 301'),
+            ('timeout-minutes: 245','timeout-minutes: 246'),
+            ("needs.contracts.result == 'success'",'true'),
+            ('inputs.expected_source == github.sha','true'),
+            ('--clear-groups','--keep-groups'),
+            ('--requester "$GITHUB_WORKSPACE/target/resident-public-requester"','--requester /tmp/unbound'),
+            ('systemctl stop','systemctl show'),
+            ('/evidence/result.json','/**'),
+            ('refs/heads/integration/resident-model-main-20261022','refs/heads/main'))
+        for old,new in mutations:
+            self.assertIn(old,public)
+            with self.subTest(old=old),self.assertRaises(AssertionError): bind(git,public.replace(old,new))
+
+    def test_maintained_checkout_and_shell_guards_bind_exact_clean_source(self):
+        workflow = self._resident_workflow()
+        self.assertEqual(workflow.count('persist-credentials: false'),2)
+        self.assertEqual(workflow.count('ref: ${{ github.sha }}'),2)
+        self.assertEqual(workflow.count('fetch-depth: 0'),2)
+        self.assertIn('permissions:\n  contents: read\n',workflow)
+        contracts,public = workflow.split('\n  public-model:\n',1)
+        for body in (contracts,public):
+            for check in ('test "$GITHUB_ACTIONS" = true','test "$RUNNER_ENVIRONMENT" = github-hosted',
+                          'test -z "$(git status --porcelain --untracked-files=all)"'):
+                self.assertIn(check,body)
+            self.assertIn('git diff --exit-code HEAD',body)
+        self.assertIn('test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"',contracts)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',contracts)
+        for check in ('test "$GITHUB_SHA" = "$EXPECTED_SOURCE"','test "$GITHUB_WORKFLOW_SHA" = "$EXPECTED_SOURCE"',
+                      'test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"'):
+            self.assertIn(check,public)
+        self.assertIn("assert git('rev-parse','HEAD^{tree}')==source['source_tree']",contracts)
+        self.assertIn("assert fmt['tested_source_is_committed'] and not fmt['formatter_changed_files']",contracts)
+
+    def test_maintained_rust_inventory_requires_named_guards_and_each_success(self):
         import json
-        import textwrap
-        import tomllib
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/integration/resident-model-main-20261022'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-main-integration-gate', 'exec')
-        main = '89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1'
-        feature = '81c6b6a5522b0f1cadf98345a7180974f46a2344'
-        feature_base = '7d0f9f0b492c5e692cc9d26f23d95f55f2c1e651'
-        feature_tree = '411c728475a8adf77a5a7273a86084c597775c44'
-        reconciled = {'Cargo.lock','THIRD_PARTY_LICENSES.md','.github/workflows/protected-resident-model.yml',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py',
-            'crates/volparossa/src/compute/resident_guest/public_trial.rs',
-            'crates/volparossa/src/compute/resident_guest/public_trial/tests.rs'}
-        allowed = reconciled | {f'source-{i}' for i in range(45)}
-        dependencies = {'prost','rcgen','rustls','tokio-rustls','x509-cert'}
-        old_lock = {'package': [dict(name='volparossa',version='0.1.0',dependencies=['tokio']),
-            dict(name='hpke',version='0.14.1',checksum='reviewed'),
-            dict(name='zeroize',version='1.9.1',checksum='reviewed'),
-            dict(name='volparossa-dps-ffi',version='0.1.0',dependencies=['prost'])]}
-        old_manifest = '[dependencies]\ntokio.workspace = true\n[dev-dependencies]\ntokio.workspace = true\n'
-        actual = b'contracts: arbitrary\n  public-model:\n    exact historical public trial\n'
-        for defect in (None,'extra','missing','duplicate','feature-tree','merge-base','ancestry',
-                       'feature-blob','preserved-main','dependency-version','dependency-checksum',
-                       'dependency-graph','cli-dependencies','manifest','actual-job'):
-            lock = copy.deepcopy(old_lock)
-            lock['package'][0]['dependencies'] = sorted(['tokio'] + list(dependencies))
-            if defect == 'dependency-version': lock['package'][1]['version'] = '0.14.0'
-            if defect == 'dependency-checksum': lock['package'][1]['checksum'] = 'different'
-            if defect == 'dependency-graph': lock['package'][3]['dependencies'].append('unreviewed')
-            if defect == 'cli-dependencies': lock['package'][0]['dependencies'].append('unreviewed')
-            manifest = tomllib.loads(old_manifest)
-            manifest['dependencies'].update({name:{'workspace':True}
-                for name in dependencies - {'rcgen'}})
-            manifest['dev-dependencies']['rcgen'] = {'workspace':True}
-            if defect == 'manifest': manifest['dependencies']['tokio'] = {'version':'unreviewed'}
-            changed = sorted(allowed)
-            if defect == 'extra': changed.append('unrelated-storage.rs')
-            if defect == 'missing': changed.pop()
-            if defect == 'duplicate': changed[-1] = changed[0]
-            def git(*args):
-                if args == ('merge-base',main,feature): return 'wrong' if defect == 'merge-base' else feature_base
-                if args == ('rev-parse',feature+'^{tree}'): return 'wrong' if defect == 'feature-tree' else feature_tree
-                if args == ('diff','--name-only',feature_base,feature): return '\n'.join(sorted(allowed | {'docs/IMPLEMENTATION_STATUS.md'}))
-                if args == ('diff','--name-only',main,'HEAD'): return '\n'.join(changed)
-                if args == ('show',main+':crates/volparossa/Cargo.toml'): return old_manifest
-                if args[0] == 'rev-parse':
-                    if defect == 'feature-blob' and args[1] == 'HEAD:source-0': return 'wrong'
-                    if defect == 'preserved-main' and args[1] == 'HEAD:AGENTS.md': return 'wrong'
-                    if args[1] in ('HEAD:crates/volparossa/src/compute/resident_guest/public_trial.rs',
-                                   'HEAD:crates/volparossa/src/compute/resident_guest/public_trial/tests.rs'):
-                        return 'reviewed-certificate-error-boundary'
-                    return 'same-blob'
-                self.fail(args)
-            def path(name):
-                return types.SimpleNamespace(read_text=lambda: 'candidate-manifest',
-                    read_bytes=lambda: actual + (b'changed' if defect == 'actual-job' else b''))
-            command = mock.Mock(side_effect=AssertionError('ancestry') if defect == 'ancestry' else None)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF':branch}),base=main,git=git,
-                old=old_lock,new=lock,subprocess=types.SimpleNamespace(run=command,check_output=lambda _:actual),
-                tomllib=types.SimpleNamespace(loads=lambda text: manifest if text=='candidate-manifest' else tomllib.loads(text)),
-                pathlib=types.SimpleNamespace(Path=path),hashlib=hashlib)
-            if defect is None:
-                exec(compiled,namespace)
-                self.assertEqual(namespace['main_integration_scope']['included_paths'],sorted(allowed))
-                self.assertEqual(namespace['main_integration_scope']['excluded_feature_paths'],['docs/IMPLEMENTATION_STATUS.md'])
-                self.assertEqual(namespace['main_integration_scope']['reconciled_paths'],sorted(reconciled))
-                self.assertTrue(namespace['main_integration_scope']['source_contracts_only'])
-                self.assertFalse(namespace['main_integration_scope']['actual_model_execution'])
+        import re
+        tree = ast.parse(self._workflow_python('PYRUST'))
+        assignments = {n.targets[0].id:ast.literal_eval(n.value) for n in tree.body
+            if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)
+            and n.targets[0].id in ('socket_tests','connect_tests','native_exit_tests','required')}
+        self.assertEqual(assignments['socket_tests'],{
+            'socket_preflight_accepts_owned_socket_without_an_observation',
+            'socket_preflight_preserves_exact_parent_validation_rejections',
+            'socket_preflight_distinguishes_metadata_type_and_owner_without_following_links',
+            'socket_diagnostic_io_kinds_are_closed_and_never_include_raw_errors',
+            'socket_diagnostic_is_optional_and_cannot_replace_the_original_error'})
+        self.assertEqual(assignments['connect_tests'],{
+            'connect_diagnostic_io_kinds_are_closed_and_never_include_raw_errors',
+            'connect_diagnostic_is_optional_and_cannot_replace_original_peer_error',
+            'connect_peer_check_preserves_original_io_owner_guard_and_success',
+            'connect_socket_preserves_original_io_and_success_guards'})
+        self.assertEqual(assignments['native_exit_tests'],{
+            'worker::tests::stdout_eof_retains_precleanup_exit_and_bounded_stderr_class',
+            'worker::tests::stdout_eof_retains_only_a_signal_observed_before_cleanup',
+            'worker::tests::live_child_stdout_eof_never_exports_cleanup_kill_status',
+            'worker::tests::unconfirmed_cleanup_returns_no_terminal_observation',
+            'tests::stdout_close_observation_preserves_primary_error_and_other_failure_shapes',
+            'tests::stdout_close_detail_accepts_only_legacy_null_or_closed_observation_matrix'})
+        self.assertEqual(assignments['required'],{
+            'compute::supervise::tests::public_bubblewrap_stage_matches_source_prefix_families_only',
+            'compute::supervise::tests::public_bubblewrap_stage_uses_existing_fragmented_prefix_without_changing_default_failure',
+            'compute::supervise::native_session::worker::tests::stdout_eof_carries_only_closed_public_bubblewrap_stage_after_join',
+            'compute::supervise::native_session::tests::public_bubblewrap_stages_preserve_ordinary_detail_and_require_stdout_close',
+            'compute::resident_guest::tests::public_bubblewrap_stage_frame_roundtrip_requires_exact_cleanup_and_scope'})
+        names = dict(grant=[],guest=[],resident=[],local=[],startup=[],descriptor=[])
+        required = assignments['required'] | {'compute::resident_guest::public_trial::tests::'+n
+            for key in ('socket_tests','connect_tests') for n in assignments[key]} | {
+            'compute::supervise::native_session::'+n for n in assignments['native_exit_tests']}
+        for name in sorted(required):
+            group = 'guest' if name.startswith('compute::resident_guest::') else (
+                'resident' if 'native_session::' in name else 'startup')
+            names[group].append(name)
+        counts = dict(grant=22,guest=45,resident=41,local=30,startup=2,descriptor=3)
+        for group,count in counts.items(): names[group] += [group+'::case_'+str(i) for i in range(count-len(names[group]))]
+        gate = compile(ast.Module(body=[n for n in tree.body if not isinstance(n,(ast.Import,ast.ImportFrom))],type_ignores=[]),
+            'inert-named-rust-inventory','exec')
+        for defect in (None,'missing-name','duplicate','missing-ok','ignored','doctest'):
+            inventories = copy.deepcopy(names)
+            if defect == 'missing-name': inventories['guest'][0] = 'guest::unrelated_case'
+            if defect == 'duplicate': inventories['guest'][0] = inventories['guest'][1]
+            logs = {}
+            for group,cases in inventories.items():
+                logs[group+'-inventory.log'] = '\n'.join(n+': test' for n in cases)
+                logs[group+'-test.log'] = '\n'.join('test '+n+' ... ok' for n in cases)+f'\n{len(cases)} passed; 0 failed; 0 ignored;'
+            if defect == 'missing-ok': logs['guest-test.log'] = logs['guest-test.log'].replace(' ... ok',' ... FAILED',1)
+            if defect == 'ignored': logs['guest-test.log'] = logs['guest-test.log'].replace('0 ignored','1 ignored')
+            logs['descriptor-doctest.log'] = '2 passed; 0 failed; 0 ignored;' if defect != 'doctest' else '1 passed; 0 failed; 1 ignored;'
+            written = {}
+            class Logs:
+                def __truediv__(self,name):
+                    return types.SimpleNamespace(read_text=lambda:logs[name],write_text=lambda value:written.update({name:value}))
+            namespace = dict(json=json,re=re,pathlib=types.SimpleNamespace(Path=lambda _:Logs()))
+            if defect:
+                with self.subTest(defect=defect),self.assertRaises(AssertionError): exec(gate,namespace)
             else:
-                with self.assertRaises(AssertionError,msg=defect): exec(compiled,namespace)
-        for job in ('contracts','public-model'):
-            condition = workflow.split('\n  '+job+':\n',1)[1].split('    if: >-\n',1)[1].split('\n    runs-on:',1)[0]
-            expression = ' '.join(condition.splitlines()).replace('&&',' and ').replace('||',' or ').strip()
-            for event in ('push','pull_request','workflow_dispatch'):
-                for scenario in ('source-contracts','public-model'):
-                    context = dict(github=types.SimpleNamespace(repository='VOLPAROSSA/volparossa',ref=branch,event_name=event,sha='a'*40),
-                        inputs=types.SimpleNamespace(scenario=scenario,expected_source=''))
-                    self.assertEqual(eval(expression,context),job=='contracts' and event=='workflow_dispatch' and scenario=='source-contracts')
+                exec(gate,namespace)
+                receipt = json.loads(written['tests.json'])
+                self.assertEqual(receipt['counts'],counts)
+                self.assertEqual(len(receipt['test_names']),143)
 
-
-    def test_main_runtime_source_gate_is_exact_and_preserves_canonical_workload(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/integration/resident-model-main-20261022'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and 'main_integration_scope' in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-connect-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = 'a9c3cc61a8bcde9dc7666b9189977ad52fc7fb44'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry', 'actual_job', 'job_hash', 'main_workload', 'main_route'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            candidate = workflow.encode() + (b'\n' if change in ('actual_job', 'job_hash') else b'')
-            original = candidate if change == 'job_hash' else workflow.encode()
-            if change == 'main_workload': candidate=candidate.replace(b'timeout-minutes: 300',b'timeout-minutes: 301',1)
-            if change == 'main_route': candidate=b"inputs.expected_source == github.sha".join(candidate.rsplit(b"inputs.expected_source == github.sha && needs.contracts.result == 'success'",1))
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            read = mock.Mock(return_value=original)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), main_integration_scope={}, git=git,
-                subprocess=types.SimpleNamespace(run=command, check_output=read), hashlib=hashlib,
-                pathlib=types.SimpleNamespace(Path=lambda _: types.SimpleNamespace(read_bytes=lambda: candidate)))
-            if change == 'valid':
-                exec(compiled, namespace)
-                receipt = namespace['main_runtime_scope']
-                self.assertEqual(set(receipt['source_blobs']), approved)
-                self.assertEqual(len(receipt['dependency_blobs']), 17)
-                self.assertTrue(receipt['source_contracts_only'])
-                self.assertEqual(receipt['checkpoint_mode'],'supported_ipv6_reference_metadata_v1')
-                self.assertNotIn('diagnostic_only',receipt)
-                self.assertTrue(receipt['main_job_matches_canonical_after_routing'])
-                for key in ('actual_model_execution', 'guest_boot', 'historical_cause_proven'):
-                    self.assertFalse(receipt[key])
-                self.assertEqual(receipt['actual_job_sha256'],
-                                 'e44d67525c0d12f1711064c8f674f35fce559e85b679c6f30fd715fbdf4c90f2')
+    def test_maintained_python_inventory_requires_every_named_case_without_skips(self):
+        import pathlib
+        import re
+        tree = ast.parse(self._workflow_python('PYPYTHON'))
+        function = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='verify_python_contracts')
+        namespace = dict(ast=ast,pathlib=pathlib,re=re)
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'inert-named-python-inventory','exec'),namespace)
+        expected = ast.literal_eval(function.body[0].value)
+        self.assertEqual(expected,{
+            'scripts/test-provision-rust189.py':18,'scripts/test-cargo-source-policy.py':18,
+            'tests/integration/test-protected-resident-binary-package.py':1,
+            'tests/integration/test-protected-resident-model-workload.py':33,
+            'tests/integration/test-protected-resident-model-build.py':62,
+            'tests/integration/test-resident-model-debian.py':19,
+            'tests/integration/test-protected-resident-model-install.py':61,
+            'tests/integration/test-protected-resident-model-assemble.py':35,
+            'tests/integration/test-protected-resident-model-run.py':252,
+            'tests/integration/test-protected-resident-model-host-observation.py':20,
+            'tests/integration/test-protected-resident-model-initrd.py':31,
+            'tests/integration/test-protected-resident-initrd.py':21,
+            'tests/integration/test-protected-resident-image.py':158})
+        logs = {}
+        for name,count in expected.items():
+            tree = ast.parse((R.ROOT/name).read_text())
+            names = [cls.name+'.'+node.name for cls in tree.body if isinstance(cls,ast.ClassDef)
+                for node in cls.body if isinstance(node,ast.FunctionDef) and node.name.startswith('test_')]
+            logs[pathlib.Path(name).stem+'.log'] = '\n'.join(n.split('.')[1]+' (__main__.'+n+') ... ok' for n in names)+f'\nRan {count} tests in 0.1s\n\nOK\n'
+        target = 'test-protected-resident-model-install.log'
+        for defect in (None,'missing-case','duplicate-case','count','skip','failure'):
+            actual = dict(logs)
+            if defect == 'missing-case': actual[target] = actual[target].split('\n',1)[1]
+            if defect == 'duplicate-case': actual[target] = actual[target].split('\n',1)[0]+'\n'+actual[target]
+            if defect == 'count': actual[target] = actual[target].replace('Ran 61 tests','Ran 60 tests')
+            if defect == 'skip': actual[target] = actual[target].replace('\nOK\n','\nOK (skipped=1)\n')
+            if defect == 'failure': actual[target] = actual[target].replace(' ... ok',' ... FAIL',1)
+            class Logs:
+                def __truediv__(self,name): return types.SimpleNamespace(read_text=lambda:actual[name])
+            verify = lambda:namespace['verify_python_contracts'](Logs(),lambda name:R.ROOT/name)
+            if defect:
+                with self.subTest(defect=defect),self.assertRaises(AssertionError): verify()
             else:
-                with self.assertRaises(AssertionError): exec(compiled, namespace)
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-        for job in ('contracts', 'public-model'):
-            condition = workflow.split('\n  ' + job + ':\n', 1)[1].split('    if: >-\n', 1)[1].split('\n    runs-on:', 1)[0]
-            expression = ' '.join(condition.splitlines()).replace('&&', ' and ').replace('||', ' or ').strip()
-            for repository in ('VOLPAROSSA/volparossa', 'unapproved/repository'):
-                for event in ('push', 'workflow_dispatch'):
-                    for scenario in ('source-contracts', 'public-model'):
-                        context = dict(github=types.SimpleNamespace(repository=repository, ref=branch, event_name=event,sha='a'*40),
-                                       inputs=types.SimpleNamespace(scenario=scenario,expected_source=''))
-                        self.assertEqual(eval(compile(expression, 'inert-connect-authority', 'eval'), context),
-                            job == 'contracts' and repository == 'VOLPAROSSA/volparossa' and
-                            event == 'workflow_dispatch' and scenario == 'source-contracts')
+                inventory = verify()
+                self.assertEqual(sum(map(len,inventory.values())),729)
 
+    def test_maintained_compiler_and_cargo_callers_preserve_current_main_policy(self):
+        workflow = self._resident_workflow()
+        self.assertNotIn('rustup toolchain install 1.85',workflow)
+        self.assertEqual(workflow.count('python3 -B scripts/provision-rust189.py runner'),2)
+        exports = ('          python3 -B scripts/provision-rust189.py runner\n'
+            '          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"\n'
+            '          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false')
+        self.assertEqual(workflow.count(exports),2)
+        self.assertIn("runpy.run_path('scripts/provision-rust189.py')['provision']('runner',dict(os.environ))",workflow)
+        for package in ('protobuf-compiler','libprotoc32t64','libprotobuf32t64'):
+            self.assertEqual(workflow.count(package+'=3.21.12-8.2ubuntu0.4'),2)
+        self.assertIn('cargo clippy --locked --offline -p volparossa-content -p volparossa -p volparossa-linux-uapi --all-targets -- -D warnings',workflow)
+
+    def test_maintained_public_host_access_and_requester_remain_scoped_and_owned(self):
+        public = self._resident_workflow().split('\n  public-model:\n',1)[1]
+        for guard in ('[[ "$launch_uid" =~ ^[1-9][0-9]*$ && "$launch_gid" =~ ^[1-9][0-9]*$ ]]',
+                      '--clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs',
+                      'iflag=nofollow,count_bytes','count=67108865','--kill-after=2s 15s /usr/bin/dd',
+                      'test ! -e target/resident-public-requester',
+                      'cp --no-clobber target/debug/volparossa target/resident-public-requester',
+                      'test "$(stat -c \'%h\' target/resident-public-requester)" = 1',
+                      'cmp target/debug/volparossa target/resident-public-requester'):
+            self.assertIn(guard,public)
+        cleanup = public.split('      - name: Restore only the user manager started by this job\n',1)[1].split('      - name:',1)[0]
+        self.assertIn('if: always()',cleanup)
+        self.assertIn('if test -f "$RUNNER_TEMP/vp-model-user-manager-owned-$GITHUB_RUN_ID"',cleanup)
+        self.assertIn('systemctl stop "user@$(id -u).service"',cleanup)
+        self.assertIn('--property=ActiveState --value)" = inactive',cleanup)
+        self.assertNotIn('continue-on-error',public)
+        self.assertNotIn('|| true',cleanup)
+
+    def test_maintained_public_budgets_and_controller_cleanup_are_unchanged(self):
+        contracts,public = self._resident_workflow().split('\n  public-model:\n',1)
+        import re
+        source_limits = [int(n) for n in re.findall(r'timeout-minutes: ([0-9]+)',contracts)]
+        self.assertEqual(source_limits[0],145)
+        self.assertEqual(sum(source_limits[1:]),143)
+        self.assertGreaterEqual(source_limits[0]-sum(source_limits[1:]),2)
+        self.assertEqual(len(source_limits[1:]),contracts.count('      - '))
+        self.assertEqual(re.findall(r'timeout-minutes: ([0-9]+)',public),['300','35','245'])
+        self.assertEqual(public.count('protected-resident-model-run.py --execute --yes'),1)
+        self.assertIn('--expected-source "$EXPECTED_SOURCE" --work "$RUNNER_TEMP/vp-resident-model-$GITHUB_RUN_ID"',public)
+        self.assertIn('--appliance-kernel "$kernel_copy" --requester "$GITHUB_WORKSPACE/target/resident-public-requester"',public)
+        bind,git,_,values,_ = self._composition_fixture()
+        self.assertNotIn('tests/integration/protected-resident-model-run.py',values['expected'])
+        self.assertTrue(bind(git,public)['actual_recipe_preserved'])
+
+    def test_maintained_public_artifacts_are_the_closed_eleven_receipts(self):
+        public = self._resident_workflow().split('\n  public-model:\n',1)[1]
+        artifact = public.split('      - uses: actions/upload-artifact@',1)[1]
+        paths = artifact.split('          path: |\n',1)[1].split('          if-no-files-found:',1)[0].splitlines()
+        prefix = '${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/'
+        expected = ('install-build.json','install-runtime.json','build-cleanup.json','model-build.json',
+            'workload.json','initrd.json','sealed-inputs.json','requester.json','model-boot.json','corrupt-boot.json','result.json')
+        self.assertEqual([p.strip() for p in paths],[prefix+p for p in expected])
+        self.assertEqual(public.count('uses: actions/upload-artifact@'),1)
+        self.assertIn('if: always()',artifact)
+        self.assertIn('retention-days: 14',artifact)
+
+    def test_maintained_default_produces_only_source_contract_evidence(self):
+        workflow = self._resident_workflow()
+        triggers = workflow.split('permissions:',1)[0]
+        self.assertIn('on:\n  workflow_dispatch:',triggers)
+        self.assertNotIn('\n  push:',triggers)
+        self.assertNotIn('\n  pull_request:',triggers)
+        self.assertIn('default: source-contracts',triggers)
+        self.assertIn('options: [source-contracts, public-model]',triggers)
+        contracts = workflow.split('\n  public-model:\n',1)[0]
+        self.assertNotIn(' --execute',contracts)
+        self.assertNotIn('setpriv',contracts)
+        self.assertNotIn('/dev/kvm',contracts)
+        self.assertIn('name: public-resident-model-contracts',contracts)
+        self.assertIn('path: resident-model-evidence',contracts)
+        self.assertNotIn('vp-resident-model-${{ github.run_id }}',contracts)
+
+    def test_maintained_recipe_replaces_only_fully_mapped_historical_wrappers(self):
+        workflow = self._resident_workflow()
+        for name in ('resident-current-main.yml','resident-installer-io.yml','resident-pinned-compiler.yml'):
+            self.assertFalse((R.ROOT/'.github/workflows'/name).exists(),name)
+        for name in ('protected-resident-image.yml','protected-resident-task.yml'):
+            self.assertTrue((R.ROOT/'.github/workflows'/name).is_file(),name)
+        for command in ('run_group grant volparossa-content provider::compute::resident_task::',
+                        'run_group guest volparossa compute::resident_guest::',
+                        'run_group resident volparossa compute::supervise::native_session::',
+                        'run_group local volparossa compute::private_serve::tests::',
+                        'run_group startup volparossa compute::supervise::tests::public_bubblewrap_stage',
+                        'run_group descriptor volparossa-linux-uapi async_fd::tests::'):
+            self.assertEqual(workflow.count('          '+command+'\n'),1)
+        self.assertEqual(workflow.count('--doc OwnedAsyncFd'),1)
+        step = workflow.split('      - name: Verify every maintained Python contract',1)[1].split("          python3 -B - <<'PYPYTHON'",1)[0]
+        self.assertEqual(step.count('timeout --kill-after=5s 180s python3 -B "$suite" -v'),1)
+        code = ast.parse(self._workflow_python('PYPYTHON'))
+        function = next(n for n in code.body if isinstance(n,ast.FunctionDef))
+        for suite in ast.literal_eval(function.body[0].value): self.assertEqual(step.count(suite),1,suite)
 
     def test_host_after_evidence_keeps_raw_truth_and_separate_configuration_eligibility(self):
         tree = ast.parse(SOURCE.read_text())
@@ -2833,372 +2951,6 @@ class ReceiptAndBindings(Inert):
             self.assertEqual(report['host_observed_routes_dns_unchanged'],changed is None)
             self.assertEqual((report['state'],report['model_execution']),('failed',False))
 
-    def test_inventory_diagnostic_branch_only_adds_exact_source_contract_authority(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        self.assertIn('branches: [feature/protected-resident-model, diagnostic/protected-export-inventory-20261021, fix/protected-requester-diagnostic-20261021, fix/protected-result-failure-20261021, fix/protected-socket-diagnostic-20261021, fix/protected-native-exit-observation-20261021, fix/protected-bwrap-stage-20261022, fix/protected-model-root-transition-20261022, fix/model-corruption-transition-20261022]', workflow)
-        self.assertIn("github.ref == 'refs/heads/diagnostic/protected-export-inventory-20261021' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-requester-diagnostic-20261021' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-result-failure-20261021' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-socket-diagnostic-20261021' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-native-exit-observation-20261021' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-bwrap-stage-20261022' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/protected-model-root-transition-20261022' ||", workflow)
-        self.assertIn("github.ref == 'refs/heads/fix/model-corruption-transition-20261022') &&", workflow)
-        self.assertIn("github.event_name == 'push' || inputs.scenario == 'source-contracts'", workflow)
-        public = workflow.split('\n  public-model:\n', 1)[1]
-        self.assertNotIn('diagnostic/protected-export-inventory', public)
-        self.assertNotIn('fix/protected-requester-diagnostic', public)
-        self.assertNotIn('fix/protected-result-failure', public)
-        self.assertNotIn('fix/protected-socket-diagnostic', public)
-        self.assertNotIn('fix/protected-native-exit-observation', public)
-        self.assertNotIn('fix/protected-bwrap-stage', public)
-        self.assertNotIn('fix/protected-model-root-transition', public)
-        self.assertIn("github.ref == 'refs/heads/feature/protected-resident-model'", public)
-        self.assertIn('test "$GITHUB_SHA" = "$EXPECTED_SOURCE"', public)
-        self.assertIn('test "$GITHUB_WORKFLOW_SHA" = "$EXPECTED_SOURCE"', public)
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        gate = next(node for node in ast.parse(code).body if isinstance(node, ast.If))
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'tests/integration/protected-resident-model-build.py',
-            'tests/integration/protected-resident-model-workload.py',
-            'tests/integration/test-protected-resident-model-build.py',
-            'tests/integration/test-protected-resident-model-workload.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = '3a1a15930fa69b89c9275f980e02eb6b89c94fb7'
-        for extra in (None, 'crates/volparossa/src/main.rs'):
-            changed = sorted(approved | ({extra} if extra else set()))
-            git = mock.Mock(return_value='\n'.join(changed))
-            command = mock.Mock()
-            namespace = {'os': types.SimpleNamespace(environ={
-                'GITHUB_REF': 'refs/heads/diagnostic/protected-export-inventory-20261021'}),
-                'git': git, 'subprocess': types.SimpleNamespace(run=command)}
-            compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-diagnostic-gate', 'exec')
-            if extra:
-                with self.assertRaises(AssertionError):
-                    exec(compiled, namespace)
-            else:
-                exec(compiled, namespace)
-                self.assertEqual(namespace['diagnostic_allowed'], approved)
-            git.assert_called_once_with('diff', '--name-only', base, 'HEAD')
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-
-    def test_bubblewrap_stage_source_gate_preserves_actual_job_and_exact_scope(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/protected-bwrap-stage-20261022'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-bwrap-stage-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml', 'THIRD_PARTY_LICENSES.md',
-            'crates/volparossa/src/compute/supervise.rs',
-            'crates/volparossa/src/compute/supervise/diagnostic.rs',
-            'crates/volparossa/src/compute/supervise/native_session.rs',
-            'crates/volparossa/src/compute/supervise/native_session/worker.rs',
-            'crates/volparossa/src/compute/supervise/native_session/tests.rs',
-            'crates/volparossa/src/compute/resident_guest/tests.rs',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = '3fceb0f82716a4ee10d1b9d11c7d5011fec31179'
-        old = b'contracts: old\n  public-model:\n    unchanged actual job\n'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry', 'actual-job'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            new = old.replace(b'contracts: old', b'contracts: new')
-            if change == 'actual-job': new += b'    changed actual authority\n'
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), git=git,
-                hashlib=hashlib, subprocess=types.SimpleNamespace(run=command, check_output=lambda _: old),
-                pathlib=types.SimpleNamespace(Path=lambda _: types.SimpleNamespace(read_bytes=lambda: new)))
-            if change == 'valid':
-                exec(compiled, namespace)
-                self.assertEqual(namespace['bwrap_allowed'], approved)
-                self.assertFalse(namespace['bwrap_stage_scope']['actual_model_execution'])
-                self.assertTrue(namespace['bwrap_stage_scope']['default_diagnostic_encoding_unchanged'])
-            else:
-                with self.assertRaises(AssertionError):
-                    exec(compiled, namespace)
-
-    def test_corruption_transition_source_gate_preserves_actual_job_dependencies_and_exact_scope(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/model-corruption-transition-20261022'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-corruption-transition-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = 'a9737718688ec285a86acb7a4d330dbb444e10b5'
-        dependencies = ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml',
-                        'crates/volparossa/Cargo.toml', 'crates/volparossa-content/Cargo.toml')
-        old = b'contracts: old\n  public-model:\n    unchanged actual job\n'
-        variants = ['valid', 'missing', 'extra', 'duplicate', 'ancestry', 'actual-job', *dependencies]
-        for change in variants:
-            with self.subTest(change=change):
-                changed = sorted(approved)
-                if change == 'missing': changed.pop()
-                if change == 'extra': changed.append('packaging/protected-resident-model/init')
-                if change == 'duplicate': changed.append(changed[0])
-                def git(*args):
-                    if args[0] == 'diff': return '\n'.join(changed)
-                    if change in dependencies and args == ('rev-parse', base + ':' + change):
-                        return 'b' * 40
-                    return 'a' * 40
-                command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-                new = old.replace(b'contracts: old', b'contracts: new')
-                if change == 'actual-job': new += b'    changed actual authority\n'
-                namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), git=git,
-                    hashlib=hashlib, subprocess=types.SimpleNamespace(run=command, check_output=lambda _: old),
-                    pathlib=types.SimpleNamespace(Path=lambda _: types.SimpleNamespace(read_bytes=lambda: new)))
-                if change == 'valid':
-                    exec(compiled, namespace)
-                    scope = namespace['corruption_transition_scope']
-                    self.assertEqual(namespace['corruption_allowed'], approved)
-                    self.assertEqual(scope['base_commit'], base)
-                    self.assertEqual(set(scope['source_blobs']), approved)
-                    self.assertEqual(set(scope['dependency_blobs']), set(dependencies))
-                    self.assertTrue(scope['source_contracts_only'])
-                    self.assertFalse(scope['actual_model_execution'])
-                    self.assertFalse(scope['guest_boot'])
-                    self.assertEqual(scope['actual_job_sha256'], hashlib.sha256(b'\n  public-model:\n' +
-                        new.split(b'\n  public-model:\n', 1)[1]).hexdigest())
-                    command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-                else:
-                    with self.assertRaises(AssertionError):
-                        exec(compiled, namespace)
-
-    def test_root_transition_source_gate_preserves_actual_job_dependencies_and_exact_scope(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/protected-model-root-transition-20261022'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-root-transition-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'packaging/protected-resident-model/init',
-            'tests/integration/test-protected-resident-model-initrd.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = '8b37a08bcf64a8d6e34932f0d0f4ee75082c813e'
-        old = b'contracts: old\n  public-model:\n    unchanged actual job\n'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry', 'actual-job'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/compute/supervise/sandbox.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            new = old.replace(b'contracts: old', b'contracts: new')
-            if change == 'actual-job': new += b'    changed actual authority\n'
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), git=git,
-                hashlib=hashlib, subprocess=types.SimpleNamespace(run=command, check_output=lambda _: old),
-                pathlib=types.SimpleNamespace(Path=lambda _: types.SimpleNamespace(read_bytes=lambda: new)))
-            if change == 'valid':
-                exec(compiled, namespace)
-                scope = namespace['root_transition_scope']
-                self.assertEqual(namespace['transition_allowed'], approved)
-                self.assertEqual(scope['base_commit'], base)
-                self.assertEqual(set(scope['source_blobs']), approved)
-                self.assertTrue(scope['source_contracts_only'])
-                self.assertFalse(scope['actual_model_execution'])
-                self.assertFalse(scope['guest_boot'])
-                self.assertEqual(scope['actual_job_sha256'], hashlib.sha256(b'\n  public-model:\n' +
-                    new.split(b'\n  public-model:\n', 1)[1]).hexdigest())
-                command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-            else:
-                with self.assertRaises(AssertionError):
-                    exec(compiled, namespace)
-
-    def test_result_failure_source_gate_requires_exact_paths_dependencies_and_ancestry(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/protected-result-failure-20261021'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-result-failure-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'crates/volparossa/src/compute/resident_guest/wire.rs',
-            'crates/volparossa/src/compute/resident_guest/session.rs',
-            'crates/volparossa/src/compute/resident_guest/public_trial.rs',
-            'crates/volparossa/src/compute/resident_guest/tests.rs',
-            'crates/volparossa/src/compute/resident_guest/public_trial/tests.rs',
-            'crates/volparossa/src/compute/supervise/native_session.rs',
-            'crates/volparossa/src/compute/supervise/native_session/tests.rs',
-            'crates/volparossa/src/compute/supervise/diagnostic.rs',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = 'b47d80d80c650791a6273c291a99c154536f4dab'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}),
-                             subprocess=types.SimpleNamespace(run=command), git=git)
-            if change == 'valid':
-                exec(compiled, namespace)
-                receipt = namespace['result_failure_scope']
-                self.assertEqual(set(receipt['source_blobs']), approved)
-                self.assertEqual(len(receipt['dependency_blobs']), 5)
-                self.assertTrue(receipt['diagnostic_only'])
-                self.assertFalse(receipt['actual_model_execution'])
-            else:
-                with self.assertRaises(AssertionError): exec(compiled, namespace)
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-
-    def test_connect_source_gate_is_exact_and_only_authorizes_dispatched_source_contracts(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/resident-connect-observation-20261023'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-connect-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'crates/volparossa/src/compute/resident_guest/public_trial.rs',
-            'crates/volparossa/src/compute/resident_guest/public_trial/tests.rs',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = '291e94938ebefb828fa05f30515205424ccec925'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry', 'actual_job', 'job_hash'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            candidate = workflow.encode() + (b'\n' if change in ('actual_job', 'job_hash') else b'')
-            original = candidate if change == 'job_hash' else workflow.encode()
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            read = mock.Mock(return_value=original)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}), git=git,
-                subprocess=types.SimpleNamespace(run=command, check_output=read), hashlib=hashlib,
-                pathlib=types.SimpleNamespace(Path=lambda _: types.SimpleNamespace(read_bytes=lambda: candidate)))
-            if change == 'valid':
-                exec(compiled, namespace)
-                receipt = namespace['connect_observation_scope']
-                self.assertEqual(set(receipt['source_blobs']), approved)
-                self.assertEqual(len(receipt['dependency_blobs']), 17)
-                self.assertTrue(receipt['source_contracts_only'] and receipt['diagnostic_only'])
-                for key in ('actual_model_execution', 'guest_boot', 'historical_cause_proven'):
-                    self.assertFalse(receipt[key])
-                self.assertEqual(receipt['actual_job_sha256'],
-                                 'e44d67525c0d12f1711064c8f674f35fce559e85b679c6f30fd715fbdf4c90f2')
-            else:
-                with self.assertRaises(AssertionError): exec(compiled, namespace)
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-        for job in ('contracts', 'public-model'):
-            condition = workflow.split('\n  ' + job + ':\n', 1)[1].split('    if: >-\n', 1)[1].split('\n    runs-on:', 1)[0]
-            expression = ' '.join(condition.splitlines()).replace('&&', ' and ').replace('||', ' or ').strip()
-            for repository in ('VOLPAROSSA/volparossa', 'unapproved/repository'):
-                for event in ('push', 'workflow_dispatch'):
-                    for scenario in ('source-contracts', 'public-model'):
-                        context = dict(github=types.SimpleNamespace(repository=repository, ref=branch, event_name=event,sha='a'*40),
-                                       inputs=types.SimpleNamespace(scenario=scenario,expected_source=''))
-                        self.assertEqual(eval(compile(expression, 'inert-connect-authority', 'eval'), context),
-                            job == 'contracts' and repository == 'VOLPAROSSA/volparossa' and
-                            event == 'workflow_dispatch' and scenario == 'source-contracts')
-
-    def test_socket_source_gate_requires_exact_paths_dependencies_and_ancestry(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/protected-socket-diagnostic-20261021'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-socket-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'crates/volparossa/src/compute/resident_guest/public_trial.rs',
-            'crates/volparossa/src/compute/resident_guest/public_trial/tests.rs',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = '9a96c1281e3fa6b5a9e8ad0490c37d5f17cd66bc'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}),
-                             subprocess=types.SimpleNamespace(run=command), git=git)
-            if change == 'valid':
-                exec(compiled, namespace)
-                receipt = namespace['socket_diagnostic_scope']
-                self.assertEqual(set(receipt['source_blobs']), approved)
-                self.assertEqual(len(receipt['dependency_blobs']), 5)
-                self.assertTrue(receipt['diagnostic_only'])
-                self.assertFalse(receipt['actual_model_execution'])
-            else:
-                with self.assertRaises(AssertionError): exec(compiled, namespace)
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-
-    def test_native_exit_source_gate_requires_exact_paths_dependencies_and_ancestry(self):
-        import textwrap
-        workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n", 1)[1].split('\n          PY', 1)[0])
-        branch = 'refs/heads/fix/protected-native-exit-observation-20261021'
-        gate = next(node for node in ast.parse(code).body
-                    if isinstance(node, ast.If) and repr(branch) in ast.unparse(node.test))
-        compiled = compile(ast.Module(body=[gate], type_ignores=[]), 'inert-native-exit-gate', 'exec')
-        approved = {'.github/workflows/protected-resident-model.yml',
-            'crates/volparossa/src/compute/supervise/native_session.rs',
-            'crates/volparossa/src/compute/supervise/native_session/worker.rs',
-            'crates/volparossa/src/compute/supervise/native_session/tests.rs',
-            'crates/volparossa/src/compute/supervise/diagnostic.rs',
-            'tests/integration/protected-resident-model-run.py',
-            'tests/integration/test-protected-resident-model-run.py'}
-        base = 'fd1018edc8ebeb225e9d36dcb188b067f7b5a4a9'
-        for change in ('valid', 'missing', 'extra', 'duplicate', 'dependency', 'ancestry'):
-            changed = sorted(approved)
-            if change == 'missing': changed.pop()
-            if change == 'extra': changed.append('crates/volparossa/src/main.rs')
-            if change == 'duplicate': changed.append(changed[0])
-            def git(*args):
-                if args[0] == 'diff': return '\n'.join(changed)
-                if change == 'dependency' and args == ('rev-parse', base + ':Cargo.lock'): return 'b' * 40
-                return 'a' * 40
-            command = mock.Mock(side_effect=AssertionError('ancestry') if change == 'ancestry' else None)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF': branch}),
-                             subprocess=types.SimpleNamespace(run=command), git=git)
-            if change == 'valid':
-                exec(compiled, namespace)
-                receipt = namespace['native_exit_scope']
-                self.assertEqual(set(receipt['source_blobs']), approved)
-                self.assertEqual(len(receipt['dependency_blobs']), 5)
-                self.assertTrue(receipt['diagnostic_only'])
-                self.assertFalse(receipt['actual_model_execution'])
-                self.assertEqual(receipt['status_semantics'], 'observed_before_native_session_cleanup')
-                self.assertEqual(receipt['stderr_semantics'], 'bounded_existing_drain_classification')
-                self.assertEqual(receipt['eof_matrix'],
-                                 'legacy_null_or_class_with_optional_precleanup_status_v1')
-            else:
-                with self.assertRaises(AssertionError): exec(compiled, namespace)
-            command.assert_called_once_with(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
-
     def test_formatter_gate_checks_before_compile_and_restores_failed_correction(self):
         workflow = (R.ROOT / '.github/workflows/protected-resident-model.yml').read_text()
         step = workflow.split('      - name: Check formatting before compilation', 1)[1]
@@ -3218,7 +2970,7 @@ class ReceiptAndBindings(Inert):
         offsets = [failure.index(token) for token in order]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn('tested_source_is_committed=not changed', formatting)
-        self.assertIn("if: always()\n        with:\n          name: public-resident-model-contracts", workflow)
+        self.assertIn("if: always()\n        timeout-minutes: 3\n        with:\n          name: public-resident-model-contracts", workflow)
 
     def test_ready_uses_actual_fixed_entrypoint_literal(self):
         source = R.ROOT / 'packaging/protected-resident-model/entrypoint'
