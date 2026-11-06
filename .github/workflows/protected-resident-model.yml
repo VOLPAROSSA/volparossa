@@ -172,11 +172,77 @@ jobs:
             exit 1
           fi
 
+      - name: Verify every maintained Python contract and the GNU packaging path
+        timeout-minutes: 42
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          sh -n packaging/protected-resident-model/init
+          for suite in scripts/test-provision-rust189.py scripts/test-cargo-source-policy.py \
+              tests/integration/test-protected-resident-binary-package.py \
+              tests/integration/test-protected-resident-model-workload.py \
+              tests/integration/test-protected-resident-model-build.py \
+              tests/integration/test-resident-model-debian.py \
+              tests/integration/test-protected-resident-model-install.py \
+              tests/integration/test-protected-resident-model-assemble.py \
+              tests/integration/test-protected-resident-model-run.py \
+              tests/integration/test-protected-resident-model-host-observation.py \
+              tests/integration/test-protected-resident-model-initrd.py \
+              tests/integration/test-protected-resident-initrd.py \
+              tests/integration/test-protected-resident-image.py; do
+            timeout --kill-after=5s 180s python3 -B "$suite" -v --buffer \
+              2>&1 | tee "resident-model-evidence/$(basename "$suite" .py).log"
+          done
+          python3 -B - <<'PYPYTHON'
+          import ast,json,pathlib,re
+          def verify_python_contracts(root, source):
+            expected={
+              'scripts/test-provision-rust189.py':18,
+              'scripts/test-cargo-source-policy.py':18,
+              'tests/integration/test-protected-resident-binary-package.py':1,
+              'tests/integration/test-protected-resident-model-workload.py':33,
+              'tests/integration/test-protected-resident-model-build.py':62,
+              'tests/integration/test-resident-model-debian.py':19,
+              'tests/integration/test-protected-resident-model-install.py':61,
+              'tests/integration/test-protected-resident-model-assemble.py':35,
+              'tests/integration/test-protected-resident-model-run.py':252,
+              'tests/integration/test-protected-resident-model-host-observation.py':20,
+              'tests/integration/test-protected-resident-model-initrd.py':31,
+              'tests/integration/test-protected-resident-initrd.py':21,
+              'tests/integration/test-protected-resident-image.py':158,
+            }
+            inventory={}
+            for name,count in expected.items():
+              tree=ast.parse(source(name).read_text())
+              names=sorted(cls.name+'.'+node.name for cls in tree.body if isinstance(cls,ast.ClassDef)
+                for node in cls.body if isinstance(node,ast.FunctionDef) and node.name.startswith('test_'))
+              assert len(names)==len(set(names))==count,name
+              raw=(root/(pathlib.Path(name).stem+'.log')).read_text()
+              assert re.findall(r'^Ran ([0-9]+) tests? in ',raw,re.M)==[str(count)],name
+              assert re.findall(r'^OK(?: .*)?$',raw,re.M)==['OK'],name
+              assert not re.search(r'\bskipped\b|^FAILED',raw,re.M),name
+              for test in names:
+                cls,method=test.split('.')
+                pattern=r'^'+re.escape(method)+r' \((?:[^() ]+\.)?'+re.escape(test)+r'\) \.\.\. ok$'
+                assert len(re.findall(pattern,raw,re.M))==1,(name,test)
+              inventory[name]=names
+            assert sum(map(len,inventory.values()))==729
+            return inventory
+          root=pathlib.Path('resident-model-evidence')
+          inventory=verify_python_contracts(root,pathlib.Path)
+          (root/'python-tests.json').write_text(json.dumps(dict(version=1,test_names=inventory,
+            guest_boot=False,model_execution=False,private_peer_admission=False),sort_keys=True)+'\n')
+          PYPYTHON
+
       - name: Compile both affected crates
         id: build
         timeout-minutes: 30
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
           cargo fetch --locked
           cargo test --locked --offline -p volparossa-content -p volparossa --no-run 2>&1 | tee resident-model-evidence/build.log
 
@@ -248,70 +314,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy --locked --offline -p volparossa-content -p volparossa -p volparossa-linux-uapi --all-targets -- -D warnings 2>&1 | tee resident-model-evidence/clippy.log
-
-      - name: Verify every maintained Python contract and the GNU packaging path
-        timeout-minutes: 42
-        run: |
-          set -euo pipefail
-          test "$GITHUB_ACTIONS" = true
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test "$(id -u)" != 0
-          sh -n packaging/protected-resident-model/init
-          for suite in scripts/test-provision-rust189.py scripts/test-cargo-source-policy.py \
-              tests/integration/test-protected-resident-binary-package.py \
-              tests/integration/test-protected-resident-model-workload.py \
-              tests/integration/test-protected-resident-model-build.py \
-              tests/integration/test-resident-model-debian.py \
-              tests/integration/test-protected-resident-model-install.py \
-              tests/integration/test-protected-resident-model-assemble.py \
-              tests/integration/test-protected-resident-model-run.py \
-              tests/integration/test-protected-resident-model-host-observation.py \
-              tests/integration/test-protected-resident-model-initrd.py \
-              tests/integration/test-protected-resident-initrd.py \
-              tests/integration/test-protected-resident-image.py; do
-            timeout --kill-after=5s 180s python3 -B "$suite" -v \
-              2>&1 | tee "resident-model-evidence/$(basename "$suite" .py).log"
-          done
-          python3 -B - <<'PYPYTHON'
-          import ast,json,pathlib,re
-          def verify_python_contracts(root, source):
-            expected={
-              'scripts/test-provision-rust189.py':18,
-              'scripts/test-cargo-source-policy.py':18,
-              'tests/integration/test-protected-resident-binary-package.py':1,
-              'tests/integration/test-protected-resident-model-workload.py':33,
-              'tests/integration/test-protected-resident-model-build.py':62,
-              'tests/integration/test-resident-model-debian.py':19,
-              'tests/integration/test-protected-resident-model-install.py':61,
-              'tests/integration/test-protected-resident-model-assemble.py':35,
-              'tests/integration/test-protected-resident-model-run.py':252,
-              'tests/integration/test-protected-resident-model-host-observation.py':20,
-              'tests/integration/test-protected-resident-model-initrd.py':31,
-              'tests/integration/test-protected-resident-initrd.py':21,
-              'tests/integration/test-protected-resident-image.py':158,
-            }
-            inventory={}
-            for name,count in expected.items():
-              tree=ast.parse(source(name).read_text())
-              names=sorted(cls.name+'.'+node.name for cls in tree.body if isinstance(cls,ast.ClassDef)
-                for node in cls.body if isinstance(node,ast.FunctionDef) and node.name.startswith('test_'))
-              assert len(names)==len(set(names))==count,name
-              raw=(root/(pathlib.Path(name).stem+'.log')).read_text()
-              assert re.findall(r'^Ran ([0-9]+) tests? in ',raw,re.M)==[str(count)],name
-              assert re.findall(r'^OK(?: .*)?$',raw,re.M)==['OK'],name
-              assert not re.search(r'\bskipped\b|^FAILED',raw,re.M),name
-              for test in names:
-                cls,method=test.split('.')
-                pattern=r'^'+re.escape(method)+r' \((?:[^() ]+\.)?'+re.escape(test)+r'\) \.\.\. ok$'
-                assert len(re.findall(pattern,raw,re.M))==1,(name,test)
-              inventory[name]=names
-            assert sum(map(len,inventory.values()))==729
-            return inventory
-          root=pathlib.Path('resident-model-evidence')
-          inventory=verify_python_contracts(root,pathlib.Path)
-          (root/'python-tests.json').write_text(json.dumps(dict(version=1,test_names=inventory,
-            guest_boot=False,model_execution=False,private_peer_admission=False),sort_keys=True)+'\n')
-          PYPYTHON
 
       - name: Verify tested source stayed equal to the committed candidate
         if: always()
