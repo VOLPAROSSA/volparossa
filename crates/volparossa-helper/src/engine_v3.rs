@@ -661,7 +661,7 @@ pub(crate) enum BackendError {
     /// Definite MPTCP connect poll timeout; retains the ordinary Kernel rejection.
     MptcpConnectPollTimedOut,
     CleanupIncomplete,
-    /// Acquire-only origin; identical cleanup authority and public result to CleanupIncomplete.
+    /// Acquire-only origin; identical cleanup authority and public result to `CleanupIncomplete`.
     AcquireCleanupIncomplete(AcquireCleanupOrigin),
 }
 

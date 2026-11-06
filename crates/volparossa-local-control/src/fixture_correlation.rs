@@ -146,7 +146,7 @@ pub enum StorageFixtureHelperDiagnostic {
     AcquireCoordinatorDeadline = 12,
     /// The worker coordinator returned its closed Ambiguous error.
     AcquireCoordinatorAmbiguous = 13,
-    /// Coordinator Dead, Quarantined, ShuttingDown or RuntimeUnavailable; not which one.
+    /// Coordinator Dead, Quarantined, `ShuttingDown` or `RuntimeUnavailable`; not which one.
     AcquireCoordinatorUnavailable = 14,
     /// Another coordinator error, excluding Capacity and the classes above; no raw text.
     AcquireCoordinatorOther = 15,
