@@ -1,0 +1,264 @@
+{
+  "admitted": true,
+  "build_manifest": {
+    "bytes": 11373,
+    "sha256": "222bfa693f5dbd4350e311a41e92732c40ffe3aefd8a83678ecd2334fb7292f7"
+  },
+  "bytes": 93841627,
+  "environment_lock_sha256": "45c347dad35d0f908233423c57cf9a6fc34f0e37dc9de8c5e37790fed1497367",
+  "evidence": {
+    "abi_run": {
+      "artifacts": {
+        "abi": {
+          "bytes": 951949,
+          "id": 12547626243,
+          "sha256": "db1e3a29166c94ebe14073c2cb492b583a3bd193e890bb8092314dd4c87f0984"
+        },
+        "build": {
+          "bytes": 988187,
+          "id": 12547069518,
+          "sha256": "909818a70b68aa09c7bd408139f7af5d82a2e1954ff922db866969cdc082c4b4"
+        }
+      },
+      "attempt": 1,
+      "core_commit": "382df4d5b4e6d7434828dec00bee6d7d620ed805",
+      "id": 40060819389,
+      "job_id": 120773716703,
+      "reports": {
+        "abi/evidence/inventory-vm-cleanup.json": {
+          "bytes": 282,
+          "sha256": "61c0d9eb5c48fa5231522697ce6a5c3473fdf3e00713e8f28b4a3cdce67e9d04"
+        },
+        "abi/evidence/source-abi-decode-first.log": {
+          "bytes": 269,
+          "sha256": "769c46ff19c8985759a280c4abbc669a6e79b5018800239ead554e55d53585f7"
+        },
+        "abi/evidence/source-abi-decode-last.log": {
+          "bytes": 273,
+          "sha256": "fc2fac05c4976dff2e9b135666bded45595bd4568cccb4fd2737d3f9679f58d2"
+        },
+        "abi/evidence/source-abi-elf.log": {
+          "bytes": 11262,
+          "sha256": "7937abb62e2892b1c35008e6de4abeb86d901eb1696e3dd3c3e624e8cec11c8e"
+        },
+        "abi/evidence/source-abi-report.json": {
+          "bytes": 4002,
+          "sha256": "c12bf5c0aac8d11bdb79d1138fc8ff474c4113f6b3bcedc3fae117ee8efc52d5"
+        },
+        "abi/evidence/source-abi-sandbox.log": {
+          "bytes": 73,
+          "sha256": "ae0899d31cfa1444f0225d42b4a9b29da7ba5d1840a7f6deec08a253e9d538ff"
+        },
+        "abi/evidence/source-abi-version.log": {
+          "bytes": 25,
+          "sha256": "9a44b8f4c22b2b88686807288404b8b042bcfe6c63c294002b5df9b7e75a1e03"
+        },
+        "abi/evidence/source-trial-report.json": {
+          "bytes": 3441,
+          "sha256": "b038ca4899c4d82a204e06a02d0bb12821017a62c6fb380a3429674f15b8e7f3"
+        },
+        "build/evidence/inventory-vm-cleanup.json": {
+          "bytes": 277,
+          "sha256": "491390b0349cf1aee18b46c66be373801c11c4fea986922cf85e58b348fe1f92"
+        }
+      }
+    },
+    "cold_builds": {
+      "review": {
+        "id": "F09-COLD-BUILDS-40057456323-40057858381",
+        "sha256": "a8b585d0fa72e46f7594174546af53b49110ff7a5179c4084ee1ec55ada6cc37"
+      },
+      "runs": [
+        {
+          "artifact": {
+            "bytes": 988128,
+            "sha256": "63c2bf74a32439f1f8a08ac2d7896b31bba72a645b62ad451669ea8cbfe46782"
+          },
+          "artifact_id": 12546316159,
+          "attempt": 1,
+          "id": 40057456323,
+          "job_id": 120763481923
+        },
+        {
+          "artifact": {
+            "bytes": 988208,
+            "sha256": "befc96d6ed07bd4dbdc080f005695c26887547fc04f358d327a3929c4e48470a"
+          },
+          "artifact_id": 12545649865,
+          "attempt": 1,
+          "id": 40057858381,
+          "job_id": 120764722589
+        }
+      ]
+    },
+    "review": {
+      "id": "F09-SOURCE-ABI-40060819389-REVIEW",
+      "sha256": "226fa7ca2de091c7ec8f90afd114c4663f38d2593373fd7c4a566cb8dfc79baf"
+    }
+  },
+  "files": {
+    "build-manifest.json": {
+      "bytes": 11373,
+      "mode": 256,
+      "sha256": "222bfa693f5dbd4350e311a41e92732c40ffe3aefd8a83678ecd2334fb7292f7"
+    },
+    "ecbuild-source/COPYING": {
+      "bytes": 11392,
+      "mode": 256,
+      "sha256": "e66e138859d69f0a9f85ff83caa3a7dd4be46871036b3ddb483e97fc92c19120"
+    },
+    "ecbuild-source/LICENSE": {
+      "bytes": 10751,
+      "mode": 256,
+      "sha256": "b8cd06462fcd1691d120610d7c2a868796809f520c9977b10eace0fc91a9dbf4"
+    },
+    "ecbuild-source/NOTICE": {
+      "bytes": 744,
+      "mode": 256,
+      "sha256": "e7338a08ea2e75ad7936781fc7fda0cbc18758370bfedabdb6e9a2965df319f5"
+    },
+    "eccodes-build/bin/codes_info": {
+      "bytes": 31112488,
+      "mode": 320,
+      "sha256": "04c0d0c3ef9b0941e3b43792179a4951004ca2597f2c31035046d60c745ddd8e"
+    },
+    "eccodes-build/bin/grib_filter": {
+      "bytes": 31281296,
+      "mode": 320,
+      "sha256": "0d182f27514266258396f3dbd01770ce52c8038f293d6e08db08b981cf9b63f8"
+    },
+    "eccodes-build/bin/grib_ls": {
+      "bytes": 31332240,
+      "mode": 320,
+      "sha256": "ed316220369428181c3620baa50297746a7a3eb6d797b19c950469e62c870b63"
+    },
+    "eccodes-source/COPYING": {
+      "bytes": 11337,
+      "mode": 256,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/LICENSE": {
+      "bytes": 11337,
+      "mode": 256,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/NOTICE": {
+      "bytes": 771,
+      "mode": 256,
+      "sha256": "8a73c2ffa4c7b56513d27830fbb22eb30bb73df80612c1395b416570f1637393"
+    },
+    "eccodes-source/third_party/expected/COPYING": {
+      "bytes": 7048,
+      "mode": 256,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    "libaec-source/LICENSE.txt": {
+      "bytes": 1346,
+      "mode": 256,
+      "sha256": "66924e663d6e156dc45fe5aba993f5dcb131a8a5400b5580d956877c2c77c717"
+    },
+    "prefix/lib/libaec.a": {
+      "bytes": 48676,
+      "mode": 256,
+      "sha256": "0954a707293a5d9c43e539b520df178f4e6eaf6f971f2115d0c081369a28f324"
+    },
+    "probe.grib2": {
+      "bytes": 828,
+      "mode": 256,
+      "sha256": "551114e2f896b62e3f6901330876040015ed2b7ae483f5798ddb18a8ae233eec"
+    }
+  },
+  "id": "weather-decoder-source-20261024-v1",
+  "kind": "volparossa-weather-decoder-source-admission",
+  "payload_manifest": {
+    "bytes": 2554,
+    "sha256": "b95fa04b4e9c4024d0bc35442321f39c73c2344c3864c686537fba78cd9d8d35"
+  },
+  "producer_core_commit": "b027d87367262c62d1e70c61102ba87513bbfeec",
+  "profile": "source-v1",
+  "schema": 1,
+  "scope": {
+    "abi_proven": true,
+    "android_proven": false,
+    "browser_proven": false,
+    "ccsds_probe_proven": true,
+    "core_delivery_proven": false,
+    "default_branch_accepted": false,
+    "disposable_debian13_amd64_decoder_inputs_authorized": true,
+    "full_eccodes_suite_proven": false,
+    "origin_acquisition_proven": false,
+    "production_decoder_authorized": false,
+    "sanitizers_proven": false
+  },
+  "source_archives": [
+    {
+      "archive": "ecbuild-a07c0a5c.tar.gz",
+      "bytes": 272815,
+      "commit": "a07c0a5caeec13214b3c7b0542c2427f46d417b3",
+      "license": "Apache-2.0",
+      "name": "ecbuild",
+      "notices": [
+        "LICENSE",
+        "NOTICE",
+        "COPYING"
+      ],
+      "origin": "https://github.com/ecmwf/ecbuild",
+      "sha256": "6e52dfb8828b6de24ef27792b132d1b928a987ec3e62866292c354a763943446",
+      "url": "https://codeload.github.com/ecmwf/ecbuild/tar.gz/a07c0a5caeec13214b3c7b0542c2427f46d417b3",
+      "version": "3.8.5"
+    },
+    {
+      "archive": "libaec-7204505a.tar.gz",
+      "bytes": 2786217,
+      "commit": "7204505af7d6635734fc12a38d6bd0a6253c9c6d",
+      "license": "BSD-2-Clause",
+      "name": "libaec",
+      "notices": [
+        "LICENSE.txt"
+      ],
+      "origin": "https://github.com/Deutsches-Klimarechenzentrum/libaec",
+      "sha256": "2695774c3bf2c85d366e8c13524a77057a72e5fab48cf50425cce611dc5ecb0e",
+      "url": "https://codeload.github.com/Deutsches-Klimarechenzentrum/libaec/tar.gz/7204505af7d6635734fc12a38d6bd0a6253c9c6d",
+      "version": "1.1.4"
+    },
+    {
+      "archive": "eccodes-aa85928d.tar.gz",
+      "bytes": 12913990,
+      "commit": "aa85928d05036a1bce3cab330bc75681dc26c234",
+      "license": "Apache-2.0",
+      "name": "eccodes",
+      "notices": [
+        "LICENSE",
+        "NOTICE",
+        "COPYING"
+      ],
+      "origin": "https://github.com/ecmwf/eccodes",
+      "sha256": "c2e8ff9d8343c4c56a6635c43ca18446752ce464d4129a22ef3fda8508d49df6",
+      "url": "https://codeload.github.com/ecmwf/eccodes/tar.gz/aa85928d05036a1bce3cab330bc75681dc26c234",
+      "version": "2.44.0"
+    }
+  ],
+  "source_files": {
+    "scripts/build_eccodes.py": {
+      "bytes": 11634,
+      "sha256": "5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"
+    },
+    "scripts/prepare_hosted_decoder.py": {
+      "bytes": 38796,
+      "sha256": "e6000583dd24cd441e511a78b4d106b71c265ccd25df4173ef1cb2ecc734430f"
+    },
+    "scripts/prepare_hosted_decoder_environment.py": {
+      "bytes": 35384,
+      "sha256": "790051cfb2900b597d27cde09f87acc672b35e480cf027755ae4b1efca72d40e"
+    },
+    "third_party/eccodes-sources.json": {
+      "bytes": 2087,
+      "sha256": "f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"
+    }
+  },
+  "trial": {
+    "id": "weather-decoder-source-20261024-trial-v1",
+    "sha256": "e87d339f069101d889cc45b3a7810e407252c1d32c9ef16bed0983feb09839be"
+  },
+  "weather_commit": "05a7350c702625d99d610a882f50b2fd639edc4e"
+}

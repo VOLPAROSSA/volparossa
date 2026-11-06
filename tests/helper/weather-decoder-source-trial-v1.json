@@ -1,0 +1,190 @@
+{
+  "build_manifest": {
+    "bytes": 11373,
+    "sha256": "222bfa693f5dbd4350e311a41e92732c40ffe3aefd8a83678ecd2334fb7292f7"
+  },
+  "bytes": 93841627,
+  "environment_lock_sha256": "45c347dad35d0f908233423c57cf9a6fc34f0e37dc9de8c5e37790fed1497367",
+  "evidence": {
+    "review": {
+      "id": "F09-COLD-BUILDS-40057456323-40057858381",
+      "sha256": "a8b585d0fa72e46f7594174546af53b49110ff7a5179c4084ee1ec55ada6cc37"
+    },
+    "runs": [
+      {
+        "artifact": {
+          "bytes": 988128,
+          "sha256": "63c2bf74a32439f1f8a08ac2d7896b31bba72a645b62ad451669ea8cbfe46782"
+        },
+        "artifact_id": 12546316159,
+        "attempt": 1,
+        "id": 40057456323,
+        "job_id": 120763481923
+      },
+      {
+        "artifact": {
+          "bytes": 988208,
+          "sha256": "befc96d6ed07bd4dbdc080f005695c26887547fc04f358d327a3929c4e48470a"
+        },
+        "artifact_id": 12545649865,
+        "attempt": 1,
+        "id": 40057858381,
+        "job_id": 120764722589
+      }
+    ]
+  },
+  "files": {
+    "build-manifest.json": {
+      "bytes": 11373,
+      "mode": 256,
+      "sha256": "222bfa693f5dbd4350e311a41e92732c40ffe3aefd8a83678ecd2334fb7292f7"
+    },
+    "ecbuild-source/COPYING": {
+      "bytes": 11392,
+      "mode": 256,
+      "sha256": "e66e138859d69f0a9f85ff83caa3a7dd4be46871036b3ddb483e97fc92c19120"
+    },
+    "ecbuild-source/LICENSE": {
+      "bytes": 10751,
+      "mode": 256,
+      "sha256": "b8cd06462fcd1691d120610d7c2a868796809f520c9977b10eace0fc91a9dbf4"
+    },
+    "ecbuild-source/NOTICE": {
+      "bytes": 744,
+      "mode": 256,
+      "sha256": "e7338a08ea2e75ad7936781fc7fda0cbc18758370bfedabdb6e9a2965df319f5"
+    },
+    "eccodes-build/bin/codes_info": {
+      "bytes": 31112488,
+      "mode": 320,
+      "sha256": "04c0d0c3ef9b0941e3b43792179a4951004ca2597f2c31035046d60c745ddd8e"
+    },
+    "eccodes-build/bin/grib_filter": {
+      "bytes": 31281296,
+      "mode": 320,
+      "sha256": "0d182f27514266258396f3dbd01770ce52c8038f293d6e08db08b981cf9b63f8"
+    },
+    "eccodes-build/bin/grib_ls": {
+      "bytes": 31332240,
+      "mode": 320,
+      "sha256": "ed316220369428181c3620baa50297746a7a3eb6d797b19c950469e62c870b63"
+    },
+    "eccodes-source/COPYING": {
+      "bytes": 11337,
+      "mode": 256,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/LICENSE": {
+      "bytes": 11337,
+      "mode": 256,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/NOTICE": {
+      "bytes": 771,
+      "mode": 256,
+      "sha256": "8a73c2ffa4c7b56513d27830fbb22eb30bb73df80612c1395b416570f1637393"
+    },
+    "eccodes-source/third_party/expected/COPYING": {
+      "bytes": 7048,
+      "mode": 256,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    "libaec-source/LICENSE.txt": {
+      "bytes": 1346,
+      "mode": 256,
+      "sha256": "66924e663d6e156dc45fe5aba993f5dcb131a8a5400b5580d956877c2c77c717"
+    },
+    "prefix/lib/libaec.a": {
+      "bytes": 48676,
+      "mode": 256,
+      "sha256": "0954a707293a5d9c43e539b520df178f4e6eaf6f971f2115d0c081369a28f324"
+    },
+    "probe.grib2": {
+      "bytes": 828,
+      "mode": 256,
+      "sha256": "551114e2f896b62e3f6901330876040015ed2b7ae483f5798ddb18a8ae233eec"
+    }
+  },
+  "id": "weather-decoder-source-20261024-trial-v1",
+  "kind": "volparossa-weather-decoder-source-abi-trial",
+  "payload_manifest": {
+    "bytes": 2554,
+    "sha256": "b95fa04b4e9c4024d0bc35442321f39c73c2344c3864c686537fba78cd9d8d35"
+  },
+  "producer_core_commit": "b027d87367262c62d1e70c61102ba87513bbfeec",
+  "profile": "source-v1",
+  "schema": 1,
+  "scope": {
+    "abi_proven": false,
+    "abi_trial_inputs_authorized": true,
+    "consumer_fallback": false,
+    "production_decoder_authorized": false
+  },
+  "source_archives": [
+    {
+      "archive": "ecbuild-a07c0a5c.tar.gz",
+      "bytes": 272815,
+      "commit": "a07c0a5caeec13214b3c7b0542c2427f46d417b3",
+      "license": "Apache-2.0",
+      "name": "ecbuild",
+      "notices": [
+        "LICENSE",
+        "NOTICE",
+        "COPYING"
+      ],
+      "origin": "https://github.com/ecmwf/ecbuild",
+      "sha256": "6e52dfb8828b6de24ef27792b132d1b928a987ec3e62866292c354a763943446",
+      "url": "https://codeload.github.com/ecmwf/ecbuild/tar.gz/a07c0a5caeec13214b3c7b0542c2427f46d417b3",
+      "version": "3.8.5"
+    },
+    {
+      "archive": "libaec-7204505a.tar.gz",
+      "bytes": 2786217,
+      "commit": "7204505af7d6635734fc12a38d6bd0a6253c9c6d",
+      "license": "BSD-2-Clause",
+      "name": "libaec",
+      "notices": [
+        "LICENSE.txt"
+      ],
+      "origin": "https://github.com/Deutsches-Klimarechenzentrum/libaec",
+      "sha256": "2695774c3bf2c85d366e8c13524a77057a72e5fab48cf50425cce611dc5ecb0e",
+      "url": "https://codeload.github.com/Deutsches-Klimarechenzentrum/libaec/tar.gz/7204505af7d6635734fc12a38d6bd0a6253c9c6d",
+      "version": "1.1.4"
+    },
+    {
+      "archive": "eccodes-aa85928d.tar.gz",
+      "bytes": 12913990,
+      "commit": "aa85928d05036a1bce3cab330bc75681dc26c234",
+      "license": "Apache-2.0",
+      "name": "eccodes",
+      "notices": [
+        "LICENSE",
+        "NOTICE",
+        "COPYING"
+      ],
+      "origin": "https://github.com/ecmwf/eccodes",
+      "sha256": "c2e8ff9d8343c4c56a6635c43ca18446752ce464d4129a22ef3fda8508d49df6",
+      "url": "https://codeload.github.com/ecmwf/eccodes/tar.gz/aa85928d05036a1bce3cab330bc75681dc26c234",
+      "version": "2.44.0"
+    }
+  ],
+  "source_files": {
+    "scripts/build_eccodes.py": {
+      "bytes": 11634,
+      "sha256": "5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"
+    },
+    "scripts/prepare_hosted_decoder.py": {
+      "bytes": 38796,
+      "sha256": "e6000583dd24cd441e511a78b4d106b71c265ccd25df4173ef1cb2ecc734430f"
+    },
+    "scripts/prepare_hosted_decoder_environment.py": {
+      "bytes": 35384,
+      "sha256": "790051cfb2900b597d27cde09f87acc672b35e480cf027755ae4b1efca72d40e"
+    },
+    "third_party/eccodes-sources.json": {
+      "bytes": 2087,
+      "sha256": "f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"
+    }
+  },
+  "weather_commit": "05a7350c702625d99d610a882f50b2fd639edc4e"
+}

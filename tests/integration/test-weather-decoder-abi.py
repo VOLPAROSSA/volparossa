@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure fixtures/inert Python children only: never execute a decoder or bwrap."""
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -193,6 +194,17 @@ class ABI(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, error): owner.run([sys.executable, "-c", code], time.monotonic()+seconds)
             self.assertTrue(owner.drained)
 
+    def test_inert_timeout_preserves_original_partial_inventory_log(self):
+        with tempfile.TemporaryFile() as stream:
+            owner = H['Commands']()
+            owner.output_stream = stream
+            with self.assertRaisesRegex(ValueError, 'ABI_DEADLINE'):
+                owner.run([sys.executable, '-c', "import time; print('actual partial output',flush=True); time.sleep(5)"],
+                          time.monotonic() + .2)
+            stream.seek(0)
+            self.assertEqual(stream.read(), b'actual partial output\n')
+            self.assertTrue(owner.drained)
+
     def test_interrupt_during_cleanup_is_never_confirmed_drained(self):
         child = Mock(pid=99999)
         child.wait.side_effect = [0, H["Interrupted"]()]
@@ -203,6 +215,397 @@ class ABI(unittest.TestCase):
                 patch.object(os, "killpg"):
             with self.assertRaises(H["CleanupUnconfirmed"]): owner.run(["inert"], time.monotonic()+2)
         self.assertFalse(owner.drained)
+
+
+class SourceInventory(unittest.TestCase):
+    def test_checkout_before_apt_annotation_fix_is_rejected_before_reading_or_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            read = Mock(side_effect=AssertionError('stale checkout must not provide source bytes'))
+            stale = SimpleNamespace(stdout=b'b7151fd226df6624f788accbb3afaffa8991a5b4\n')
+            with patch.dict(G, source_files=read), patch.object(subprocess, 'run', return_value=stale):
+                with self.assertRaisesRegex(ValueError, 'SOURCE_COMMIT_MISMATCH'):
+                    H['stage_source'](root, root / 'staged')
+            read.assert_not_called()
+            self.assertFalse((root / 'staged').exists())
+
+    def test_fixed_source_commit_and_files_before_guest_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'; source.mkdir()
+            (source / 'scripts').mkdir()
+            (source / 'scripts/input.py').write_bytes(b'inert source\n')
+            (source / 'scripts/input.py').chmod(0o600)
+            expected = {'scripts/input.py': dict(bytes=13, sha256=H['digest'](b'inert source\n'))}
+            with patch.dict(G, SOURCE_FILES=expected), patch.object(subprocess, 'run', return_value=SimpleNamespace(stdout=(H['SOURCE_COMMIT'] + '\n').encode())):
+                value = H['stage_source'](source, root / 'staged')
+                self.assertFalse(value['admitted'])
+                self.assertEqual(set(H['inventory'](root / 'staged', expected)), set(expected))
+                (source / 'scripts/input.py').write_bytes(b'changed bytes')
+                with self.assertRaisesRegex(ValueError, 'SOURCE_FILE_MISMATCH'):
+                    H['stage_source'](source, root / 'rejected')
+            with patch.object(subprocess, 'run', return_value=SimpleNamespace(stdout=b'0' * 40 + b'\n')):
+                with self.assertRaisesRegex(ValueError, 'SOURCE_COMMIT_MISMATCH'): H['source_checkout'](source)
+
+    def test_candidate_or_old_binary_record_cannot_replace_recipe_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'candidate.json').write_bytes(b'{"admitted":false}')
+            with self.assertRaises((ValueError, OSError)): H['source_files'](root)
+        self.assertEqual(set(H['SOURCE_FILES']), {'scripts/prepare_hosted_decoder_environment.py',
+            'scripts/prepare_hosted_decoder.py', 'scripts/build_eccodes.py', 'third_party/eccodes-sources.json'})
+        self.assertNotIn('RECORD', H['source_files'].__code__.co_names)
+
+    def test_redirects_remain_exact_snapshot_files(self):
+        redirects = H['SnapshotRedirect']()
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian/20261023T000000Z/dists/trixie/InRelease')
+        for url in ['http://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease',
+                    'https://elsewhere.invalid/file/' + 'a' * 40 + '/InRelease',
+                    'https://snapshot.debian.org/file/' + 'a' * 40 + '/other',
+                    'https://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease?different']:
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                redirects.redirect_request(request, None, 302, '', {}, url)
+        redirect = redirects.redirect_request(request, None, 302, '', {},
+            'https://snapshot.debian.org/file/' + 'a' * 40 + '/InRelease')
+        self.assertEqual(redirect.host, 'snapshot.debian.org')
+
+    def test_observed_index_content_hash_redirect_requires_verified_expected_digest(self):
+        checksum = '7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498'
+        url = 'https://snapshot.debian.org/file/32fc3b1c3e78ef911b125ee266a7e73d5884083f/' + checksum
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian/20261023T000000Z/dists/trixie/main/binary-amd64/Packages.xz')
+        self.assertEqual(H['SnapshotRedirect'](checksum).redirect_request(request, None, 302, '', {}, url).full_url, url)
+        for pin, target in [(None, url), ('0' * 64, url), (checksum, url.replace('snapshot.debian.org', 'elsewhere.invalid')),
+                             (checksum, url + '?other'), (checksum, url[:-1] + '0')]:
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                H['SnapshotRedirect'](pin).redirect_request(request, None, 302, '', {}, target)
+
+    def test_observed_debian_package_plus_encoding_does_not_decode_arbitrary_paths(self):
+        basename = 'ca-certificates_20250419+deb13u1_all.deb'
+        request = H['urllib'].request.Request('https://snapshot.debian.org/archive/debian-security/20261023T000000Z/pool/updates/main/c/ca-certificates/' + basename)
+        prefix = 'https://snapshot.debian.org/file/5f7c51c2ab8fb7a6d49f2cd774e6ac19a692414d/'
+        redirects = H['SnapshotRedirect']('a' * 64)
+        for name in (basename, basename.replace('+', '%2B')):
+            self.assertEqual(redirects.redirect_request(request, None, 302, '', {}, prefix + name).full_url,
+                             prefix + name)
+        for name in (basename.replace('+', '%252B'), basename.replace('+', '%2F'),
+                     basename.replace('+', '%2b'), basename.replace('ca-', '%63a-'),
+                     '../' + basename, basename + '?other', basename + '#other',
+                     basename.replace('deb13u1', 'deb13u2')):
+            with self.assertRaisesRegex(ValueError, 'SNAPSHOT_REDIRECT_REJECTED'):
+                redirects.redirect_request(request, None, 302, '', {}, prefix + name)
+
+    def test_snapshot_fetch_checks_content_digest_and_exact_size_before_success(self):
+        raw = b'fixed signed index bytes'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, size, checksum, accepted in [('valid', len(raw), H['digest'](raw), True),
+                ('digest', len(raw), '0' * 64, False), ('length', len(raw) + 1, H['digest'](raw), False)]:
+                opener = Mock()
+                opener.open.return_value = io.BytesIO(raw)
+                with patch.object(H['urllib'].request, 'build_opener', return_value=opener):
+                    if accepted:
+                        H['snapshot_fetch']('https://snapshot.debian.org/archive/debian/fixed/Packages.xz',
+                            root / name, size, time.monotonic() + 2, checksum)
+                        self.assertEqual((root / name).read_bytes(), raw)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'SNAPSHOT_DIGEST'):
+                            H['snapshot_fetch']('https://snapshot.debian.org/archive/debian/fixed/Packages.xz',
+                                root / name, size, time.monotonic() + 2, checksum)
+
+    def test_public_export_never_copies_debs_images_keys_or_index_binaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            (source / 'inventory-report.json').write_bytes(b'{"admitted":false,"compiled":false}')
+            (source / 'inventory-report.json').chmod(0o600)
+            for name in ['package.deb', 'image.qcow2', 'guest-key', 'debian.Packages.xz', 'binary']:
+                (source / name).write_bytes(b'PRIVATE BINARY')
+            value = H['stage_inventory_public'](source, root / 'public')
+            self.assertEqual(value['files'], 1)
+            self.assertEqual({path.name for path in (root / 'public').iterdir()}, {'inventory-report.json', 'inventory-public-export.json'})
+            (source / 'inventory-report.json').write_bytes(b'{"value":"-----BEGIN PRIVATE KEY-----"}')
+            with self.assertRaisesRegex(ValueError, 'INVENTORY_PUBLIC_BOUND'):
+                H['stage_inventory_public'](source, root / 'bad')
+
+    def test_public_export_rejects_symlink_oversize_and_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            path = source / 'inventory-report.json'
+            for raw in [b'{"a":1,"a":2}', b'x' * 65537]:
+                path.write_bytes(raw)
+                path.chmod(0o600)
+                with self.assertRaises(ValueError): H['stage_inventory_public'](source, root / ('bad' + str(len(raw))))
+            path.unlink(); path.symlink_to(source / 'absent')
+            with self.assertRaises(OSError): H['stage_inventory_public'](source, root / 'link')
+
+    def test_quiet_qemu_logs_are_projected_while_empty_control_files_still_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'private'; source.mkdir()
+            for name in ('qemu.stderr', 'vm-console.log'):
+                (source / name).touch(mode=0o600)
+            with self.assertRaises(ValueError): H['read_file'](source / 'qemu.stderr', 131072)
+            H['stage_inventory_public'](source, root / 'public')
+            manifest = json.loads((root / 'public/inventory-public-export.json').read_bytes())
+            for name in ('qemu.stderr', 'vm-console.log'):
+                self.assertEqual((root / 'public' / name).read_bytes(), b'')
+                self.assertEqual(manifest['files'][name], dict(bytes=0, sha256=H['digest'](b'')))
+            for name in ('inventory-report.json', 'guest-exit-status'):
+                (source / name).touch(mode=0o600)
+                captured = io.StringIO()
+                with patch.object(sys, 'stderr', captured), self.assertRaises(ValueError):
+                    H['stage_inventory_public'](source, root / ('bad-' + name))
+                failure = json.loads(captured.getvalue())
+                self.assertEqual(failure['phase'], name)
+                self.assertFalse(failure['admitted'])
+                (source / name).unlink()
+
+    def test_failure_diagnostic_keeps_machine_code_without_arbitrary_exception_text(self):
+        captured = io.StringIO()
+        with patch.object(sys, 'stderr', captured):
+            value = H['inventory_failure'](ValueError('INRELEASE_SIGNERS'), 'source-input-inventory', 'debian-inrelease-verify')
+        self.assertEqual(value['code'], 'INRELEASE_SIGNERS')
+        self.assertEqual(json.loads(captured.getvalue()), value)
+        captured = io.StringIO()
+        error = H['urllib'].error.HTTPError('https://private.invalid/token=secret', 503, 'private detail', None, None)
+        with patch.object(sys, 'stderr', captured):
+            value = H['inventory_failure'](error, 'source-input-inventory', 'debian-index-fetch')
+        self.assertEqual(value['http_status'], 503)
+        self.assertNotIn('secret', captured.getvalue())
+        self.assertNotIn('private', captured.getvalue())
+
+    def test_apt_cache_names_match_apt_epoch_underscore_and_literal_plus_spelling(self):
+        for name, version, architecture, expected in [
+            ('libfoo+bar', '2:1.0_2+deb13u1', 'amd64', 'libfoo+bar_2%3a1.0%5f2+deb13u1_amd64.deb'),
+            ('fixed-package', '1.0~rc1-2', 'all', 'fixed-package_1.0~rc1-2_all.deb')]:
+            self.assertEqual(H['apt_cache_filename'](dict(name=name, version=version, architecture=architecture)), expected)
+        for name, version, architecture in [('bad/name', '1', 'amd64'), ('bad_name', '1', 'amd64'),
+                ('valid', '1%3a2', 'amd64'), ('valid', '../1', 'amd64'), ('valid', '1', '../all')]:
+            with self.assertRaisesRegex(ValueError, 'APT_CACHE_IDENTITY'):
+                H['apt_cache_filename'](dict(name=name, version=version, architecture=architecture))
+
+    def cache_fixture(self, root):
+        (root / 'debs').mkdir(mode=0o700); (root / 'apt-cache').mkdir(mode=0o700)
+        raw = b'only preverified package data'
+        source = root / 'debs/package.deb'; source.write_bytes(raw); source.chmod(0o600)
+        package = dict(name='fixed-package', version='1:2+deb13u1', architecture='amd64',
+                       filename='pool/package.deb', bytes=len(raw), sha256=H['digest'](raw))
+        target = root / 'apt-cache' / H['apt_cache_filename'](package)
+        return raw, source, package, target
+
+    def test_apt_cache_copies_exact_separate_single_link_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw, source, package, target = self.cache_fixture(Path(temporary))
+            H['stage_verified_apt_cache'](Path(temporary), [package])
+            self.assertEqual(target.read_bytes(), raw)
+            self.assertEqual((source.stat().st_nlink, target.stat().st_nlink), (1, 1))
+            self.assertNotEqual(source.stat().st_ino, target.stat().st_ino)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_apt_cache_never_overwrites_or_follows_source_destination_or_directory_links(self):
+        for mutation in ('existing', 'destination-link', 'source-link', 'directory-link'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); raw, source, package, target = self.cache_fixture(root)
+                other = root / 'other'; other.write_bytes(raw); other.chmod(0o600)
+                if mutation == 'existing': target.write_bytes(b'preserved'); target.chmod(0o600)
+                elif mutation == 'destination-link': target.symlink_to(other)
+                elif mutation == 'source-link': source.unlink(); source.symlink_to(other)
+                else:
+                    (root / 'apt-cache').rmdir(); (root / 'apt-cache').symlink_to(root / 'debs', target_is_directory=True)
+                with self.assertRaises(OSError): H['stage_verified_apt_cache'](root, [package])
+                self.assertEqual(other.read_bytes(), raw)
+                if mutation == 'existing': self.assertEqual(target.read_bytes(), b'preserved')
+
+    def test_apt_cache_rehashes_source_and_actual_copied_bytes(self):
+        for mutation in ('source', 'copy'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); raw, source, package, target = self.cache_fixture(root)
+                if mutation == 'source':
+                    source.write_bytes(b'changed after verification')
+                    with self.assertRaisesRegex(ValueError, 'APT_CACHE_SOURCE_DIGEST'):
+                        H['stage_verified_apt_cache'](root, [package])
+                    self.assertFalse(target.exists())
+                else:
+                    original = H['read_file']
+                    def changed(path, maximum, **kwargs):
+                        actual = original(path, maximum, **kwargs)
+                        return b'corrupt copied bytes' if kwargs.get('parent') is not None else actual
+                    with patch.dict(G, read_file=changed), self.assertRaisesRegex(ValueError, 'APT_CACHE_COPY_DIGEST'):
+                        H['stage_verified_apt_cache'](root, [package])
+
+    def run_inventory(self, root, fail_deb=False, fail_release=False, build_mode=False, fail_cache=False, fail_lock=False):
+        events = []
+        def canonical(value): return (json.dumps(value, sort_keys=True) + '\n').encode()
+        deb = b'verified package fixture'
+        package = dict(name='fixed-package', version='1:2.0+deb13u1', architecture='amd64', repository='debian', filename='pool/main/f/fixed/package.deb', bytes=len(deb), sha256=H['digest'](deb))
+        helper = dict(STATUS_FORMAT='fixed status format', SCOPE={'compiled': False}, KEYRING=Path('/fixed/image/keyring'),
+            INDEX_PATH='main/binary-amd64/Packages.xz', ROOT_PACKAGES=['fixed-package'],
+            APT_OPTIONS=['--no-install-recommends', '--no-remove'],
+            REPOSITORIES={'debian': dict(inrelease_url='https://snapshot.debian.org/archive/debian/stamp/InRelease',
+                inrelease_bytes=100, archive_url='https://snapshot.debian.org/archive/debian/stamp/', codename='trixie')},
+            inventory=lambda raw: [], capture_base=lambda directory: events.append('baseline'),
+            verify_release=lambda *_args: dict(index={'bytes': 100, 'sha256': 'a' * 64}), index_records=lambda *_args: iter([{}]),
+            resolver_inventory=lambda raw: [{'name': 'fixed-package'}],
+            indexed_packages=lambda *_args: [package],
+            candidate=lambda directory: {'admitted': False}, validate_record=lambda value, admitted: value,
+            package_delta=lambda *_args: [{'name': 'fixed-package'}],
+            verify_locked_inputs=lambda *_args: {'environment_lock_sha256': ('2' if fail_lock else '1') * 64},
+            check_environment=lambda: {'environment_lock_sha256': '1' * 64},
+            canonical=canonical, write_candidate_file=H['write_new'])
+        def verified(*_args):
+            events.append('verified-deb')
+            if fail_deb: raise ValueError('DEB_DIGEST')
+            if fail_cache: (root / 'inventory/debs/package.deb').write_bytes(b'changed after verification')
+            return [package]
+        helper['verified_packages'] = verified
+        if fail_release:
+            helper['verify_release'] = Mock(side_effect=ValueError('INRELEASE_SIGNATURE'))
+        class InertCommands:
+            def __init__(self, **_kwargs): pass
+            def run(self, argv, _deadline):
+                events.append(argv)
+                if '--no-download' in argv:
+                    self_test.assertIn('verified-deb', events)
+                    self_test.assertNotIn('compile', events)
+                    self_test.assertEqual((root / 'inventory/apt-cache/fixed-package_1%3a2.0+deb13u1_amd64.deb').read_bytes(), deb)
+                    self_test.assertEqual((root / 'inventory/debs/package.deb').stat().st_nlink, 1)
+                return 0, b'inert log\n'
+        self_test = self
+        def fetch(_url, path, *_args):
+            events.append('download-data')
+            path.write_bytes(deb if path.suffix == '.deb' else b'metadata')
+            path.chmod(0o600)
+        state = dict(INVENTORY_ROOT=root / 'inventory', INVENTORY_PHASE=root / 'phase',
+            inventory_boundary=lambda commit: None, source_files=lambda path: {},
+            snapshot_fetch=fetch, Commands=InertCommands)
+        if build_mode:
+            state['load_source_lock'] = lambda _helper: (dict(before=[], after=[],
+                repositories={'debian': dict(index={'bytes': 100, 'sha256': 'a' * 64})}), '1' * 64)
+        with patch.dict(G, **state), patch.object(H['runpy'], 'run_path', return_value=helper):
+            if fail_deb or fail_release or fail_cache or fail_lock:
+                error = 'INRELEASE_SIGNATURE' if fail_release else 'DEB_DIGEST' if fail_deb else 'APT_CACHE_SOURCE_DIGEST' if fail_cache else 'ENVIRONMENT_LOCK_CHANGED'
+                with self.assertRaisesRegex(ValueError, error):
+                    H['source_inventory']('a' * 40, build_mode=build_mode)
+                value = json.loads((root / 'inventory/inventory-report.json').read_bytes())
+            else:
+                value = H['source_inventory']('a' * 40, build_mode=build_mode)
+        return value, events
+
+    def test_inventory_installs_only_after_verified_package_data_and_stops_uncompiled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary))
+            self.assertTrue(value['success']); self.assertFalse(value['admitted']); self.assertFalse(value['compiled'])
+            commands = [event for event in events if isinstance(event, list)]
+            install = next(command for command in commands if '--no-download' in command)
+            self.assertTrue(install[-1].endswith('/debs/package.deb'))
+            self.assertNotIn('upgrade', sum(commands, []))
+            self.assertTrue(any('--simulate' in command for command in commands))
+            self.assertEqual(value['phase'], 'complete')
+
+    def test_corrupt_package_aborts_before_install_and_preserves_failure_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary), fail_deb=True)
+            self.assertFalse(value['success']); self.assertFalse(value['admitted'])
+            self.assertEqual(value['phase'], 'verify-debs')
+            self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
+
+    def test_inventory_never_installs_after_cache_rehash_or_locked_input_failure(self):
+        for options in (dict(fail_cache=True), dict(fail_lock=True, build_mode=True)):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as temporary:
+                value, events = self.run_inventory(Path(temporary), **options)
+                self.assertFalse(value['success'])
+                self.assertFalse(any('--no-download' in event for event in events if isinstance(event, list)))
+
+    def test_signed_metadata_failure_preserves_exact_phase_and_error_code(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(sys, 'stderr', io.StringIO()) as diagnostic:
+            value, _events = self.run_inventory(Path(temporary), fail_release=True)
+            self.assertFalse(value['success'])
+            self.assertEqual(value['phase'], 'debian-inrelease-verify')
+            self.assertEqual(value['failure']['code'], 'INRELEASE_SIGNATURE')
+            self.assertEqual(json.loads(diagnostic.getvalue()), value['failure'])
+
+    def test_source_build_environment_uses_reviewed_closure_without_update_or_resolver(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, events = self.run_inventory(Path(temporary), build_mode=True)
+            commands = [event for event in events if isinstance(event, list)]
+            self.assertFalse(any('--simulate' in command or 'update' in command for command in commands))
+            self.assertTrue(any('--no-download' in command for command in commands))
+            self.assertTrue(value['environment_prepared'])
+            self.assertNotIn('candidate_sha256', value)
+            self.assertFalse((Path(temporary) / 'inventory/candidate.json').exists())
+
+    def test_source_build_missing_lock_fails_before_network_or_compiler(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            network = Mock(side_effect=AssertionError('must not download without fixed admission'))
+            helper = {'validate_record': Mock(side_effect=AssertionError('missing lock'))}
+            with patch.dict(G, ENVIRONMENT_RECORD=root / 'absent', source_checkout=lambda source: {},
+                            source_helper=lambda source: helper), patch.object(H['urllib'].request, 'build_opener', network):
+                with self.assertRaises(FileNotFoundError): H['fetch_source_archives'](root)
+            network.assert_not_called()
+            H['write_new'](root / 'candidate', b'{"admitted":false}')
+            validator = Mock(side_effect=ValueError('ENVIRONMENT_NOT_ADMITTED'))
+            with patch.dict(G, ENVIRONMENT_RECORD=root / 'candidate'), self.assertRaisesRegex(ValueError, 'ENVIRONMENT_NOT_ADMITTED'):
+                H['load_source_lock']({'validate_record': validator})
+            validator.assert_called_once_with({'admitted': False}, True)
+
+    def test_cold_build_executes_existing_builder_actions_in_order_without_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); environment = root / 'environment'; calls = []
+            def provision(*_args, **kwargs):
+                self.assertTrue(kwargs['build_mode']); environment.mkdir()
+            class BuildCommands:
+                def __init__(self, **kwargs): self.output_stream = None
+                def run(self, argv, _deadline):
+                    calls.append(argv); self.output_stream.write(b'original synthetic builder output\n')
+                    return 0, b'{}'
+            with patch.dict(G, inventory_boundary=lambda commit: None, inventory=lambda *_args: {},
+                build_source_files=lambda source: {}, source_helper=lambda source: {}, load_source_lock=lambda helper: ({}, '1' * 64),
+                source_inventory=provision, source_payload_manifest_bytes=lambda: b'{}', Commands=BuildCommands,
+                INVENTORY_ROOT=environment, INVENTORY_PHASE=root / 'phase'):
+                value = H['source_cold_build']('a' * 40)
+            self.assertEqual([argv[3] for argv in calls], ['capture-source-toolchain', 'build-source', 'stage-source-payload'])
+            self.assertTrue(value['compiled']); self.assertTrue(value['success']); self.assertFalse(value['admitted'])
+            self.assertEqual((environment / 'build-source.log').read_bytes(), b'original synthetic builder output\n')
+
+    def test_readback_checks_every_member_hash_before_writing_and_never_executes_payload(self):
+        data = b'synthetic payload data'
+        manifest = {'files': {'probe.grib2': dict(bytes=len(data), mode=0o400, sha256=H['digest'](data))}}
+        raw = json.dumps(manifest).encode()
+        for corrupt in (False, True):
+            calls = []
+            class ReadbackCommands:
+                def __init__(self, **kwargs): self.maximum = kwargs['maximum']
+                def run(self, argv, _deadline):
+                    calls.append((argv, self.maximum))
+                    if argv[-1] == 'source-payload-manifest': return 0, raw
+                    return 0, b'corrupt' if corrupt else data
+            builder = dict(validate_payload_manifest=lambda value, lock_sha: value,
+                verify_source_payload_tree=lambda *_args: dict(admitted=False, decoder_executed=False, files=1, bytes=len(data)))
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch.dict(G, source_checkout=lambda source: {}, source_helper=lambda source: {},
+                    load_source_lock=lambda helper: ({}, '1' * 64), source_builder=lambda source: builder,
+                    source_ssh=lambda directory: ['fixed-localhost-ssh'], Commands=ReadbackCommands):
+                    if corrupt:
+                        with self.assertRaisesRegex(ValueError, 'SOURCE_READBACK_BYTES'):
+                            H['readback_source_payload'](root, root, root / 'payload')
+                        self.assertFalse((root / 'payload/probe.grib2').exists())
+                    else:
+                        value = H['readback_source_payload'](root, root, root / 'payload')
+                        self.assertFalse(value['decoder_executed']); self.assertFalse(value['admitted'])
+                        self.assertEqual((root / 'payload/probe.grib2').read_bytes(), data)
+                self.assertEqual(calls[1][1], len(data))
+                self.assertEqual(calls[1][0][-2:], ['source-payload-member', 'probe.grib2'])
+
+    def test_readback_ssh_is_pinned_localhost_with_private_owned_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'weather-decoder-abi-kvm.abc123'; root.mkdir(mode=0o700)
+            for name in ('guest-key', 'known-hosts'): H['write_new'](root / name, b'fixture')
+            argv = H['source_ssh'](root)
+            for option in ('StrictHostKeyChecking=yes', 'IdentityAgent=none', 'ProxyCommand=none', 'RequestTTY=no'):
+                self.assertIn(option, argv)
+            self.assertIn('vpci@127.0.0.1', argv)
+            (root / 'guest-key').chmod(0o644)
+            with self.assertRaisesRegex(ValueError, 'SOURCE_READBACK_IDENTITY'): H['source_ssh'](root)
 
 
 if __name__ == "__main__":
