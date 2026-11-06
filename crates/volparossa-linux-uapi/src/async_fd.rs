@@ -3,6 +3,7 @@
 use std::{
     io,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
+    task::{Context, Poll},
 };
 
 use tokio::io::unix::{AsyncFd, AsyncFdReadyGuard};
@@ -56,6 +57,22 @@ impl OwnedAsyncFd {
     /// Wait for readable readiness while borrowing this registration and its descriptor.
     pub async fn readable(&self) -> io::Result<AsyncFdReadyGuard<'_, OwnedFd>> {
         self.inner.readable().await
+    }
+
+    /// Poll for readable readiness without exposing mutable descriptor ownership.
+    pub fn poll_read_ready(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<AsyncFdReadyGuard<'_, OwnedFd>>> {
+        self.inner.poll_read_ready(cx)
+    }
+
+    /// Poll for writable readiness without exposing mutable descriptor ownership.
+    pub fn poll_write_ready(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<AsyncFdReadyGuard<'_, OwnedFd>>> {
+        self.inner.poll_write_ready(cx)
     }
 }
 

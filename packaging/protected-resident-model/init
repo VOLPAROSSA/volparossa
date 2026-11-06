@@ -1,0 +1,154 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Separate PUBLIC model fixture. No rescue, networking or alternate boot path.
+set -efu
+[ "$$" -eq 1 ] || exit 1
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C
+export OPENSSL_CONF=/dev/null DM_DISABLE_UDEV=1
+umask 077
+ROOT_HASH='@ROOT_HASH@'
+DATA_BLOCKS='@DATA_BLOCKS@'
+KERNEL_VERSION='@KERNEL_VERSION@'
+SALT=0000000000000000000000000000000000000000000000000000000000000000
+EXPECTED_CMDLINE='console=ttyS0 panic=-1 oops=panic quiet rdinit=/init vp.profile=public-resident-model-v1'
+stage=bootstrap
+reported=no
+verified=false
+invoked=false
+zero=false
+
+receipt() {
+    printf 'VP_PROTECTED_MODEL_BOOT_V1 {"version":1,"outcome":"%s","stage":"%s","verity_verified":%s,"root_readonly":%s,"write_denied":%s,"entrypoint_invoked":%s,"process_exit_zero":%s,"worker_cleanup_confirmed":false,"hardware_attestation":false,"private_inputs":false,"model_execution":false,"worker_execution":false,"guest_key_origin_proven":false}\n' \
+        "$1" "$stage" "$verified" "$verified" "$verified" "$invoked" "$zero" >/dev/console
+    reported=yes
+}
+
+# shellcheck disable=SC2317
+finish() {
+    trap - 0 HUP INT TERM
+    if [ "$reported" != yes ]; then receipt boot_rejected; fi
+    /usr/bin/busybox poweroff -f
+    /usr/bin/busybox halt -f
+    # No rescue shell: a failed poweroff remains the bounded outer runner's job.
+    while :; do /usr/bin/busybox sleep 60; done
+}
+trap finish 0
+trap 'exit 1' HUP INT TERM
+
+/usr/bin/busybox mount -t devtmpfs devtmpfs /dev
+/usr/bin/busybox mount -t proc -o nosuid,nodev,noexec proc /proc
+/usr/bin/busybox mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
+/usr/bin/busybox mount -t tmpfs -o mode=0755,size=2G,nosuid,nodev,noexec tmpfs /run
+stage=cmdline
+[ "$(/usr/bin/busybox id -u)" = 0 ]
+[ "$(/usr/bin/busybox cat /proc/cmdline)" = "$EXPECTED_CMDLINE" ]
+[ "$(/usr/bin/busybox uname -r)" = "$KERNEL_VERSION" ]
+stage=modules
+for module in virtio_pci virtio_blk dm_mod dm_verity ext4 sha256_generic virtio_console; do
+    /usr/sbin/modprobe "$module"
+done
+stage=devices
+[ -b /dev/vda ] && [ -b /dev/vdb ] && [ ! -e /dev/vdc ]
+[ "$(/usr/bin/busybox ls /sys/class/net)" = lo ]
+[ "$(/usr/sbin/blockdev --getro /dev/vda)" = 1 ]
+[ "$(/usr/sbin/blockdev --getro /dev/vdb)" = 1 ]
+[ "$(/usr/sbin/blockdev --getsize64 /dev/vda)" = "$((DATA_BLOCKS * 4096))" ]
+stage=verity_open
+/usr/sbin/veritysetup open --no-superblock --format=1 --hash=sha256 \
+    --data-block-size=4096 --hash-block-size=4096 --data-blocks="$DATA_BLOCKS" \
+    --salt="$SALT" /dev/vda vp-root /dev/vdb "$ROOT_HASH" >/dev/null 2>&1
+/usr/sbin/dmsetup mknodes vp-root
+[ -b /dev/mapper/vp-root ]
+[ "$(/usr/sbin/blockdev --getro /dev/mapper/vp-root)" = 1 ]
+[ "$(/usr/sbin/blockdev --getsize64 /dev/mapper/vp-root)" = "$((DATA_BLOCKS * 4096))" ]
+stage=verity_read
+if ! /usr/bin/busybox dd if=/dev/mapper/vp-root of=/dev/null bs=4096 count="$DATA_BLOCKS" 2>/run/read-error; then
+    status=$(/usr/sbin/dmsetup status vp-root)
+    # Fixed kernel fields, never pathname expansion.
+    # shellcheck disable=SC2086
+    set -- $status
+    if [ "$#" -ge 4 ] && [ "$1" = 0 ] && [ "$2" = "$((DATA_BLOCKS * 8))" ] &&
+       [ "$3" = verity ] && [ "$4" = C ]; then receipt integrity_failure; fi
+    exit 1
+fi
+status=$(/usr/sbin/dmsetup status vp-root)
+# shellcheck disable=SC2086
+set -- $status
+[ "$#" -ge 4 ] && [ "$1" = 0 ] && [ "$2" = "$((DATA_BLOCKS * 8))" ] &&
+    [ "$3" = verity ] && [ "$4" = V ]
+stage=root_mount
+/usr/bin/busybox mount -t ext4 -o ro,noload /dev/mapper/vp-root /newroot
+# shellcheck disable=SC2016
+/usr/bin/busybox awk '$1 == "/dev/mapper/vp-root" && $2 == "/newroot" && $3 == "ext4" && $4 ~ /^ro,/ {n++} END {exit n != 1}' /proc/mounts
+stage=write_probe
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/usr/lib/volparossa)" = 0:0:755 ]
+[ -f /newroot/usr/lib/volparossa/verity-write-probe ]
+[ ! -L /newroot/usr/lib/volparossa/verity-write-probe ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/usr/lib/volparossa/verity-write-probe)" = 0:0:644 ]
+if { printf 'must not be written\n' >/newroot/usr/lib/volparossa/verity-write-probe; } 2>/run/write-error; then
+    exit 1
+fi
+/usr/bin/busybox grep -F 'Read-only file system' /run/write-error >/dev/null
+verified=true
+stage=cgroup
+# No systemd runs in this profile. Expose the real unified hierarchy to the
+# unchanged admission sampler, read-only; no fabricated limits or delegation.
+[ -d /sys/fs/cgroup ] && [ ! -L /sys/fs/cgroup ]
+/usr/bin/busybox mount -t cgroup2 -o ro,nosuid,nodev,noexec cgroup2 /sys/fs/cgroup
+/usr/bin/busybox grep -w memory /sys/fs/cgroup/cgroup.controllers >/dev/null
+stage=mounts
+for directory in proc sys dev run; do
+    [ -d "/newroot/$directory" ] && [ ! -L "/newroot/$directory" ]
+    [ "$(/usr/bin/busybox stat -c '%u:%g:%a' "/newroot/$directory")" = 0:0:755 ]
+done
+# bubblewrap writes uid_map/gid_map through this original proc mount before
+# installing its own worker proc. This is virtual proc, not writable OS data.
+/usr/bin/busybox mount -t proc -o rw,nosuid,nodev,noexec proc /newroot/proc
+/usr/bin/busybox mount --bind /sys /newroot/sys
+/usr/bin/busybox mount -o remount,bind,ro,nosuid,nodev,noexec /newroot/sys
+# A plain sysfs bind does not include submounts; bind the actual cgroup2 mount.
+/usr/bin/busybox mount --bind /sys/fs/cgroup /newroot/sys/fs/cgroup
+/usr/bin/busybox mount -o remount,bind,ro,nosuid,nodev,noexec /newroot/sys/fs/cgroup
+/usr/bin/busybox mount --bind /dev /newroot/dev
+/usr/bin/busybox mount --bind /run /newroot/run
+/usr/bin/busybox mkdir -m 0755 /run/volparossa-resident
+/usr/bin/busybox mkdir -m 0700 /run/volparossa-resident/work
+/usr/bin/busybox chown 985:985 /run/volparossa-resident/work
+stage=lease
+[ -d /newroot/opt/volparossa/runtime ] && [ ! -L /newroot/opt/volparossa/runtime ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/opt/volparossa/runtime)" = 985:985:700 ]
+lease=/newroot/opt/volparossa/runtime/.volparossa-compute.lock
+[ -f "$lease" ] && [ ! -L "$lease" ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a:%h:%s' "$lease")" = 985:985:600:1:0 ]
+: >/run/volparossa-resident/lease
+/usr/bin/busybox chmod 0600 /run/volparossa-resident/lease
+/usr/bin/busybox chown 985:985 /run/volparossa-resident/lease
+/usr/bin/busybox mount --bind /run/volparossa-resident/lease "$lease"
+/usr/bin/busybox mount -o remount,bind,rw,nosuid,nodev,noexec "$lease"
+stage=entrypoint
+entry=/newroot/usr/lib/volparossa/protected-resident-model-entrypoint
+[ -f "$entry" ] && [ ! -L "$entry" ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' "$entry")" = 0:0:555 ]
+invoked=true
+# The fixed entrypoint emits only READY after privilege checks, then replaces
+# stdout/stderr with /dev/null before core exec. TLS uses the sole virtio port.
+# A zero process exit is still not two-turn or cleanup evidence.
+# Keep PID 1 and its shutdown traps in the original mount namespace. In the
+# child, make the verified mount the namespace root before chroot, so the later
+# unprivileged bubblewrap user namespace is not entered from a mere chroot.
+# BusyBox unshare makes propagation recursively private before executing sh;
+# no PID/network namespace or forking supervisor is added here.
+if /usr/bin/busybox unshare --mount --propagation private /usr/bin/busybox sh -efu -c '
+    /usr/bin/busybox awk '\''$1 == "/dev/mapper/vp-root" && $2 == "/newroot" && $3 == "ext4" && $4 ~ /^ro,/ {n++} END {exit n != 1}'\'' /proc/mounts
+    cd /newroot
+    /usr/bin/busybox mount --move . /
+    # The cwd still names the verified root; do not resolve BusyBox via old /.
+    exec ./usr/bin/busybox chroot . /usr/bin/python3.13 -I /usr/lib/volparossa/protected-resident-model-entrypoint
+' </dev/null >/dev/console 2>/dev/null; then
+    zero=true
+    stage=complete
+    receipt guest_process_returned
+    exit 0
+fi
+receipt guest_process_failed
+exit 1

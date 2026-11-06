@@ -1,0 +1,105 @@
+#!/bin/sh
+# Public verity boot fixture only. No admission, model, worker or private input.
+set -efu
+[ "$$" -eq 1 ] || exit 1
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C
+export OPENSSL_CONF=/dev/null DM_DISABLE_UDEV=1
+umask 077
+ROOT_HASH='@ROOT_HASH@'
+DATA_BLOCKS='@DATA_BLOCKS@'
+KERNEL_VERSION='@KERNEL_VERSION@'
+SALT=0000000000000000000000000000000000000000000000000000000000000000
+EXPECTED_CMDLINE='console=ttyS0 panic=-1 oops=panic quiet rdinit=/init vp.profile=public-boot-v1'
+stage=bootstrap
+reported=no
+
+receipt() {
+    outcome=$1
+    proof=false
+    [ "$outcome" != boot_verified ] || proof=true
+    printf 'VP_PROTECTED_BOOT_V1 {"version":1,"outcome":"%s","stage":"%s","verity_verified":%s,"root_readonly":%s,"write_denied":%s,"entrypoint_invoked":%s,"hardware_attestation":false,"private_inputs":false,"model_execution":false,"worker_execution":false}\n' \
+        "$outcome" "$stage" "$proof" "$proof" "$proof" "$proof" >/dev/console
+    reported=yes
+}
+
+# Invoked only by the installed EXIT trap, never by a rescue or alternate init.
+# shellcheck disable=SC2317
+finish() {
+    trap - 0 HUP INT TERM
+    if [ "$reported" != yes ]; then receipt boot_rejected; fi
+    /usr/bin/busybox poweroff -f
+    /usr/bin/busybox halt -f
+    # A failed poweroff is not success: the outer bounded runner must reap QEMU.
+    while :; do /usr/bin/busybox sleep 60; done
+}
+trap finish 0
+trap 'exit 1' HUP INT TERM
+
+/usr/bin/busybox mount -t devtmpfs devtmpfs /dev
+/usr/bin/busybox mount -t proc proc /proc
+/usr/bin/busybox mount -t sysfs sysfs /sys
+/usr/bin/busybox mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run
+[ "$(/usr/bin/busybox id -u)" = 0 ]
+stage=cmdline
+[ "$(/usr/bin/busybox cat /proc/cmdline)" = "$EXPECTED_CMDLINE" ]
+[ "$(/usr/bin/busybox uname -r)" = "$KERNEL_VERSION" ]
+stage=modules
+for module in virtio_pci virtio_blk dm_mod dm_verity ext4 sha256_generic; do
+    /usr/sbin/modprobe "$module"
+done
+stage=devices
+# No device discovery or alternate root: exactly the two readonly fixture disks.
+[ -b /dev/vda ] && [ -b /dev/vdb ] && [ ! -e /dev/vdc ]
+[ "$(/usr/bin/busybox ls /sys/class/net)" = lo ]
+[ "$(/usr/sbin/blockdev --getro /dev/vda)" = 1 ]
+[ "$(/usr/sbin/blockdev --getro /dev/vdb)" = 1 ]
+[ "$(/usr/sbin/blockdev --getsize64 /dev/vda)" = "$((DATA_BLOCKS * 4096))" ]
+stage=verity_open
+/usr/sbin/veritysetup open --no-superblock --format=1 --hash=sha256 \
+    --data-block-size=4096 --hash-block-size=4096 --data-blocks="$DATA_BLOCKS" \
+    --salt="$SALT" /dev/vda vp-root /dev/vdb "$ROOT_HASH" >/dev/null 2>&1
+/usr/sbin/dmsetup mknodes vp-root
+[ -b /dev/mapper/vp-root ]
+[ "$(/usr/sbin/blockdev --getro /dev/mapper/vp-root)" = 1 ]
+[ "$(/usr/sbin/blockdev --getsize64 /dev/mapper/vp-root)" = "$((DATA_BLOCKS * 4096))" ]
+stage=verity_read
+# Force every authenticated data block to be read before interpreting filesystem data.
+if ! /usr/bin/busybox dd if=/dev/mapper/vp-root of=/dev/null bs=4096 count="$DATA_BLOCKS" 2>/run/read-error; then
+    status=$(/usr/sbin/dmsetup status vp-root)
+    # Split fixed kernel status fields intentionally; pathname expansion is off.
+    # shellcheck disable=SC2086
+    set -- $status
+    if [ "$#" -ge 4 ] && [ "$1" = 0 ] && [ "$2" = "$((DATA_BLOCKS * 8))" ] &&
+       [ "$3" = verity ] && [ "$4" = C ]; then
+        receipt integrity_failure
+    fi
+    exit 1
+fi
+status=$(/usr/sbin/dmsetup status vp-root)
+# Split fixed kernel status fields intentionally; pathname expansion is off.
+# shellcheck disable=SC2086
+set -- $status
+[ "$#" -ge 4 ] && [ "$1" = 0 ] && [ "$2" = "$((DATA_BLOCKS * 8))" ] &&
+    [ "$3" = verity ] && [ "$4" = V ]
+stage=root_mount
+/usr/bin/busybox mount -t ext4 -o ro,noload /dev/mapper/vp-root /newroot
+# These are awk field references, not shell variables.
+# shellcheck disable=SC2016
+/usr/bin/busybox awk '$1 == "/dev/mapper/vp-root" && $2 == "/newroot" && $3 == "ext4" && $4 ~ /^ro,/ {n++} END {exit n != 1}' /proc/mounts
+stage=write_probe
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/usr/lib/volparossa)" = 0:0:755 ]
+[ -f /newroot/usr/lib/volparossa/verity-write-probe ]
+[ ! -L /newroot/usr/lib/volparossa/verity-write-probe ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/usr/lib/volparossa/verity-write-probe)" = 0:0:644 ]
+if { printf 'must not be written\n' >/newroot/usr/lib/volparossa/verity-write-probe; } 2>/run/write-error; then
+    exit 1
+fi
+/usr/bin/busybox grep -F 'Read-only file system' /run/write-error >/dev/null
+stage=entrypoint
+[ ! -L /newroot/usr/lib/volparossa/protected-resident-entrypoint ]
+[ "$(/usr/bin/busybox stat -c '%u:%g:%a' /newroot/usr/lib/volparossa/protected-resident-entrypoint)" = 0:0:555 ]
+entrypoint=$(/usr/bin/busybox chroot /newroot /usr/lib/volparossa/protected-resident-entrypoint)
+[ "$entrypoint" = VP_PROTECTED_ENTRYPOINT_V1 ]
+stage=complete
+receipt boot_verified
+exit 0

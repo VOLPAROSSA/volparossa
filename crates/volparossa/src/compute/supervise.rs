@@ -919,10 +919,95 @@ impl StartupClass {
     }
 }
 
+// Inspected bubblewrap v0.12.0 (2a76602a8c71f36c1527cf9fc3417d9149822e0c),
+// Debian 0.12.0-1~deb13u1; full source/archive provenance: THIRD_PARTY_LICENSES.md.
+// A matching first diagnostic prefix identifies a source family, never its
+// runtime cause, errno, timing, or an authenticated emitter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BubblewrapStage {
+    NamespaceSetup,
+    RootSetup,
+    SourceSetup,
+    DestinationSetup,
+    BindMount,
+}
+
+impl BubblewrapStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NamespaceSetup => "bubblewrap_namespace_setup",
+            Self::RootSetup => "bubblewrap_root_setup",
+            Self::SourceSetup => "bubblewrap_source_setup",
+            Self::DestinationSetup => "bubblewrap_destination_setup",
+            Self::BindMount => "bubblewrap_bind_mount",
+        }
+    }
+}
+
+fn public_bubblewrap_stage(prefix: &[u8]) -> Option<BubblewrapStage> {
+    if startup_class(prefix) != StartupClass::Bubblewrap {
+        return None;
+    }
+    let families: &[(BubblewrapStage, &[&[u8]])] = &[
+        (
+            BubblewrapStage::NamespaceSetup,
+            &[b"bwrap: No permissions to create a new namespace,"],
+        ),
+        (
+            BubblewrapStage::RootSetup,
+            &[
+                b"bwrap: Failed to make / slave: ",
+                b"bwrap: Failed to mount tmpfs: ",
+                b"bwrap: chdir base_path: ",
+                b"bwrap: Creating newroot failed: ",
+                b"bwrap: setting up newroot bind: ",
+                b"bwrap: Creating oldroot failed: ",
+                b"bwrap: pivot_root: ",
+                b"bwrap: pivot_root(/newroot): ",
+                b"bwrap: mounting proc: ",
+                b"bwrap: Failed to make old root rprivate: ",
+            ],
+        ),
+        (
+            BubblewrapStage::SourceSetup,
+            &[
+                b"bwrap: Can't find source path ",
+                b"bwrap: Can't open source ",
+                b"bwrap: Can't get type of source ",
+            ],
+        ),
+        (
+            BubblewrapStage::DestinationSetup,
+            &[
+                b"bwrap: Can't mkdir parents for ",
+                b"bwrap: Can't create file ",
+                b"bwrap: Can't get type of dest ",
+                b"bwrap: Can't mount on symlink destination ",
+                b"bwrap: Destination is not a directory ",
+                b"bwrap: Destination is not a file ",
+            ],
+        ),
+        (
+            BubblewrapStage::BindMount,
+            &[
+                b"bwrap: Can't bind mount ",
+                b"bwrap: Can't remount readonly on ",
+            ],
+        ),
+    ];
+    families.iter().find_map(|(stage, prefixes)| {
+        prefixes
+            .iter()
+            .any(|candidate| prefix.starts_with(candidate))
+            .then_some(*stage)
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct StartupDiagnostics {
     class: StartupClass,
     bytes: usize,
+    public_bubblewrap_stage: Option<BubblewrapStage>,
 }
 
 #[derive(Debug)]
@@ -1008,6 +1093,7 @@ async fn drain_stderr(mut stream: impl AsyncRead + Unpin) -> Result<StartupDiagn
             return Ok(StartupDiagnostics {
                 class: startup_class(&prefix),
                 bytes: total,
+                public_bubblewrap_stage: public_bubblewrap_stage(&prefix),
             });
         }
         total += length;
@@ -1563,6 +1649,95 @@ mod tests {
         assert!(drain_stderr(too_large.as_slice()).await.is_err());
     }
 
+    #[test]
+    fn public_bubblewrap_stage_matches_source_prefix_families_only() {
+        for (prefix, stage) in [
+            (
+                "bwrap: No permissions to create a new namespace,",
+                BubblewrapStage::NamespaceSetup,
+            ),
+            ("bwrap: Failed to mount tmpfs: ", BubblewrapStage::RootSetup),
+            ("bwrap: pivot_root: ", BubblewrapStage::RootSetup),
+            (
+                "bwrap: Can't find source path ",
+                BubblewrapStage::SourceSetup,
+            ),
+            ("bwrap: Can't open source ", BubblewrapStage::SourceSetup),
+            (
+                "bwrap: Can't get type of source ",
+                BubblewrapStage::SourceSetup,
+            ),
+            (
+                "bwrap: Can't mkdir parents for ",
+                BubblewrapStage::DestinationSetup,
+            ),
+            (
+                "bwrap: Can't mount on symlink destination ",
+                BubblewrapStage::DestinationSetup,
+            ),
+            ("bwrap: Can't bind mount ", BubblewrapStage::BindMount),
+            (
+                "bwrap: Can't remount readonly on ",
+                BubblewrapStage::BindMount,
+            ),
+        ] {
+            let raw = format!("{prefix}PRIVATE_CANARY /private/input: private errno text");
+            assert_eq!(startup_class(raw.as_bytes()), StartupClass::Bubblewrap);
+            assert_eq!(public_bubblewrap_stage(raw.as_bytes()), Some(stage));
+            assert_eq!(
+                public_bubblewrap_stage(&prefix.as_bytes()[..prefix.len() - 1]),
+                None
+            );
+        }
+        for raw in [
+            b"bwrap: unknown PRIVATE_CANARY".as_slice(),
+            b"not bwrap: Can't open source ",
+            b"bwrap: Can't open sourcewise ",
+            b"bwrap: warning\nbwrap: Can't open source ",
+            b"bwrap: \xff",
+            b"bwrap: Creating new namespace failed",
+            b"bwrap: Can't mount proc on ",
+        ] {
+            assert_eq!(public_bubblewrap_stage(raw), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_bubblewrap_stage_uses_existing_fragmented_prefix_without_changing_default_failure()
+     {
+        use tokio::io::AsyncWriteExt as _;
+
+        let raw = [
+            b"bwrap: Can't open source PRIVATE_CANARY /private/input: ".as_slice(),
+            &[b'x'; 2048],
+        ]
+        .concat();
+        let bytes = raw.len();
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let writing = tokio::spawn(async move {
+            for byte in raw {
+                writer.write_all(&[byte]).await.unwrap();
+            }
+        });
+        let diagnostics = drain_stderr(reader).await.unwrap();
+        writing.await.unwrap();
+        assert_eq!(diagnostics.class, StartupClass::Bubblewrap);
+        assert_eq!(diagnostics.bytes, bytes);
+        assert_eq!(
+            diagnostics.public_bubblewrap_stage,
+            Some(BubblewrapStage::SourceSetup)
+        );
+        assert!(!format!("{diagnostics:?}").contains("PRIVATE_CANARY"));
+        let error = required_result(None, ExitStatus::from_raw(256), diagnostics).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "compute_result_missing exit_code=1 signal=0 stderr_class=bubblewrap stderr_bytes={bytes}"
+            )
+        );
+        assert!(!format!("{error:?}").contains("PRIVATE_CANARY"));
+    }
+
     #[tokio::test]
     async fn clean_missing_result_retains_exit_diagnostics_but_malformed_output_still_fails_fast() {
         assert!(
@@ -1577,6 +1752,7 @@ mod tests {
             StartupDiagnostics {
                 class: StartupClass::None,
                 bytes: 0,
+                public_bubblewrap_stage: None,
             },
         )
         .unwrap_err()

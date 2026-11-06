@@ -230,13 +230,24 @@ class PublicSources(unittest.TestCase):
     def test_all_current189_callers_export_fixed_home_in_same_shell(self):
         git_export='export '+' '.join(name+'='+value for name,value in P['GIT_ENV'].items())
         count=0
+        resident_callers={'protected-resident-model.yml':2}
+        seen_resident=set()
         for path in (ROOT/'.github/workflows').glob('*.yml'):
             lines=path.read_text().splitlines()
+            file_count=0
             for index,line in enumerate(lines):
                 if 'python3 -B ' in line and 'scripts/provision-rust189.py runner' in line:
                     self.assertEqual(lines[index+1].strip(),'export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"',path)
                     self.assertEqual(lines[index+2].strip(),git_export,path)
-                    count+=1
+                    file_count+=1
+            # The maintained resident source and public jobs own one invocation each.
+            # Preserve the original inventory for all other workflows separately.
+            if path.name in resident_callers:
+                self.assertEqual(file_count,resident_callers[path.name],path)
+                seen_resident.add(path.name)
+            else:
+                count+=file_count
+        self.assertEqual(seen_resident,set(resident_callers))
         self.assertEqual(count,20)
         helper=(ROOT/'tests/helper/run-helper-boundary-evidence-vm.sh').read_text()
         self.assertTrue(('python3 -B scripts/provision-rust189.py guest\n'
