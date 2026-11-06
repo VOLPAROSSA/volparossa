@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Historical source proof or exact current-compiler reuse
+        description: Historical ABI proof, current compiler, or explicit GPSD adapter proof
         required: true
         type: choice
         default: historical
-        options: [historical, current-compiler]
+        options: [historical, current-compiler, gpsd-preflight, gpsd-adapter]
       core_revision:
-        description: Exact reviewed 40-hex Core commit for current-compiler only
+        description: Exact reviewed 40-hex Core commit for either explicit current source mode
         required: false
         type: string
 
@@ -35,6 +35,161 @@ env:
   CORE_REVISION: ${{ inputs.core_revision }}
 
 jobs:
+  gpsd-preflight:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'gpsd-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the exact guard-only source and run the existing bounded contracts
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          output="$RUNNER_TEMP/dps-gpsd-preflight-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$output"
+          printf 'DPS_GPSD_PREFLIGHT=%s\n' "$output" >> "$GITHUB_ENV"
+          python3 -B scripts/check-dps-gpsd-source.py > "$output/source.json"
+          sh -n scripts/run-isolated-test.sh
+          shellcheck -s sh scripts/run-isolated-test.sh
+          python3 -B scripts/test-dps-gpsd-wrapper.py
+          python3 -B tests/dps/gpsd/test_proof.py
+          python3 -B scripts/test-cargo-source-policy.py
+          git diff --exit-code HEAD
+          printf '%s\n' '{"schema_version":1,"kind":"guard-only-preflight","checks_passed":true,"native_runtime_acceptance":false,"compiler_or_native_build":false}' > "$output/preflight.json"
+
+      - name: Retain guard-only evidence without a native runtime claim
+        if: always() && env.DPS_GPSD_PREFLIGHT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dps-gpsd-preflight-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: ${{ env.DPS_GPSD_PREFLIGHT }}/*.json
+
+  gpsd-adapter:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'gpsd-adapter'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the explicit GPSD route without changing historical ABI claims
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          test "$DPS_MODE" = gpsd-adapter
+          [[ "$CORE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$CORE_REVISION" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          gpsd_evidence="$RUNNER_TEMP/dps-gpsd-evidence-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$gpsd_evidence"
+          printf 'DPS_GPSD_EVIDENCE=%s\n' "$gpsd_evidence" >> "$GITHUB_ENV"
+          python3 -B scripts/check-dps-gpsd-source.py > "$gpsd_evidence/source.json"
+          python3 -B scripts/test-dps-gpsd-wrapper.py
+          python3 -B tests/dps/gpsd/test_proof.py
+          python3 -B scripts/test-cargo-source-policy.py
+          sh -n scripts/run-isolated-test.sh
+
+      - name: Use authenticated compiler and unchanged public Cargo source policy
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" "$DPS_GPSD_EVIDENCE/cargo-source-policy.json"
+          rustc --version --verbose > "$DPS_GPSD_EVIDENCE/rust.txt"
+          cargo --version --verbose >> "$DPS_GPSD_EVIDENCE/rust.txt"
+          cargo fetch --locked
+
+      - name: Compile and test the actual one-shot CLI before native downloads
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline -p volparossa --bin volparossa dps::gpsd::tests:: \
+            2>&1 | tee "$DPS_GPSD_EVIDENCE/rust-tests.log"
+          python3 -B - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['DPS_GPSD_EVIDENCE'])
+          with (root / 'rust-tests.log').open('rb') as stream:
+              raw = stream.read(4 * 1024 * 1024 + 1)
+          assert len(raw) <= 4 * 1024 * 1024
+          log = raw.decode('utf-8', errors='strict')
+          names = re.findall(r'^test (dps::gpsd::tests::\S+) \.\.\. ok$', log, re.M)
+          assert len(names) == len(set(names)) == 17
+          assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured;', log, re.M) == ['17']
+          receipt = dict(schema_version=1, source_commit=os.environ['GITHUB_SHA'],
+              passed=17, ignored=0, test_names=sorted(names), physical_positioning_acceptance=False)
+          with (root / 'rust-tests.json').open('x') as stream:
+              json.dump(receipt, stream, sort_keys=True)
+              stream.write('\n')
+          PY
+          cargo build --locked --offline -p volparossa --bin volparossa
+          cargo clippy --locked --offline -p volparossa --bin volparossa --tests -- -D warnings
+          rustfmt --edition 2024 --config skip_children=true --check \
+            crates/volparossa/src/dps.rs crates/volparossa/src/dps/gpsd.rs crates/volparossa/src/dps/gpsd/tests.rs
+          git diff --exit-code HEAD
+
+      - name: Record the disposable parent host and compile pinned patched GPSD privately
+        run: |
+          set -euo pipefail
+          python3 -B scripts/dps-gpsd-host-state.py "$DPS_GPSD_EVIDENCE/host-before.json"
+          python3 -B tests/dps/gpsd/build.py --evidence-dir "$DPS_GPSD_EVIDENCE" --source-revision "$GITHUB_SHA"
+
+      - name: Run upstream checks and real normal and sanitized sensor chains in isolation
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          scripts/run-isolated-test.sh --dps-gpsd-command "$GITHUB_WORKSPACE/target/debug/volparossa" \
+            "$DPS_GPSD_EVIDENCE" "$DPS_GPSD_EVIDENCE/build-receipt.json"
+
+      - name: Verify the parent host after the proof, including on failure
+        if: always() && env.DPS_GPSD_EVIDENCE != ''
+        run: |
+          set -euo pipefail
+          if [ -f "$DPS_GPSD_EVIDENCE/host-before.json" ]; then
+            python3 -B scripts/dps-gpsd-host-state.py "$DPS_GPSD_EVIDENCE/host-after.json" \
+              --compare "$DPS_GPSD_EVIDENCE/host-before.json"
+          fi
+          git diff --exit-code HEAD
+
+      - name: Retain bounded public synthetic GPSD evidence
+        if: always() && env.DPS_GPSD_EVIDENCE != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dps-gpsd-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.json
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.log
+            ${{ env.DPS_GPSD_EVIDENCE }}/*.txt
+            ${{ env.DPS_GPSD_EVIDENCE }}/*-PUBLIC-SYNTHETIC.nmea
+
   native-contracts:
     if: >-
       github.repository == 'VOLPAROSSA/volparossa' &&

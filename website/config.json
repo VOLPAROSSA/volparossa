@@ -1,0 +1,9 @@
+{
+  "site_url": "https://volparossa.org",
+  "base_path": "/volparossa/",
+  "repository": "https://github.com/VOLPAROSSA/volparossa",
+  "title": "VOLPAROSSA Core — Shared infrastructure, built together",
+  "description": "Explore the developing VOLPAROSSA Core: shared network, cache, storage, compute and transactions, with privacy-preserving positioning in research and development.",
+  "upstream_marks": true,
+  "content_source_commit": "edf569300acbdf5e7715b5192ffbb293235b15ab"
+}

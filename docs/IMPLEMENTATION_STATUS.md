@@ -31,10 +31,30 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
 
-### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
+### Core project website — 2026-10-30
 
-De kandidaat voor [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) bevat de minimale
-beveiligingsroute en de gerichte helpercorrecties. De oorspronkelijke
+The bounded Golden Harbour introduction lives in `website/`, with an isolated
+Python static build and project Pages artifact for `/volparossa/`. It imports
+reviewed shared theme v1.0.3 from homepage commit `8114d966f3e9` and preserves
+development/permission boundaries from Core source `edf569300acb`.
+[Website verification](../website/VERIFICATION.md) records responsive Chromium/
+Firefox renders, accessibility, no-JavaScript behavior and performance results.
+This work changes no runtime or project goal and supplies no new Core, DPS,
+network, model or sensor acceptance evidence. Publication follows the existing
+required PR gate and the separate scoped website deployment workflow.
+The owner’s subsequent visual refinement restores the four concept scenes below
+the unchanged hero and adds an accessible rotating nine-application strip,
+excluding Bank/Citizen; [bounded website evidence](../website/REFINEMENT-VERIFICATION.md)
+records the responsive renders, original icons and interaction checks.
+The final [Compute/satellite icon correction](../website/ICON-VERIFICATION.md)
+replaces malformed custom geometry while preserving the page composition.
+
+### F04 — helperacceptatie en integratie geslaagd — 2026-10-27
+
+[PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) is op 27 oktober 2026
+gemerged als `edf569300acbdf5e7715b5192ffbb293235b15ab` en bevat de minimale
+beveiligingsroute en de gerichte helpercorrecties. De mergegegevens zijn op
+5 november 2026 opnieuw gecontroleerd; dit is geen nieuwe runtimeproef. De oorspronkelijke
 [F04-evidence en failures](https://github.com/VOLPAROSSA/volparossa/blob/ff2df276bc50a395dbcfa2d11b515c51fe0ee340/docs/IMPLEMENTATION_STATUS.md)
 blijven behouden; PR347 is historische basis, geen afzonderlijke integratiekandidaat.
 
@@ -61,10 +81,10 @@ livecontracttest en gerichte syntax/ShellCheck/diffcontroles slagen. Onafhankeli
 bron- en resultaatreview bevestigt de afbakening. Eerdere Quality40487291792,
 CodeQL40487286993, dependency/RustSec- en zbus/crypto/DPS-native-evidence blijven
 hergebruikt voor hun gecontroleerd gelijke inputs; dit is geen herhaalde audit.
-De integratiekandidaat behoudt actuele main-documentatie en doorloopt de
-[bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks).
-Integratie en administratieve F04-afsluiting blijven aan handmatige maintainermerge
-gebonden. Geen automatische merge of productieactivatie.
+De geïntegreerde kandidaat behoudt de destijds actuele main-documentatie;
+de [bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)
+blijven bij hun geteste bron horen. De handmatige integratie is voltooid.
+Dit bewijst geen nieuwe runtimecompositie en activeert geen productiefunctionaliteit.
 
 ### Development workflow — 2026-10-26
 
@@ -161,6 +181,19 @@ system value; these priorities impose no fixed application/model/agent order.
   `Require actual owner-private storage maintenance`. This metadata does not
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
+
+The central continuation on 5 November reapplies PR339's bounded ordinary
+rotation fixture to current main. It also keeps version-4 failure diagnostics
+compact through export and revalidation, and records only the validated closed
+diagnostic in job logs. The original run's seven-day artifacts have expired;
+its retained logs do not establish the failure substage. A fresh source-bound
+trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
+on `e50af83d` stops before Storage: the guest compiler source policy rejects its
+environment. Alpha's SSH caller now drops only the two transport metadata
+variables already removed by the helper VM; credentials/configuration remain
+rejected. This caller correction still needs a new actual trial. Historical consumer
+profile 10 pins remain unchanged, so that trial cannot accept the later
+Image/Cloud draft heads by implication.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still

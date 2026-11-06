@@ -41,7 +41,8 @@ TERMINALS = ('active', 'complete', 'tls_timeout', 'tls_error', 'operation_error'
 MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete', 'unmatchable')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
-    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete')
+    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete',
+    'mptcp_connect_poll_timed_out')
 HELPER_REASONS = ('helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
     'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
     'helper_validation', 'helper_authority', 'helper_correlation', 'helper_runtime_changed')
@@ -119,6 +120,7 @@ def acquire_summary(value, phase, terminal):
         code = failure['helper_diagnostic']
         require(code is None or (type(code) is str and code in HELPER_DIAGNOSTICS
             and failure['stage'] == 'helper_acquire' and failure['reason'] in HELPER_REASONS[:6]))
+        require(code != 'mptcp_connect_poll_timed_out' or failure['reason'] == 'helper_kernel')
 
 
 def reply(value, action, fingerprints, version=1):

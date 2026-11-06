@@ -1995,6 +1995,9 @@ case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-pri
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 prepare_current_compiler() {
+    # Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+    # Keep other SSH/Git variables for the source policy to reject.
+    unset SSH_CLIENT SSH_CONNECTION
     python3 -B scripts/provision-rust189.py alpha-guest
     export CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1
     export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
