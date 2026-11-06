@@ -8,9 +8,10 @@ private_storage_consumer_private() {
     consumer_profile_version=${storage_consumer_profile_version-7}
     case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
+    # Publish observation starts before Image and includes owner cleanup.
+    # These phase-wide diagnostics do not bind an application or failed request.
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:10) set -- "$@" --fixture-request-stage ;;
-        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
+        publish:yes:10|publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \

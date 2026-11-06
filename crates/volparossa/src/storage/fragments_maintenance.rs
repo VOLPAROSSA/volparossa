@@ -62,6 +62,9 @@ pub(crate) struct Enroll {
     /// Finite permission for maintenance, not an extension of provider-issued grants.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
     authorization_seconds: u64,
+    /// Optional absolute Unix-second ceiling; never extends `--authorization-seconds`.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    authorization_expires_at: Option<u64>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
     lifetime_seconds: u64,
     #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..=MAX_LEASE_SECONDS))]
@@ -226,6 +229,43 @@ fn check_turn_size(set: &LockedFragments, maximum: u64) -> Result<()> {
     Ok(())
 }
 
+fn enrollment_expiry(created: u64, seconds: u64, absolute: Option<u64>) -> Result<u64> {
+    ensure!(
+        (1..=MAX_LEASE_SECONDS).contains(&seconds),
+        "invalid maintenance authorization duration"
+    );
+    let relative = created.checked_add(seconds).context("expiry overflow")?;
+    let expires = absolute.map_or(relative, |cap| relative.min(cap));
+    ensure!(
+        created < expires,
+        "maintenance enrollment authority expired"
+    );
+    Ok(expires)
+}
+
+fn sign_enrollment(
+    enrollment: Enrollment,
+    signer: &SigningKey,
+    now: impl FnOnce() -> Result<u64>,
+) -> Result<SignedEnrollment> {
+    let bytes = signing(&enrollment)?;
+    // Grant reads/validation may have taken time. Do not rebase either expiry
+    // on this later clock sample or sign authority after its window closes.
+    let now = now()?;
+    ensure!(
+        now >= enrollment.created,
+        "maintenance enrollment clock moved backwards"
+    );
+    ensure!(
+        now < enrollment.expires,
+        "maintenance enrollment authority expired"
+    );
+    Ok(SignedEnrollment {
+        enrollment,
+        signature: hex::encode(signer.sign(&bytes).to_bytes()),
+    })
+}
+
 fn enroll(args: Enroll) -> Result<serde_json::Value> {
     ensure!(
         (1..=8).contains(&args.provider_key.len()) && args.provider_key.len() == args.grant.len(),
@@ -269,26 +309,21 @@ fn enroll(args: Enroll) -> Result<serde_json::Value> {
             .map(|path| state::read_private(path, 2048).map(hex::encode))
             .collect::<Result<_>>()?,
         created,
-        expires: created
-            .checked_add(args.authorization_seconds)
-            .context("expiry overflow")?,
+        expires: enrollment_expiry(
+            created,
+            args.authorization_seconds,
+            args.authorization_expires_at,
+        )?,
         lifetime: args.lifetime_seconds,
         renew_before: args.renew_before_seconds,
         maximum_charged: args.maximum_charged_bytes,
         maximum_turn: args.maximum_turn_bytes,
     };
     candidates(&enrollment)?;
-    let signature = hex::encode(signer.sign(&signing(&enrollment)?).to_bytes());
+    let document = sign_enrollment(enrollment, &signer, crate::storage::now)?;
     fs::DirBuilder::new().mode(0o700).create(&args.enrollment)?;
     let directory = state::directory(&args.enrollment)?;
-    save(
-        &directory,
-        "enrollment.json",
-        &SignedEnrollment {
-            enrollment,
-            signature,
-        },
-    )?;
+    save(&directory, "enrollment.json", &document)?;
     checkpoint(&directory, "enrolled", 0, None)
 }
 

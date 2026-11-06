@@ -108,7 +108,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | Components pass; full consumer restore/deletion and zero remote usage remain open after catalog/retention failures. |
+| Storage / Image / Cloud | Current core maintenance, repeated restore, all-copy deletion and zero provider usage pass; the following Cloud deposit times out while reading its challenge length. Full consumer cleanup and joined upload remain open. |
 | Protected Compute | Strict host gate fails in 39868428738 despite public answers/corruption/cleanup; later feature run 39876860833 has successful public-job metadata. Receipt-level host/configuration acceptance, main composition and private workloads remain separate. |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -122,9 +122,10 @@ is removed; behavioral tests and production paths are unchanged.
 Choose complete executable slices by shared dependency, demonstrated failure and
 system value; these priorities impose no fixed application/model/agent order.
 
-1. **Storage:** drive the required ordinary renewal rotation without weakening
-   retention authority; then exercise catalog restore and finish Image/Cloud
-   publish, repair, restore, deletion and confirmed zero remote usage.
+1. **Storage:** diagnose the Cloud deposit challenge-read deadline with bounded
+   connection observations; then complete Image/Cloud publish, repair, restore,
+   deletion and confirmed zero remote usage before the joined upload trial.
+   Preserve finite retention authority and the passing core maintenance baseline.
 2. **Protected model:** use the retained connect diagnostic and strict host gate
    to prove two public turns, corruption rejection and complete cleanup on one
    source; join separately authorized private execution only with its own proof.
@@ -164,7 +165,7 @@ system value; these priorities impose no fixed application/model/agent order.
   analyses and 66 Node tests pass. These source results do not prove catalog
   restoration. Failure snapshots are bounded/sequential, not per-request cause
   evidence; empty saturated rings do not prove absence of failures.
-- **Latest actual and follow-up:** Alpha 39864473079 fails
+- **October failure and follow-up:** Alpha 39864473079 fails
   `private-storage-maintenance-core-restart`, specifically
   `baseline_custody/reconcile_progress/pending_handoff` with
   `replacement_retention_insufficient`. The retention guard correctly prevents
@@ -182,23 +183,80 @@ system value; these priorities impose no fixed application/model/agent order.
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
 
-The central continuation on 5 November reapplies PR339's bounded ordinary
-rotation fixture to current main. It also keeps version-4 failure diagnostics
-compact through export and revalidation, and records only the validated closed
-diagnostic in job logs. The original run's seven-day artifacts have expired;
-its retained logs do not establish the failure substage. A fresh source-bound
-trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
-on `e50af83d` stops before Storage: the guest compiler source policy rejects its
-environment. Alpha's SSH caller now drops only the two transport metadata
-variables already removed by the helper VM; credentials/configuration remain
-rejected. This caller correction still needs a new actual trial. Historical consumer
-profile 10 pins remain unchanged, so that trial cannot accept the later
-Image/Cloud draft heads by implication.
+The central continuation [PR371](https://github.com/VOLPAROSSA/volparossa/pull/371)
+integrates as `ba6ab458429f5ac50cdc8c3538e6d24f44aad916`, restoring bounded
+ordinary rotation and compact validated failure diagnostics. The
+[prior central record](https://github.com/VOLPAROSSA/volparossa/blob/3e8a27e333230d5523264762da2905a6a9a5bccc/docs/IMPLEMENTATION_STATUS.md#storage-consumer-and-provider-evidence)
+preserves the initial compiler-environment failure, subsequent Cloud/Image
+failures, original artifact digests and the cancelled combined Quality run.
+Those failures remain failures.
+
+Draft [PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) now separates
+source contracts from compilation within the existing Quality workflow; the
+required final gate succeeds only when both jobs succeed. At
+`3e8a27e333230d5523264762da2905a6a9a5bccc`,
+[Quality 42132745309](https://github.com/VOLPAROSSA/volparossa/actions/runs/42132745309)
+passes all 21 source suites, build/integration and both isolated TLS-close tests.
+[CodeQL 42132740445](https://github.com/VOLPAROSSA/volparossa/actions/runs/42132740445)
+and its separate security aggregate pass. Quality's tested merge `1a413a85`
+shares source tree `b66b2f086226df978b9da3cef9da12e53907914e`.
+
+**Latest actual:** [42133516630](https://github.com/VOLPAROSSA/volparossa/actions/runs/42133516630)
+at that source again passes Core maintenance through cursor 9, restart/repair,
+two restores, eleven-copy deletion and independent zero usage at three providers.
+It needs no extra reconciliation turns, so it does not exercise that optional
+branch. Image then fails fragment 2/copy 0 APPEND at `stream_open/flow_acquire`:
+two rounds, first `helper_kernel`, then `helper_cleanup_incomplete`. Cloud never
+starts. Consumer providers retain nonzero usage. Host comparison and local
+cleanup pass; full consumer acceptance and remote cleanup remain unproved.
+The retained ZIP digest is
+`b8a9351465df0f8f649c806579eccb017aec8e8dfb6628af5885d09d904e8ea7`.
+
+The existing phase-wide v2 observer arms, disarms and joins successfully. An
+unmatchable acquire record reports `mptcp_connect_poll_timed_out`, followed by
+`transport_unavailable`; it cannot bind an application, fragment or provider.
+Unmatchable records require `incomplete=true`; here `sampling_failed=false`.
+Source review finds that an authenticated descriptor-free
+poll timeout preserves committed worker/helper state and permits a fresh retry.
+The second observed diagnostic identifies a backend acquisition failure followed
+by confirmed helper-context rollback; it proves no remote cleanup and does not
+identify which backend failure branch occurred.
+
+The current follow-up adds closed acquisition-origin diagnostics through that
+existing helper/v2 path, preserving result categories, retries, deadlines and
+cleanup behavior. A focused regression checks fresh retry admission after the
+specific authenticated poll timeout. Hosted source validation and a fresh actual
+remain required; this does not claim a transport fix. Historical Image v3 capture
+and application pins remain unchanged. Optional observations cannot replace the
+application outcome; `fragment_copy_binding` and `causal_attribution` remain false.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
 requires the complete consumer profile, finite authority, actual enrollment,
 repeated restore and all-copy deletion; SDK source checks do not replace it.
+
+#### Automatic upload integration candidate
+
+The retained [PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) now
+reconciles its finite upload continuation with the current main source. Upload
+profile 6 still requires shared consumer profile 10 and TLS-close diagnostic 9.
+Upload profiles 1–6 retain their exact application pins and finite authorization
+ceilings. Consumer profile 10 retains main's corrected challenge-read pins
+(Image `f51b8ace` / Cloud `5f143725`); upload profile 6 separately retains Image
+`1e812ec6` / Cloud `35598609`. Each phase validates its own source and the exact
+preceding receipt; the two phases do not require identical application revisions.
+Current main's diagnostic choices and compiler provisioning are preserved. Reusable upload checks and the two isolated TLS-close contracts now
+run through Quality instead of a historical branch-specific source workflow.
+The normal and emergency upload export inventories retain the two current main
+diagnostic sidecars only through their closed validators. The [original source record](https://github.com/VOLPAROSSA/volparossa/blob/dd1fd4dff55413ade4cfb26ffcb7bf5a9ad26c01/docs/IMPLEMENTATION_STATUS.md)
+retains its earlier component results and failures; those results do not accept
+this new composition.
+
+The candidate must first pass the complete real shared-consumer lifecycle with
+confirmed cleanup and zero usage on all providers. Only then may its separate
+scenario prove authenticated upload, automatic enrollment under finite authority,
+provider withdrawal, repair, two cold restorations across restart, deletion and
+cleanup. No new upload runtime acceptance is claimed.
 
 ### Protected Compute evidence
 
@@ -245,6 +303,20 @@ repeated restore and all-copy deletion; SDK source checks do not replace it.
   source run proves actual inference on main's dependency composition or any
   subsequent reconciliation. Earlier Quality/CodeQL results likewise remain
   bound to their tested composition.
+
+**Current continuation (2026-11-06):** draft PR332 preserves feature parent
+`812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e` and current-main parent
+`235c2c9165c2c07e7cd3bca82ec8b70152bb8d90` in a normal merge. Earlier exact-812
+[Quality 40746019059](https://github.com/VOLPAROSSA/volparossa/actions/runs/40746019059)
+and [public trial 40744937287](https://github.com/VOLPAROSSA/volparossa/actions/runs/40744937287)
+succeeded; those results do not validate this new composition. The maintained
+[resident workflow](../.github/workflows/protected-resident-model.yml) replaces
+the three historical `resident-current-main`, `resident-installer-io` and
+`resident-pinned-compiler` wrappers, whose exact sources remain in
+[feature 812b25ed](https://github.com/VOLPAROSSA/volparossa/tree/812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e/.github/workflows).
+It retains their full existing source-test inventory and an explicitly
+dispatched public trial. Fresh hosted validation is pending; public fixture
+results do not establish private-workload acceptance.
 
 Keep raw host equality separate from configuration-checkpoint acceptance,
 unchanged public-job authority, bounded privacy-safe diagnostics and original
@@ -354,7 +426,7 @@ using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
 | Work | Retained branch / checkout | Resume boundary |
 | --- | --- | --- |
 | Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
-| Main resident composition | `integration/resident-model-main-20261022`, PR332 | Source gates pass at af9ecc3c and c29f67c5; ordinary merge results bind af9ecc3c, not later runtime compositions. |
+| Main resident composition | `integration/resident-model-main-20261022`, draft PR332 | Current continuation combines parents 812b25ed and 235c2c91; fresh hosted validation is pending. Historical successes remain bound to their exact sources. |
 | Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
 | Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
 | Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |

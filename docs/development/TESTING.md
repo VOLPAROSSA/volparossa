@@ -52,7 +52,7 @@ security changes, unchanged license files, complete vendor-tree hashes, and
 the locked root and standalone fuzz feature graphs before running pinned
 `cargo-deny 0.18.6` all-in-one checks and independent no-fetch
 `cargo-audit 0.22.1` scans of both lockfiles. Cargo-deny is built with its
-pinned Rust 1.88 toolchain; the product remains pinned to Rust 1.85. The gate
+pinned Rust 1.88 toolchain; the product remains pinned to Rust 1.89. The gate
 records the local RustSec database commit. See `third_party/rust/README.md` for
 the narrowly scoped local backports, single-backend Yamux hardening, and
 scanner exemptions.

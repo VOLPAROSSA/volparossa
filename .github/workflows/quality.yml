@@ -291,8 +291,66 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  quality:
-    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+  storage-contracts:
+    name: Storage source contracts
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check Storage consumer diagnostic profiles without network access
+        run: |
+          # These are source-only Python/Node/shell contracts; fail before compiler
+          # provisioning, while retaining every independent suite's result.
+          for tool in python3 node jq tar sh; do command -v "$tool"; done
+          node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+          storage_contract_failures=0
+          run_contract() {
+            local contract_status
+            printf '::group::Storage contract: %s\n' "$*"
+            if "$@"; then
+              contract_status=0
+            else
+              contract_status=$?
+              storage_contract_failures=$((storage_contract_failures + 1))
+            fi
+            printf '::endgroup::\n'
+            if [ "$contract_status" -ne 0 ]; then
+              printf '::error::Storage contract failed (%s): %s\n' "$contract_status" "$*"
+            fi
+          }
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
+          run_contract python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
+          run_contract node --test tests/integration/test-storage-consumer-maintenance.mjs
+          run_contract python3 -B tests/integration/test-private-storage-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+          run_contract python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
+          run_contract python3 -B tests/integration/test-storage-provider-activity-sampler.py
+          run_contract python3 -B tests/integration/test-storage-consumer-network.py
+          run_contract python3 -B tests/integration/test-storage-acquire-diagnostic.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-provision.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-smoke.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-evidence.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-shell.py
+          run_contract python3 -B tests/integration/test-cloud-upload-maintenance-vm-wiring.py
+          run_contract node --test tests/integration/test-cloud-upload-maintenance.mjs
+          run_contract python3 -B scripts/test-storage-tls-close-contracts.py
+          run_contract python3 -B tests/integration/test-storage-request-stage-consumers.py
+          run_contract python3 -B tests/integration/test-storage-consumer-failure-boundary.py
+          run_contract python3 -B tests/integration/test-storage-provider-usage-snapshot.py
+
+          test "$storage_contract_failures" -eq 0
+
+  quality-build:
+    name: Build and integration tests
+    needs: storage-contracts
     if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -301,6 +359,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Verify complete committed goal preservation and fresh-export controls
@@ -416,19 +475,6 @@ jobs:
           python3 -B tests/integration/test-alpha-vm-diagnostics.py
           sh -n tests/integration/run-alpha-topology-vm.sh
 
-      - name: Check Storage consumer diagnostic profiles without network access
-        run: |
-          python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
-          node --test tests/integration/test-storage-consumer-maintenance.mjs
-          python3 -B tests/integration/test-private-storage-maintenance-smoke.py
-          python3 -B tests/integration/test-private-storage-maintenance-wiring.py
-          python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
-          python3 -B tests/integration/test-storage-request-stage-consumers.py
-          python3 -B tests/integration/test-storage-consumer-failure-boundary.py
-          python3 -B tests/integration/test-storage-provider-usage-snapshot.py
 
       - name: Check formatting and shell sources
         run: |
@@ -607,6 +653,29 @@ jobs:
           cargo test --locked --offline -p volparossa-content --lib
           private_storage::wire -- --test-threads=1
 
+      - name: Require isolated Storage TLS close contracts and unchanged host state
+        timeout-minutes: 8
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          # Reuse the workspace build; the helper requires both exact ignored tests
+          # to execute in disposable namespaces and independently verifies their output.
+          cargo test --locked --offline -p volparossa-agent --lib --all-features \
+            --no-run --message-format=json >"$RUNNER_TEMP/storage-tls-close-build.jsonl"
+          python3 -B scripts/storage-tls-close-contracts.py \
+            --build-receipt "$RUNNER_TEMP/storage-tls-close-build.jsonl" \
+            --output "$RUNNER_TEMP/storage-tls-close"
+
+      - name: Preserve bounded Storage TLS close evidence including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-tls-close-${{ github.run_id }}
+          path: ${{ runner.temp }}/storage-tls-close/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Require real dormant-agent DPS IPC and unchanged host configuration
         timeout-minutes: 6
         env:
@@ -705,3 +774,20 @@ jobs:
           # helper enforces a closed inventory and a 128 MiB payload limit.
           path: ${{ steps.audit-cache.outputs.path }}
           key: ${{ steps.audit-cache.outputs.key }}
+
+  quality:
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+    needs: [storage-contracts, quality-build]
+    # Always report the required result, including failed, skipped or cancelled
+    # prerequisites. Only this small gate is unconditional; builds stay cancellable.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every Quality prerequisite to succeed
+        env:
+          STORAGE_CONTRACTS_RESULT: ${{ needs.storage-contracts.result }}
+          QUALITY_BUILD_RESULT: ${{ needs.quality-build.result }}
+        run: |
+          test "$STORAGE_CONTRACTS_RESULT" = success
+          test "$QUALITY_BUILD_RESULT" = success

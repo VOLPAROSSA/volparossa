@@ -74,7 +74,7 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
             value
         );
     }
-    for code in [-1, 10, i32::MAX] {
+    for code in [-1, 19, i32::MAX] {
         let mut value = valid;
         value.first.as_mut().unwrap().helper_diagnostic = Some(code);
         assert!(value.validate().is_err());
@@ -94,6 +94,65 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
     assert_ne!(valid.encode_to_vec(), absent.encode_to_vec());
     absent.first.as_mut().unwrap().failure = None;
     assert!(absent.validate().is_err());
+}
+
+#[test]
+fn fixture_acquire_origins_preserve_allocations_and_require_cleanup_rejection() {
+    use crate::PrivateStorageFlowAcquireReason as Reason;
+    use StorageFixtureHelperDiagnostic as Code;
+
+    for (code, number) in [
+        (Code::Unknown, 0),
+        (Code::BackendResultAmbiguous, 1),
+        (Code::StaleBackendResult, 2),
+        (Code::FlowIdentityUnavailable, 3),
+        (Code::TransportUnavailable, 4),
+        (Code::CleanupIncomplete, 5),
+        (Code::ReplayCommitInconsistent, 6),
+        (Code::ExpiredContextCleanupIncomplete, 7),
+        (Code::ExpiredExtensionCleanupIncomplete, 8),
+        (Code::MptcpConnectPollTimedOut, 9),
+        (Code::AcquireWorkerBudget, 10),
+        (Code::AcquireWorkerState, 11),
+        (Code::AcquireCoordinatorDeadline, 12),
+        (Code::AcquireCoordinatorAmbiguous, 13),
+        (Code::AcquireCoordinatorUnavailable, 14),
+        (Code::AcquireCoordinatorOther, 15),
+        (Code::AcquireWorkerResponse, 16),
+        (Code::AcquireDescriptorState, 17),
+        (Code::AcquireDescriptorDeadline, 18),
+    ] {
+        assert_eq!(code as i32, number);
+        if number < 10 {
+            continue;
+        }
+        let mut value = acquire_summary();
+        value.rounds = 2;
+        value.last.as_mut().unwrap().helper_diagnostic = Some(number);
+        value.validate().unwrap();
+        assert_eq!(
+            StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        for reason in [
+            Reason::HelperKernel,
+            Reason::HelperCapacity,
+            Reason::HelperUnavailable,
+            Reason::HelperNotFound,
+            Reason::HelperOtherRejection,
+        ] {
+            let mut wrong = value;
+            wrong
+                .last
+                .as_mut()
+                .unwrap()
+                .failure
+                .as_mut()
+                .unwrap()
+                .reason = reason as i32;
+            assert!(wrong.validate().is_err());
+        }
+    }
 }
 
 #[test]

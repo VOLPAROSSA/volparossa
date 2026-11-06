@@ -1,6 +1,6 @@
 //! Persistent pipe supervision. A turn result is not a process-exit receipt.
 
-use std::{io::Read as _, path::Path, time::Duration};
+use std::{io::Read as _, path::Path, process::ExitStatus, time::Duration};
 
 use anyhow::{Context as _, Result, ensure};
 use serde_json::{Value, json};
@@ -71,6 +71,15 @@ pub(super) struct Live {
     clock_ticks: u64,
 }
 
+/// Available only after the existing child/descendant join and stderr drain.
+/// Status, when present, was observed before stdin close or cleanup termination.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CloseObservation {
+    pub(super) status_before_cleanup: Option<ExitStatus>,
+    pub(super) stderr_class: &'static str,
+    pub(super) public_bubblewrap_stage: Option<supervisor::BubblewrapStage>,
+}
+
 fn clock_ticks() -> Result<u64> {
     // Linux's own bounded auxiliary vector, not a subprocess or guessed USER_HZ.
     ensure!(size_of::<usize>() == 8, "compute_native_session_cpu_clock");
@@ -98,11 +107,12 @@ fn clock_ticks() -> Result<u64> {
 }
 
 impl Live {
-    pub(super) fn spawn(options: &Options, root: &Path) -> Result<Self> {
+    pub(super) fn spawn(options: &Options, root: &Path, deadline: Instant) -> Result<Self> {
+        super::budget::check_deadline(deadline)?;
         let ticks = clock_ticks()?;
-        let child = sandbox::native_session_command(options, root)
-            .spawn()
-            .context("compute_sandbox_spawn")?;
+        let mut command = sandbox::native_session_command(options, root);
+        super::budget::check_deadline(deadline)?;
+        let child = command.spawn().context("compute_sandbox_spawn")?;
         Ok(Self::own(child, ticks))
     }
 
@@ -326,8 +336,11 @@ impl Live {
         Ok(report)
     }
 
-    pub(super) async fn close(mut self) -> Result<()> {
+    pub(super) async fn close(mut self) -> Result<CloseObservation> {
         let deadline = Instant::now() + Duration::from_secs(3);
+        // Diagnostic only: no wait/retry and observation errors retain no status.
+        // Later waits may observe our EOF or kill, never the original failure.
+        let status_before_cleanup = self.child.try_wait().ok().flatten();
         if let Some(Ok(tracker)) = self.lifetimes.as_mut() {
             let _ = tracker.refresh();
         }
@@ -356,18 +369,21 @@ impl Live {
             .stderr
             .take()
             .context("compute_native_session_stderr")?;
-        let drained = if let Ok(Ok(Ok(_))) = tokio::time::timeout_at(deadline, &mut stderr).await {
-            true
-        } else {
-            stderr.abort();
-            let _ = stderr.await;
-            false
-        };
-        ensure!(
-            closed && drained,
-            crate::compute::private_task::CleanupUnconfirmed
-        );
-        Ok(())
+        let drained =
+            if let Ok(Ok(Ok(diagnostics))) = tokio::time::timeout_at(deadline, &mut stderr).await {
+                Some(diagnostics)
+            } else {
+                stderr.abort();
+                let _ = stderr.await;
+                None
+            };
+        ensure!(closed, crate::compute::private_task::CleanupUnconfirmed);
+        let diagnostics = drained.ok_or(crate::compute::private_task::CleanupUnconfirmed)?;
+        Ok(CloseObservation {
+            status_before_cleanup,
+            stderr_class: diagnostics.class.label(),
+            public_bubblewrap_stage: diagnostics.public_bubblewrap_stage,
+        })
     }
 }
 
@@ -434,6 +450,91 @@ mod tests {
         assert!(original < 1_000_000);
         live.close().await.unwrap();
         assert!(!Path::new("/proc").join(pid.to_string()).exists());
+    }
+
+    #[tokio::test]
+    async fn stdout_eof_retains_precleanup_exit_and_bounded_stderr_class() {
+        let process = child(
+            "import sys;sys.stdin.buffer.read(1);sys.stderr.write('Traceback (most recent call last):\\nPRIVATE_CANARY /private/input\\n');sys.stderr.flush();sys.exit(23)",
+        );
+        let mut live = Live::own(process, clock_ticks().unwrap());
+        live.stdin.as_mut().unwrap().write_all(b"x").await.unwrap();
+        let error = live.stdout.next().await.unwrap_err();
+        assert_eq!(error.to_string(), "compute_native_session_stdout_closed");
+        // Establish a naturally exited child before the production close call.
+        assert_eq!(live.child.wait().await.unwrap().code(), Some(23));
+        let observation = live.close().await.unwrap();
+        assert_eq!(observation.status_before_cleanup.unwrap().code(), Some(23));
+        assert_eq!(observation.stderr_class, "python_startup");
+    }
+
+    #[tokio::test]
+    async fn stdout_eof_carries_only_closed_public_bubblewrap_stage_after_join() {
+        let process = child(
+            "import sys;sys.stdin.buffer.read(1);sys.stderr.write(\"bwrap: Can't open source PRIVATE_CANARY /private/input\\n\");sys.stderr.flush();sys.exit(23)",
+        );
+        let mut live = Live::own(process, clock_ticks().unwrap());
+        live.stdin.as_mut().unwrap().write_all(b"x").await.unwrap();
+        assert!(live.stdout.next().await.is_err());
+        assert_eq!(live.child.wait().await.unwrap().code(), Some(23));
+        let observation = live.close().await.unwrap();
+        assert_eq!(observation.status_before_cleanup.unwrap().code(), Some(23));
+        assert_eq!(observation.stderr_class, "bubblewrap");
+        assert_eq!(
+            observation.public_bubblewrap_stage,
+            Some(supervisor::BubblewrapStage::SourceSetup)
+        );
+        assert!(!format!("{observation:?}").contains("PRIVATE_CANARY"));
+    }
+
+    #[tokio::test]
+    async fn stdout_eof_retains_only_a_signal_observed_before_cleanup() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let process = child(
+            "import os,signal,sys;sys.stdin.buffer.read(1);os.kill(os.getpid(),signal.SIGUSR1)",
+        );
+        let mut live = Live::own(process, clock_ticks().unwrap());
+        live.stdin.as_mut().unwrap().write_all(b"x").await.unwrap();
+        assert!(live.stdout.next().await.is_err());
+        assert_eq!(
+            live.child.wait().await.unwrap().signal(),
+            Some(libc::SIGUSR1)
+        );
+        let observation = live.close().await.unwrap();
+        assert_eq!(
+            observation.status_before_cleanup.unwrap().signal(),
+            Some(libc::SIGUSR1)
+        );
+        assert_eq!(observation.stderr_class, "none");
+    }
+
+    #[tokio::test]
+    async fn live_child_stdout_eof_never_exports_cleanup_kill_status() {
+        let process = child(
+            "import os,sys,time;sys.stdin.buffer.read(1);os.close(1)\nwhile True: time.sleep(60)",
+        );
+        let pid = process.id().unwrap();
+        let mut live = Live::own(process, clock_ticks().unwrap());
+        live.stdin.as_mut().unwrap().write_all(b"x").await.unwrap();
+        assert!(live.stdout.next().await.is_err());
+        assert!(live.child.try_wait().unwrap().is_none());
+        let observation = live.close().await.unwrap();
+        assert!(observation.status_before_cleanup.is_none());
+        assert_eq!(observation.stderr_class, "none");
+        assert!(!Path::new("/proc").join(pid.to_string()).exists());
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_cleanup_returns_no_terminal_observation() {
+        let process = child("import sys;sys.stdin.buffer.read()");
+        let mut live = Live::own(process, clock_ticks().unwrap());
+        live.lifetimes = Some(Err(anyhow::anyhow!("PRIVATE_CANARY")));
+        let error = live.close().await.unwrap_err();
+        assert!(error.is::<crate::compute::private_task::CleanupUnconfirmed>());
+        assert!(super::super::cleanup(&error).is_none());
+        assert!(super::super::public_fixture_failure(&error).is_none());
+        assert!(!error.to_string().contains("PRIVATE_CANARY"));
     }
 
     #[tokio::test]

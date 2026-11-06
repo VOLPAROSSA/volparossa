@@ -16,6 +16,7 @@ OLD = U['OLD']
 require, keys, canonical = (OLD[k] for k in ('require', 'keys', 'canonical'))
 BROKERS, PROVIDERS = U['BROKERS'], U['PROVIDERS']
 PHASES = OLD['PHASES']
+CLOUD_PHASES = ('upload', 'exercise', 'finish')
 EXPORT_NAMES = (U['NAME'], *(f'storage-consumer-{phase}-control-{suffix}.json'
     for phase in PHASES for suffix in ('before', 'after', *BROKERS)))
 
@@ -41,7 +42,9 @@ def worker_flow(work, path):
     """Only the fixed worker output, not a general alternate-owner JSON reader."""
     work, path = Path(work), Path(path)
     parent = work / 'client-fixtures/private-storage-user'
-    require(path.parent == parent and path.name in {f'flow-consumer-{n}.json' for n in PHASES}
+    allowed = {f'flow-consumer-{n}.json' for n in PHASES} | {
+        f'flow-cloud-upload-{n}.json' for n in CLOUD_PHASES}
+    require(path.parent == parent and path.name in allowed
         and parent.resolve(strict=True) == parent, 'consumer_worker_flow_path')
     isolation = OLD['read'](work / 'private-storage-fragments-isolation.json', maximum=8192)[0]
     owner = isolation.get('user_uid')
@@ -72,13 +75,21 @@ def worker_flow(work, path):
         parse_constant=lambda _: require(False, 'consumer_nonfinite_flow'))
 
 
-def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay):
+def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay, *, minimum=None):
+    # Cloud's separate continuation has different flow and cold-read bounds.
+    # Its caller validates those exact application bounds; original consumers
+    # retain their fixed minima and never infer a profile from evidence fields.
+    if minimum is None:
+        require(name in PHASES, 'consumer_network_phase')
+        minimum = PHASES[name]
+    else:
+        require(name in CLOUD_PHASES and OLD['count'](minimum, 1, 100000), 'cloud_network_phase')
     keys(phase, ('layout', 'selected_route', 'privacy', 'control_privacy', 'gates', 'control_before', 'control_after'))
     require(canonical(phase['layout']) == canonical(layout(underlay, peers)), 'consumer_matrix_binding')
     validate_readback(phase['control_before'], underlay)
     validate_readback(phase['control_after'], underlay)
     selected, privacy, gates = phase['selected_route'], phase['privacy'], phase['gates']
-    S['validate_summary'](gates, gates['event_baseline_unix_ms'], PHASES[name])
+    S['validate_summary'](gates, gates['event_baseline_unix_ms'], minimum)
     S['validate_phase_route'](policy(peers), selected, gates)
     require(original_layout['provider_nodes'] == list(OLD['NODES']), 'consumer_provider_roles')
     slots = selected['benchmark_slots']

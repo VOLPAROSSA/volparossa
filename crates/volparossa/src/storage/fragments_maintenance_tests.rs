@@ -18,6 +18,9 @@ mod service;
 #[path = "fragments_maintenance_expiry_tests.rs"]
 mod expiry;
 
+#[path = "fragments_maintenance_enrollment_tests.rs"]
+mod enrollment_authority;
+
 fn candidate(owner: &SigningKey) -> (SigningKey, VerifiedStorageGrant) {
     let key = SigningKey::from_bytes(&[55; 32]);
     let now = crate::storage::now().unwrap();

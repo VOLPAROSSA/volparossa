@@ -53,14 +53,14 @@ use volparossa_wireguard::overlay_addresses;
 use crate::{
     deadline::HardDeadline,
     engine::{
-        AccountingBackendCompletion, AccountingBackendRequest, AsyncLeaseBackend, BackendAction,
-        BackendBinding, BackendCompletion, BackendDestroy, BackendError, BackendFuture,
-        BackendLineage, BackendPhase, BackendProbe, BackendRequest, BackendRuntimeCompletion,
-        BackendRuntimeRequest, ConfirmedAbsent, ContextPhase, IngressBackendAction,
-        IngressBackendBinding, IngressBackendCompletion, IngressBackendRequest, KernelCounters,
-        MeshBackendCompletion, MeshBackendRequest, MeshInterfaceIdentity, OperationKind,
-        PreparedKernelIngressSocket, PreparedKernelLease, SharingBackendCompletion,
-        SharingBackendRequest,
+        AccountingBackendCompletion, AccountingBackendRequest, AcquireCleanupOrigin,
+        AsyncLeaseBackend, BackendAction, BackendBinding, BackendCompletion, BackendDestroy,
+        BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
+        BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
+        IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
+        IngressBackendRequest, KernelCounters, MeshBackendCompletion, MeshBackendRequest,
+        MeshInterfaceIdentity, OperationKind, PreparedKernelIngressSocket, PreparedKernelLease,
+        SharingBackendCompletion, SharingBackendRequest,
     },
     internal_protocol::{
         AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
@@ -1285,10 +1285,13 @@ impl FunctionalAlphaLeaseBackend {
     ) -> Result<OwnedFd, BackendError> {
         let (key, internal) = validate_acquire_transport_binding(binding, &value)?;
         let deadline = prepare_deadline(binding)?;
-        let operation_deadline = worker_operation_deadline(deadline)?;
+        let operation_deadline = worker_operation_deadline(deadline)
+            .map_err(|error| error.with_acquire_origin(AcquireCleanupOrigin::WorkerBudget))?;
         let generation = {
             let state = lock_state(&self.state);
-            validate_acquire_entry(exact_entry(&state, key)?, &value, &internal)?
+            exact_entry(&state, key)
+                .and_then(|entry| validate_acquire_entry(entry, &value, &internal))
+                .map_err(|error| error.with_acquire_origin(AcquireCleanupOrigin::WorkerState))?
         };
         let request = worker_request(
             worker_attempt_request_id(key, STAGE_ACQUIRE_TRANSPORT, binding),
@@ -1307,15 +1310,19 @@ impl FunctionalAlphaLeaseBackend {
                     AcquireTransportExecution::Ready(descriptor) => descriptor,
                     AcquireTransportExecution::Definite(error) => return Err(error),
                     AcquireTransportExecution::RequiresCleanup(error) => {
-                        return Err(self.cleanup_after_failure(key, deadline, error).await);
+                        return Err(self
+                            .cleanup_after_failure(key, deadline, error)
+                            .await
+                            .with_acquire_origin(AcquireCleanupOrigin::WorkerResponse));
                     }
                 }
             }
             Err(WorkerV3Error::Capacity) => return Err(BackendError::Capacity),
-            Err(_) => {
+            Err(error) => {
                 return Err(self
                     .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
-                    .await);
+                    .await
+                    .with_acquire_origin(acquire_coordinator_origin(&error)));
             }
         };
 
@@ -1325,17 +1332,31 @@ impl FunctionalAlphaLeaseBackend {
                 validate_acquire_entry(entry, &value, &internal) == Ok(generation)
             })
         };
-        if !still_exact || deadline.ensure_remaining().is_err() || ensure_hard_is_live(key).is_err()
-        {
+        // Preserve the original short-circuit order and each check's single evaluation.
+        #[allow(
+            clippy::if_same_then_else,
+            reason = "equal state origins preserve short-circuit order around the deadline check"
+        )]
+        let failed_boundary = if !still_exact {
+            Some(AcquireCleanupOrigin::DescriptorState)
+        } else if deadline.ensure_remaining().is_err() {
+            Some(AcquireCleanupOrigin::DescriptorDeadline)
+        } else if ensure_hard_is_live(key).is_err() {
+            Some(AcquireCleanupOrigin::DescriptorState)
+        } else {
+            None
+        };
+        if let Some(origin) = failed_boundary {
             drop(descriptor);
             return Err(self
                 .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
-                .await);
+                .await
+                .with_acquire_origin(origin));
         }
         deadline.complete(descriptor).map_err(|_| {
             // The descriptor is consumed and closed by `complete` on the elapsed branch. The
             // reserved tail remains available to the engine's exact rollback/destroy call.
-            BackendError::CleanupIncomplete
+            BackendError::AcquireCleanupIncomplete(AcquireCleanupOrigin::DescriptorDeadline)
         })
     }
 
@@ -3885,6 +3906,19 @@ enum AcquireTransportExecution {
     RequiresCleanup(BackendError),
 }
 
+fn acquire_coordinator_origin(error: &WorkerV3Error) -> AcquireCleanupOrigin {
+    match error {
+        WorkerV3Error::Deadline => AcquireCleanupOrigin::CoordinatorDeadline,
+        WorkerV3Error::Ambiguous => AcquireCleanupOrigin::CoordinatorAmbiguous,
+        // This grouped observation does not identify which of the four states occurred.
+        WorkerV3Error::Dead
+        | WorkerV3Error::Quarantined
+        | WorkerV3Error::ShuttingDown
+        | WorkerV3Error::RuntimeUnavailable => AcquireCleanupOrigin::CoordinatorUnavailable,
+        _ => AcquireCleanupOrigin::CoordinatorOther,
+    }
+}
+
 fn log_acquire_failure(execution: &crate::worker_transport::CredentialedWorkerExecution) {
     if execution.response.result != InternalWorkerResult::Kernel as i32
         || execution.response.outcome.is_some()
@@ -6222,6 +6256,42 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn acquire_coordinator_origins_are_closed_and_do_not_change_definite_errors() {
+        use AcquireCleanupOrigin as Origin;
+        for (error, origin) in [
+            (WorkerV3Error::Deadline, Origin::CoordinatorDeadline),
+            (WorkerV3Error::Ambiguous, Origin::CoordinatorAmbiguous),
+            (WorkerV3Error::Dead, Origin::CoordinatorUnavailable),
+            (WorkerV3Error::Quarantined, Origin::CoordinatorUnavailable),
+            (WorkerV3Error::ShuttingDown, Origin::CoordinatorUnavailable),
+            (
+                WorkerV3Error::RuntimeUnavailable,
+                Origin::CoordinatorUnavailable,
+            ),
+            (WorkerV3Error::Authentication, Origin::CoordinatorOther),
+            (WorkerV3Error::Invalid, Origin::CoordinatorOther),
+            (WorkerV3Error::Conflict, Origin::CoordinatorOther),
+            (WorkerV3Error::Stale, Origin::CoordinatorOther),
+            (WorkerV3Error::Busy, Origin::CoordinatorOther),
+            (
+                WorkerV3Error::Io(std::io::Error::other("private-error-canary")),
+                Origin::CoordinatorOther,
+            ),
+        ] {
+            assert_eq!(acquire_coordinator_origin(&error), origin);
+            for definite in [
+                BackendError::Unavailable,
+                BackendError::Capacity,
+                BackendError::Invalid,
+                BackendError::Kernel,
+                BackendError::MptcpConnectPollTimedOut,
+            ] {
+                assert_eq!(definite.with_acquire_origin(origin), definite);
+            }
+        }
+    }
+
+    #[test]
     fn acquire_diagnostic_preserves_only_exact_mptcp_connect_poll_timeout() {
         let request = mptcp_connected_acquire_request();
         assert!(matches!(
@@ -7565,6 +7635,131 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "two credentialed attempts and their retained ownership form one regression"
+    )]
+    async fn mptcp_poll_timeout_allows_fresh_acquire_on_the_same_credentialed_worker() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture time")
+            .as_secs();
+        let key = live_key([0x89; 16], now);
+        let (backend, peer, alive, overlay) =
+            committed_transport_backend(key, WireguardRole::Client);
+        let generation = lock_state(&backend.state)
+            .as_ref()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .coordinates
+            .worker_generation
+            .get();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let expected_worker = ExpectedUnixCredentials::new(
+            std::process::id(),
+            geteuid().as_raw(),
+            getegid().as_raw(),
+        )
+        .expect("current worker credentials");
+        let worker = std::thread::spawn(move || {
+            let mut request_ids = Vec::new();
+            for attempt in 0..2 {
+                let received = receive_credential_worker_request(&peer, expected_worker)
+                    .expect("fresh MPTCP Acquire reached the same worker");
+                let Some(internal_worker_request::Operation::AcquireTransportSocket(value)) =
+                    received.request.operation.as_ref()
+                else {
+                    panic!("Acquire request");
+                };
+                assert_eq!(
+                    value.descriptor_kind,
+                    InternalTransportSocketKind::MptcpConnected as i32
+                );
+                assert_eq!(value.role, InternalEndpointRole::Client as i32);
+                assert!(value.expected_remote.is_some());
+                request_ids.push(received.request.request_id.clone());
+                let mut response =
+                    correlated_response(&received.request, InternalWorkerResult::Kernel, None)
+                        .expect("correlated definite failure");
+                if attempt == 0 {
+                    response.acquire_failure = Some(AcquireFailureDiagnostic {
+                        operation: AcquireFailureOperation::Poll as i32,
+                        class: AcquireFailureClass::TimedOut as i32,
+                        errno: None,
+                    });
+                }
+                send_credential_worker_response(&peer, &received.request, &response, None)
+                    .expect("credentialed descriptor-free failure");
+            }
+            assert_ne!(request_ids[0], request_ids[1]);
+        });
+        for attempt in 0_u8..2 {
+            let mut binding =
+                acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+            binding.operation_sequence += u64::from(attempt);
+            binding.request_id = [8 + attempt; 16];
+            binding.request_digest = [9 + attempt; 32];
+            let mut value = acquire_value(
+                key,
+                WireguardRole::Client,
+                overlay,
+                41_089 + u16::from(attempt),
+            );
+            value.descriptor_kind = TransportSocketKind::MptcpConnected as i32;
+            value.expected_remote = Some(TransportSocketAddress {
+                address: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets().to_vec(),
+                port: 443,
+            });
+            let completion = Arc::clone(&backend)
+                .acquire_transport_socket(BackendRequest::new(binding, value))
+                .await;
+            assert_eq!(completion.binding, binding);
+            assert_eq!(
+                completion.result.err(),
+                Some(if attempt == 0 {
+                    BackendError::MptcpConnectPollTimedOut
+                } else {
+                    BackendError::Kernel
+                })
+            );
+            assert!(alive.load(Ordering::SeqCst));
+            {
+                let state = lock_state(&backend.state);
+                let entry = state.as_ref().unwrap();
+                assert_eq!(entry.key, key);
+                assert_eq!(entry.phase, OpenLeasePhase::Committed);
+                assert_eq!(
+                    entry
+                        .worker
+                        .as_ref()
+                        .unwrap()
+                        .coordinates
+                        .worker_generation
+                        .get(),
+                    generation
+                );
+                assert!(entry.child_cleanup.is_none() && entry.worker_cleanup.is_none());
+            }
+            let registry = backend.coordinator.registry.lock().unwrap();
+            let record = registry.records.get(&key.context_id).unwrap();
+            assert_eq!(record.generation, generation);
+            assert_eq!(record.stable_phase, StablePhase::Committed);
+            assert!(record.in_flight.is_none() && !record.quarantined);
+            assert!(record.process.is_some());
+            assert!(registry.cache.is_empty());
+            assert_eq!(registry.tombstones.len(), usize::from(attempt) + 1);
+        }
+        worker
+            .join()
+            .expect("both fresh acquisitions reached the worker");
+        retire_transport_fixture(&backend, key).await;
+        assert!(!alive.load(Ordering::SeqCst));
+        assert!(lock_state(&backend.state).is_none());
+    }
+
+    #[tokio::test]
     async fn descriptor_shape_mismatch_is_closed_and_retains_the_committed_generation() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7705,43 +7900,57 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn worker_channel_ambiguity_closes_generation_under_exact_cleanup_authority() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("fixture time")
-            .as_secs();
-        let key = live_key([0x88; 16], now);
-        let (backend, peer, alive, overlay) =
-            committed_transport_backend(key, WireguardRole::Client);
-        let binding = acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
-        let value = acquire_value(key, WireguardRole::Client, overlay, 41_088);
-        let expected_worker = ExpectedUnixCredentials::new(
-            std::process::id(),
-            geteuid().as_raw(),
-            getegid().as_raw(),
-        )
-        .expect("current worker credentials");
-        let worker_backend = Arc::clone(&backend);
-        let worker = std::thread::spawn(move || {
-            let _received = receive_credential_worker_request(&peer, expected_worker)
-                .expect("dispatched Acquire request");
-            lock_state(&worker_backend.state)
-                .as_mut()
-                .expect("owned entry")
-                .birth_may_exist
-                .fill(false);
-            drop(peer);
-        });
-        let completion = Arc::clone(&backend)
-            .acquire_transport_socket(BackendRequest::new(binding, value))
-            .await;
-        assert_eq!(
-            completion.result.err(),
-            Some(BackendError::CleanupIncomplete)
-        );
-        worker.join().expect("fake worker thread");
-        assert!(!alive.load(Ordering::SeqCst));
-        assert!(lock_state(&backend.state).is_none());
+    async fn worker_acquire_failure_origins_preserve_exact_cleanup_authority() {
+        for (worker_result, origin) in [
+            (None, AcquireCleanupOrigin::CoordinatorAmbiguous),
+            (
+                Some(InternalWorkerResult::NotFound),
+                AcquireCleanupOrigin::WorkerResponse,
+            ),
+        ] {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("fixture time")
+                .as_secs();
+            let key = live_key([0x88; 16], now);
+            let (backend, peer, alive, overlay) =
+                committed_transport_backend(key, WireguardRole::Client);
+            let binding =
+                acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
+            let value = acquire_value(key, WireguardRole::Client, overlay, 41_088);
+            let expected_worker = ExpectedUnixCredentials::new(
+                std::process::id(),
+                geteuid().as_raw(),
+                getegid().as_raw(),
+            )
+            .expect("current worker credentials");
+            let worker_backend = Arc::clone(&backend);
+            let worker = std::thread::spawn(move || {
+                let received = receive_credential_worker_request(&peer, expected_worker)
+                    .expect("dispatched Acquire request");
+                lock_state(&worker_backend.state)
+                    .as_mut()
+                    .expect("owned entry")
+                    .birth_may_exist
+                    .fill(false);
+                if let Some(result) = worker_result {
+                    let response = correlated_response(&received.request, result, None).unwrap();
+                    send_credential_worker_response(&peer, &received.request, &response, None)
+                        .unwrap();
+                }
+                drop(peer);
+            });
+            let completion = Arc::clone(&backend)
+                .acquire_transport_socket(BackendRequest::new(binding, value))
+                .await;
+            assert_eq!(
+                completion.result.err(),
+                Some(BackendError::AcquireCleanupIncomplete(origin))
+            );
+            worker.join().expect("fake worker thread");
+            assert!(!alive.load(Ordering::SeqCst));
+            assert!(lock_state(&backend.state).is_none());
+        }
     }
 
     fn live_prepare_fixture() -> (BackendBinding, PrepareLeaseBatch) {
