@@ -352,60 +352,100 @@ class SourceBindings(unittest.TestCase):
             'linux-6.17-azure-native-seq-v1':r'6\.17\.0-[0-9]{1,6}-azure',
             'linux-7.0-azure-native-seq-v1':r'7\.0\.0-[0-9]{1,6}-azure'})
 
-    def test_source_gate_keeps_six_paths_dependencies_and_no_actual_trial_authority(self):
-        for branch,scope in (('refs/heads/fix/model-host-observation-20261022','host_observation_scope'),
-            ('refs/heads/fix/resident-host-config-20261023','host_configuration_scope')):
-            self.check_source_gate(branch,scope)
-
-    def check_source_gate(self,branch,scope):
+    def test_source_gate_keeps_closed_composition_dependencies_and_no_legacy_trial_authority(self):
         import textwrap
         workflow = (SOURCE.parents[2]/'.github/workflows/protected-resident-model.yml').read_text()
-        code = textwrap.dedent(workflow.split("python3 -B - <<'PY'\n",1)[1].split('\n          PY',1)[0])
-        branch = branch
-        gate = next(n for n in ast.parse(code).body if isinstance(n,ast.If) and repr(branch) in ast.unparse(n.test))
-        compiled = compile(ast.Module(body=[gate],type_ignores=[]),'inert-host-observation-source-gate','exec')
-        allowed = {'.github/workflows/protected-resident-model.yml','THIRD_PARTY_LICENSES.md',
-            'tests/integration/protected-resident-model-run.py','tests/integration/test-protected-resident-model-run.py',
+        code = textwrap.dedent(workflow.split("python3 -B - <<'PYBIND'\n",1)[1].split('\n          PYBIND',1)[0])
+        gate = next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='bind_composition')
+        namespace = {}
+        exec(compile(ast.Module(body=[gate],type_ignores=[]),'inert-host-observation-source-gate','exec'),namespace)
+        bind = namespace['bind_composition']
+        feature = '812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e'
+        main = '235c2c9165c2c07e7cd3bca82ec8b70152bb8d90'
+        checkpoint = 'a7acb02089c2a93964a35d8fa005408e92eb6d7e'
+        allowed = {
+            '.github/workflows/protected-resident-model.yml':'M',
+            '.github/workflows/resident-current-main.yml':'D',
+            '.github/workflows/resident-installer-io.yml':'D',
+            '.github/workflows/resident-pinned-compiler.yml':'D',
+            'docs/IMPLEMENTATION_STATUS.md':'M',
+            'scripts/test-cargo-source-policy.py':'M',
+            'tests/integration/test-protected-resident-model-host-observation.py':'M',
+            'tests/integration/test-protected-resident-model-run.py':'M'}
+        # The exact merge-tree boundary now protects every unchanged input.
+        # Exercise each of the former seventeen dependency/assembly bindings,
+        # and the observer/controller sources, against that closed boundary.
+        unchanged = ('Cargo.lock','Cargo.toml','rust-toolchain.toml',
+            'crates/volparossa/Cargo.toml','crates/volparossa-content/Cargo.toml',
+            'crates/volparossa/src/compute/resident_guest.rs',
+            'crates/volparossa/src/compute/resident_guest/public_trial.rs',
+            'crates/volparossa/src/compute/supervise/native_session.rs',
+            'packaging/protected-resident-model/init',
+            'packaging/protected-resident-model/entrypoint',
+            'packaging/protected-resident-model/profile-v1.json',
+            'tests/integration/protected-resident-image-pins-v1.json',
+            'tests/integration/protected-resident-model-debian-lock-v1.json',
+            'tests/integration/protected-resident-model-build.py',
+            'tests/integration/protected-resident-model-install.py',
+            'tests/integration/protected-resident-model-assemble.py',
+            'tests/integration/protected-resident-model-workload.py',
             'tests/integration/protected-resident-model-host-observation.py',
-            'tests/integration/test-protected-resident-model-host-observation.py'}
-        original = workflow.encode()
-        for defect in (None,'missing','extra','duplicate','dependency','actual-job','ancestry'):
-            changed = sorted(allowed)
+            'tests/integration/protected-resident-model-run.py')
+        public = workflow.split('\n  public-model:\n',1)[1]
+        historical = public.replace('refs/heads/integration/resident-model-main-20261022',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
+        defects = (None,'missing','extra','duplicate','status','actual-job','checkpoint',feature,main)+unchanged
+        for defect in defects:
+            changed = [status+'\t'+name for name,status in allowed.items()]
             if defect=='missing':changed.pop()
-            if defect=='extra':changed.append('unrelated.rs')
+            if defect=='extra':changed.append('M\tunrelated.rs')
             if defect=='duplicate':changed[-1]=changed[0]
+            if defect=='status':changed[0]='A\t.github/workflows/protected-resident-model.yml'
+            if defect in unchanged:changed[-1]='M\t'+defect
+            calls = []
             def git(*args):
-                if args[0]=='diff':return '\n'.join(changed)
-                if args[0]=='rev-parse':return 'different' if defect=='dependency' and args[1]=='HEAD:Cargo.lock' else 'same'
+                calls.append(args)
+                if args[:2]==('merge-base','--is-ancestor'):
+                    self.assertIn(args[2],(feature,main));self.assertEqual(args[3],'HEAD')
+                    if defect==args[2]:raise AssertionError('ancestry')
+                    return ''
+                if args==('log','--first-parent','--format=%T','HEAD'):
+                    return 'wrong-tree' if defect=='checkpoint' else checkpoint
+                if args==('diff','--no-renames','--name-status',checkpoint,'HEAD'):return '\n'.join(changed)
+                if args==('show',feature+':.github/workflows/resident-pinned-compiler.yml'):
+                    return 'contracts: historical\n  public-model:\n'+historical
                 self.fail(args)
-            namespace = dict(os=types.SimpleNamespace(environ={'GITHUB_REF':branch}),git=git,hashlib=hashlib,
-                subprocess=types.SimpleNamespace(check_output=lambda _:original,
-                    run=mock.Mock(side_effect=AssertionError('ancestry') if defect=='ancestry' else None)),
-                pathlib=types.SimpleNamespace(Path=lambda _:types.SimpleNamespace(
-                    read_bytes=lambda:original+(b'changed' if defect=='actual-job' else b''))))
+            candidate = public+('changed' if defect=='actual-job' else '')
             if defect:
-                with self.assertRaises(AssertionError,msg=defect):exec(compiled,namespace)
+                with self.subTest(defect=defect),self.assertRaises(AssertionError):bind(git,candidate)
             else:
-                exec(compiled,namespace)
-                self.assertEqual(set(namespace[scope]['source_blobs']),allowed)
-                self.assertEqual(len(namespace[scope]['dependency_blobs']),17)
-                self.assertTrue(namespace[scope]['source_contracts_only'])
-                self.assertEqual(namespace[scope]['base_commit'],
-                    'ce438c27df80cdba46e990b157b3e5c52e94543c' if scope=='host_configuration_scope'
-                    else 'e4824ae3c9a3f606a6013540461f5d148e3a76b6')
-                if scope=='host_configuration_scope':
-                    self.assertEqual(namespace[scope]['checkpoint_mode'],'supported_ipv6_reference_metadata_v1')
-                    self.assertNotIn('strict_raw_equality_unchanged',namespace[scope])
-                self.assertFalse(namespace[scope]['historical_cause_proven'])
-                self.assertFalse(namespace[scope]['actual_model_execution'])
+                receipt = bind(git,candidate)
+                self.assertEqual(receipt['consolidation_paths'],allowed)
+                self.assertEqual(receipt['normal_merge_tree'],checkpoint)
+                self.assertEqual((receipt['feature_parent'],receipt['main_parent']),(feature,main))
+                self.assertEqual(calls[:2],[('merge-base','--is-ancestor',p,'HEAD') for p in (feature,main)])
+                self.assertTrue(receipt['source_contracts_only'])
+                self.assertTrue(receipt['actual_recipe_preserved'])
+                for field in ('actual_model_execution','guest_boot','private_workload_acceptance','hardware_attestation'):
+                    self.assertFalse(receipt[field])
+                self.assertNotIn('historical_cause_proven',receipt)
+        target = 'refs/heads/integration/resident-model-main-20261022'
         for job in ('contracts','public-model'):
             condition = workflow.split('\n  '+job+':\n',1)[1].split('    if: >-\n',1)[1].split('\n    runs-on:',1)[0]
             expression = ' '.join(condition.splitlines()).replace('&&',' and ').replace('||',' or ').strip()
-            for event in ('push','pull_request','workflow_dispatch'):
-                for scenario in ('source-contracts','public-model'):
-                    context = dict(github=types.SimpleNamespace(repository='VOLPAROSSA/volparossa',ref=branch,event_name=event),
-                        inputs=types.SimpleNamespace(scenario=scenario))
-                    self.assertEqual(eval(expression,context),job=='contracts' and event=='workflow_dispatch' and scenario=='source-contracts')
+            for branch in (target,'refs/heads/fix/model-host-observation-20261022',
+                           'refs/heads/fix/resident-host-config-20261023','refs/heads/main'):
+                for event in ('push','pull_request','workflow_dispatch'):
+                    for scenario in ('source-contracts','public-model'):
+                        for pin in ('','b'*40,'a'*40):
+                            for result in ('success','failure','skipped','cancelled'):
+                                context = dict(github=types.SimpleNamespace(repository='VOLPAROSSA/volparossa',ref=branch,event_name=event,sha='a'*40),
+                                    inputs=types.SimpleNamespace(scenario=scenario,expected_source=pin),
+                                    needs=types.SimpleNamespace(contracts=types.SimpleNamespace(result=result)))
+                                eligible = branch==target and event=='workflow_dispatch'
+                                actual = eligible and scenario=='public-model' and pin=='a'*40
+                                expected = eligible and (scenario=='source-contracts' or actual) if job=='contracts' else actual and result=='success'
+                                self.assertEqual(eval(expression,context),expected)
 
 
 if __name__ == '__main__':

@@ -2597,6 +2597,7 @@ class ReceiptAndBindings(Inert):
             '.github/workflows/resident-pinned-compiler.yml':'D',
             'docs/IMPLEMENTATION_STATUS.md':'M',
             'scripts/test-cargo-source-policy.py':'M',
+            'tests/integration/test-protected-resident-model-host-observation.py':'M',
             'tests/integration/test-protected-resident-model-run.py':'M'})
         changes = [status+'\t'+name for name,status in expected.items()]
         if defect == 'missing': changes.pop()
