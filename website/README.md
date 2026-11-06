@@ -45,6 +45,13 @@ details, keyboard navigation, no JavaScript and reduced motion. An absent browse
 is a missing QA prerequisite, not a passed test. Results and rendered review
 images are summarized in [VERIFICATION.md](VERIFICATION.md).
 
+For lockfile maintenance, dispatch **Core website** at the reviewed ref with
+`qa_tools=true`. Its five-minute hosted job uses an existing Node 22.19+ or 24+
+runtime, installs locked tools with lifecycle scripts disabled, and checks the
+glob/minimatch APIs and Lighthouse import/version without downloading browsers.
+This opt-in cannot prepare or publish Pages. Automatic website checks remain
+Python-only; this smoke does not replace browser or accessibility verification.
+
 ## Sources and maintenance
 
 - `config.json`: one explicit host URL, project basepath, metadata and upstream
@@ -84,14 +91,14 @@ creation and Pages deployment. PRs receive read-only repository access and a
 downloadable noindex preview artifact. Only the main branch can reach the separate
 deployment job, which receives Pages/OIDC permissions and the `github-pages`
 environment. Official actions are pinned to immutable revisions. Existing Core
-quality requirements are preserved; this website workflow invokes no Cargo,
+quality requirements are preserved; automatic website checks invoke no Cargo,
 daemon, network, sensor, model or installation trial.
 
 The user explicitly requested publication. The initial repository setup selects
 GitHub Actions as the Core project's Pages source; no root-domain, homepage CNAME,
 DNS or existing homepage hosting setting is changed. Later relevant main pushes
-or a manual main-branch dispatch publish the checked artifact. Review production
-before enabling the homepage's Core publication flag. Revert through a normal
+or a manual main-branch dispatch with `qa_tools=false` publish the checked artifact.
+Review production before enabling the homepage's Core publication flag. Revert through a normal
 reviewed PR and the same workflow if a rollback is needed.
 
 Original site code is GPL-3.0-only. Preserve third-party notices in `theme/`.
