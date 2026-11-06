@@ -184,72 +184,51 @@ system value; these priorities impose no fixed application/model/agent order.
   restoration or independent remote cleanup.
 
 The central continuation [PR371](https://github.com/VOLPAROSSA/volparossa/pull/371)
-integrates as `ba6ab458429f5ac50cdc8c3538e6d24f44aad916`. It restores PR339's
-bounded ordinary rotation fixture and keeps validated failure diagnostics compact
-through export and durable job logging. Initial actual
-[42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
-at `e50af83d` fails before Storage because the compiler policy rejects inherited
-SSH transport metadata. The caller now removes only `SSH_CLIENT` and
-`SSH_CONNECTION`; credential/configuration rejection remains enforced.
+integrates as `ba6ab458429f5ac50cdc8c3538e6d24f44aad916`, restoring bounded
+ordinary rotation and compact validated failure diagnostics. The
+[prior central record](https://github.com/VOLPAROSSA/volparossa/blob/3e8a27e333230d5523264762da2905a6a9a5bccc/docs/IMPLEMENTATION_STATUS.md#storage-consumer-and-provider-evidence)
+preserves the initial compiler-environment failure, subsequent Cloud/Image
+failures, original artifact digests and the cancelled combined Quality run.
+Those failures remain failures.
 
-**Main baseline:** [42116076218](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116076218)
-tests `3af3cce1082cd76ea8a0e348e280d85f8fbc6771`, whose Quality and CodeQL pass.
-Core maintenance completes through cursor 9, including restart/repair, two
-restores, deletion of all eleven copies and independently observed zero usage
-at all three providers. This run needs no extra reconciliation turns and does
-not demonstrate the optional extra-turn branch. Cloud then fails deposit:
-fragment 1/copy 0 append returns `CONTENT_UNAVAILABLE` after an operation
-deadline in `challenge_read_verify/length_read` (90–120 seconds). Provider A
-retains 1,198,718 committed bytes; B 998,931 committed plus 199,787 reserved;
-C 799,148 committed. Host comparison and local cleanup pass; complete consumer
-acceptance and remote cleanup do not. The saved v3 request correlation belongs
-to a successful Image reserve, so it cannot establish this Cloud failure's cause.
+Draft [PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) now separates
+source contracts from compilation within the existing Quality workflow; the
+required final gate succeeds only when both jobs succeed. At
+`3e8a27e333230d5523264762da2905a6a9a5bccc`,
+[Quality 42132745309](https://github.com/VOLPAROSSA/volparossa/actions/runs/42132745309)
+passes all 21 source suites, build/integration and both isolated TLS-close tests.
+[CodeQL 42132740445](https://github.com/VOLPAROSSA/volparossa/actions/runs/42132740445)
+and its separate security aggregate pass. Quality's tested merge `1a413a85`
+shares source tree `b66b2f086226df978b9da3cef9da12e53907914e`.
+
+**Latest actual:** [42133516630](https://github.com/VOLPAROSSA/volparossa/actions/runs/42133516630)
+at that source again passes Core maintenance through cursor 9, restart/repair,
+two restores, eleven-copy deletion and independent zero usage at three providers.
+It needs no extra reconciliation turns, so it does not exercise that optional
+branch. Image then fails fragment 2/copy 0 APPEND at `stream_open/flow_acquire`:
+two rounds, first `helper_kernel`, then `helper_cleanup_incomplete`. Cloud never
+starts. Consumer providers retain nonzero usage. Host comparison and local
+cleanup pass; full consumer acceptance and remote cleanup remain unproved.
 The retained ZIP digest is
-`e245ce06890e56728825c4e89a8b124e985589c644da72229ff642be10460330`.
-Historical consumer profile 10 pins remain unchanged: this actual does not accept
-the later Image/Cloud draft heads.
+`b8a9351465df0f8f649c806579eccb017aec8e8dfb6628af5885d09d904e8ea7`.
 
-Cumulative [PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) remains a
-draft. At `fb835b136ed4`, all 21 Storage source suites, workspace tests,
-separate-feature checks and both isolated TLS-close tests pass; the TLS receipt
-binds tree `fc598b13bf38bd916309ba3aa670f147cb74ce5b` and confirms unchanged
-host state. [Quality 42116351790](https://github.com/VOLPAROSSA/volparossa/actions/runs/42116351790)
-is nevertheless cancelled at the 45-minute job limit during its final integration
-harness. No aggregate pass is inferred. Source contracts took 7m18s and a cold
-audit-tool build 7m07s. The draft now separates source checks and compilation
-within the existing workflow; its required final check fails unless both jobs
-succeed, including cancellation and skipped-dependency cases.
+The existing phase-wide v2 observer arms, disarms and joins successfully. An
+unmatchable acquire record reports `mptcp_connect_poll_timed_out`, followed by
+`transport_unavailable`; it cannot bind an application, fragment or provider.
+Unmatchable records require `incomplete=true`; here `sampling_failed=false`.
+Source review finds that an authenticated descriptor-free
+poll timeout preserves committed worker/helper state and permits a fresh retry.
+The second observed diagnostic identifies a backend acquisition failure followed
+by confirmed helper-context rollback; it proves no remote cleanup and does not
+identify which backend failure branch occurred.
 
-At `3682669226d49f7f3b71eca3e93205a74ca3d2a5`,
-[Quality 42124657171](https://github.com/VOLPAROSSA/volparossa/actions/runs/42124657171)
-passes all 21 source suites, the complete build/test job and the required final
-gate. [CodeQL 42124650437](https://github.com/VOLPAROSSA/volparossa/actions/runs/42124650437)
-also passes. The tested PR merge tree matches source tree
-`3648c76038e528511fb455da9f139638a8e07c6a`.
-
-**Latest actual:** [42125726739](https://github.com/VOLPAROSSA/volparossa/actions/runs/42125726739)
-at that source again passes Core maintenance, two restores, eleven-copy deletion
-and independent zero usage. Image then fails deposit before Cloud starts:
-fragment 2/copy 0 FINALIZE reaches its ten-second TLS handshake deadline; the
-following copy 1 RESERVE returns `helper_acquire/helper_cleanup_incomplete`.
-The latter is a new helper Acquire rejection after the local retirement-drain
-boundary, not proof that the prior flow failed retirement. Consumer providers
-retain nonzero usage. Host comparison and local cleanup pass; full consumer
-acceptance and remote cleanup remain unproved. The Cloud-only observer correctly
-remains unarmed. The retained ZIP digest is
-`c9de63735843fe498bba8f713ba918629eccff593c0e72bd6653af54db8abcdf`.
-
-The follow-up removes that separate Cloud mode and uses the existing bounded
-v2 observer around profile 10's whole publish phase, from before Image through
-owner cleanup. Failed or cancelled connections take priority within the existing
-bounded final batch; helper diagnostics can distinguish existing rejection branches.
-Historical Image v3 request capture remains available. Optional observation
-cannot replace the application outcome. No app pin, operation deadline,
-authority or public diagnostic schema changes. The v2 records do not bind an
-application or request; `fragment_copy_binding` and `causal_attribution` remain
-false. This simpler fixture needs
-hosted contracts and a fresh exact-source actual; it is not a transport fix or
-acceptance.
+The current follow-up adds closed acquisition-origin diagnostics through that
+existing helper/v2 path, preserving result categories, retries, deadlines and
+cleanup behavior. A focused regression checks fresh retry admission after the
+specific authenticated poll timeout. Hosted source validation and a fresh actual
+remain required; this does not claim a transport fix. Historical Image v3 capture
+and application pins remain unchanged. Optional observations cannot replace the
+application outcome; `fragment_copy_binding` and `causal_attribution` remain false.
 
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still

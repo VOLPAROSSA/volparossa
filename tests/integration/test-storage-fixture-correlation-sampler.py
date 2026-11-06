@@ -280,7 +280,8 @@ class FixtureV2(unittest.TestCase):
             for code in M['HELPER_DIAGNOSTICS']:
                 failure['helper_diagnostic'] = code
                 if (stage == 'helper_acquire' and reason in M['HELPER_REASONS'][:6]
-                        and (code != 'mptcp_connect_poll_timed_out' or reason == 'helper_kernel')):
+                        and (code != 'mptcp_connect_poll_timed_out' or reason == 'helper_kernel')
+                        and (code not in M['ACQUIRE_ORIGINS'] or reason == 'helper_cleanup_incomplete')):
                     M['acquire_summary'](value, 'flow_acquire', 'operation_error')
                 else:
                     with self.assertRaises(ValueError): M['acquire_summary'](value, 'flow_acquire', 'operation_error')
@@ -292,7 +293,8 @@ class FixtureV2(unittest.TestCase):
         invalid.append(dict(self.summary(), raw='PRIVATE_CANARY'))
         for key, value in (('stage', 'PRIVATE_CANARY'), ('reason', 'PRIVATE_CANARY'),
                 ('helper_diagnostic', 'MPTCP_FLOW_IDENTITY_UNAVAILABLE'), ('helper_diagnostic', {}),
-                ('helper_diagnostic', 0), ('request_id', 'PRIVATE_CANARY')):
+                ('helper_diagnostic', 0), ('helper_diagnostic', 'acquire_coordinator_other_extra'),
+                ('request_id', 'PRIVATE_CANARY')):
             summary = self.summary(); summary['last'][key] = value; invalid.append(summary)
         for summary in invalid:
             with self.assertRaises(ValueError) as caught:
@@ -346,6 +348,8 @@ class FixtureV2(unittest.TestCase):
                 if last == 'mptcp_connect_poll_timed_out': continue
                 client = self.client()
                 client['flow_acquire']['first']['helper_diagnostic'] = first
+                if first in M['ACQUIRE_ORIGINS']:
+                    client['flow_acquire']['first']['reason'] = 'helper_cleanup_incomplete'
                 client['flow_acquire']['last']['helper_diagnostic'] = last
                 samples.add(client, 'unmatchable')
         report = samples.report()
