@@ -185,6 +185,23 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   [Real Immich restoration](https://github.com/VOLPAROSSA/volparossa-image/actions/runs/44410004375)
   · [Earlier attempt](https://github.com/VOLPAROSSA/volparossa-image/actions/runs/44409707182)
   · [Separate owner-key support](https://github.com/VOLPAROSSA/volparossa-image/commit/0da0c35e9372a828553f376c3eb404a6081e0bb8)
+  The subsequent joined trial used that same Immich release with Core
+  `46f5c2c9` and Image `ce16debc`. The source project and original
+  ciphertext were removed. With provider A offline, the two surviving peers
+  supplied two cold restores of the same 51,283-byte encrypted snapshot.
+  Empty PostgreSQL and a fresh Immich instance recovered the owner account,
+  private album and all 8,516 original photo bytes. Anonymous access was
+  denied. After deletion of eight copies all three providers reported zero
+  usage. The VM, Docker resources and private scratch were removed.
+  Reproduce by dispatching `alpha-topology.yml` on the tested Core source
+  with `scenario=image-immich` and `image_revision=ce16debc9277bdf80fa76c373746e3d502fc96fb`.
+  The published two-file ZIP SHA-256 is
+  `f467c00dfa0aa8036e52106d85961c67dc530ba53c39ce4b8e7d71a619036478`.
+  Mobile synchronization and availability of a live service without an
+  owner-operated server remain open.
+  [Joined trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44411540175)
+  · [Application receipt](development/evidence/immich-peer-44411540175/immich-restore-result.json)
+  · [Storage receipt](development/evidence/immich-peer-44411540175/image-topology-receipt.json)
 - **Mail** now connects from the browser and lets the account owner recheck
   a reported import after an interrupted metadata lookup. Chromium 154 exercised
   its actual form with a synthetic JMAP fixture. It performed one upload, one
@@ -321,7 +338,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The direct Cloud UI upload and cold downloads passed. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. Direct Cloud UI upload and cold downloads also passed. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
