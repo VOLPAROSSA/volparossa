@@ -23,6 +23,20 @@ the particular failing Core/browser substage follows. The
 and [preserved PR343 diff](../archive/integration-evidence-pr343-20261023.patch.txt)
 retain source bindings, diagnostics and remaining gates.
 
+To contribute the exact release the owner reviewed, use its original file,
+trusted publisher key and manifest ID from the review. This uses the normal
+local agent and requires an authorized public contribution.
+
+```sh
+volparossa content contribute --manifest manifest.bin --publisher-key "$PUBLISHER_KEY" \
+  --expected-manifest-id "$MANIFEST_ID" --input site.vps
+```
+
+Core checks the signature, expiry, chunk hashes and whole-file digest before
+handoff. It stages the chunks under the selected cache limits in a temporary
+owner-only directory. The owner can also supply an existing verified source
+cache with `--cache`.
+
 | Existing Core facility | Reuse and evidence boundary |
 | --- | --- |
 | Signed chunks/manifests, explicit `content publish`, contribution handoff | Existing identity, original expiry, bounded object/cache and explicit public-content authority. A local signed object is not a published website. |
@@ -115,6 +129,66 @@ Use shared Core model/agent orchestration and Code's existing runtime. Private
 drafts, credentials, customer data and code require authorized protected processing;
 if unavailable, show waiting or an authorized local fallback. No silent public-peer
 execution, cross-project disclosure or shared training is allowed.
+
+### Restore an earlier signed site locally
+
+The owner can restore an earlier site as the immediate successor of the locally
+observed release. Keep the original signed manifests and record their IDs when
+publishing. Choose the earlier site bytes after reviewing the original release.
+For example, when revision 2 is current, sign revision 1's original bundle as
+revision 3 with the same publisher and site name. Select a lifetime for this new
+authorization. All three releases must still be valid when applying the restore.
+
+```sh
+volparossa content publish --input site-v1.vps --expected-input-sha256 "$V1_BUNDLE_SHA256" \
+  --expected-publisher-key "$SITE_KEY" --identity "$IDENTITY" --name "$SITE_NAME" \
+  --revision 3 --content-type application/vnd.volparossa.site.v1 --lifetime-seconds 3600 \
+  --cache "$SIGNING_CACHE" --reuse-cache --manifest v3.manifest
+
+volparossa content site restore --publisher-key "$SITE_KEY" --name "$SITE_NAME" \
+  --source-manifest v1.manifest --expected-source-id "$V1_MANIFEST_ID" \
+  --current-manifest v2.manifest --expected-current-id "$V2_MANIFEST_ID" \
+  --candidate-manifest v3.manifest --expected-candidate-id "$V3_MANIFEST_ID" \
+  --cache "$OWNER_CACHE"
+```
+
+Use the revision 3 manifest ID from the signing receipt. The owner cache must
+already contain all original site chunks. On first use in this cache, add
+`--initialize-from-reviewed-current` to explicitly establish the reviewed
+revision 2 as the starting point. This also requires the complete revision 2
+site in the cache. A different recorded head or a conflicting signature at the
+same revision prevents activation. An already active revision 3 can be retried
+with the same signed envelope. A replay confirms that envelope and identifies
+the supplied source and predecessor without attesting to a past transition.
+
+Restoration updates the selected cache's named manifest and retained revision
+floor. Peer deployment is a separate owner action using the existing
+`content contribute` interface with the pinned revision 3 manifest and bundle.
+The receipt covers this local activation. Deployment, withdrawal and observed peer
+availability have separate state.
+
+A reader can open the exact restored release using the publisher key, site name
+and manifest ID from the owner's review. For revision 3, use the ID in the
+restore receipt.
+
+```sh
+volparossa content site open --publisher-key "$SITE_KEY" --name "$SITE_NAME" \
+  --expected-manifest-id "$V3_MANIFEST_ID" --cache "$READER_CACHE"
+```
+
+The usual named lookup and retained revision floor still apply. Add
+`--min-revision 3` to set an explicit minimum as well. A different selected
+manifest, a conflict, or a release below the floor stops the command before it
+creates a browser URL. Pinning the ID does not search historical objects.
+
+In the publisher-offline deployment trial on Core `060fcaa3`, the owner restored
+the earlier four-asset site as revision 3 and contributed that exact signed bundle.
+After the publisher stopped, an independent holder served the restored release
+and a reader verified all four assets. The fixture used a generated site. A
+separate trial on Core `20696912` followed a real Silex edit and export through
+independent hosting and Firefox rendering.
+[Restored-site trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835)
+· [Silex hosting trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
 
 ## Static, dynamic and application boundaries
 

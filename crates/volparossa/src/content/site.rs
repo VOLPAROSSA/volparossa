@@ -2,6 +2,7 @@
 
 mod preparation;
 mod preview;
+mod restore;
 mod source;
 mod viewer;
 
@@ -24,6 +25,8 @@ pub(crate) enum Command {
     Pack(Pack),
     /// Check whether the active local contribution service can deliver this exact signed site.
     Confirm(Confirm),
+    /// Activate a reviewed, owner-signed successor that restores a previous site in your local cache.
+    Restore(Box<restore::Restore>),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
     Open(Box<Open>),
     /// Preview exact reviewed local bytes against an independently selected original signed manifest.
@@ -64,6 +67,10 @@ pub(crate) struct Open {
     /// Reject an older signed revision; not proof of a globally latest version.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     min_revision: Option<u64>,
+    /// Require this exact signed manifest ID for the named result; keep all revision floors.
+    /// A different selected release fails before the browser URL is created.
+    #[arg(long, value_parser = super::parse_input_sha256)]
+    expected_manifest_id: Option<[u8; 32]>,
     /// New agent-owned destination cache, or explicitly reopened owned cache.
     #[arg(long)]
     cache: PathBuf,
@@ -103,6 +110,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Pack(args) => println!("{}", pack(&args)?),
         Command::Open(args) => viewer::run(*args, socket).await?,
         Command::Preview(args) => preview::run(*args).await?,
+        Command::Restore(args) => println!("{}", restore::run(&args)?),
         Command::Confirm(args) => println!("{}", confirm(&args, socket).await?),
     }
     Ok(())
