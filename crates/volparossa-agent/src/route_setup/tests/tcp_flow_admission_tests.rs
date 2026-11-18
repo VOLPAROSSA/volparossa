@@ -345,6 +345,21 @@ fn tcp_flow_admission_production_call_checks_initial_and_existing_retry_boundary
                 .expect("source port")
     );
     assert!(admission < loop_body.find(".acquire_flow(").expect("helper acquire"));
+    let expired_before_acquire = loop_body
+        .split_once("Ok(None) => {")
+        .expect("expired after retirement")
+        .1
+        .split_once("Ok(Some(flow)) => {")
+        .expect("live acquisition")
+        .0;
+    assert!(
+        loop_body.contains("!expiry.is_expired(crate::unix_millis().max(now_ms), Instant::now())")
+    );
+    assert!(
+        expired_before_acquire
+            .contains(".finish_flow_acquire_failure(state, true, failure, retire)")
+    );
+    assert!(!expired_before_acquire.contains("record_round"));
     assert!(
         acquisition
             .contains("client_open_tcp_material(route, policy, destination, port, admitted_at_ms)")
@@ -641,7 +656,7 @@ fn tcp_flow_admission_post_acquire_production_rechecks_and_forwards_fresh_activa
         .expect("production admission wrapper")
         .0;
     let success = acquisition
-        .split_once("                Ok(flow) => {")
+        .split_once("                Ok(Some(flow)) => {")
         .expect("successful acquired stream")
         .1
         .split_once("                Err(error) => {")
@@ -650,7 +665,8 @@ fn tcp_flow_admission_post_acquire_production_rechecks_and_forwards_fresh_activa
     assert!(success.contains(".complete_tcp_flow_acquire("));
     assert!(success.contains("crate::unix_millis().max(now_ms), Instant::now()"));
     assert!(success.contains("Some(established.is_expired(wall_now_ms, monotonic_now))"));
-    assert!(success.contains("self.start_retirement(established)"));
+    assert!(success.contains("retire,"));
+    assert!(acquisition.contains("let retire = |prior| self.start_tcp_flow_retirement(prior)"));
     assert!(success.contains("return Ok((flow, material, activation_at_ms))"));
     assert!(!success.contains("client_open_tcp_material("));
     for (start, end) in [
