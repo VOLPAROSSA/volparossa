@@ -18,6 +18,14 @@ updates:
         applies-to: version-updates
         patterns:
           - "*"
+        # The helper's reviewed D-Bus graph has exact versions and feature bounds.
+        # Direct version updates for these crates receive their own review.
+        exclude-patterns:
+          - "zbus"
+          - "zbus_macros"
+          - "zbus_utils"
+          - "zcheapstr"
+          - "zruntime"
         update-types:
           - "minor"
           - "patch"
