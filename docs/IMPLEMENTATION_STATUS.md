@@ -264,6 +264,24 @@ and verified range reads when the agent reports a provider TLS handshake deadlin
 before READY. The retry keeps the existing exchange deadline, offset and grant.
 Background turns and ordinary successful flow counts are preserved.
 
+At `edf778da`, [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367731858)
+passed, including the live framed restore lifecycle. The
+[KVM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367739602)
+completed Image and Cloud publication, including Cloud catalog creation and the
+56-flow publication gate. Both applications committed eight copies and
+1,598,292 bytes each. The run then failed at `exercise/image_repair/private_file`.
+Independent readings found 6/6/5 provider leases with zero reserved bytes.
+Scoped local cleanup and the guest host-state comparison passed. The
+[artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367739602/artifacts/14459484719)
+has SHA-256 `ab571e82f420c93df74883d07268a6140aa673ece20f2d6777a70af9d17421f3`.
+The report does not record the inode or attribute that tripped the private-file check.
+
+A deterministic fixture regression reproduces the same error when the replica
+writer renames a new manifest after the observer opens the old one and before its
+first stat. The observer now discards an otherwise valid private inode with zero
+links so its existing bounded poll can reopen the current path. Multiple links,
+wrong ownership or mode, and invalid file size remain fatal.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
