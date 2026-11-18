@@ -1,5 +1,7 @@
 //! Explicit static-site bundles reuse native signatures, names and protected chunk retrieval.
 
+mod preparation;
+mod preview;
 mod viewer;
 
 use std::{
@@ -21,6 +23,8 @@ pub(crate) enum Command {
     Pack(Pack),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
     Open(Box<Open>),
+    /// Preview exact reviewed local bytes against an independently selected original signed manifest.
+    Preview(Box<preview::Preview>),
 }
 
 #[derive(Debug, Args)]
@@ -31,6 +35,9 @@ pub(crate) struct Pack {
     /// New private bundle file; publish it with the reported native content type.
     #[arg(long)]
     output: PathBuf,
+    /// Return a bounded review inventory for these exact bytes; grants no publication authority.
+    #[arg(long)]
+    review_receipt: bool,
 }
 
 #[derive(Debug, Args)]
@@ -82,6 +89,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     match command {
         Command::Pack(args) => println!("{}", pack(&args)?),
         Command::Open(args) => viewer::run(*args, socket).await?,
+        Command::Preview(args) => preview::run(*args).await?,
     }
     Ok(())
 }
@@ -97,12 +105,20 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
     collect(&root, "", 0, &mut 0, &mut assets)?;
     let count = assets.len();
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.output))?;
-    let bytes = SiteBundle::write_to(assets, temporary.as_file_mut())?;
+    let (bytes, receipt) = if args.review_receipt {
+        let (bytes, receipt) = preparation::write_to(assets, temporary.as_file_mut())?;
+        (bytes, Some(receipt))
+    } else {
+        (SiteBundle::write_to(assets, temporary.as_file_mut())?, None)
+    };
     temporary.as_file().sync_all()?;
     temporary
         .persist_noclobber(&args.output)
         .map_err(|error| error.error)?;
     File::open(output_parent(&args.output))?.sync_all()?;
+    if let Some(receipt) = receipt {
+        return Ok(receipt);
+    }
     Ok(serde_json::json!({
         "operation":"site_pack", "assets":count, "bytes":bytes,
         "content_type":SITE_CONTENT_TYPE, "output":args.output,
@@ -256,6 +272,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         let report = pack(&args).unwrap();
         assert_eq!(report["assets"], 3);
@@ -290,6 +307,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         assert!(pack(&args).is_err());
         assert!(!args.output.exists());
@@ -304,7 +322,8 @@ mod tests {
         assert!(
             pack(&Pack {
                 directory: root.path().join("linked-root"),
-                output: args.output
+                output: args.output,
+                review_receipt: false,
             })
             .is_err()
         );
