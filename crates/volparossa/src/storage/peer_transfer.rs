@@ -125,6 +125,7 @@ pub(super) async fn deposit_retained(
         if initial == ReceiptState::Committed {
             return Ok(());
         }
+        let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
         let mut offset = retained.journal.last_stored_bytes;
         ensure!(
             offset <= length && (offset == length || offset % CHUNK_BYTES as u64 == 0),
@@ -151,7 +152,16 @@ pub(super) async fn deposit_retained(
                 .journal
                 .target()
                 .context(Boundary::new(operation, Stage::JournalOpen))?;
-            let reply = remote(socket, grant, signer, target, operation, &chunk[..count]).await?;
+            let reply = exchange_before_ready(
+                socket,
+                grant,
+                signer,
+                target,
+                operation,
+                &chunk[..count],
+                &mut retry_available,
+            )
+            .await?;
             boundary.stage = Stage::ReceiptValidation;
             let result = reply.receipt.result();
             ensure!(
@@ -269,12 +279,13 @@ pub(super) async fn restore_retained(
     state::new_output(destination)?;
     let target = known_target(&retained.journal)?;
     let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
-    let reply = restore_exchange(
+    let reply = exchange_before_ready(
         socket,
         grant,
         signer,
         target,
         StorageOperation::Progress,
+        &[],
         &mut retry_available,
     )
     .await?;
@@ -295,12 +306,13 @@ pub(super) async fn restore_retained(
     let mut offset = 0;
     while offset < retained.journal.ciphertext_bytes {
         let length = (retained.journal.ciphertext_bytes - offset).min(range_bytes());
-        let reply = restore_exchange(
+        let reply = exchange_before_ready(
             socket,
             grant,
             signer,
             retained.journal.target()?,
             StorageOperation::ReadRange { offset, length },
+            &[],
             &mut retry_available,
         )
         .await?;
@@ -326,19 +338,20 @@ pub(super) async fn restore_retained(
     Ok(())
 }
 
-// One retry per foreground copy, shared by its preflight and all ranges. Only
-// a correlated pre-READY TLS handshake timeout can consume it: no signed storage
-// operation was sent. Each attempt obtains a new challenge under the original grant.
-async fn restore_exchange(
+// A foreground deposit or restore can reopen one TLS handshake per copy. At
+// AgentReady the owner has sent neither the signed operation nor any payload.
+// Both attempts use the same grant, operation, bytes and exchange deadline.
+async fn exchange_before_ready(
     socket: &Path,
     grant: &VerifiedStorageGrant,
     signer: &SigningKey,
     target: StorageTarget,
     operation: StorageOperation,
+    payload: &[u8],
     retry_available: &mut bool,
 ) -> Result<StorageTransfer> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
-    let first = remote(socket, grant, signer, target, operation, &[]).await;
+    let first = remote(socket, grant, signer, target, operation, payload).await;
     let Err(error) = first else { return first };
     let handshake_timeout = error
         .downcast_ref::<crate::control::AgentRejected>()
@@ -346,13 +359,20 @@ async fn restore_exchange(
         .is_some_and(|detail| {
             detail.tls_failure == Some(PrivateStorageTlsFailure::HandshakeDeadline as i32)
         });
-    if !*retry_available || !handshake_timeout || tokio::time::Instant::now() >= deadline {
+    let before_ready = error
+        .downcast_ref::<Boundary>()
+        .is_some_and(|boundary| matches!(boundary.stage, Stage::AgentReady));
+    if !*retry_available
+        || !before_ready
+        || !handshake_timeout
+        || tokio::time::Instant::now() >= deadline
+    {
         return Err(error);
     }
     *retry_available = false;
     tokio::time::timeout_at(
         deadline,
-        remote(socket, grant, signer, target, operation, &[]),
+        remote(socket, grant, signer, target, operation, payload),
     )
     .await
     .context(Boundary::new(operation, Stage::Deadline))?
