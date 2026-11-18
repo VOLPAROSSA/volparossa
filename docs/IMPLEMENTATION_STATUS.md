@@ -31,6 +31,50 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
 
+### Development branches — 18 November 2026
+
+- **Studio** saved an edited page, reopened it in a fresh browser context,
+  verified its text and 37 px styling, and exported it. The Core CLI packed
+  the four files from the 1,474-byte ZIP and the production decoder verified
+  their contents. Overwrite refusal and cleanup passed on Core `9b8f92ed` and
+  Studio `db6cae98`. An earlier run timed out before it confirmed the reopened
+  page. [Successful paired trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368192079)
+  · [Original failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44366437457)
+- **Signed site recovery** passed on Core `7208e241` and Studio `2c5e4145`.
+  The CLI signed a 1,204-byte, four-asset bundle with an ephemeral test
+  identity. The daemon imported it with network roles disabled, was forcibly
+  terminated, reopened its cache and exported byte-identical content. A second
+  browser verified the signed local preview, the four assets and the security
+  headers. The receipt confirms process, listener and private-state cleanup.
+  [Signed recovery trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368339229)
+- **Cloud** exercised owner uploads, restart and private catalog recovery using
+  HTTP, OpenPGP and the pinned OpenCloud SDK. GnuPG sockets now work beneath
+  long owner-directory paths. On `d105f983`, 111 Node and 13 Python tests
+  passed locally. The cumulative upload branch passed 139 Node tests. These
+  suites used a fixture for the peer Storage interface.
+  [Main-derived change](https://github.com/VOLPAROSSA/volparossa-cloud/commit/d105f983555a6c15b2859e651e1e075647dcf2c6)
+  · [Cumulative upload source](https://github.com/VOLPAROSSA/volparossa-cloud/commit/998bf2d46ba51ba904500e4f223d5f7d200092dc)
+- **Weather** compares IFS and AIFS 2 m temperature forecasts against supplied
+  public station observations on matched runs, grids and observation times.
+  The CLI reports signed and absolute error, coverage and exclusions. Its
+  synthetic fixture scores two of three times. An independent historical
+  station dataset with matched forecasts is still needed for a skill estimate.
+  The NOAA cancellation fixture also checks that a live decoder child is
+  joined. All 207 Node tests passed on the combined branch.
+  [Weather source and usage](https://github.com/VOLPAROSSA/volparossa-weather/tree/ddb534f36c88206b06bc9bd938160418bd8d64cf)
+- **Map** clears an expired positioning-quality result when the Android
+  activity or its window regains focus, and when a new assessment is requested.
+  Eight synthetic Android/JNI emulator cases passed on `249266a8`, including
+  a real dialog dismissal. The fixture removed its Android state and accepted
+  its host-configuration checkpoint. The raw route/DNS/firewall comparison
+  returned false. Physical sensors and navigation remain unverified.
+  [Android trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44369696420)
+- **Bank** accepts a TEST budget and a dated synthetic portfolio snapshot with
+  an explicit source. The offline CLI gives whole units per asset, spending
+  within aggregate ownership limits and remaining TEST cash. Nine library and
+  four CLI tests, formatting and strict Clippy passed locally.
+  [Bank source and runnable example](https://github.com/VOLPAROSSA/volparossa-bank/tree/29e79f9b9c5b3e4a83a80672580ee1c18276e526)
+
 ### Core project website — 2026-10-30
 
 The bounded Golden Harbour introduction lives in `website/`, with an isolated
