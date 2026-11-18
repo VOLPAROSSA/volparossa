@@ -1,5 +1,5 @@
 name: DNS cache built-in-root preflight
-run-name: Public DNSSEC chain — collector and local cache only
+run-name: Public DNSSEC chain — local cache outage and recovery only
 
 on:
   # A new dispatch workflow is unavailable until it exists on the default branch.
@@ -76,11 +76,18 @@ jobs:
               "scope": "builtin-anchor-collector-and-local-cache-only",
               "peer_cache_proven": False,
               "normal_client_route_proven": False,
+              "cache_recovery_requested": True,
+              "natural_expiry_proven": False,
           }
           with (root / "source.json").open("x") as stream:
               json.dump(source, stream, sort_keys=True)
               stream.write("\n")
           PY
+
+      - name: Check fixture contracts before installing the compiler
+        run: |
+          python3 -B tests/integration/test-dns-cache-fixture.py
+          sh -n tests/integration/dns-cache-proof.sh
 
       - name: Install pinned Rust toolchain and verify namespace tools
         run: |
@@ -100,6 +107,8 @@ jobs:
           set -euo pipefail
           cargo fetch --locked
           cargo build --locked --offline -p volparossa-udp --example dns-cache-proof
+          cargo test --locked --offline -p volparossa-udp --example dns-cache-proof
+          cargo clippy --locked --offline -p volparossa-udp --example dns-cache-proof -- -D warnings
           git diff --exit-code
           sha256sum target/debug/examples/dns-cache-proof \
             >"$VOLPAROSSA_DNS_PROOF_OUTPUT/binary.sha256"
@@ -113,20 +122,37 @@ jobs:
             2>"$VOLPAROSSA_DNS_PROOF_OUTPUT/collect.stderr" \
             | tee "$VOLPAROSSA_DNS_PROOF_OUTPUT/collect.json"
 
-      - name: Validate real public root chains and local reuse in a disposable network
+      - name: Validate real public root chains and cache recovery in a disposable network
         env:
           # Namespace creation only. The runner drops to the original UID/GID and
           # all capabilities before it runs either replay or the Rust validator.
           VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
         run: |
           set -euo pipefail
-          tests/integration/dns-cache-proof.sh --execute --yes \
+          tests/integration/dns-cache-proof.sh --execute --yes --cache-recovery \
             --fixture "$VOLPAROSSA_DNS_PROOF_OUTPUT/fixture" \
             --binary "$GITHUB_WORKSPACE/target/debug/examples/dns-cache-proof" \
             --output "$VOLPAROSSA_DNS_PROOF_OUTPUT/proof"
-          jq -e '.success == true and
+          jq -e '.schema_version == 2 and .success == true and
             .scope == "builtin-anchor-collector-and-local-cache-only" and
             .peer_cache_proven == false and .normal_client_route_proven == false and
+            .natural_expiry_proven == false and
+            (.core | type) == "array" and
+            ([.core[].family] | sort) == ["A", "AAAA"] and
+            .recovery.warm_upstream_validated == true and
+            .recovery.upstream_stopped_before_outage == true and
+            .recovery.outage_local_validated == true and
+            .recovery.cold_outage_failed_closed == true and
+            .recovery.same_cold_resolver_recovered == true and
+            .recovery.same_recording_replayed == true and
+            .recovery.phase_count == 3 and
+            .recovery.warm_counts == {local_validated: 2, peer_validated: 0, upstream_validated: 2, trusted_fallback: 0} and
+            .recovery.cold_outage_counts == {local_validated: 0, peer_validated: 0, upstream_validated: 0, trusted_fallback: 0} and
+            .recovery.recovered_counts == {local_validated: 0, peer_validated: 0, upstream_validated: 2, trusted_fallback: 0} and
+            .recovery.children == {probe_joined: true, first_replay_joined: true, second_replay_joined: true, listeners_closed: true} and
+            all(.core[]; .schema == 2 and .builtin_anchors == true and .warm.source == "UpstreamValidated" and
+              .outage.source == "LocalValidated" and .cold_outage_error == true and
+              .recovered.source == "UpstreamValidated") and
             (.core | length) == 2' "$VOLPAROSSA_DNS_PROOF_OUTPUT/proof/proof.json"
 
       - name: Upload exact-source public wire and bounded collector evidence

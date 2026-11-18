@@ -658,6 +658,8 @@ pub(crate) enum BackendError {
     Capacity,
     Invalid,
     Kernel,
+    /// Definite MPTCP connect poll timeout; retains the ordinary Kernel rejection.
+    MptcpConnectPollTimedOut,
     CleanupIncomplete,
 }
 
@@ -4452,7 +4454,15 @@ impl HelperEngine {
             } => {
                 self.clear_operation(*owner).await;
                 return Some(execution(
-                    backend_response(request, error, "TRANSPORT_SOCKET_UNAVAILABLE"),
+                    backend_response(
+                        request,
+                        error,
+                        if error == BackendError::MptcpConnectPollTimedOut {
+                            "MPTCP_CONNECT_POLL_TIMED_OUT"
+                        } else {
+                            "TRANSPORT_SOCKET_UNAVAILABLE"
+                        },
+                    ),
                     None,
                 ));
             }
@@ -6270,7 +6280,7 @@ fn backend_response(
         BackendError::Unavailable => HelperResult::Unavailable,
         BackendError::Capacity => HelperResult::Capacity,
         BackendError::Invalid => HelperResult::InvalidRequest,
-        BackendError::Kernel => HelperResult::Kernel,
+        BackendError::Kernel | BackendError::MptcpConnectPollTimedOut => HelperResult::Kernel,
         BackendError::CleanupIncomplete => HelperResult::CleanupIncomplete,
     };
     response(request, result, diagnostic, None)
@@ -6417,6 +6427,7 @@ mod tests {
         fail_probe_cleanup: AtomicBool,
         fail_acquire_cleanup: AtomicBool,
         fail_next_acquire_kernel: AtomicBool,
+        fail_next_acquire_poll_timeout: AtomicBool,
         panic_prepare_factory: AtomicBool,
         panic_prepare_poll: AtomicBool,
         substitute_prepare_generation: AtomicBool,
@@ -6916,6 +6927,11 @@ mod tests {
                     Err(BackendError::CleanupIncomplete)
                 } else if self.fail_next_acquire_kernel.swap(false, Ordering::AcqRel) {
                     Err(BackendError::Kernel)
+                } else if self
+                    .fail_next_acquire_poll_timeout
+                    .swap(false, Ordering::AcqRel)
+                {
+                    Err(BackendError::MptcpConnectPollTimedOut)
                 } else {
                     StdUnixStream::pair()
                         .map_err(|_| BackendError::Kernel)
@@ -9079,6 +9095,70 @@ mod tests {
             state.contexts.get(&[7; 16]).map(|context| context.phase),
             Some(ContextPhase::Committed)
         );
+    }
+
+    #[tokio::test]
+    async fn mptcp_connect_poll_timeout_is_bound_to_request_and_preserves_context() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let prepared = commit_client_context(&engine, &backend).await;
+        let mut acquire = acquire_request_for(&prepared, 70);
+        let Some(helper_request::Operation::AcquireTransportSocket(value)) =
+            acquire.operation.as_mut()
+        else {
+            unreachable!()
+        };
+        value.descriptor_kind = RoutingTransportSocketKind::MptcpConnected as i32;
+        value.expected_remote = Some(transport_address([10, 77, 0, 3], 443));
+        let expected_digest = operation_digest(&acquire).expect("digest").to_vec();
+        backend
+            .fail_next_acquire_poll_timeout
+            .store(true, Ordering::Release);
+
+        let first = engine.execute_with_descriptor(acquire).await;
+        assert_eq!(first.response.result, HelperResult::Kernel as i32);
+        assert_eq!(
+            first.response.diagnostic_code,
+            "MPTCP_CONNECT_POLL_TIMED_OUT"
+        );
+        assert_eq!(first.response.request_id, vec![70; 16]);
+        assert_eq!(first.response.operation_digest, expected_digest);
+        assert!(first.response.outcome.is_none());
+        assert!(first.descriptor.is_none());
+        {
+            let state = engine.inner.state.lock().await;
+            assert_eq!(
+                state.contexts.get(&[7; 16]).map(|context| context.phase),
+                Some(ContextPhase::Committed)
+            );
+            assert!(state.in_flight.is_none());
+            assert!(state.cleanup_pending.is_empty());
+        }
+        assert!(backend.destroyed.lock().expect("destroyed").is_empty());
+
+        // A later successful acquisition neither inherits the token nor loses its route.
+        let next = engine
+            .execute_with_descriptor(acquire_request_for(&prepared, 71))
+            .await;
+        assert_eq!(next.response.result, HelperResult::Ok as i32);
+        assert_eq!(next.response.diagnostic_code, "TRANSPORT_SOCKET_READY");
+        assert_eq!(next.response.request_id, vec![71; 16]);
+        assert!(next.descriptor.is_some());
+    }
+
+    #[test]
+    fn mptcp_poll_timeout_does_not_relabel_other_backend_responses() {
+        let original = prepare_request(1);
+        let reply = backend_response(
+            &original,
+            BackendError::MptcpConnectPollTimedOut,
+            "COMMIT_PROBE_FAILED",
+        );
+        assert_eq!(reply.result, HelperResult::Kernel as i32);
+        assert_eq!(reply.diagnostic_code, "COMMIT_PROBE_FAILED");
     }
 
     #[tokio::test]

@@ -210,9 +210,9 @@ verify_vendor \
     third_party/rust/sources/hickory-proto-0.25.2.crate \
     f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502 \
     third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch \
-    bd1d5df1a13574d5c8b546e1a53dfde04d524353a646c8235786d7724215828a \
+    151a1d425a6fc3a056753f740e35ab9a67e769255f07d756f8e2c697576a9b77 \
     hickory-proto-0.25.2 \
-    65d70d1559f2209a76b3ca68357c86bd94c9046e0b5dd22b0b3458ad418b1786
+    5e1fcb2158ae0cc83334ac2a1e11fa60ebcadd1e59e224521aff288b61e4a516
 
 verify_vendor \
     third_party/rust/sources/hickory-resolver-0.25.2.crate \
@@ -282,7 +282,7 @@ check_sha256 \
     aabd2af12e26033cb8de9b63841b54574718406e4479b47e41bc0d92fc6f14e0 \
     third_party/rust/backport-regressions/.cargo/config.toml
 check_sha256 \
-    2a6f58b0f92f55d9a98e15956d4ff74214e711d1f1aaa8314c7cce39af21ae03 \
+    2ad370a5800712ebd689802776b6450ccd83de62728c6d8cee63f19e0a8f0e86 \
     third_party/rust/backport-regressions/src/lib.rs
 check_sha256 \
     c41ab6922715e7a2e9772b9b70c64024f6629dcdc6280b763eaefc3eb52c809f \

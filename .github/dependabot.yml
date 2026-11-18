@@ -1,7 +1,5 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Propose related compatible updates together; every group still needs review.
+# Major upgrades remain individual; existing security-update policies stay separate.
 
 version: 2
 
@@ -16,6 +14,13 @@ updates:
       day: "monday"
     open-pull-requests-limit: 3
     groups:
+      rust-compatible:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
       rust-security:
         applies-to: security-updates
         patterns:
@@ -28,3 +33,11 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 3
+    groups:
+      actions-compatible:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

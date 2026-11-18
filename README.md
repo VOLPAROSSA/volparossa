@@ -69,7 +69,7 @@ access and explicitly chosen system-wide operation remain separate permissions.
 
 ## Development status
 
-**Development evidence through 20 October 2026.** Working milestones exist across all five
+**Selected development milestones.** Working milestones exist across all five
 layers, but they do not yet form a complete, supported service. The distinction matters
 especially for private data and applications that depend on several layers at once.
 
@@ -97,16 +97,13 @@ performance, general coding reliability or confidential execution on other peopl
 
 The next shared dependencies are **private-storage maintenance with Image/Cloud** and
 **protected peer computation**, while preserving the demonstrated coding workflow.
-The [ordinary-expiry trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/39081968944)
-fails its required acceptance step. The [earlier Cloud consumer failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/38917106698)
-and unconfirmed remote cleanup remain separate; ordinary expiry has not been established
-as their cause. Joined publication, repair, repeated restore and deletion remain open.
-
-The [latest public-model guest trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/39082065142)
-passes contracts but fails public-model execution. Its retained artifact identifies an
-export inventory pathname rejection, with the exact pathname and failing rule still
-unknown. Public model execution and confidential private workloads remain unproven.
-A public guest trial does not establish confidential hardware or authorize private tasks.
+Joined storage publication, repair, repeated restore and deletion remain open.
+Public model trials do not establish confidential hardware or authorize private tasks.
+The [current implementation status](docs/IMPLEMENTATION_STATUS.md) owns the latest
+recorded results and blockers; [original failures](docs/archive/README.md) remain
+preserved with their source revisions. The
+[organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md)
+coordinates retained branches and integration work across repositories.
 
 Complete applications, dependable shared reasoning, the full immune system and authorized
 automatic software updates also remain in development. The

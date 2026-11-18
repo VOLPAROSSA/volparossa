@@ -1,0 +1,15 @@
+{
+  "core_base": "edf569300acbdf5e7715b5192ffbb293235b15ab",
+  "theme_commit": "8114d966f3e9be878cb6dbb3d155a5739edfeb03",
+  "date": "2026-10-30",
+  "files": {
+    "build.py": "e97136d02b9dae2a9c42fef9ab6d71e48b70a4921a31ac49cdc74c62a94ae46d",
+    "check_site.py": "1c7731ebefe44f5962f1a39670895f152bb777f41fcfa955179769419d5257ae",
+    "browser_check.mjs": "4978ac76cc7a6e208b7c37662c6dd7c3a0ef21ccd1f405370d04f029969d88d2",
+    "config.json": "867b909f03d3329a6c1781b44cf0fd1de9f3990c170f898c561c52de5df109fb",
+    "content.html": "60b25c28a865350a134d2b16c8dea5459fcfa9df6fc3bce97a3dd8ac45f8bf41",
+    "assets/core.css": "b1782bb57fd8ec35aeec335a1d2bfa31dd7d3221d4fc55e0383a73818e15831b",
+    "assets/harbour/images.json": "a768c4027b9e07ca930d0b1ae6125c1cebf2d2214d8f3606be44da6d0060ac47",
+    "theme/theme-version.json": "56404fc52bf672d0b2421db0433f1443f540ab578ab0ddc242009772607354b6"
+  }
+}

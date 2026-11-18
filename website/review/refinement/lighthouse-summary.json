@@ -1,0 +1,28 @@
+{
+  "mobile": {
+    "scores": {
+      "performance": 93,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100
+    },
+    "metrics": {
+      "largest-contentful-paint": "3.2\u00a0s",
+      "cumulative-layout-shift": "0",
+      "total-byte-weight": "Total size was 436\u00a0KiB"
+    }
+  },
+  "desktop": {
+    "scores": {
+      "performance": 98,
+      "accessibility": 100,
+      "best-practices": 100,
+      "seo": 100
+    },
+    "metrics": {
+      "largest-contentful-paint": "1.1\u00a0s",
+      "cumulative-layout-shift": "0.001",
+      "total-byte-weight": "Total size was 1,639\u00a0KiB"
+    }
+  }
+}

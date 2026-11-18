@@ -31,10 +31,30 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ## Current integration and active work
 
-### F04 — helperacceptatie geslaagd; handmatige integratie — 2026-10-27
+### Core project website — 2026-10-30
 
-De kandidaat voor [PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) bevat de minimale
-beveiligingsroute en de gerichte helpercorrecties. De oorspronkelijke
+The bounded Golden Harbour introduction lives in `website/`, with an isolated
+Python static build and project Pages artifact for `/volparossa/`. It imports
+reviewed shared theme v1.0.3 from homepage commit `8114d966f3e9` and preserves
+development/permission boundaries from Core source `edf569300acb`.
+[Website verification](../website/VERIFICATION.md) records responsive Chromium/
+Firefox renders, accessibility, no-JavaScript behavior and performance results.
+This work changes no runtime or project goal and supplies no new Core, DPS,
+network, model or sensor acceptance evidence. Publication follows the existing
+required PR gate and the separate scoped website deployment workflow.
+The owner’s subsequent visual refinement restores the four concept scenes below
+the unchanged hero and adds an accessible rotating nine-application strip,
+excluding Bank/Citizen; [bounded website evidence](../website/REFINEMENT-VERIFICATION.md)
+records the responsive renders, original icons and interaction checks.
+The final [Compute/satellite icon correction](../website/ICON-VERIFICATION.md)
+replaces malformed custom geometry while preserving the page composition.
+
+### F04 — helperacceptatie en integratie geslaagd — 2026-10-27
+
+[PR349](https://github.com/VOLPAROSSA/volparossa/pull/349) is op 27 oktober 2026
+gemerged als `edf569300acbdf5e7715b5192ffbb293235b15ab` en bevat de minimale
+beveiligingsroute en de gerichte helpercorrecties. De mergegegevens zijn op
+5 november 2026 opnieuw gecontroleerd; dit is geen nieuwe runtimeproef. De oorspronkelijke
 [F04-evidence en failures](https://github.com/VOLPAROSSA/volparossa/blob/ff2df276bc50a395dbcfa2d11b515c51fe0ee340/docs/IMPLEMENTATION_STATUS.md)
 blijven behouden; PR347 is historische basis, geen afzonderlijke integratiekandidaat.
 
@@ -61,10 +81,10 @@ livecontracttest en gerichte syntax/ShellCheck/diffcontroles slagen. Onafhankeli
 bron- en resultaatreview bevestigt de afbakening. Eerdere Quality40487291792,
 CodeQL40487286993, dependency/RustSec- en zbus/crypto/DPS-native-evidence blijven
 hergebruikt voor hun gecontroleerd gelijke inputs; dit is geen herhaalde audit.
-De integratiekandidaat behoudt actuele main-documentatie en doorloopt de
-[bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks).
-Integratie en administratieve F04-afsluiting blijven aan handmatige maintainermerge
-gebonden. Geen automatische merge of productieactivatie.
+De geïntegreerde kandidaat behoudt de destijds actuele main-documentatie;
+de [bestaande PR-controles](https://github.com/VOLPAROSSA/volparossa/pull/349/checks)
+blijven bij hun geteste bron horen. De handmatige integratie is voltooid.
+Dit bewijst geen nieuwe runtimecompositie en activeert geen productiefunctionaliteit.
 
 ### Development workflow — 2026-10-26
 
@@ -89,7 +109,7 @@ is removed; behavioral tests and production paths are unchanged.
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Components pass; full consumer restore/deletion and zero remote usage remain open after catalog/retention failures. |
-| Protected Compute | Strict host gate fails in 39868428738 despite public answers/corruption/cleanup; later feature run 39876860833 has successful public-job metadata. Receipt-level host/configuration acceptance, main composition and private workloads remain separate. |
+| Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
@@ -105,9 +125,8 @@ system value; these priorities impose no fixed application/model/agent order.
 1. **Storage:** drive the required ordinary renewal rotation without weakening
    retention authority; then exercise catalog restore and finish Image/Cloud
    publish, repair, restore, deletion and confirmed zero remote usage.
-2. **Protected model:** use the retained connect diagnostic and strict host gate
-   to prove two public turns, corruption rejection and complete cleanup on one
-   source; join separately authorized private execution only with its own proof.
+2. **Protected model.** Build on the verified public resident session. Private
+   execution requires separately authorized inputs and its own acceptance proof.
 3. **Studio publication:** bound request geometry and Storage reads before
    allocations; separate untrusted editor/MCP preparation from trusted native
    review, identity/revision binding, signing and authorized contribution. Prove
@@ -162,6 +181,19 @@ system value; these priorities impose no fixed application/model/agent order.
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
 
+The central continuation on 5 November reapplies PR339's bounded ordinary
+rotation fixture to current main. It also keeps version-4 failure diagnostics
+compact through export and revalidation, and records only the validated closed
+diagnostic in job logs. The original run's seven-day artifacts have expired;
+its retained logs do not establish the failure substage. A fresh source-bound
+trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
+on `e50af83d` stops before Storage: the guest compiler source policy rejects its
+environment. Alpha's SSH caller now drops only the two transport metadata
+variables already removed by the helper VM; credentials/configuration remain
+rejected. This caller correction still needs a new actual trial. Historical consumer
+profile 10 pins remain unchanged, so that trial cannot accept the later
+Image/Cloud draft heads by implication.
+
 [Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
 retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
 requires the complete consumer profile, finite authority, actual enrollment,
@@ -169,55 +201,29 @@ repeated restore and all-copy deletion; SDK source checks do not replace it.
 
 ### Protected Compute evidence
 
-- The retained resident feature PR276 includes PR326/PR329/PR333/PR338.
-  Public trial 39842391908 at `e4824ae3c9a3` obtains `READY` and `4`, rejects a
-  corrupt image before entrypoint and confirms VM/tool/scratch cleanup, but
-  fails `host_network_observation_changed`; the changed field/cause is unknown.
-- Trial 39855637060 at `291e94938ebe` fails
-  `two_public_turns/command_failed` after the connect prefix. It proves phase
-  entry only; no public answer or complete host comparison follows. Diagnostic
-  source run 39866709823 passes 137 Rust/484 Python cases at `3a96ad7f110b`;
-  PR338 merges into the feature as `ce438c27df80` with the same tree.
-- **Strict actual failure:** feature trial 39868428738 fails the final
-  `host_network_observation_changed` gate despite both expected `READY`/`4`
-  answers, corruption rejection at `verity_read` and VM/tool/scratch cleanup.
-  Its aggregate remains `state=failed`, `model_execution=false`. The bounded
-  Linux 6.17.0-1022-azure diagnostic identifies `REFERENCE_METADATA_ONLY`:
-  renderer, IPv4 routes, DNS and all six IPv6 rows' non-reference-count bytes
-  match; reference counts/raw IPv6 fingerprint differ. This localizes this
-  run's difference, without identifying its actor or explaining earlier runs.
-- **Feature checkpoint candidate:** PR341 at `81c6b6a5522b`, tree
-  `411c728475a8`, preserves raw equality false and adds a separate versioned,
-  bounded route/DNS configuration checkpoint plus sticky cancellation and
-  post-cleanup terminal checks. Source gate 39875150717 passes 137 Rust/494
-  Python tests, formatting, compilation and Clippy; actual execution is skipped.
-  It merges into the retained feature as `2d004c2466ef`, with the tested tree.
-  Follow-up [39876860833](https://github.com/VOLPAROSSA/volparossa/actions/runs/39876860833)
-  is now verified successful at that SHA, including the `public-model` job and
-  execution step. This refresh did not inspect its final receipt fields and
-  does not reclassify the earlier strict failure. The terminal guard selects
-  success after cleanup; cancellation at later receipt-write entry is not
-  atomic with that decision and can retain an already selected pass.
-- **Main composition:** PR332, branch `integration/resident-model-main-20261022`,
-  is separately reconciled at `af9ecc3ca400`, tree `eefe84a3565b`.
-  Source gate 39868938187 passes 137 Rust/485 Python tests, compilation,
-  formatting and Clippy with actual-model execution skipped. Recorded Quality
-  39868882810 and CodeQL 39868876355 pass; Quality tests merge `2d11a7778786`,
-  tree `9550ea68f344` (main `a68b805a` plus `af9ecc3c`), with 4,345 top-level
-  passes/0 failures/17 ignored. Later checkpoint reconciliation `c29f67c5a884`,
-  tree `10b4bb01e73b`, has 243 inert controller/20 host tests and unchanged
-  dependency/public-job authority. Its source run
-  [39876866868](https://github.com/VOLPAROSSA/volparossa/actions/runs/39876866868)
-  is now verified successful at that SHA with `public-model` skipped. Neither
-  source run proves actual inference on main's dependency composition or any
-  subsequent reconciliation. Earlier Quality/CodeQL results likewise remain
-  bound to their tested composition.
+The public resident model completed two turns on `6ac9f2a8`, and PR332 merged
+as `f355776a` with the same tree `a62dc47706d7b299fc59cf9652192cc5288c4340`.
+The requester received `READY` and `4` in order, retained the session between
+turns and removed each request’s files. At shutdown it reaped the child and
+removed private session state. VM, tool and scratch cleanup all passed. The
+corrupted image failed at `verity_read` before entrypoint invocation.
+[Merge](https://github.com/VOLPAROSSA/volparossa/pull/332) · [Public trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/42145544662)
 
-Keep raw host equality separate from configuration-checkpoint acceptance,
-unchanged public-job authority, bounded privacy-safe diagnostics and original
-failures. Public fixture execution is not confidential/private-workload acceptance. The
-[full record](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#resumed-full-objective-and-dependency-work--2026-10-22)
-retains exact source/tree manifests and failed/successful artifacts.
+The host configuration checkpoint accepted a change in IPv6 reference metadata.
+The raw IPv6 route fingerprint changed. IPv4 routes, resolver configuration and
+IPv6 non-reference-count fields matched. All eleven execution receipts were
+verified in public artifact `13472243011`, SHA-256
+`15663a652423a85056eb7879ff30edd7b66048d12f42af8a4681f039ebb6b6e5`.
+Confidential execution, hardware attestation and independent guest-key origin
+remain open. Cancellation can still arrive between selecting a terminal result
+and writing its receipt.
+
+The resident workflow consolidates three historical wrappers. Source validation
+passed 143 Rust tests, two documentation tests and 729 Python tests. For an
+explicit public trial, use the reviewed commit on
+`integration/resident-model-main-20261022`. Earlier host-check failures,
+source-only runs and their exact revisions remain in the historical record.
+[Workflow](../.github/workflows/protected-resident-model.yml) · [Source checks](https://github.com/VOLPAROSSA/volparossa/actions/runs/42141349016) · [Prior evidence](https://github.com/VOLPAROSSA/volparossa/blob/f355776a9191ce5ade255cc299b765229e9f5e99/docs/IMPLEMENTATION_STATUS.md#protected-compute-evidence)
 
 ### Studio and shared hosting evidence
 
@@ -321,7 +327,7 @@ using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
 | Work | Retained branch / checkout | Resume boundary |
 | --- | --- | --- |
 | Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
-| Main resident composition | `integration/resident-model-main-20261022`, PR332 | Source gates pass at af9ecc3c and c29f67c5; ordinary merge results bind af9ecc3c, not later runtime compositions. |
+| Main resident composition | `integration/resident-model-main-20261022`, merged PR332 | Keep the tested commit `6ac9f2a8` available on the ref admitted by the public workflow. |
 | Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
 | Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
 | Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |

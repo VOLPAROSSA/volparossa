@@ -11,6 +11,9 @@ use prost::Message;
 
 use crate::ControlProtocolError;
 
+/// Pure caller-input coordinate conversion; no sensor or platform authority.
+pub mod geodetic;
+
 #[cfg(test)]
 mod tests;
 

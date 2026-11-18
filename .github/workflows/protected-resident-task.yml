@@ -1,0 +1,203 @@
+name: Protected resident task source contracts
+
+on:
+  push:
+    branches: [feature/protected-resident-task]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-resident-task-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_BASE: 7d0f9f0b492c5e692cc9d26f23d95f55f2c1e651
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  resident-budget:
+    name: Finite resident execution and existing local lifecycle
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/feature/protected-resident-task'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind execution source and unchanged dependencies
+        id: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/feature/protected-resident-task
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          mkdir resident-task-evidence
+          python3 -B - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          base = os.environ['SOURCE_BASE']
+          changed = git('diff', '--name-only', base, 'HEAD').splitlines()
+          assert changed and len(changed) == len(set(changed))
+          allowed = {'.github/workflows/protected-resident-task.yml',
+              'docs/IMPLEMENTATION_STATUS.md',
+              'crates/volparossa/src/compute/supervise/native_session.rs'}
+          prefix = 'crates/volparossa/src/compute/supervise/native_session/'
+          assert all(name in allowed or name.startswith(prefix) for name in changed)
+          dependencies = ('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml',
+              'crates/volparossa/Cargo.toml')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', base + ':' + name)
+          receipt = dict(schema=1, source_commit=os.environ['GITHUB_SHA'],
+              source_tree=git('rev-parse', 'HEAD^{tree}'), base_commit=base,
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              source_blobs={name: git('rev-parse', 'HEAD:' + name) for name in changed},
+              dependency_blobs={name: git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              scope='resident-parent-budget-and-local-lifecycle',
+              model_execution=False, guest_execution=False,
+              private_peer_acceptance=False, hardware_attestation=False)
+          pathlib.Path('resident-task-evidence/source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the existing pinned Rust toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update \
+            --component clippy --component rustfmt
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install reviewed Protobuf on the disposable hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.3
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Compile the affected executable and its tests
+        id: build
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa --bin volparossa --no-run \
+            2>&1 | tee resident-task-evidence/build.log
+
+      - name: Inventory and run the resident and connection contracts
+        run: |
+          set -euo pipefail
+          export RUST_BACKTRACE=1
+          contract_group() {
+            local label="$1" filter="$2"
+            timeout --kill-after=5s 180s \
+              cargo test --locked --offline -p volparossa --bin volparossa "$filter" -- --list \
+              2>&1 | tee "resident-task-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s \
+              cargo test --locked --offline -p volparossa --bin volparossa "$filter" \
+              2>&1 | tee "resident-task-evidence/$label-test.log"
+          }
+          contract_group resident compute::supervise::native_session::
+          contract_group connection compute::private_serve::tests::
+          contract_group diagnostics compute::supervise::diagnostic::
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path('resident-task-evidence')
+          required_budget_cases = {
+              'budget_rejects_expired_excessive_lifetime_and_request_counts',
+              'delayed_start_consumes_the_original_parent_lifetime',
+              'expired_budget_rejects_before_configuration_or_private_root_creation',
+              'expiry_after_root_creation_still_uses_real_cleanup',
+              'turn_deadlines_keep_the_parent_cap_and_existing_six_hundred_second_limit',
+              'request_ceiling_rejects_before_parsing_staging_or_worker_start',
+              'expired_turn_rejects_before_staging_and_consuming_a_request',
+              'cancelled_or_lost_owner_rejects_before_staging',
+              'opened_backpressure_expires_and_removes_the_owned_root',
+              'result_backpressure_cannot_extend_the_original_deadline',
+              'ready_event_capacity_cannot_publish_after_expiry',
+              'blocked_event_delivery_observes_owner_cancellation',
+              'benign_owner_update_does_not_drop_a_waiting_result',
+              'closed_event_receiver_preserves_failure_and_real_root_cleanup',
+              'idle_close_keeps_the_existing_three_hundred_second_ceiling',
+              'explicit_close_keeps_the_existing_cleanup_shape',
+              'cleanup_failure_dominates_an_expired_execution_budget',
+              'dropped_owner_future_does_not_fabricate_private_root_removal',
+              'expired_spawn_is_rejected_before_starting_a_sandbox',
+          }
+          all_names, counts = [], {}
+          for group in ('resident', 'connection', 'diagnostics'):
+              inventory = (root / (group + '-inventory.log')).read_text()
+              output = (root / (group + '-test.log')).read_text()
+              names = re.findall(r'^([^\n]+): test$', inventory, re.M)
+              assert 1 <= len(names) <= 512 and len(names) == len(set(names)), group
+              if group == 'resident':
+                  prefix = 'compute::supervise::native_session::budget_tests::'
+                  assert len(names) == 30, 'resident baseline or budget cases missing'
+                  assert {name.removeprefix(prefix) for name in names if name.startswith(prefix)} == required_budget_cases
+              results = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.M)
+              assert results == [str(len(names))], group
+              for name in names:
+                  assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.M)) == 1
+              counts[group] = len(names)
+              all_names.extend(names)
+          assert len(all_names) == len(set(all_names)), 'overlapping test groups'
+          receipt = dict(schema=1, unique_tests=len(all_names), group_counts=counts,
+              test_names=sorted(all_names), model_execution=False,
+              guest_execution=False, private_peer_acceptance=False)
+          (root / 'tests.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+
+      - name: Lint the affected executable and tests
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa --all-targets --all-features -- -D warnings \
+            2>&1 | tee resident-task-evidence/clippy.log
+
+      - name: Check formatting without modifying source
+        if: ${{ always() && steps.source.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee resident-task-evidence/format.log
+
+      - name: Recheck source even after failure
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+
+      - name: Retain original contract evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: protected-resident-task-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: resident-task-evidence/

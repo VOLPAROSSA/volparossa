@@ -1,0 +1,480 @@
+name: Resident model contracts and explicit public trial
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Source checks or the explicit public-only immutable model trial
+        type: choice
+        default: source-contracts
+        options: [source-contracts, public-model]
+        required: true
+      expected_source:
+        description: Exact reviewed commit required for an explicit public model trial
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-resident-model-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/integration/resident-model-main-20261022' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.scenario == 'source-contracts' ||
+      (inputs.scenario == 'public-model' && inputs.expected_source == github.sha))
+    runs-on: ubuntu-24.04
+    # Hard step ceilings total 143 minutes, including final evidence. Normal
+    # duration is much shorter; this ceiling is not a resident task lifetime.
+    timeout-minutes: 145
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the reviewed merge and the closed workflow consolidation
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/integration/resident-model-main-20261022
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          mkdir resident-model-evidence
+          python3 -B - <<'PYBIND'
+          import json,os,pathlib,subprocess
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          def bind_composition(git, public_job):
+            main='235c2c9165c2c07e7cd3bca82ec8b70152bb8d90'
+            feature='812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e'
+            checkpoint='a7acb02089c2a93964a35d8fa005408e92eb6d7e'
+            # Publish the normal merge as a separate ancestor. The exact tree
+            # retains current main policy/dependencies and the reviewed feature.
+            for parent in (feature,main): git('merge-base','--is-ancestor',parent,'HEAD')
+            assert checkpoint in git('log','--first-parent','--format=%T','HEAD').splitlines()
+            expected={
+              '.github/workflows/protected-resident-model.yml':'M',
+              '.github/workflows/resident-current-main.yml':'D',
+              '.github/workflows/resident-installer-io.yml':'D',
+              '.github/workflows/resident-pinned-compiler.yml':'D',
+              'docs/IMPLEMENTATION_STATUS.md':'M',
+              'scripts/test-cargo-source-policy.py':'M',
+              'tests/integration/test-protected-resident-model-host-observation.py':'M',
+              'tests/integration/test-protected-resident-model-run.py':'M',
+            }
+            changes=git('diff','--no-renames','--name-status',checkpoint,'HEAD').splitlines()
+            pairs=[line.split('\t') for line in changes]
+            assert all(len(pair)==2 for pair in pairs)
+            assert len(pairs)==len(expected)
+            assert {name:status for status,name in pairs}==expected
+            # Keep the successful public execution recipe byte-identical except
+            # for routing it through the already admitted integration branch.
+            original=git('show',feature+':.github/workflows/resident-pinned-compiler.yml')
+            canonical=original.split('\n  public-model:\n',1)[1].rstrip()
+            canonical=canonical.replace('refs/heads/fix/resident-runtime-assembly-diagnostic-20261028',
+              'refs/heads/integration/resident-model-main-20261022')
+            assert public_job.rstrip()==canonical
+            return dict(main_parent=main,feature_parent=feature,normal_merge_tree=checkpoint,
+              consolidation_paths=expected,actual_recipe_preserved=True,
+              source_contracts_only=True,actual_model_execution=False,guest_boot=False,
+              private_workload_acceptance=False,hardware_attestation=False)
+          public_job=pathlib.Path('.github/workflows/protected-resident-model.yml').read_text().split('\n  public-model:\n',1)[1]
+          receipt=bind_composition(git,public_job)
+          receipt.update(version=1,source_commit=os.environ['GITHUB_SHA'],workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+            source_tree=git('rev-parse','HEAD^{tree}'),
+            source_blobs={name:git('rev-parse','HEAD:'+name) for name,status in receipt['consolidation_paths'].items() if status=='M'})
+          pathlib.Path('resident-model-evidence/source.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+          PYBIND
+
+      - name: Authenticate the existing exact compiler and public Cargo source policy
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+
+      - name: Install the existing reviewed Protobuf on this disposable runner
+        timeout-minutes: 10
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo apt-get -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
+          sudo apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+
+      - name: Check formatting before compilation and retain a correction on failure
+        id: format
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          umask 077
+          record_format() {
+            python3 -B - <<'PYFORMAT'
+          import hashlib,json,pathlib,subprocess
+          changed=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()
+          assert all(p.endswith('.rs') for p in changed)
+          receipt=dict(version=1,formatter_changed_files={p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in changed},
+                       tested_source_is_committed=not changed)
+          pathlib.Path('resident-model-evidence/format.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+          PYFORMAT
+          }
+          if cargo fmt --all -- --check > resident-model-evidence/format.log 2>&1; then
+            git diff --exit-code HEAD
+            : > resident-model-evidence/format.patch
+            record_format
+          else
+            restore_source() {
+              git restore --source=HEAD --worktree -- .
+            }
+            trap restore_source EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            if cargo fmt --all > resident-model-evidence/format-write.log 2>&1; then
+              formatter_status=0
+            else
+              formatter_status=$?
+            fi
+            git diff --binary --full-index --no-ext-diff --no-color HEAD -- \
+              > resident-model-evidence/format.patch
+            record_format
+            restore_source
+            trap - EXIT INT TERM
+            git diff --exit-code HEAD
+            printf 'Formatting check failed; correction captured; formatter exit: %s\n' "$formatter_status"
+            exit 1
+          fi
+
+      - name: Verify every maintained Python contract and the GNU packaging path
+        timeout-minutes: 42
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          sh -n packaging/protected-resident-model/init
+          for suite in scripts/test-provision-rust189.py scripts/test-cargo-source-policy.py \
+              tests/integration/test-protected-resident-binary-package.py \
+              tests/integration/test-protected-resident-model-workload.py \
+              tests/integration/test-protected-resident-model-build.py \
+              tests/integration/test-resident-model-debian.py \
+              tests/integration/test-protected-resident-model-install.py \
+              tests/integration/test-protected-resident-model-assemble.py \
+              tests/integration/test-protected-resident-model-run.py \
+              tests/integration/test-protected-resident-model-host-observation.py \
+              tests/integration/test-protected-resident-model-initrd.py \
+              tests/integration/test-protected-resident-initrd.py \
+              tests/integration/test-protected-resident-image.py; do
+            timeout --kill-after=5s 180s python3 -B "$suite" -v --buffer \
+              2>&1 | tee "resident-model-evidence/$(basename "$suite" .py).log"
+          done
+          python3 -B - <<'PYPYTHON'
+          import ast,json,pathlib,re
+          def verify_python_contracts(root, source):
+            expected={
+              'scripts/test-provision-rust189.py':18,
+              'scripts/test-cargo-source-policy.py':18,
+              'tests/integration/test-protected-resident-binary-package.py':1,
+              'tests/integration/test-protected-resident-model-workload.py':33,
+              'tests/integration/test-protected-resident-model-build.py':62,
+              'tests/integration/test-resident-model-debian.py':19,
+              'tests/integration/test-protected-resident-model-install.py':61,
+              'tests/integration/test-protected-resident-model-assemble.py':35,
+              'tests/integration/test-protected-resident-model-run.py':252,
+              'tests/integration/test-protected-resident-model-host-observation.py':20,
+              'tests/integration/test-protected-resident-model-initrd.py':31,
+              'tests/integration/test-protected-resident-initrd.py':21,
+              'tests/integration/test-protected-resident-image.py':158,
+            }
+            inventory={}
+            for name,count in expected.items():
+              tree=ast.parse(source(name).read_text())
+              names=sorted(cls.name+'.'+node.name for cls in tree.body if isinstance(cls,ast.ClassDef)
+                for node in cls.body if isinstance(node,ast.FunctionDef) and node.name.startswith('test_'))
+              assert len(names)==len(set(names))==count,name
+              raw=(root/(pathlib.Path(name).stem+'.log')).read_text()
+              assert re.findall(r'^Ran ([0-9]+) tests? in ',raw,re.M)==[str(count)],name
+              assert re.findall(r'^OK(?: .*)?$',raw,re.M)==['OK'],name
+              assert not re.search(r'\bskipped\b|^FAILED',raw,re.M),name
+              for test in names:
+                cls,method=test.split('.')
+                pattern=r'^'+re.escape(method)+r' \((?:[^() ]+\.)?'+re.escape(test)+r'\) \.\.\. ok$'
+                assert len(re.findall(pattern,raw,re.M))==1,(name,test)
+              inventory[name]=names
+            assert sum(map(len,inventory.values()))==729
+            return inventory
+          root=pathlib.Path('resident-model-evidence')
+          inventory=verify_python_contracts(root,pathlib.Path)
+          (root/'python-tests.json').write_text(json.dumps(dict(version=1,test_names=inventory,
+            guest_boot=False,model_execution=False,private_peer_admission=False),sort_keys=True)+'\n')
+          PYPYTHON
+
+      - name: Compile both affected crates
+        id: build
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-content -p volparossa --no-run 2>&1 | tee resident-model-evidence/build.log
+
+      - name: Test grants TLS lifecycle and unchanged native supervision
+        timeout-minutes: 24
+        run: |
+          set -euo pipefail
+          run_group() {
+            local label="$1" package="$2" filter="$3"
+            cargo test --locked --offline -p "$package" "$filter" -- --list 2>&1 | tee "resident-model-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p "$package" "$filter" 2>&1 | tee "resident-model-evidence/$label-test.log"
+          }
+          run_group grant volparossa-content provider::compute::resident_task::
+          run_group guest volparossa compute::resident_guest::
+          run_group resident volparossa compute::supervise::native_session::
+          run_group local volparossa compute::private_serve::tests::
+          run_group startup volparossa compute::supervise::tests::public_bubblewrap_stage
+          run_group descriptor volparossa-linux-uapi async_fd::tests::
+          timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-linux-uapi --doc OwnedAsyncFd \
+            2>&1 | tee resident-model-evidence/descriptor-doctest.log
+          python3 -B - <<'PYRUST'
+          import json,pathlib,re
+          root=pathlib.Path('resident-model-evidence'); groups={}; all_names=[]
+          labels=('grant','guest','resident','local','startup','descriptor')
+          for label in labels:
+            names=re.findall(r'^(.+): test$',(root/(label+'-inventory.log')).read_text(),re.M)
+            output=(root/(label+'-test.log')).read_text()
+            assert names and len(names)==len(set(names))
+            for name in names: assert len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$',output,re.M))==1
+            assert f'{len(names)} passed; 0 failed; 0 ignored;' in output
+            groups[label]=len(names); all_names.extend(names)
+          assert groups==dict(grant=22,guest=45,resident=41,local=30,startup=2,descriptor=3)
+          assert len(all_names)==len(set(all_names))
+          socket_tests={
+            'socket_preflight_accepts_owned_socket_without_an_observation',
+            'socket_preflight_preserves_exact_parent_validation_rejections',
+            'socket_preflight_distinguishes_metadata_type_and_owner_without_following_links',
+            'socket_diagnostic_io_kinds_are_closed_and_never_include_raw_errors',
+            'socket_diagnostic_is_optional_and_cannot_replace_the_original_error'}
+          assert {'compute::resident_guest::public_trial::tests::'+name for name in socket_tests} <= set(all_names)
+          connect_tests={
+            'connect_diagnostic_io_kinds_are_closed_and_never_include_raw_errors',
+            'connect_diagnostic_is_optional_and_cannot_replace_original_peer_error',
+            'connect_peer_check_preserves_original_io_owner_guard_and_success',
+            'connect_socket_preserves_original_io_and_success_guards'}
+          assert {'compute::resident_guest::public_trial::tests::'+name for name in connect_tests} <= set(all_names)
+          native_exit_tests={
+            'worker::tests::stdout_eof_retains_precleanup_exit_and_bounded_stderr_class',
+            'worker::tests::stdout_eof_retains_only_a_signal_observed_before_cleanup',
+            'worker::tests::live_child_stdout_eof_never_exports_cleanup_kill_status',
+            'worker::tests::unconfirmed_cleanup_returns_no_terminal_observation',
+            'tests::stdout_close_observation_preserves_primary_error_and_other_failure_shapes',
+            'tests::stdout_close_detail_accepts_only_legacy_null_or_closed_observation_matrix'}
+          assert {'compute::supervise::native_session::'+name for name in native_exit_tests} <= set(all_names)
+          required={
+            'compute::supervise::tests::public_bubblewrap_stage_matches_source_prefix_families_only',
+            'compute::supervise::tests::public_bubblewrap_stage_uses_existing_fragmented_prefix_without_changing_default_failure',
+            'compute::supervise::native_session::worker::tests::stdout_eof_carries_only_closed_public_bubblewrap_stage_after_join',
+            'compute::supervise::native_session::tests::public_bubblewrap_stages_preserve_ordinary_detail_and_require_stdout_close',
+            'compute::resident_guest::tests::public_bubblewrap_stage_frame_roundtrip_requires_exact_cleanup_and_scope'}
+          assert required<=set(all_names) and sum(groups.values())==143
+          assert '2 passed; 0 failed; 0 ignored;' in (root/'descriptor-doctest.log').read_text()
+          (root/'tests.json').write_text(json.dumps(dict(version=1,counts=groups,test_names=sorted(all_names),model_execution=False,guest_boot=False,private_peer_admission=False),sort_keys=True)+'\n')
+          PYRUST
+
+      - name: Lint affected code
+        if: always() && steps.build.outcome == 'success'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-content -p volparossa -p volparossa-linux-uapi --all-targets -- -D warnings 2>&1 | tee resident-model-evidence/clippy.log
+
+      - name: Verify tested source stayed equal to the committed candidate
+        if: always()
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json,os,pathlib,subprocess
+          root=pathlib.Path('resident-model-evidence')
+          source=json.loads((root/'source.json').read_text())
+          fmt=json.loads((root/'format.json').read_text())
+          def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+          assert git('rev-parse','HEAD')==source['source_commit']==os.environ['GITHUB_SHA']==os.environ['GITHUB_WORKFLOW_SHA']
+          assert git('rev-parse','HEAD^{tree}')==source['source_tree']
+          assert not git('diff','--name-only','HEAD')
+          assert fmt['tested_source_is_committed'] and not fmt['formatter_changed_files']
+          assert (root/'format.patch').stat().st_size==0
+          (root/'source-final.json').write_text(json.dumps(dict(version=1,source_commit=source['source_commit'],source_tree=source['source_tree'],tracked_source_unchanged=True),sort_keys=True)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        timeout-minutes: 3
+        with:
+          name: public-resident-model-contracts
+          path: resident-model-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+  public-model:
+    needs: contracts
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.scenario == 'public-model' &&
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      github.ref == 'refs/heads/integration/resident-model-main-20261022' &&
+      inputs.expected_source == github.sha && needs.contracts.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      EXPECTED_SOURCE: ${{ inputs.expected_source }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind explicit hosted source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_SHA" = "$EXPECTED_SOURCE"
+          test "$GITHUB_WORKFLOW_SHA" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Install official tools on the disposable hosted runner only
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            libguestfs-tools qemu-system-x86 qemu-utils cryptsetup-bin cloud-image-utils \
+            openssh-client openssl cpio zstd initramfs-tools-core dbus-user-session \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+      - name: Prepare only the disposable runner's user manager when absent
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          umask 077
+          if ! sudo -n systemctl is-active --quiet "user@$(id -u).service"; then
+            touch "$RUNNER_TEMP/vp-model-user-manager-owned-$GITHUB_RUN_ID"
+            sudo -n systemctl start "user@$(id -u).service"
+          fi
+          test -S "/run/user/$(id -u)/bus"
+      - name: Compile the same-source requester for the hosted operating system
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo build --locked --offline -p volparossa --bin volparossa
+          # Cargo may hardlink target/debug to target/debug/deps. Make an owned
+          # single-link copy; do not loosen the controller's executable guard.
+          test ! -e target/resident-public-requester
+          cp --no-clobber target/debug/volparossa target/resident-public-requester
+          chmod 0700 target/resident-public-requester
+          test "$(stat -c '%h' target/resident-public-requester)" = 1
+          cmp target/debug/volparossa target/resident-public-requester
+          python3 -B - <<'PY'
+          import os,runpy
+          # Recheck the authenticated payload and the already active source policy.
+          runpy.run_path('scripts/provision-rust189.py')['provision']('runner',dict(os.environ))
+          PY
+          git diff --exit-code HEAD
+      - name: Execute the public model trial with process-scoped KVM access
+        timeout-minutes: 245
+        run: |
+          set -euo pipefail
+          umask 077
+          launch_uid="$(id -u)"
+          launch_gid="$(stat -c '%g' /dev/kvm)"
+          [[ "$launch_uid" =~ ^[1-9][0-9]*$ && "$launch_gid" =~ ^[1-9][0-9]*$ ]]
+          kernel_release="$(uname -r)"
+          [[ "$kernel_release" =~ ^[0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          kernel_copy="$RUNNER_TEMP/vp-model-kernel-$GITHUB_RUN_ID"
+          # A bounded read only; no chmod/chown of the host kernel or KVM device.
+          (set -o noclobber
+            sudo -n /usr/bin/timeout --kill-after=2s 15s /usr/bin/dd \
+              "if=/boot/vmlinuz-$kernel_release" iflag=nofollow,count_bytes \
+              count=67108865 bs=1048576 status=none >"$kernel_copy")
+          sudo -n -- /usr/bin/setpriv --reuid="$launch_uid" --regid="$launch_gid" \
+            --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+            /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_SHA="$GITHUB_SHA" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" RUNNER_TEMP="$RUNNER_TEMP" \
+            VP_PUBLIC_BOOT_UID="$launch_uid" VP_PUBLIC_BOOT_KVM_GID="$launch_gid" \
+            python3 -B tests/integration/protected-resident-model-run.py --execute --yes \
+              --expected-source "$EXPECTED_SOURCE" --work "$RUNNER_TEMP/vp-resident-model-$GITHUB_RUN_ID" \
+              --appliance-kernel "$kernel_copy" --requester "$GITHUB_WORKSPACE/target/resident-public-requester"
+      - name: Restore only the user manager started by this job
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if test -f "$RUNNER_TEMP/vp-model-user-manager-owned-$GITHUB_RUN_ID"; then
+            sudo -n systemctl stop "user@$(id -u).service"
+            test "$(sudo -n systemctl show "user@$(id -u).service" --property=ActiveState --value)" = inactive
+          fi
+      - name: Verify source after the trial
+        if: always()
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          git diff --exit-code HEAD
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: public-resident-model-trial-${{ github.run_id }}
+          # Closed public receipts only. Never upload SSH/TLS/signing keys,
+          # guest filesystems, raw source inputs or the model payload directory.
+          path: |
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/install-build.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/install-runtime.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/build-cleanup.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/model-build.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/workload.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/initrd.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/sealed-inputs.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/requester.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/model-boot.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/corrupt-boot.json
+            ${{ runner.temp }}/vp-resident-model-${{ github.run_id }}/evidence/result.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -7,6 +7,24 @@ the documentation describes both implemented milestones and intended capabilitie
 [Project introduction](../README.md) · [Applications](applications/APPLICATIONS.md) ·
 [Common questions](FAQ.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
 
+## Sources of truth
+
+Each question has one owning reference. Summaries link to it instead of maintaining
+another copy of requirements, current failures or the integration queue.
+
+| Question | Owning reference |
+| --- | --- |
+| What are we building? | [GOAL](development/GOAL.md), including DPS and Studio/hosting. |
+| How must a component behave? | Its architecture, network, service or application contract below. |
+| What exists and what has actually passed? | [Implementation status](IMPLEMENTATION_STATUS.md), with exact source and evidence links; application-specific evidence stays in its repository. |
+| Which repository or retained PR should we work on next? | [Organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md); confirm live PR heads and checks before integration. |
+| How do we change and verify it? | [AGENTS](../AGENTS.md), [shared workflow](development/CODEX_WORKFLOW.md) and [testing](development/TESTING.md). |
+| Where is the earlier evidence? | [Archive](archive/README.md); historical instructions and pending states are not current authority. |
+
+The README and websites introduce the project; they are not additional execution
+ledgers. The maintenance index coordinates work without changing requirements or
+turning a retained experiment into an accepted feature.
+
 ## Find the right folder
 
 The top level keeps this guide, the FAQ and compact implementation status.

@@ -1700,7 +1700,7 @@ impl HelperClient {
                 // Only this already authenticated and request/digest-correlated response.
                 // Keep the old rejection and its cleanup semantics exactly unchanged.
                 if let Some(diagnostic) = diagnostic {
-                    *diagnostic = Some(acquire_diagnostic(&response.diagnostic_code));
+                    *diagnostic = Some(acquire_diagnostic(&response.diagnostic_code, result));
                 }
                 return Err(HelperClientError::Rejected(result));
             }
@@ -1744,8 +1744,11 @@ impl HelperClient {
     }
 }
 
-fn acquire_diagnostic(code: &str) -> AcquireDiagnostic {
+fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
     match code {
+        "MPTCP_CONNECT_POLL_TIMED_OUT" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectPollTimedOut
+        }
         "BACKEND_RESULT_AMBIGUOUS" => AcquireDiagnostic::BackendResultAmbiguous,
         "STALE_BACKEND_RESULT" => AcquireDiagnostic::StaleBackendResult,
         "MPTCP_FLOW_IDENTITY_UNAVAILABLE" => AcquireDiagnostic::FlowIdentityUnavailable,
@@ -3901,9 +3904,33 @@ mod tests {
                 AcquireDiagnostic::ExpiredExtensionCleanupIncomplete,
             ),
             ("BACKEND_RESULT_AMBIGUOUS_EXTRA", AcquireDiagnostic::Unknown),
+            (
+                "MPTCP_CONNECT_POLL_TIMED_OUT",
+                AcquireDiagnostic::MptcpConnectPollTimedOut,
+            ),
+            (
+                "MPTCP_CONNECT_POLL_TIMED_OUT_EXTRA",
+                AcquireDiagnostic::Unknown,
+            ),
         ] {
-            assert_eq!(acquire_diagnostic(raw), expected);
-            assert!(!format!("{:?}", acquire_diagnostic(raw)).contains("PRIVATE_CANARY"));
+            assert_eq!(acquire_diagnostic(raw, HelperResult::Kernel), expected);
+            assert!(
+                !format!("{:?}", acquire_diagnostic(raw, HelperResult::Kernel))
+                    .contains("PRIVATE_CANARY")
+            );
+        }
+        for result in [
+            HelperResult::Capacity,
+            HelperResult::Unavailable,
+            HelperResult::NotFound,
+            HelperResult::CleanupIncomplete,
+            HelperResult::InvalidRequest,
+            HelperResult::Expired,
+        ] {
+            assert_eq!(
+                acquire_diagnostic("MPTCP_CONNECT_POLL_TIMED_OUT", result),
+                AcquireDiagnostic::Unknown
+            );
         }
     }
 
@@ -3926,6 +3953,10 @@ mod tests {
                 |response| response.diagnostic_code = "EXPIRED_EXTENSION_CLEANUP_INCOMPLETE".into(),
                 AcquireDiagnostic::ExpiredExtensionCleanupIncomplete,
             ),
+            (
+                |response| response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into(),
+                AcquireDiagnostic::MptcpConnectPollTimedOut,
+            ),
         ] {
             let (error, diagnostic) =
                 acquire_transport_rejection_observed(HelperResult::Kernel, alter, true).await;
@@ -3936,10 +3967,16 @@ mod tests {
             assert_eq!(diagnostic, Some(expected));
         }
         for alter in [
-            (|response: &mut HelperResponse| response.request_id[0] ^= 1)
-                as fn(&mut HelperResponse),
-            |response: &mut HelperResponse| response.operation_digest[0] ^= 1,
+            (|response: &mut HelperResponse| {
+                response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into();
+                response.request_id[0] ^= 1;
+            }) as fn(&mut HelperResponse),
             |response: &mut HelperResponse| {
+                response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into();
+                response.operation_digest[0] ^= 1;
+            },
+            |response: &mut HelperResponse| {
+                response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into();
                 response.outcome = Some(helper_response::Outcome::Empty(Empty {}));
             },
         ] {
@@ -3955,10 +3992,32 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_acquire_wrong_server_uid_never_observes_detail() {
-        let (error, diagnostic) =
-            acquire_transport_rejection_observed(HelperResult::Kernel, |_| {}, false).await;
+        let (error, diagnostic) = acquire_transport_rejection_observed(
+            HelperResult::Kernel,
+            |response| response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into(),
+            false,
+        )
+        .await;
         assert!(matches!(error, HelperClientError::UntrustedServer));
         assert_eq!(diagnostic, None);
+    }
+
+    #[tokio::test]
+    async fn fixture_acquire_poll_timeout_code_cannot_relabel_other_rejections() {
+        for result in [
+            HelperResult::CleanupIncomplete,
+            HelperResult::Capacity,
+            HelperResult::Unavailable,
+        ] {
+            let (error, diagnostic) = acquire_transport_rejection_observed(
+                result,
+                |response| response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into(),
+                true,
+            )
+            .await;
+            assert!(matches!(error, HelperClientError::Rejected(actual) if actual == result));
+            assert_eq!(diagnostic, Some(AcquireDiagnostic::Unknown));
+        }
     }
 
     #[tokio::test(start_paused = true)]
