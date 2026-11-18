@@ -3878,14 +3878,12 @@ fn acquire_transport_child_context(
         Ok(lease) => lease,
         Err(result) => return Ok((result, None, None, None)),
     };
-    let descriptor = match create_transport_socket_diagnosed(lease, acquire) {
+    let acquired = create_transport_socket_diagnosed(lease, acquire, deadline);
+    ensure_worker_deadline(deadline)?;
+    let descriptor = match acquired {
         Ok(descriptor) => descriptor,
         Err(failure) => return Ok(child_acquire_failure(&failure)),
     };
-    if ensure_worker_deadline(deadline).is_err() {
-        drop(descriptor);
-        return Err(WorkerV3Error::Deadline);
-    }
     Ok((
         InternalWorkerResult::Ok,
         Some(internal_worker_response::Outcome::TransportSocketReady(
@@ -14940,7 +14938,7 @@ mod tests {
             .expect("production child Acquire end");
         let acquire = &source[acquire_start..acquire_end];
         assert!(acquire.contains("context.transport_lease(acquire)"));
-        assert!(acquire.contains("create_transport_socket_diagnosed(lease, acquire)"));
+        assert!(acquire.contains("create_transport_socket_diagnosed(lease, acquire, deadline)"));
         assert!(acquire.contains("Some(descriptor)"));
 
         let loop_start = source

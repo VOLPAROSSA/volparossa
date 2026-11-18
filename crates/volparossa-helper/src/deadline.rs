@@ -237,25 +237,28 @@ fn wait_for_fd_events<F: AsFd>(
     deadline: HardDeadline,
     events_are_valid: impl Fn(PollFlags) -> bool,
 ) -> io::Result<()> {
+    let events = poll_fd_until(descriptor, required, deadline)?
+        .ok_or_else(|| io::Error::other("poll returned no readiness state"))?;
+    if !events_are_valid(events) {
+        return Err(io::Error::other("descriptor readiness is invalid"));
+    }
+    deadline.ensure_remaining()
+}
+
+/// Return the kernel event mask under a single timeout, retrying interrupted waits.
+/// The caller classifies the mask and checks the deadline before accepting readiness.
+pub(crate) fn poll_fd_until<F: AsFd>(
+    descriptor: &F,
+    required: PollFlags,
+    deadline: HardDeadline,
+) -> io::Result<Option<PollFlags>> {
     loop {
-        deadline.ensure_remaining()?;
         let mut descriptors = [PollFd::new(descriptor.as_fd(), required)];
-        let ready = match poll(&mut descriptors, deadline.poll_timeout()?) {
-            Ok(ready) => ready,
-            Err(nix::errno::Errno::EINTR) => continue,
+        match poll(&mut descriptors, deadline.poll_timeout()?) {
+            Ok(0) | Err(nix::errno::Errno::EINTR) => {}
+            Ok(_) => return Ok(descriptors[0].revents()),
             Err(error) => return Err(io::Error::from_raw_os_error(error as i32)),
-        };
-        if ready == 0 {
-            continue;
         }
-        let events = descriptors[0]
-            .revents()
-            .ok_or_else(|| io::Error::other("poll returned no readiness state"))?;
-        if !events_are_valid(events) {
-            return Err(io::Error::other("descriptor readiness is invalid"));
-        }
-        deadline.ensure_remaining()?;
-        return Ok(());
     }
 }
 
