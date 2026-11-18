@@ -391,6 +391,8 @@ Bouw gefaseerde uitrol, zichtbare status, pauzemogelijkheid en herstel bij mislu
 ## Uitvoering en voortgang
 Prioriteit is daadwerkelijk werkende functionaliteit. Schrap geen afgesproken functies en presenteer ontbrekende werking niet als voltooid. Werk in grotere, samenhangende gebruiksscenario’s die van begin tot eind uitvoerbaar zijn, met expliciete afhankelijkheden en resterende werkzaamheden.
 Gebruik tijdens het bouwen compilatie en gerichte functionele proeven, met behoud van privacygrenzen en bescherming van de ontwikkelhost. Bewijs de essentiële werking van echte datapaden, beschermde netwerkuitvoering, herstel, bevoegdheden, transactieconsistentie en automatische installatie voordat die als functioneel worden beschouwd. Presenteer simulaties, losse componenttests of lokale demonstraties niet als bewijs van een volledig werkende gedistribueerde dienst.
+Deze chat is de officiële centrale bouwsessie voor VOLPAROSSA. Oudere bouwsessies worden niet hervat. Beheer namens de eigenaar de repositories, pull requests, branches, worktrees, workflows, GitHub Actions en instellingen. Neem bruikbare wijzigingen over, sluit achterhaalde pull requests en ruim overbodige branches en worktrees op zodra de relevante bron en resultaten terug te vinden zijn.
+
 Integreer afgeronde mijlpalen regelmatig in main en ruim volledig geïntegreerde branches op zonder ongepubliceerd werk te verliezen. Beoordeel nieuwe ideeën expliciet op gevolgen voor architectuur, volgorde en resterend werk; laat begonnen integraties niet ongemerkt liggen.
 Meet voortgang aan aantoonbaar werkende gebruiksscenario’s. Werk README en overige documentatie gebundeld bij en houd visie, geïmplementeerde werking en resterend werk duidelijk gescheiden. Uitgebreide regressiecontroles, aanvullende hardening, verdere optimalisatie en releasepolish volgen nadat de gewenste functionaliteit is geïntegreerd.
 
@@ -402,6 +404,8 @@ Bouw voort op het bestaande werk en rond begonnen integraties af waar dat doelma
 Houd een beknopt, actueel uitvoeringsplan bij met de eerstvolgende aantoonbare mijlpalen, betrokken repositories, belangrijkste afhankelijkheden en resterende blokkades. Prioritering verandert de volgorde, niet de afgesproken functionaliteit, privacygrenzen of voltooiingscriteria.
 
 ## Organisatiebrede verbetering en publieke groei
+
+Houd de oplossingen elegant en efficiënt en onderbouw verbeteringen.
 
 Verbeter efficiëntie en kwaliteit in alle VOLPAROSSA-repositories naast de functionele
 ontwikkeling. Pak gemeten gedeelde knelpunten aan met samenhangende, omkeerbare
