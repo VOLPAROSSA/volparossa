@@ -98,6 +98,18 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   bound is 262,148 bytes, in addition to chunk buffers and decoded metadata.
   [Passing restore and streaming tests](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
   · [Earlier strict-lint failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44390773927)
+  The publisher's `content contribute` and the reader's `content site open`
+  now accept the exact reviewed manifest ID. The publisher rejected the
+  original release when instructed to contribute its newly signed successor,
+  even though the two releases authorize identical bytes. The reader refused
+  older, newer and conflicting envelopes before opening the browser listener.
+  The existing minimum revision and retained reader floor still apply. The
+  hosted run on `69ba30e8` passed 68 focused tests, formatting and strict
+  Clippy. Its isolated reader exercised the ordinary CLI and local HTTP
+  listener with a test peer interface. The first run stopped when its
+  isolated contribution test lacked the hosted namespace setup.
+  [Passing paired selection tests](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400389278)
+  · [Initial namespace setup failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44399182634)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -476,6 +488,17 @@ zero reserved bytes. Local cleanup and the guest network-state comparison
 passed. The run ended before the Image repair and all-copy deletion stages.
 [Retained archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44387064217/artifacts/14470925130)
 SHA-256 `8b37f49942e02d42f8be595c78f3b9fffd896066ecdc1b68da17a7b13c70d543`.
+
+The opt-in fixture on `b037a998` distinguishes an authenticated client MPTCP
+bind rejection (`EADDRINUSE`) from a connect poll timeout. The ordinary
+application still sees the same kernel failure category. The first hosted
+attempt on this revision passed its source checks, then stopped before VM
+startup because the runner's APT index offered no QEMU package. It produced
+no guest report. In the separate workspace quality run, strict Clippy flagged
+a narrowing cast in the 256 MiB site-layout test. Revision `53027324` uses
+a checked conversion for the block length.
+[Initial runner setup failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397819655/attempts/1)
+· [Original workspace check](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397448406)
 
 #### Automatic upload integration candidate
 
