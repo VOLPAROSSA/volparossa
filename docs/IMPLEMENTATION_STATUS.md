@@ -423,6 +423,12 @@ actual read. Owner startup, repair observation, restore, decryption and final
 join report separate stages. A closed exercise error survives subsequent owner
 teardown. The earlier generic error does not identify which call failed.
 
+[Run 44385364109](https://github.com/VOLPAROSSA/volparossa/actions/runs/44385364109)
+at `8e156da3` stopped in the source-contract step before VM preparation.
+The Image wiring test's isolated shell selector lacked the empty default for
+the newly integrated optional Studio evidence digest. The complete guest driver
+already initialized it. The test now supplies the same empty default.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
