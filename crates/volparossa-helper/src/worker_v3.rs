@@ -993,14 +993,12 @@ fn spawn_with_command_locked(
     observation_mode: SandboxObservationMode,
 ) -> Result<AuthenticatedWorker, WorkerV3Error> {
     let WorkerSpawnBinding {
-        parent_identity: _,
         worker_identity,
         context_id,
-        context_role: _,
-        path_id: _,
         generation,
         retained_environment,
         deadline,
+        ..
     } = binding;
     ensure_worker_deadline(deadline)?;
     let challenge = random_challenge()?;
@@ -1085,10 +1083,8 @@ fn spawn_with_command_locked(
         return Err(finish_launch_failure(process, error));
     }
     if !process.probe_alive() {
-        return Err(finish_launch_failure(
-            process,
-            WorkerV3Error::Dead(WorkerDeadReason::Unspecified),
-        ));
+        let error = WorkerV3Error::Dead(WorkerDeadReason::Unspecified);
+        return Err(finish_launch_failure(process, error));
     }
     if let Err(error) = parent_handshake(&process, observation, challenge, binding) {
         return Err(finish_launch_failure(process, error));
