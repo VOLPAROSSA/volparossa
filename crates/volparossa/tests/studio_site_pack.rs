@@ -12,7 +12,7 @@ use std::{
 };
 
 use sha2::{Digest as _, Sha256};
-use volparossa_content::site::{SITE_CONTENT_TYPE, SiteBundle};
+use volparossa_content::site::{MAX_SITE_ASSETS, SITE_CONTENT_TYPE, SiteBundle};
 
 #[test]
 #[ignore = "requires the real pinned Silex browser/export hosted fixture"]
@@ -119,4 +119,42 @@ fn actual_silex_export_packs_and_decodes_without_publication() {
             "network_published":false,"signing_authority_exercised":false,
             "ephemeral_fixture_signing":true,"local_viewer":viewer})
     );
+}
+
+#[test]
+fn full_asset_count_packs_with_a_small_file_descriptor_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("site");
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("index.html"), b"index").unwrap();
+    let mut deep = directory.clone();
+    for _ in 0..16 {
+        deep = deep.join("nested");
+        fs::create_dir(&deep).unwrap();
+    }
+    for n in 1..MAX_SITE_ASSETS {
+        fs::write(deep.join(format!("asset-{n}.txt")), n.to_string()).unwrap();
+    }
+    let output = temporary.path().join("site.bundle");
+    let result = Command::new("/usr/bin/prlimit")
+        .args(["--nofile=64:64", "--", env!("CARGO_BIN_EXE_volparossa")])
+        .args(["content", "site", "pack", "--directory"])
+        .arg(&directory)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let bundle = SiteBundle::decode(fs::read(output).unwrap()).unwrap();
+    assert_eq!(bundle.asset_count(), MAX_SITE_ASSETS);
+    assert_eq!(bundle.asset("/index.html").unwrap().bytes, b"index");
+    let prefix = "/nested".repeat(16);
+    for n in 1..MAX_SITE_ASSETS {
+        let path = format!("{prefix}/asset-{n}.txt");
+        assert_eq!(bundle.asset(&path).unwrap().bytes, n.to_string().as_bytes());
+    }
 }
