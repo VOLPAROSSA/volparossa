@@ -33,6 +33,10 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ### Development branches — 18 November 2026
 
+- The [integrated Core quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44372813034)
+  passed its Storage contracts, build, integration and unprivileged quality
+  jobs on `dc5a1bac`. The topology and application trials below identify
+  the source revisions they each exercised.
 - **Studio** saved an edited page, reopened it in a fresh browser context,
   verified its text and 37 px styling, and exported it. The Core CLI packed
   the four files from the 1,474-byte ZIP and the production decoder verified
@@ -79,11 +83,30 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   `178592a3`.
   [Initial VM failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368961729)
   · [Corrected Cloud source](https://github.com/VOLPAROSSA/volparossa-cloud/commit/178592a3881d49f839f7716a154f7ef446ecbda5)
+  On Core `94ba2fb8` and Cloud `178592a3`, the real OpenCloud Files UI
+  uploaded 262,145 synthetic bytes and received HTTP 201. The fixture removed
+  both local ciphertext copies and stopped one provider. A restarted browser
+  and service downloaded the file twice. Baseline restores, exact charges,
+  retirement of sixteen peer copies and zero remaining test objects passed.
+  [Successful Cloud topology](https://github.com/VOLPAROSSA/volparossa/actions/runs/44374814775)
+  · [Source bindings and receipt hashes](https://github.com/VOLPAROSSA/volparossa-cloud/blob/08f3d2551ed80372693df4a69fcef70eef67fa02/docs/OWNER_UPLOADS.md#owner-upload-and-recovery-on-18-november-2026)
+- **Mail** now connects from the browser and lets the account owner recheck
+  a reported import after an interrupted metadata lookup. Chromium 154 exercised
+  its actual form with a synthetic JMAP fixture. It performed one upload, one
+  import and two readbacks for the exact same message. The earlier browser code
+  failed before issuing its first request. Fourteen connector tests and 25
+  Python source checks passed locally.
+  [Mail development source](https://github.com/VOLPAROSSA/volparossa-mail/commit/650e96a56a77e0300a5aae7d36fa5db9233ab201)
 - **Weather** compares IFS and AIFS 2 m temperature forecasts against supplied
   public station observations on matched runs, grids and observation times.
   The CLI reports signed and absolute error, coverage and exclusions. Its
-  synthetic fixture scores two of three times. An independent historical
-  station dataset with matched forecasts is still needed for a skill estimate.
+  synthetic fixture scores two of three times. A separate archive comparison
+  at Berlin-Tempelhof for 11 October found a provisional 11.6 °C station
+  observation and 24-hour forecasts of 10.73 °C (IFS) and 12.07 °C (AIFS).
+  Both forecasts used the same grid point, 7.55 km from the station. The two
+  archived fields were retrieved retrospectively. A skill comparison requires
+  a broader set of forecasts and independent observations.
+  [Archived fields, timings and station evidence](https://github.com/VOLPAROSSA/volparossa-weather/blob/f2c48306eefea26428cf94e1b2d2c5a54014752c/third_party/ecmwf-dwd-temperature-comparison.json)
   The NOAA cancellation fixture also checks that a live decoder child is
   joined. All 207 Node tests passed on the combined branch.
   [Weather source and usage](https://github.com/VOLPAROSSA/volparossa-weather/tree/ddb534f36c88206b06bc9bd938160418bd8d64cf)
@@ -177,7 +200,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | Core restore and deletion passed. Image publish stopped during stream opening and all three consumer providers retained usage. [Storage trial](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -191,9 +214,9 @@ is removed; behavioral tests and production paths are unchanged.
 Choose complete executable slices by shared dependency, demonstrated failure and
 system value; these priorities impose no fixed application/model/agent order.
 
-1. **Storage.** Resolve the Image publish failure during stream opening. Complete
-   Image and Cloud publish, repair, restore and deletion with confirmed zero
-   provider usage before running the joined upload trial.
+1. **Storage.** Complete the cross-application Image and Cloud maintenance run
+   through repair, cold restore, deletion and zero provider usage. Keep that
+   multi-application result distinct from the successful direct Cloud upload.
 2. **Protected model.** Build on the verified public resident session. Private
    execution requires separately authorized inputs and its own acceptance proof.
 3. **Studio publication:** bound request geometry and Storage reads before
