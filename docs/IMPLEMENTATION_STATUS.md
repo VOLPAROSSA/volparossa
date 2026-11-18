@@ -62,6 +62,16 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   The Silex export and browser rendering were exercised in the separate
   signed-site trial above.
   [Original topology run and artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44372819560)
+  On `da018320` the complete repair and offline retrieval run passed. The
+  independent holder retained nine chunks. A fresh client fetched all
+  2,097,628 bytes from this holder and verified four HTTP assets and a range
+  request with the publisher still stopped. All four network phases recorded
+  zero forbidden packets and zero capture drops. The earlier repair restart
+  recorded six mDNS leaves that matched the prior Linux group membership and
+  its retransmission window. The fixture removed all owned objects and the
+  guest host-state digests matched. The retained archive has SHA-256
+  `e1a135092225929c005577203e41a8f03539a1483d726b7101793948d923a6ad`.
+  [Successful full topology and archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44378301593)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -215,7 +225,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
-| Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
+| Studio | Real Silex saved-project export, signed local recovery and separate publisher-offline retrieval by a fresh client passed. The joined Silex-to-independent-browser scenario, shared AI and dynamic execution need their own evidence. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
