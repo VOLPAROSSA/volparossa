@@ -596,9 +596,12 @@ export async function boundedFile(path, maximum, { publicFile = false } = {}) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
-    check(before.isFile() && before.nlink === 1n && before.size > 0n && before.size <= BigInt(maximum)
+    check(before.isFile() && before.size > 0n && before.size <= BigInt(maximum)
       && (publicFile ? before.uid === 0n && (before.mode & 0o022n) === 0n
         : before.uid === BigInt(process.getuid()) && (before.mode & 0o7777n) === 0o600n), 'private_file');
+    // Core atomically renames a complete private manifest over the previous inode.
+    // A descriptor opened just before replacement can already be unlinked at first stat.
+    check(before.nlink === 1n, !publicFile && before.nlink === 0n ? 'input_changed' : 'private_file');
     const bytes = Buffer.alloc(Number(before.size) + 1);
     let offset = 0;
     while (offset < bytes.length) {
