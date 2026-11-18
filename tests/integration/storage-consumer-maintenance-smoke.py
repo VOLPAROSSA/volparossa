@@ -884,6 +884,39 @@ def cleanup_tree(root):
     return len(files), len(directories) + 1
 
 
+def release_failed_deposit(root, name, binary, client):
+    require(name in ('image', 'cloud') and PROFILE_VERSION == 10, 'release_scope')
+    failure = private_json(root / 'storage-consumer-publish.json')
+    require(type(failure) is dict and failure.get('phase') == 'publish' and failure.get('passed') is False
+        and failure.get('kind') == 'storage-consumer-maintenance', 'release_scope')
+    no_fixture_processes(root)
+    app = root / name
+    private_directory(app)
+    archive = app / 'archive'
+    try:
+        private_directory(archive)
+    except FileNotFoundError:
+        return 'no_archive'
+    binary, client = validate_locations(root, binary, client)
+    # The owner CLI verifies the signed plan and skips unattempted copies. A
+    # missing lease ID stays unconfirmed. Teardown never issues a fresh Reserve.
+    status, output, _ = run_child([binary, '--control-socket', client, 'storage', 'fragments', 'delete',
+        '--state', archive, *BASE['unlock'](app)], time.monotonic() + 90)
+    value = json.loads(output)
+    require(type(value) is dict and value.get('operation') == 'private_storage_fragments_delete'
+        and value.get('owner_signature_verified') is True and type(value.get('operation_complete')) is bool
+        and status == (0 if value['operation_complete'] else 1), 'release_report')
+    charge = value.get('physical_payload_charge_upper_bound')
+    require(type(charge) is int and charge >= 0, 'release_report')
+    if value['operation_complete']:
+        require(charge == 0, 'release_report')
+        return 'owner_confirmed'
+    return 'unconfirmed'
+
+
+RELEASE_RESULTS = ('no_archive', 'owner_confirmed', 'unconfirmed', 'unavailable')
+
+
 def cleanup(root):
     no_fixture_processes(root)
     files, directories = cleanup_tree(root) if root.exists() else (0, 0)
@@ -925,8 +958,16 @@ def main(arguments):
     if selected == 'quiesced' and len(arguments) == 2:
         no_fixture_processes(root)
         result = dict(version=1, consumer_processes_observed_quiesced=True, remote_cleanup_proven=False)
-    elif selected == 'cleanup' and len(arguments) == 2:
+    elif selected == 'release-known' and len(arguments) == 5:
+        print(release_failed_deposit(root, *arguments[2:]))
+        return
+    elif selected == 'cleanup' and len(arguments) in (2, 4):
+        release = arguments[2:]
+        require(not release or (PROFILE_VERSION == 10 and all(state in RELEASE_RESULTS for state in release)),
+            'release_report')
         result = cleanup(root)
+        if release:
+            result['failed_publish_owner_delete'] = dict(zip(('image', 'cloud'), release))
     else:
         deadline = time.monotonic() + WORK_SECONDS
         provision = tools()
