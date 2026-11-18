@@ -87,6 +87,17 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   The original signed bundle SHA-256 is
   `7a8ca0a33db9854bda2045777b1ce2d6890e5bb150d72e6839e3261d099ccc1e`.
   [Joined Studio hosting trial and both receipts](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
+- **Owner-authorized site restoration** passed on Core `8b3d09a6`. The ordinary
+  CLI activated a separately signed revision 3 that restored the exact bytes
+  of revision 1 after revision 2. Replaying the same request confirmed the
+  existing result and a competing signed candidate was refused. Reopening the
+  owner's cache yielded the expected signed site. All three releases must be
+  valid at activation. The result covers the local owner cache. Peer deployment
+  remains a separate authorized operation. The streaming validator retained
+  37 bytes of encoded index for a logical 256 MiB single-asset site. Its index
+  bound is 262,148 bytes, in addition to chunk buffers and decoded metadata.
+  [Passing restore and streaming tests](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
+  · [Earlier strict-lint failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44390773927)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -252,7 +263,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
-| Studio | Silex saved-project export, signing, independent retention and publisher-offline rendering in Firefox passed in one run. Revision rollback, dynamic execution and shared AI remain open. |
+| Studio | Silex saved-project export, signing, independent retention and publisher-offline rendering in Firefox passed in one run. Owner-local restoration to a new signed revision passed. Deployment of the restored revision, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
