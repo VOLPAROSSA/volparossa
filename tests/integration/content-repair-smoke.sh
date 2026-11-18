@@ -167,6 +167,7 @@ content_repair_studio_contribution() {
     python3 -B "$WORK/bin/studio-topology-input.py" "$site_input" "$STUDIO_EVIDENCE_SHA256" "$expected_commit" \
         >"$WORK/content-repair-site-public-input.json" || return 1
     site_key=$(jq -er '.publisher_key' "$WORK/content-repair-site-public-input.json") || return 1
+    site_manifest_id=$(jq -er '.studio_handoff.manifest_id' "$WORK/content-repair-site-public-input.json") || return 1
     for site_file in site.vps manifest.bin; do
         case $site_file in site.vps) site_destination=bundle.bin ;; *) site_destination=manifest.bin ;; esac
         content_repair_site_node relay5 sh -ec 'umask 077; set -C; cat >"$1"' sh "$site_source/$site_destination" \
@@ -175,6 +176,7 @@ content_repair_studio_contribution() {
     rm -- "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json" && rmdir -- "$site_input" || return 1
     content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content contribute \
         --manifest "$site_source/manifest.bin" --publisher-key "$site_key" --input "$site_source/bundle.bin" \
+        --expected-manifest-id "$site_manifest_id" \
         >"$WORK/content-repair-site-publish.json" || return 1
     jq -e --slurpfile e "$WORK/content-repair-site-public-input.json" '.operation == "content_contribute"
         and .network_publication and .serving and .original_signature_reused and (.private_keys_transferred == false)

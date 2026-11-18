@@ -195,7 +195,30 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("retained site revision differs"));
 
+    assert_contribution_rejects_original(root, &key_hex, &candidate);
     assert_restored_site(root, &key, &candidate, first_html);
+}
+
+fn assert_contribution_rejects_original(root: &Path, key: &str, candidate: &str) {
+    // Both releases authorize identical bytes under the same name and publisher.
+    let wrong_release = command(
+        root,
+        &[
+            "contribute",
+            "--manifest",
+            "1.pb",
+            "--publisher-key",
+            key,
+            "--expected-manifest-id",
+            candidate,
+            "--input",
+            "first.vps",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(!wrong_release.status.success());
+    assert!(String::from_utf8_lossy(&wrong_release.stderr).contains("pinned manifest identity"));
 }
 
 fn assert_restored_site(root: &Path, key: &[u8; 32], candidate: &str, first_html: &[u8]) {

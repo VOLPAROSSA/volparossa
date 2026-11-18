@@ -456,9 +456,8 @@ pub(crate) struct Contribute {
     /// Original public file to verify against the signed manifest before contribution.
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Coordinator's immutable publication binding, checked on the same decoded envelope
-    /// handed to the agent. The ordinary CLI explicitly trusts its supplied manifest/key.
-    #[arg(skip)]
+    /// Exact manifest ID from the reviewed publication receipt (64 hex characters).
+    #[arg(long, value_parser = parse_input_sha256)]
     expected_manifest_id: Option<[u8; 32]>,
     #[command(flatten)]
     limits: Limits,

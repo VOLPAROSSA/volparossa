@@ -23,12 +23,13 @@ the particular failing Core/browser substage follows. The
 and [preserved PR343 diff](../archive/integration-evidence-pr343-20261023.patch.txt)
 retain source bindings, diagnostics and remaining gates.
 
-To contribute an existing signed export, select its original file and the
-publisher key from the owner's review. This uses the normal local agent and
-requires an authorized public contribution.
+To contribute the exact release the owner reviewed, use its original file,
+trusted publisher key and manifest ID from the review. This uses the normal
+local agent and requires an authorized public contribution.
 
 ```sh
-volparossa content contribute --manifest manifest.bin --publisher-key "$PUBLISHER_KEY" --input site.vps
+volparossa content contribute --manifest manifest.bin --publisher-key "$PUBLISHER_KEY" \
+  --expected-manifest-id "$MANIFEST_ID" --input site.vps
 ```
 
 Core checks the signature, expiry, chunk hashes and whole-file digest before
