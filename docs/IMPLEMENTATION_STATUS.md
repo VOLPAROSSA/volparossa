@@ -217,6 +217,8 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   `82ee157d960cca4e2821d58984bfff46f0cab06fc46de29c591513f126709b40`.
   [Main-based native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416913278)
   · [Cloud change](https://github.com/VOLPAROSSA/volparossa-cloud/pull/26)
+  · [Core integration](https://github.com/VOLPAROSSA/volparossa/pull/385)
+  · [Original Core, browser and cleanup receipt](development/evidence/cloud-owner-resume-44416913278/cloud-private-upload-smoke.json)
 - **Image** restored a private album into a fresh Immich 3.2.4 instance on
   Image `ef9b2260` and upstream `db355f79`. An authenticated client uploaded
   and read an 8,516-byte PNG. With the server stopped, Image encrypted the
@@ -247,6 +249,16 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   [Joined trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44411540175)
   · [Application receipt](development/evidence/immich-peer-44411540175/immich-restore-result.json)
   · [Storage receipt](development/evidence/immich-peer-44411540175/image-topology-receipt.json)
+  A separate trial on the main-based Core `b3496f1b` and Image `fdbe8187`
+  repeated both peer restores and the fresh database, album and media recovery.
+  Both receipts bind the same new 51,283-byte ciphertext. The owner recovered
+  the original 8,516-byte picture and anonymous access was denied. All eight
+  copies were deleted and all three stores returned to zero. A preceding
+  attempt stopped while acquiring the pinned release, before it started Immich.
+  [Main-based trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44418787447)
+  · [Application receipt](development/evidence/immich-peer-44418787447/immich-restore-result.json)
+  · [Storage receipt](development/evidence/immich-peer-44418787447/image-topology-receipt.json)
+  · [Earlier acquisition failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44415319470)
 - **Mail** now connects from the browser and lets the account owner recheck
   a reported import after an interrupted metadata lookup. Chromium 154 exercised
   its actual form with a synthetic JMAP fixture. It performed one upload, one
