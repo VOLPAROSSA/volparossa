@@ -2372,7 +2372,8 @@ elif [ "$scenario" = browser-network ] || [ -n "$studio_evidence_sha256" ]; then
     sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
         provision /home/vpci/browser-network-runtime
     if [ -n "$studio_evidence_sha256" ]; then
-        test ! -e /opt/volparossa-studio-browser && test ! -L /opt/volparossa-studio-browser
+        test ! -e /opt/volparossa-studio-browser
+        test ! -L /opt/volparossa-studio-browser
         sudo -n mv -T -- /home/vpci/browser-network-runtime /opt/volparossa-studio-browser
     fi
 fi
@@ -2498,7 +2499,8 @@ if [ -n "$studio_evidence_sha256" ]; then
     site_input=/home/vpci/studio-topology-handoff
     python3 -B tests/integration/studio-topology-input.py "$site_input" "$studio_evidence_sha256" "$expected_commit" >/dev/null
     sudo -n chown root:root -- "$site_input" "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json"
-    test ! -e /run/volparossa-studio-handoff && test ! -L /run/volparossa-studio-handoff
+    test ! -e /run/volparossa-studio-handoff
+    test ! -L /run/volparossa-studio-handoff
     sudo -n mv -T -- "$site_input" /run/volparossa-studio-handoff
     set -- STUDIO_EVIDENCE_SHA256="$studio_evidence_sha256"
 elif [ "$scenario" = image-snapshot ]; then

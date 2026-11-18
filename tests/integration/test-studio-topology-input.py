@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import unittest
 
@@ -118,6 +119,33 @@ class StudioInput(unittest.TestCase):
             field[leaf] = value
             with self.subTest(location=location, leaf=leaf), self.assertRaises(ValueError):
                 verify(changed)
+
+    def test_host_guards_stop_before_source_probes_and_symlink_cleanup(self):
+        script = Path(__file__).with_name("studio-topology-host.sh").resolve()
+        git = self.root / "git"
+        git.write_text('#!/bin/sh\n: > "$SENTINEL"\nexit 91\n')
+        git.chmod(0o700)
+        sentinel = self.root / "source-probed"
+        env = dict(os.environ, PATH=f'{self.root}:/usr/bin:/bin', SENTINEL=str(sentinel),
+            GITHUB_ACTIONS="false", RUNNER_ENVIRONMENT="github-hosted", GITHUB_EVENT_NAME="workflow_dispatch",
+            GITHUB_WORKFLOW="Quality", STUDIO_PROOF_MODE="signed-site-topology", STUDIO_CORE_REVISION=CORE, GITHUB_SHA=CORE)
+        result = subprocess.run(["bash", str(script), "prepare"], env=env, capture_output=True, timeout=2)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(sentinel.exists())
+
+        # Exercise the exact cleanup branch in a private disposable directory.
+        target = self.root / "unrelated"
+        target.mkdir(mode=0o700)
+        original = target / "site.vps"
+        write(original, b"keep this unrelated file")
+        link = self.root / "studio-topology-handoff"
+        link.symlink_to(target, target_is_directory=True)
+        cleanup = script.read_text().split("\ncleanup)\n", 1)[1].split("\n    ;;", 1)[0]
+        result = subprocess.run(["bash", "-eu", "-c", cleanup], env=dict(os.environ, stage=str(link)),
+                                capture_output=True, timeout=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(original.read_bytes(), b"keep this unrelated file")
+        self.assertTrue(link.is_symlink())
 
     def test_rejects_extra_files_and_links(self):
         extra = self.root / "signing.key"
