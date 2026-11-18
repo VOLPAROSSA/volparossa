@@ -1934,19 +1934,16 @@ mod contribution_tests {
         );
     }
 
-    async fn retry_scenario() {
-        let root = tempfile::tempdir().unwrap();
+    fn signed_retry_fixture(
+        root: &Path,
+        mut bytes: &[u8],
+    ) -> (Contribute, VerifiedManifest, Vec<u8>) {
         let publisher_identity = SigningKey::from_bytes(&[43; 32]);
-        let mut bytes = vec![b'a'; volparossa_content::CHUNK_BYTES + 1];
-        *bytes.last_mut().unwrap() = b'b';
-        let mut cache = ChunkStore::create(
-            &root.path().join("source"),
-            limits().cache_limits().unwrap(),
-        )
-        .unwrap();
+        let mut cache =
+            ChunkStore::create(&root.join("source"), limits().cache_limits().unwrap()).unwrap();
         let now = now_seconds().unwrap();
         let signed = volparossa_content::publish(
-            &mut bytes.as_slice(),
+            &mut bytes,
             Publication {
                 metadata: Metadata {
                     name: "public-retry".into(),
@@ -1968,15 +1965,22 @@ mod contribution_tests {
             .unwrap();
         drop(cache);
         let original = signed.encode();
-        fs::write(root.path().join("original.pb"), &original).unwrap();
+        fs::write(root.join("original.pb"), &original).unwrap();
         let args = Contribute::existing(
-            root.path().join("original.pb"),
+            root.join("original.pb"),
             publisher_identity.verifying_key(),
-            root.path().join("source"),
+            root.join("source"),
             limits(),
         )
         .expect_manifest_id(*manifest.manifest_id());
-        drop(publisher_identity);
+        (args, manifest, original)
+    }
+
+    async fn retry_scenario() {
+        let root = tempfile::tempdir().unwrap();
+        let mut bytes = vec![b'a'; volparossa_content::CHUNK_BYTES + 1];
+        *bytes.last_mut().unwrap() = b'b';
+        let (args, manifest, original) = signed_retry_fixture(root.path(), &bytes);
         let input = root.path().join("signed-site.vps");
         fs::write(&input, &bytes).unwrap();
         let file_args = Contribute {
