@@ -94,6 +94,12 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   and rejected mismatched, interrupted and withdrawn responses. The combined
   Studio branch passed workspace tests, formatting and strict Clippy.
   [Core quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367875308)
+  On `4b4dadaa`, `content contribute --input` verified an existing signed
+  file through the same chunk handoff as an owner cache. The exact-signature
+  contribution test, strict Clippy and all three quality jobs passed. Cargo
+  reported 4,476 passed and 21 ignored. The later joined Studio KVM trial
+  exercised the same contribution path in its normal CLI.
+  [Signed-file quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44383997327)
 - **Cloud** exercised owner uploads, restart and private catalog recovery using
   HTTP, OpenPGP and the pinned OpenCloud SDK. GnuPG sockets now work beneath
   long owner-directory paths. On `d105f983`, 111 Node and 13 Python tests
