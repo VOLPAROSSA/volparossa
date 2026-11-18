@@ -171,6 +171,14 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   The NOAA cancellation fixture also checks that a live decoder child is
   joined. All 207 Node tests passed on the combined branch.
   [Weather source and usage](https://github.com/VOLPAROSSA/volparossa-weather/tree/ddb534f36c88206b06bc9bd938160418bd8d64cf)
+  The ordinary Weather verification CLI now accepts archived GRIB fields and
+  supplied public observations. For that same 24-hour forecast, it paired
+  four provisional observations from Berlin and Potsdam across three model
+  grid cells. Each model decoded each occupied cell once. The saved report
+  reproduced byte for byte from the cached fields, and 212 tests passed on
+  Weather `f850f74f`. These observations cover one nominal hour.
+  [Runnable archive example](https://github.com/VOLPAROSSA/volparossa-weather/tree/f850f74f7347d121f039115afb6e5fb1d43e12f5#score-cached-archive-fields-with-the-verification-cli)
+  · [Four-station report](https://github.com/VOLPAROSSA/volparossa-weather/blob/f850f74f7347d121f039115afb6e5fb1d43e12f5/third_party/ecmwf-dwd-archive-report.json)
 - **Map** clears an expired positioning-quality result when the Android
   activity or its window regains focus, and when a new assessment is requested.
   Eight synthetic Android/JNI emulator cases passed on `249266a8`, including
