@@ -22,9 +22,9 @@ on:
         type: boolean
         default: false
       studio_proof_mode:
-        description: 'Studio proof: retained viewer, signed recovery, or focused signed recovery compilation'
+        description: 'Studio proof: viewer, signed recovery/preflight, or independent hosting after publisher shutdown'
         type: choice
-        options: [viewer, signed-site-recovery, signed-site-preflight]
+        options: [viewer, signed-site-recovery, signed-site-preflight, signed-site-topology]
         default: viewer
       core_revision:
         description: 'Exact 40-hex Core revision, must equal this workflow revision'
@@ -204,7 +204,7 @@ jobs:
     name: Opt-in real Studio editor export and offline Core packaging
     if: github.event_name == 'workflow_dispatch' && inputs.studio_export_pack
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: ${{ inputs.studio_proof_mode == 'signed-site-topology' && 120 || 40 }}
     permissions:
       contents: read
     steps:
@@ -222,7 +222,7 @@ jobs:
           [[ "$STUDIO_REVISION" =~ ^[0-9a-f]{40}$ ]]
           test "$CORE_REVISION" = "$WORKFLOW_REVISION"
           case "$STUDIO_PROOF_MODE" in
-            viewer|signed-site-recovery|signed-site-preflight) ;;
+            viewer|signed-site-recovery|signed-site-preflight|signed-site-topology) ;;
             *) exit 1 ;;
           esac
 
@@ -260,6 +260,13 @@ jobs:
           test "$(git -C core rev-parse HEAD)" = "$STUDIO_CORE_REVISION"
           test "$(git -C studio rev-parse HEAD)" = "$STUDIO_REVISION"
           test "$STUDIO_CORE_REVISION" = "$GITHUB_SHA"
+          if [ "$STUDIO_PROOF_MODE" = signed-site-topology ]; then
+            python3 -B core/tests/integration/test-studio-topology-input.py
+            python3 -B core/tests/integration/test-studio-recipient-browser.py
+            python3 -B core/tests/integration/test-content-repair-smoke.py
+            python3 -B core/tests/integration/test-content-provider-site-smoke.py
+            (cd studio/integration/silex-export && python3 -B -m unittest -v test_topology_handoff)
+          fi
           python3 -B studio/integration/silex-export/test_contract.py
           python3 -B studio/integration/silex-export/test_lifecycle.py
           python3 -B studio/integration/silex-export/test_runtime_context.py
@@ -329,6 +336,15 @@ jobs:
               output.write('\n')
           PYTHON
 
+      - name: Prepare the pinned Debian 13 VM and native transport on this same runner
+        if: inputs.studio_proof_mode == 'signed-site-topology'
+        working-directory: core
+        env:
+          STUDIO_PROOF_MODE: ${{ inputs.studio_proof_mode }}
+          STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
+          STUDIO_REVISION: ${{ inputs.studio_revision }}
+        run: bash tests/integration/studio-topology-host.sh prepare
+
       - name: Real pinned editor export then actual signed local viewer and independent browser
         if: inputs.studio_proof_mode != 'signed-site-preflight'
         env:
@@ -336,16 +352,45 @@ jobs:
           STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
           STUDIO_REVISION: ${{ inputs.studio_revision }}
         run: |
-          if [ "$STUDIO_PROOF_MODE" = signed-site-recovery ]; then
+          if [ "$STUDIO_PROOF_MODE" = signed-site-recovery ] || [ "$STUDIO_PROOF_MODE" = signed-site-topology ]; then
             python3 -B studio/integration/silex-export/run.py \
               "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/silex" \
               "$RUNNER_TEMP/studio-export-receipt.json" \
-              --proof-mode signed-site-recovery
+              --proof-mode "$STUDIO_PROOF_MODE"
           else
             python3 -B studio/integration/silex-export/run.py \
               "$GITHUB_WORKSPACE/core" "$GITHUB_WORKSPACE/silex" \
               "$RUNNER_TEMP/studio-export-receipt.json"
           fi
+
+      - name: Retrieve this signed export from the independent holder after publisher shutdown
+        if: inputs.studio_proof_mode == 'signed-site-topology'
+        working-directory: core
+        env:
+          STUDIO_PROOF_MODE: ${{ inputs.studio_proof_mode }}
+          STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
+          STUDIO_REVISION: ${{ inputs.studio_revision }}
+        run: bash tests/integration/studio-topology-host.sh consume
+
+      - name: Remove the same-run signed bundle and manifest from private transport
+        if: always() && inputs.studio_proof_mode == 'signed-site-topology'
+        working-directory: core
+        env:
+          STUDIO_PROOF_MODE: ${{ inputs.studio_proof_mode }}
+          STUDIO_CORE_REVISION: ${{ inputs.core_revision }}
+          STUDIO_REVISION: ${{ inputs.studio_revision }}
+        run: bash tests/integration/studio-topology-host.sh cleanup
+
+      - name: Retain only the independent hosting and cleanup report
+        if: always() && inputs.studio_proof_mode == 'signed-site-topology'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: studio-offline-hosting-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/studio-topology-result/content-repair-smoke.json
+            ${{ runner.temp }}/studio-topology-result/studio-vm-cleanup.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Retain only bounded synthetic result including failure and cleanup status
         if: always()

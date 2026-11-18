@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Ordinary signed native-site CLI and HTTP proof; no browser engine or HTTPS origin claim."""
+"""Ordinary signed native-site CLI and HTTP proof, with opt-in Studio recipient rendering."""
 
 import hashlib
 import http.client
@@ -167,6 +167,13 @@ def validate_disconnected(snapshot):
             "cache-only operation retained or created a route")
 
 
+def expected_range(expected):
+    if "studio_handoff" in expected:
+        return expected["byte_range"]
+    media = assets()["/media.bin"][1]
+    return dict(path="/media.bin", start=101, end=4196, sha256=hashlib.sha256(media[101:4197]).hexdigest())
+
+
 def consume(arguments, cache_only=False):
     binary, control, cache, directory, parent_ns, client_ns, uid, gid, group = arguments
     uid, gid, group = int(uid), int(gid), int(group)
@@ -176,7 +183,7 @@ def consume(arguments, cache_only=False):
     expected = read(directory / "expected.json")
     require({entry.name for entry in directory.iterdir()} == {"expected.json"}, "viewer directory not fresh")
     command = [binary, "--control-socket", control, "content", "site", "open",
-               "--publisher-key", expected["publisher_key"], "--name", NAME, "--min-revision", "1",
+               "--publisher-key", expected["publisher_key"], "--name", expected["name"], "--min-revision", "1",
                "--cache", cache, "--min-free-bytes", "0", "--lifetime-seconds", "90"]
     if cache_only:
         command += ["--reuse-cache", "--cache-only"]
@@ -194,7 +201,7 @@ def consume(arguments, cache_only=False):
         ready = HTTPS["bounded_json_line"](process.stdout, deadline)
         require(ready["operation"] == "native_site_ready"
                 and ready["bytes"] == expected["bundle_bytes"] and ready["sha256"] == expected["bundle_sha256"]
-                and ready["publisher_key"] == expected["publisher_key"] and ready["name"] == NAME,
+                and ready["publisher_key"] == expected["publisher_key"] and ready["name"] == expected["name"],
                 "site Ready did not authenticate the exact ordinary publication")
         url = urlsplit(ready["site_url"])
         require(url.scheme == "http" and url.path == "/" and not url.query and not url.fragment
@@ -207,16 +214,23 @@ def consume(arguments, cache_only=False):
         files = list(spools[0].iterdir())
         require(len(files) == 1 and private(files[0]).st_size == ready["bytes"], "site spool incomplete")
         results = {}
-        for path, (_, data) in assets().items():
+        for path, asset in expected["assets"].items():
             target = "/" if path == "/index.html" else path + "?v=1" if path == "/main.css" else path
             result = http_request(url.port, url.netloc, "GET", target)
-            require(result["status"] == 200 and result["bytes"] == len(data)
-                    and result["sha256"] == hashlib.sha256(data).hexdigest(), "site asset changed")
+            require(result["status"] == 200 and result["bytes"] == asset["bytes"]
+                    and result["sha256"] == asset["sha256"], "site asset changed")
             results[path] = result
-        head = http_request(url.port, url.netloc, "HEAD", "/media.bin")
-        partial = http_request(url.port, url.netloc, "GET", "/media.bin", {"Range": "bytes=101-4196"})
+        sample = expected_range(expected)
+        head = http_request(url.port, url.netloc, "HEAD", sample["path"])
+        partial = http_request(url.port, url.netloc, "GET", sample["path"],
+                               {"Range": f'bytes={sample["start"]}-{sample["end"]}'})
         rejected = {"host": http_request(url.port, "unrelated.localhost", "GET", "/")["status"],
                     "traversal": http_request(url.port, url.netloc, "GET", "/../index.html")["status"]}
+        browser = {}
+        if "studio_handoff" in expected:
+            require(not cache_only, "Studio browser requires a fresh peer-backed retrieval")
+            renderer = runpy.run_path(str(HERE / "studio-recipient-browser.py"))
+            browser["recipient_browser"] = renderer["verify_browser"](url, expected, directory)
         require(time.time() < ready["expires_unix_seconds"], "HTTP outlived native authority")
         process.send_signal(signal.SIGTERM)
         final = HTTPS["bounded_json_line"](process.stdout, min(deadline, time.monotonic() + 5))
@@ -236,8 +250,8 @@ def consume(arguments, cache_only=False):
                     final={k: v for k, v in final.items() if k != "site_url"}, assets=results,
                     head=head, byte_range=partial, rejected=rejected, elapsed_ns=time.monotonic_ns()-started,
                     agent_cache=cache, cache_only=cache_only, before=before, after=after,
-                    no_manifest_argument=True, browser_engine_executed=False, sigterm_cleanup=True,
-                    listener_closed=True, private_spool_removed=True, spool_modes="0700/0600")
+                    no_manifest_argument=True, browser_engine_executed=bool(browser), sigterm_cleanup=True,
+                    listener_closed=True, private_spool_removed=True, spool_modes="0700/0600", **browser)
     finally:
         if process.poll() is None:
             process.terminate()
@@ -356,10 +370,10 @@ def validate_application(evidence, app, manifests, cache_only):
             "site sources are empty, repeated, unauthorized or nonlocal in cache-only mode")
     for receipt, operation in ((ready, "native_site_ready"), (final, "native_site_closed")):
         require(receipt["operation"] == operation and receipt["publisher_key"] == expected["publisher_key"]
-                and receipt["name"] == NAME and receipt["revision"] == 1 and receipt["assets"] == 4
+                and receipt["name"] == expected["name"] and receipt["revision"] == 1 and receipt["assets"] == len(expected["assets"])
                 and receipt["bytes"] == expected["bundle_bytes"]
                 and receipt["peer_bytes"] == (0 if cache_only else expected["bundle_bytes"])
-                and receipt["chunks"] == publication["chunks"] == 9
+                and receipt["chunks"] == publication["chunks"] == expected.get("chunks", 9)
                 and receipt["sha256"] == expected["bundle_sha256"] and receipt["manifest_id"] in manifests
                 and receipt["providers_used"] == len(provider_ids)
                 and set(receipt["provider_peer_ids"]) == set(provider_ids)
@@ -385,22 +399,31 @@ def validate_application(evidence, app, manifests, cache_only):
     require(app["consumer"] == app["cli"] and 0 < app["elapsed_ns"] <= 120_000_000_000
             and app["agent_cache"] == isolation["agent_cache"] and app["cache_only"] is cache_only
             and all(app[key] is True for key in ("no_manifest_argument", "sigterm_cleanup", "listener_closed", "private_spool_removed"))
-            and app["browser_engine_executed"] is False and app["spool_modes"] == "0700/0600",
+            and app["browser_engine_executed"] is ("studio_handoff" in expected) and app["spool_modes"] == "0700/0600",
             "site HTTP is not a bounded ordinary user operation")
+    if "studio_handoff" in expected:
+        receipt = app["recipient_browser"]
+        required = ("edited_page", "visible_marker", "computed_37px", "chart_decoded", "browser_closed", "profile_removed")
+        require(not cache_only and set(receipt) == set(required) | {"engine", "version", "chart_width", "chart_height"}
+                and all(receipt[key] is True for key in required) and receipt["engine"] == "firefox-esr"
+                and receipt["version"] == "140.16.0" and receipt["chart_width"] == 1024 and receipt["chart_height"] == 768,
+                "fresh recipient browser failed to render and clean up the independently hosted page and chart")
     require(set(app["assets"]) == set(expected["assets"]), "site asset coverage incomplete")
     for path, value in app["assets"].items():
         require(value["status"] == 200 and value["security_headers_verified"] is True
                 and all(value[key] == expected["assets"][path][key] for key in ("bytes", "sha256", "content_type"))
                 and value["content_length"] == str(value["bytes"]), "HTTP asset hash/type/length changed")
-    media = assets()["/media.bin"][1]
-    require(app["head"]["status"] == 200 and app["head"]["bytes"] == 0
-            and app["head"]["content_length"] == str(len(media))
+    sample = expected_range(expected)
+    length = expected["assets"][sample["path"]]["bytes"]
+    start, end = sample["start"], sample["end"]
+    require(0 <= start <= end < length and app["head"]["status"] == 200 and app["head"]["bytes"] == 0
+            and app["head"]["content_length"] == str(length)
             and app["head"]["security_headers_verified"] is True
-            and app["byte_range"]["status"] == 206 and app["byte_range"]["bytes"] == 4096
-            and app["byte_range"]["content_length"] == "4096"
+            and app["byte_range"]["status"] == 206 and app["byte_range"]["bytes"] == end - start + 1
+            and app["byte_range"]["content_length"] == str(end - start + 1)
             and app["byte_range"]["security_headers_verified"] is True
-            and app["byte_range"]["sha256"] == hashlib.sha256(media[101:4197]).hexdigest()
-            and app["byte_range"]["content_range"] == f"bytes 101-4196/{len(media)}"
+            and app["byte_range"]["sha256"] == sample["sha256"]
+            and app["byte_range"]["content_range"] == f"bytes {start}-{end}/{length}"
             and app["rejected"] == dict(host=400, traversal=404), "HEAD, actual byte range or Host/path rejection failed")
 
 

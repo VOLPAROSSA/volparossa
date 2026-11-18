@@ -89,15 +89,19 @@ def output_snapshot(path):
     return dict(bytes=len(data), sha256=SHA, mode="0600", path=str(path))
 
 
-def remove_site_acquisition(state):
+def remove_site_acquisition(state, expected=None):
     state = Path(state)
     require(state.is_absolute() and state.name == "state-relay4", "unexpected site acquisition root")
     SITE["private"](state, True)
     cache, output = state / "site-acquisition-cache", state / "site-acquired.vps"
     meta = SITE["private"](cache, True)
-    bundle = owned_file(output, meta.st_uid, meta.st_gid, SITE["BUNDLE_BYTES"])
+    size = expected["bundle_bytes"] if expected else SITE["BUNDLE_BYTES"]
+    sha = expected["bundle_sha256"] if expected else SITE["BUNDLE_SHA256"]
+    require(type(size) is int and 0 < size <= 32 * 1024 * 1024 and re.fullmatch(r"[0-9a-f]{64}", sha),
+            "invalid expected acquisition size or SHA-256")
+    bundle = owned_file(output, meta.st_uid, meta.st_gid, size)
     digest = hashlib.sha256(bundle).hexdigest()
-    require(len(bundle) == SITE["BUNDLE_BYTES"] and digest == SITE["BUNDLE_SHA256"], "wrong acquired site output")
+    require(len(bundle) == size and digest == sha, "wrong acquired site output")
     hashes = {hashlib.sha256(bundle[offset:offset + CHUNK]).hexdigest()
               for offset in range(0, len(bundle), CHUNK)}
     metadata = {".volparossa-owner-v1", ".volparossa-index-v1",
@@ -299,14 +303,32 @@ def validate_evidence(evidence):
 
 def validate_offline_site(site, peers, stopped):
     expected, publication = site["input"], site["publish"]
-    size = SITE["BUNDLE_BYTES"]
-    require(expected["name"] == SITE["NAME"] and expected["content_type"] == SITE["CONTENT_TYPE"]
-            and expected["assets"] == SITE["inventory"]() and expected["bundle_bytes"] == size
-            and expected["bundle_sha256"] == SITE["BUNDLE_SHA256"], "site fixture changed")
-    require(publication["operation"] == "content_publish" and publication["network_publication"] is True
+    if "studio_handoff" in expected:
+        handoff = expected["studio_handoff"]
+        studio = runpy.run_path(str(Path(__file__).with_name("studio-topology-input.py")))
+        studio["validate"](handoff)
+        size, chunks = handoff["bundle_bytes"], handoff["chunk_count"]
+        require(publication["operation"] == "content_contribute" and publication["original_signature_reused"] is True
+                and publication["private_keys_transferred"] is False and publication["ownership_changed"] is False
+                and publication["origin_authenticated"] is False and expected["bundle_bytes"] == size
+                and expected["chunks"] == chunks and expected["bundle_sha256"] == handoff["bundle_sha256"]
+                and expected["publisher_key"] == handoff["publisher_key"] and expected["name"] == handoff["name"]
+                and expected["content_type"] == SITE["CONTENT_TYPE"]
+                and {p: {"path": p, "sha256": a["sha256"], "bytes": a["bytes"]}
+                     for p, a in expected["assets"].items()} == {a["path"]: a for a in handoff["assets"]}
+                and publication["manifest_id"] == handoff["manifest_id"]
+                and publication["expires_unix_seconds"] == handoff["publication_expires_unix_seconds"],
+                "Studio site differs from original signed export or reader acquired new authority")
+    else:
+        size, chunks = SITE["BUNDLE_BYTES"], 9
+        require(expected["name"] == SITE["NAME"] and expected["content_type"] == SITE["CONTENT_TYPE"]
+                and expected["assets"] == SITE["inventory"]() and expected["bundle_bytes"] == size
+                and expected["bundle_sha256"] == SITE["BUNDLE_SHA256"] and publication["operation"] == "content_publish",
+                "site fixture changed")
+    require(publication["network_publication"] is True
             and publication["serving"] is True and publication["name"] == expected["name"]
             and publication["content_type"] == expected["content_type"]
-            and publication["revision"] == 1 and publication["bytes"] == size and publication["chunks"] == 9
+            and publication["revision"] == 1 and publication["bytes"] == size and publication["chunks"] == chunks
             and publication["publisher_key_hex"] == expected["publisher_key"]
             and re.fullmatch(r"[0-9a-f]{64}", expected["publisher_key"])
             and re.fullmatch(r"[0-9a-f]{64}", publication["manifest_id"])
@@ -325,7 +347,7 @@ def validate_offline_site(site, peers, stopped):
     holder = site["holder"]
     require(holder["serving"] is True and holder["replication_enabled"] is True
             and holder["replica_publications"] == holder["publications"] == 2
-            and holder["replica_chunks"] == 12 and holder["replica_bytes"] == 3 * CHUNK + size,
+            and holder["replica_chunks"] == 3 + chunks and holder["replica_bytes"] == 3 * CHUNK + size,
             "independent holder did not register the complete site")
     require(site["acquisition_removed"] == dict(temporary_output_removed=True, temporary_cache_removed=True,
             bytes=size, sha256=expected["bundle_sha256"]), "holder acquisition scratch remained")
@@ -341,7 +363,7 @@ def validate_offline_site(site, peers, stopped):
         SHARED["validate_phase"](phase, kind, peers, size)
         control = {peers[node] for node in RELAYS} - {slot["relay_peer_id"] for slot in phase["route"]["benchmark_slots"]}
         require(phase["layout"]["provider"]["node"] == supplier, "wrong protected site provider")
-        SHARED["validate_fetch"](receipt, size, 9, peers[supplier], control)
+        SHARED["validate_fetch"](receipt, size, chunks, peers[supplier], control)
     require(site["uptake"]["route"]["route_context_id"] != site["view"]["route"]["route_context_id"],
             "holder and reader reused the same route")
     SITE["validate_application"](dict(input=expected, publish=publication, expected_peers=peers, isolation=boundary,
@@ -414,8 +436,9 @@ def main(args):
     elif command == "output":
         result = output_snapshot(source)
     elif command == "remove-site-acquisition":
-        require(destination == "-", "site cleanup writes only its public receipt to stdout")
-        print(json.dumps(remove_site_acquisition(source), sort_keys=True))
+        expected = None if destination == "-" else json.load(sys.stdin)
+        require(destination in ("-", "expected-stdin"), "unexpected acquisition cleanup mode")
+        print(json.dumps(remove_site_acquisition(source, expected), sort_keys=True))
         return
     elif command == "evidence":
         result = build_evidence(Path(source))

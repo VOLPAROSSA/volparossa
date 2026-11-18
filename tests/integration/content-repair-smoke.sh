@@ -160,14 +160,31 @@ content_repair_site_node() (
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- "$@"
 )
 
-content_repair_site_acquire() {
-    PHASE=content-repair-site-publish
-    site_source=$WORK/state-relay5/site-publisher
-    site_cli=$binary_directory/volparossa
-    site_driver=$WORK/bin/content-provider-site-smoke.py
-    site_r5_control=$WORK/runtime-relay5/control/agent.sock
-    site_publisher_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay5.service) || return 1
-    content_repair_site_node relay5 mkdir -m 0700 -- "$site_source" || return 1
+content_repair_studio_contribution() {
+    site_input=/run/volparossa-studio-handoff
+    # Only this root process can read the guest transport source. The publisher
+    # receives the two original files via stdin inside its own private state.
+    python3 -B "$WORK/bin/studio-topology-input.py" "$site_input" "$STUDIO_EVIDENCE_SHA256" "$expected_commit" \
+        >"$WORK/content-repair-site-public-input.json" || return 1
+    site_key=$(jq -er '.publisher_key' "$WORK/content-repair-site-public-input.json") || return 1
+    for site_file in site.vps manifest.bin; do
+        case $site_file in site.vps) site_destination=bundle.bin ;; *) site_destination=manifest.bin ;; esac
+        content_repair_site_node relay5 sh -ec 'umask 077; set -C; cat >"$1"' sh "$site_source/$site_destination" \
+            <"$site_input/$site_file" || return 1
+    done
+    rm -- "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json" && rmdir -- "$site_input" || return 1
+    content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content contribute \
+        --manifest "$site_source/manifest.bin" --publisher-key "$site_key" --input "$site_source/bundle.bin" \
+        >"$WORK/content-repair-site-publish.json" || return 1
+    jq -e --slurpfile e "$WORK/content-repair-site-public-input.json" '.operation == "content_contribute"
+        and .network_publication and .serving and .original_signature_reused and (.private_keys_transferred == false)
+        and .manifest_id == $e[0].studio_handoff.manifest_id and .publisher_key_hex == $e[0].publisher_key
+        and .name == $e[0].name and .chunks == $e[0].chunks and .bytes == $e[0].bundle_bytes
+        and .expires_unix_seconds == $e[0].studio_handoff.publication_expires_unix_seconds' \
+        "$WORK/content-repair-site-publish.json" >/dev/null
+}
+
+content_repair_generated_publication() {
     content_repair_site_node relay5 python3 -B "$site_driver" init "$site_source" >"$WORK/content-repair-site-assets.json" || return 1
     content_repair_site_node relay5 "$site_cli" init --identity "$site_source/identity.key" \
         --passphrase-file "$site_source/passphrase" >"$WORK/content-repair-site-init.log" || return 1
@@ -183,6 +200,30 @@ content_repair_site_acquire() {
     jq -ce --arg key "$site_key" --arg hash "${site_sha_line%% *}" --slurpfile inventory "$WORK/content-repair-site-assets.json" \
         '$inventory[0] + {publisher_key:$key,bundle_sha256:$hash,bundle_bytes:.bytes}' "$WORK/content-repair-site-pack.json" \
         >"$WORK/content-repair-site-public-input.json" || return 1
+}
+
+content_repair_retains_site() {
+    jq -e --argjson chunks "$site_chunks" --argjson bytes "$site_bytes" \
+        '.serving and .replication_enabled and .publications == 2 and .replica_publications == 2
+        and .replica_chunks == (3 + $chunks) and .replica_bytes == (3 * 262144 + $bytes)' "$1" >/dev/null
+}
+
+content_repair_site_acquire() {
+    PHASE=content-repair-site-publish
+    site_source=$WORK/state-relay5/site-publisher
+    site_cli=$binary_directory/volparossa
+    site_driver=$WORK/bin/content-provider-site-smoke.py
+    site_r5_control=$WORK/runtime-relay5/control/agent.sock
+    site_publisher_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay5.service) || return 1
+    content_repair_site_node relay5 mkdir -m 0700 -- "$site_source" || return 1
+    if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ]; then
+        content_repair_studio_contribution || return 1
+    else
+        content_repair_generated_publication || return 1
+    fi
+    site_name=$(jq -er '.name' "$WORK/content-repair-site-public-input.json") || return 1
+    site_chunks=$(jq -er '.chunks' "$WORK/content-repair-site-publish.json") || return 1
+    site_bytes=$(jq -er '.bundle_bytes' "$WORK/content-repair-site-public-input.json") || return 1
     content_repair_site_node relay5 python3 -B "$site_driver" publisher-cleanup "$site_source" \
         >"$WORK/content-repair-site-source-removed.json" || return 1
     content_repair_site_node relay5 test ! -e "$site_source" || return 1
@@ -190,23 +231,21 @@ content_repair_site_acquire() {
     content_repair_isolation relay4 || return 1
     content_replication_capture uptake content-repair-site-uptake "$WORK/content-repair-repaired-live-selection.json" || return 1
     content_repair_site_node relay4 "$site_cli" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
-        content fetch-name --publisher-key "$site_key" --name disposable-native-static-site --min-revision 1 \
+        content fetch-name --publisher-key "$site_key" --name "$site_name" --min-revision 1 \
         --cache "$WORK/state-relay4/site-acquisition-cache" --local-output "$WORK/state-relay4/site-acquired.vps" \
         >"$WORK/content-repair-site-acquire.json" || return 1
     content_replication_snapshot relay4 content-repair-site-uptake-live || return 1
     stop_privacy_observers || return 1
     # The ordinary named download queues a separate contribution. Wait for all
-    # nine site chunks alongside the three already verified repair chunks.
+    # signed site chunks alongside the three already verified repair chunks.
     PHASE=content-repair-site-holder-retention
     site_deadline=$(($(date +%s) + 180))
     while [ "$(date +%s)" -lt "$site_deadline" ]; do
         if CONTENT_REPLICATION_COMMAND_TIMEOUT=3s content_replication_cli relay4 content status \
             >"$WORK/content-repair-site-holder.json" 2>"$WORK/content-repair-site-holder.err" \
-            && jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 2
-                and .replica_chunks == 12 and .replica_bytes == (3 * 262144 + 2097628)' \
-                "$WORK/content-repair-site-holder.json" >/dev/null; then
+            && content_repair_retains_site "$WORK/content-repair-site-holder.json"; then
             content_repair_site_node relay4 python3 -B "$WORK/bin/content-repair-smoke.py" \
-                remove-site-acquisition "$WORK/state-relay4" - >"$WORK/content-repair-site-acquisition-removed.json"
+                remove-site-acquisition "$WORK/state-relay4" expected-stdin <"$WORK/content-repair-site-public-input.json" >"$WORK/content-repair-site-acquisition-removed.json"
             return $?
         fi
         sleep 1
@@ -234,6 +273,13 @@ content_repair_site_view() {
     site_client_ns=$(ip netns exec "$CLIENT" readlink /proc/self/ns/net) || return 1
     content_repair_site_publisher_absent before || return 1
     content_repair_isolation client || return 1
+    if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ]; then
+        ip netns exec "$CLIENT" nft -f - <<EOF || return 1
+create table inet vp_studio_renderer
+add chain inet vp_studio_renderer output { type filter hook output priority -50; policy accept; }
+add rule inet vp_studio_renderer output meta skuid $WORKER_UID oifname != "lo" drop
+EOF
+    fi
     site_offline_begin=$(date +%s) || return 1
     content_replication_capture reserve-fetch content-repair-site-view "$WORK/content-repair-final-live-selection.json" || return 1
     timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" \
@@ -360,9 +406,7 @@ content_repair_run() {
     PHASE=content-repair-holder-offline
     content_repair_stop_node relay5 holder-offline || fail CONTENT_REPAIR_HOLDER_STILL_ONLINE
     content_replication_cli relay4 content status >"$WORK/content-repair-receiver-serving.json" || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
-    jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 2
-        and .replica_chunks == 12 and .replica_bytes == (3 * 262144 + 2097628)' \
-        "$WORK/content-repair-receiver-serving.json" >/dev/null || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
+    content_repair_retains_site "$WORK/content-repair-receiver-serving.json" || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
     repair_download=$WORK/state-client/content/repair-download
     repair_output=$WORK/state-client/content/repair-output.bin
     for repair_fresh in "$repair_download" "$repair_output"; do

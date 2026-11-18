@@ -19,6 +19,8 @@ host_tools_directory=
 output_directory=
 expected_commit=
 scenario=alpha
+studio_handoff=
+studio_evidence_sha256=
 code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
@@ -50,6 +52,7 @@ usage() {
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
+        '       content-repair optionally accepts --studio-handoff DIRECTORY --studio-evidence-sha256 SHA256.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
@@ -529,6 +532,10 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
+        --studio-handoff|--studio-evidence-sha256)
+            [ "$#" -ge 2 ] || exit 64
+            case $1 in --studio-handoff) studio_handoff=$2 ;; *) studio_evidence_sha256=$2 ;; esac
+            shift ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
@@ -624,7 +631,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$studio_handoff$studio_evidence_sha256" ]; then
         usage >&2
         exit 64
     fi
@@ -642,6 +649,12 @@ case $image_path:$output_directory in
     /*:/*) ;;
     *) exit 64 ;;
 esac
+if [ -n "$studio_handoff$studio_evidence_sha256" ]; then
+    [ "$scenario" = content-repair ] && [ "${studio_handoff##*/}" = studio-topology-handoff ] || exit 64
+    case $studio_handoff in /*) ;; *) exit 64 ;; esac
+    case $studio_evidence_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#studio_evidence_sha256}" -eq 64 ] || exit 64
+fi
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
 if [ "$scenario" != weather-decoder-abi ] && [ "$scenario" != wifi-mesh ] && [ "$scenario" != transaction-abci ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-native-coding ] && [ "$scenario" != agent-native-editor ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
@@ -707,6 +720,9 @@ qemu-system-x86_64 -accel help | grep -Fx kvm >/dev/null \
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPOSITORY=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)
+if [ -n "${studio_handoff:-}" ]; then
+    python3 -B "$HERE/studio-topology-input.py" "$studio_handoff" "$studio_evidence_sha256" "$expected_commit" >/dev/null
+fi
 MANIFEST=$REPOSITORY/tests/helper/debian13-amd64-image-v1.json
 IMAGE_FILENAME=debian-13-genericcloud-amd64-20260826-2582.qcow2
 IMAGE_SHA512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -795,13 +811,14 @@ elif [ "$scenario" = weather-decoder-abi ]; then
             printf '%s\n' 'Decoder ABI VM scratch requires non-memory-backed workspace storage' >&2
             exit 69 ;;
     esac
-elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ]; then
+elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ]; then
     # Every provider proof builds Rust in this 4 GiB guest. A growing qcow2
     # overlay on tmpfs otherwise competes directly with the guest's RAM.
     # Keep scratch beside validated workspace evidence, never in its export.
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=content-provider-kvm
+    [ -z "${studio_handoff:-}" ] || RUN_DIRECTORY_PREFIX=studio-topology-kvm
     [ -z "$browser_filter_bundle" ] || RUN_DIRECTORY_PREFIX=browser-filter-kvm
     [ -z "${weather_client_bundle:-}" ] || RUN_DIRECTORY_PREFIX=weather-client-kvm
     runner_scratch_filesystem=$(stat -f -c '%T' -- "$RUN_DIRECTORY_PARENT") || exit 69
@@ -911,7 +928,9 @@ cleanup() {
                   joined_core_acceptance:false}' >"$output_directory/weather-android-vm-cleanup.json"
         ); then status=1; fi
     fi
-    if [ "$scenario" = protected-quote ]; then
+    if [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ]; then
+        cleanup_report=protected-quote-vm-cleanup.json
+        [ -z "${studio_handoff:-}" ] || cleanup_report=studio-vm-cleanup.json
         quote_private_removed=false
         if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then quote_private_removed=true; fi
         [ "$quote_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
@@ -920,7 +939,7 @@ cleanup() {
                 --argjson removed "$quote_private_removed" \
                 '{schema_version:1,source_revision:$revision,qemu_started:($started == "yes"),
                   qemu_joined:($joined == "yes"),private_guest_state_removed:$removed}' \
-                >"$output_directory/protected-quote-vm-cleanup.json"); then
+                >"$output_directory/$cleanup_report"); then
             [ "$status" -ne 0 ] || status=1
         fi
     fi
@@ -2026,7 +2045,17 @@ browser_filter_manifest_sha256=none
 weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
 # Native and cooperative bundles share positions only in disjoint scenarios.
+studio_evidence_sha256=
 case $scenario in
+    content-repair)
+        case $# in
+            5) ;;
+            6) studio_evidence_sha256=$6
+               case $studio_evidence_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+               [ "${#studio_evidence_sha256}" -eq 64 ] || exit 64 ;;
+            *) exit 64 ;;
+        esac
+        ;;
     agent-native-coding|agent-native-editor)
         [ "$#" -eq 6 ] || exit 64
         native_runtime_sha256=${6:-none}
@@ -2254,7 +2283,7 @@ fi
 if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends gpg gpg-agent gpgconf tar
 fi
-if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$browser_filter_manifest_sha256" != none ] || [ "$weather_client_manifest_sha256" != none ]; then
+if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ -n "$studio_evidence_sha256" ] || [ "$browser_filter_manifest_sha256" != none ] || [ "$weather_client_manifest_sha256" != none ]; then
     # Exact pinned ESR is extracted separately, not installed; these are its
     # ordinary Debian dependencies plus the isolated browser/HTTPS fixture tools.
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
@@ -2338,10 +2367,14 @@ elif [ "$scenario" = cloud-private-upload ]; then
 elif [ "$scenario" = cloud-private-file ]; then
     guest_phase cloud-runtime-provision
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
-elif [ "$scenario" = browser-network ]; then
+elif [ "$scenario" = browser-network ] || [ -n "$studio_evidence_sha256" ]; then
     guest_phase browser-network-provision
     sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
         provision /home/vpci/browser-network-runtime
+    if [ -n "$studio_evidence_sha256" ]; then
+        test ! -e /opt/volparossa-studio-browser && test ! -L /opt/volparossa-studio-browser
+        sudo -n mv -T -- /home/vpci/browser-network-runtime /opt/volparossa-studio-browser
+    fi
 fi
 guest_phase build
 if [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
@@ -2460,7 +2493,15 @@ topology_scenario=alpha
 case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|cloud-upload-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
-if [ "$scenario" = image-snapshot ]; then
+if [ -n "$studio_evidence_sha256" ]; then
+    guest_phase studio-handoff-admission
+    site_input=/home/vpci/studio-topology-handoff
+    python3 -B tests/integration/studio-topology-input.py "$site_input" "$studio_evidence_sha256" "$expected_commit" >/dev/null
+    sudo -n chown root:root -- "$site_input" "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json"
+    test ! -e /run/volparossa-studio-handoff && test ! -L /run/volparossa-studio-handoff
+    sudo -n mv -T -- "$site_input" /run/volparossa-studio-handoff
+    set -- STUDIO_EVIDENCE_SHA256="$studio_evidence_sha256"
+elif [ "$scenario" = image-snapshot ]; then
     set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-upload ]; then
@@ -2795,6 +2836,13 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ -n "${studio_handoff:-}" ]; then
+    ssh_base mkdir -m 0700 /home/vpci/studio-topology-handoff
+    for studio_file in site.vps manifest.bin evidence.json; do
+        scp_to "$studio_handoff/$studio_file" "/home/vpci/studio-topology-handoff/$studio_file"
+        ssh_base chmod 0600 "/home/vpci/studio-topology-handoff/$studio_file"
+    done
+fi
 if [ "$scenario" = weather-decoder-abi ]; then scp_decoder_abi_inputs; fi
 if [ -n "$browser_filter_bundle" ]; then scp_to "$BROWSER_FILTER_ARCHIVE" /home/vpci/browser-filter.tar; fi
 if [ -n "$weather_client_bundle" ]; then scp_to "$WEATHER_CLIENT_ARCHIVE" /home/vpci/weather-client.tar; fi
@@ -2881,6 +2929,12 @@ case $scenario in
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
         fi
+        ;;
+    content-repair)
+        set --
+        [ -z "$studio_evidence_sha256" ] || set -- "$studio_evidence_sha256"
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
         ;;
     agent-native-coding|agent-native-editor)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
