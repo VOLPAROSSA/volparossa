@@ -662,6 +662,17 @@ Cloud publication, repair, cold restoration or acknowledged remote deletion.
 [Original evidence archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409967365/artifacts/14480386650)
 SHA-256 `a5895c3e122b8559b9703b1bb0b3b9482c90152668cd5b4e850938ae7541a1e4`.
 
+The foreground deposit now allows one new TLS handshake per copy after a
+correlated timeout before READY, within the original exchange deadline.
+The framed owner/provider test reopened its original journal after losing the
+first Reserve confirmation. It retained the first acknowledged chunk, rejected
+a subsequent authentication failure, completed the original lease and read the
+exact bytes back. Deletion returned provider use to zero. The test used the
+real SQLite provider and a controlled local IPC transport. It passed in the
+default-branch change's workspace suite (4,459 passed, zero failed, 21 ignored).
+[Core integration](https://github.com/VOLPAROSSA/volparossa/pull/386)
+· [Quality and test log](https://github.com/VOLPAROSSA/volparossa/actions/runs/44418876629)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
