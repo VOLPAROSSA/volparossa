@@ -9,15 +9,15 @@ HERE = Path(__file__).resolve().parent
 PIN_PATH = HERE / "cloud-private-upload-pins-paired.json"
 BASE = runpy.run_path(str(HERE / "cloud-private-file-provision.py"))
 FILES = BASE["FILES"] | frozenset(("src/owner-uploads.mjs", "scripts/upload_lock.py",
-                                  "scripts/smoke_owner_upload_ui.py", "src/storage-maintenance.mjs",
-                                  "src/storage-upload-maintenance.mjs"))
+                                  "scripts/smoke_owner_upload_ui.py"))
+PAIRED_FILES = FILES | {"src/storage-maintenance.mjs", "src/storage-upload-maintenance.mjs"}
 
 
 def configured(retained=False):
     state = BASE["load_pins"].__globals__
     path = HERE / "cloud-retained-upload-pins.json" if retained else PIN_PATH
-    revision = "720f88f2a639ef5e2eecbba18c7bb2acb93f9645" if retained else "178592a3881d49f839f7716a154f7ef446ecbda5"
-    state.update(PINS=path, REVISION=revision, FILES=FILES)
+    revision = "396d5d4907f4859437b69b88943c18fefba9a2e8" if retained else "178592a3881d49f839f7716a154f7ef446ecbda5"
+    state.update(PINS=path, REVISION=revision, FILES=FILES if retained else PAIRED_FILES)
     BASE["load_pins"]()
     return state
 

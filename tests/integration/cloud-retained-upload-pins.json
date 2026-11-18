@@ -1,15 +1,15 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "720f88f2a639ef5e2eecbba18c7bb2acb93f9645",
+  "revision": "396d5d4907f4859437b69b88943c18fefba9a2e8",
   "files": {
     "LICENSE": {
       "bytes": 35149,
       "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
     },
     "THIRD_PARTY_LICENSES.md": {
-      "bytes": 4992,
-      "sha256": "0cdb217f59b5984273b507ec3d834e3f1fa9a6df0c887bacdf406d5c5a7bd188"
+      "bytes": 4936,
+      "sha256": "6c03279d8f1c7e0ea0a301d16544deb3a4a41f827a363585db36c76644d5c2c3"
     },
     "patches/opencloud-web-owner-recovery.patch": {
       "bytes": 16968,
@@ -28,12 +28,12 @@
       "sha256": "933fb1dffd39d8c89c73769d665c5e5b3419be999827569f8102f2a77af4e4e9"
     },
     "scripts/cloud-serve.mjs": {
-      "bytes": 11227,
-      "sha256": "175994c5921d6025f2141ecf62e6986727f35e5f979ce231e39037687e8ba7bf"
+      "bytes": 10113,
+      "sha256": "e99271c9440290553ba4a4635d2dfa039e352af00d1635beb246a9e164672c9a"
     },
     "scripts/private_catalog.py": {
-      "bytes": 5370,
-      "sha256": "a1a27b71a488b462cad9f509d9328d9994e23ea2869d6cc5e9239410cc065fd5"
+      "bytes": 5375,
+      "sha256": "c297457123c7f8c3e304d2bf31e6e6bf7317f788abe317037ded47adaef7a268"
     },
     "scripts/private_file.py": {
       "bytes": 13621,
@@ -64,12 +64,12 @@
       "sha256": "43e10509e2af910cb1899f40860200eb6c7a359b9108fdd7ba2f32320cfc61d9"
     },
     "src/owner-uploads.mjs": {
-      "bytes": 17181,
-      "sha256": "110096d647d38e761e38b0dc219a20983a327edc6d3c13904046ae3799213a9c"
+      "bytes": 16354,
+      "sha256": "336c7199a0739eab95da7172c158439f2b213895136db6fa29f383522cf1d40f"
     },
     "src/private-catalog.mjs": {
-      "bytes": 21139,
-      "sha256": "c8da0e49e961217bd8d6e39c6b15db5ffb638e45609a45c96d1cdf62af9bcbeb"
+      "bytes": 21008,
+      "sha256": "49fdf6af82d128a1056e32afadda167a3457700b1bb2a0de3a1ab18d354ce003"
     },
     "src/private-dav-server.mjs": {
       "bytes": 26216,
@@ -87,14 +87,6 @@
       "bytes": 6565,
       "sha256": "5a350701d31fc1add78bc0abbd44831157539a53b878041cd66f6d4626345f56"
     },
-    "src/storage-maintenance.mjs": {
-      "bytes": 4110,
-      "sha256": "2822b9088fc08502e1a7dad534a05e746a76650ee1c9f8b03bdfd733202cac8f"
-    },
-    "src/storage-upload-maintenance.mjs": {
-      "bytes": 21870,
-      "sha256": "147fd8a990b274ecbb6ee51525d6821cbd198c267e2c5d293567972b56e63da1"
-    },
     "third_party/opencloud-web-sdk.json": {
       "bytes": 837,
       "sha256": "014ebcb6d372b5d9205d53697bde1bba3193c48c82ac31d11b6955890e084de0"
@@ -104,16 +96,16 @@
       "sha256": "74cbcc4243138f7e830eb7886883a226b7c7288b41dd2c7937bfcf45007cabc0"
     },
     "third_party/volparossa-image-source.json": {
-      "bytes": 1347,
-      "sha256": "cda097e60a6eda249136d28895f5f23901ed2ea2793526dcfce6f518ce1e49bc"
+      "bytes": 1242,
+      "sha256": "2768e0cb866dc32879c23d31a84d7181608ccfb86566a4891455eb33e88b6e0d"
     },
     "vendor/volparossa-image/LICENSE": {
       "bytes": 35149,
       "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
     },
     "vendor/volparossa-image/core-storage.mjs": {
-      "bytes": 53669,
-      "sha256": "64d5eca0f4bd3de3b0898cbf60c905abc40d917a173c0ef897570c7cb43dcc4f"
+      "bytes": 35562,
+      "sha256": "e03b03de81678e3b097212d3f3b679caf6ae155493420df1f05c0d461c30d413"
     },
     "vendor/volparossa-image/immich_snapshot.py": {
       "bytes": 24955,

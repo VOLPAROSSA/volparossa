@@ -209,9 +209,11 @@ def verify_image_source(vendor):
     # The guest uses these three exact vendored files when running the Cloud adapter.
     # The source record itself is already bound by the Cloud pin.
     originals = ("scripts/immich_snapshot.py", "src/core-storage.mjs", "LICENSE")
+    image_revision = ("78cc1d6cc7012ac64bbd07408990b63ed025d127" if RETAINED
+        else "770a23fef01cb4cc69303a433b31b9df0d26b44e")
     require(vendor["version"] == 1 and vendor["local_modifications"] is False
         and vendor["repository"] == "https://github.com/VOLPAROSSA/volparossa-image"
-        and vendor["revision"] == "770a23fef01cb4cc69303a433b31b9df0d26b44e"
+        and vendor["revision"] == image_revision
         and set(vendor["files"]) == set(originals), "Cloud Image source differs")
     for original in originals:
         local = "vendor/volparossa-image/" + Path(original).name

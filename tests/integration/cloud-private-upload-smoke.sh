@@ -25,7 +25,7 @@ cloud_private_upload_run() {
     [ "$CLOUD_SOURCE" = /opt/volparossa-cloud ] || fail CLOUD_SOURCE_INVALID
     [ "$CLOUD_NODE" = /opt/volparossa-node/bin/node ] || fail CLOUD_NODE_INVALID
     case ${CLOUD_UPLOAD_PROFILE:-ordinary}:$CLOUD_REVISION in
-        ordinary:178592a3881d49f839f7716a154f7ef446ecbda5|retained-owner:720f88f2a639ef5e2eecbba18c7bb2acb93f9645) ;;
+        ordinary:178592a3881d49f839f7716a154f7ef446ecbda5|retained-owner:396d5d4907f4859437b69b88943c18fefba9a2e8) ;;
         *) fail CLOUD_REVISION_INVALID ;;
     esac
     if [ ! -f "$CLOUD_SOURCE/provision.json" ] || [ -L "$CLOUD_SOURCE/provision.json" ]; then

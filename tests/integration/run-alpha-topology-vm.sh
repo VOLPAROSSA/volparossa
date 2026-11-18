@@ -2775,7 +2775,7 @@ elif [ "$scenario" = cloud-private-upload ]; then
         CLOUD_REVISION=178592a3881d49f839f7716a154f7ef446ecbda5
     if [ "$cloud_owner_resume" = yes ]; then
         set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
-            CLOUD_UPLOAD_PROFILE=retained-owner CLOUD_REVISION=720f88f2a639ef5e2eecbba18c7bb2acb93f9645
+            CLOUD_UPLOAD_PROFILE=retained-owner CLOUD_REVISION=396d5d4907f4859437b69b88943c18fefba9a2e8
     fi
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
