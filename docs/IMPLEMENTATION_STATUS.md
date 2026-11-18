@@ -523,7 +523,9 @@ installed the packages and ran the twelve-node KVM trial on `b037a998`.
 Cloud again stopped before READY on the same three deposit reservations.
 Both copies of fragment 1 recorded eight connection attempts. Copy 0 of
 fragment 2 recorded seven, ending with `helper_other_rejection`. The source
-diagnostic retained a poll timeout for one exchange. The separate helper
+maps that final category to an unconfirmed acquisition and ends the retry
+loop. The app recorded no deadline for these requests. The fixture retained
+a poll timeout for one exchange. The separate helper
 log also recorded a bind rejection. The available records do not establish
 which copy experienced either event or the causes of the intermediate attempts.
 Providers A/B/C retained 6/5/2 leases with zero reserved bytes each. Local
