@@ -124,7 +124,9 @@ private_storage_consumer_run() {
     storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
     if [ -e "$WORK/u" ] || [ -L "$WORK/u" ]; then fail CONSUMER_OWNER_PARENT_NOT_NEW; fi
     consumer_user=$WORK/u/m
-    consumer_longest_socket=$consumer_user/image/restored-bundle/g-xxxxxxxx/S.gpg-agent
+    # Without a per-user runtime directory, the pinned GPG agent binds inside
+    # its temporary home. Cloud catalog restoration creates the deepest home.
+    consumer_longest_socket=$consumer_user/cloud/w/catalog-read-XXXXXX/g-xxxxxxxx/S.gpg-agent
     [ "${#consumer_longest_socket}" -lt 104 ] || fail CONSUMER_SOCKET_PATH_TOO_LONG
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/u" "$consumer_user"
     # Recheck the actual new owner root in the current client mount namespace;

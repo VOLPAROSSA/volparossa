@@ -11,6 +11,34 @@ TEXT = SCRIPT.read_text()
 
 
 class ConsumerShell(unittest.TestCase):
+    def test_catalog_restore_socket_fits_the_guest_root_before_owner_setup(self):
+        # Stop at the first install. Only the preflight runs with the real guest path shape.
+        script = '''
+. "$1"
+WORK=$2
+private_storage_maintenance=yes
+WORKER_UID=123
+WORKER_GID=123
+jq() { return 0; }
+storage_consumer_control_prepare() { return 0; }
+fail() { echo "$1"; exit 1; }
+install() { echo "$consumer_longest_socket"; exit 0; }
+private_storage_consumer_run
+'''
+        work = '/opt/va.' + 'a' * 32 + '.abcdef'
+        suffix = '/catalog-read-XXXXXX/g-xxxxxxxx/S.gpg-agent'
+        self.assertEqual(len((work + '/u/m/cloud/work' + suffix).encode()), 105)
+        for extra, length in (('', 102), ('x', 103), ('xx', 104)):
+            with self.subTest(length=length):
+                socket = work + extra + '/u/m/cloud/w' + suffix
+                self.assertEqual(len(socket.encode()), length)
+                result = subprocess.run(['sh', '-eu', '-c', script, 'inert', str(SCRIPT), work + extra],
+                    capture_output=True, text=True, timeout=5)
+                if length < 104:
+                    self.assertEqual((result.returncode, result.stdout.strip()), (0, socket))
+                else:
+                    self.assertEqual((result.returncode, result.stdout.strip()), (1, 'CONSUMER_SOCKET_PATH_TOO_LONG'))
+
     def test_joined_consumer_capacity_fits_both_objects_without_changing_other_profiles(self):
         script = '''
 . "$1"

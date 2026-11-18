@@ -238,6 +238,18 @@ category and bounded agent code. A failure outside a known stage is recorded
 as `unknown`. Image and Cloud were not reached in this run.
 [Foreground trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44332080434)
 
+On `49955656`, foreground progress succeeded. Core restored twice and deleted
+all eleven copies. Each Core provider reported zero leases and bytes. Consumer
+publication then stopped at `cloud_catalog_create/catalog_materialization_failed`.
+The catalog's single Storage restore returned verified and complete. Consumer
+providers A, B and C retained 6, 6 and 4 leases.
+[Catalog trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44341178239)
+
+Without a user runtime directory, the Cloud catalog's private GnuPG socket
+would use a 105-byte path. The pinned helper allows up to 103 bytes. The
+fixture now uses a 102-byte catalog socket path and checks it before consumer
+publication. The trial did not record which runtime directory GnuPG selected.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
