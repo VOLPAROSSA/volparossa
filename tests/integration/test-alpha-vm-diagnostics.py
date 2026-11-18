@@ -99,7 +99,7 @@ class VmFailureDiagnostics(unittest.TestCase):
         recovery = SOURCE.split("retrieval_bound=600s\n", 1)[1].split(
             '\ntar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-output.tar.gz"', 1)[0]
         script = "\n".join([
-            "set -eu", "expected_commit=" + "b" * 40, "scenario=wifi-link", "GUEST_STATUS=124",
+            "set -eu", "expected_commit=" + "b" * 40, "scenario=wifi-link", "decoder_mode=historical-v1", "GUEST_STATUS=124",
             'output_directory=$1', 'RUN_DIRECTORY=$1', 'CONSOLE=$1/console.log',
             'ssh_bounded() { test "$1" = 30s || exit 99; return 1; }',
             'scp_from_bounded() { test "$1" = 30s || exit 99; return 1; }',
