@@ -299,7 +299,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The direct Cloud UI upload and cold downloads passed. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -517,6 +517,20 @@ a narrowing cast in the 256 MiB site-layout test. Revision `53027324` uses
 a checked conversion for the block length.
 [Initial runner setup failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397819655/attempts/1)
 · [Original workspace check](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397448406)
+
+[Attempt 2](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397819655/attempts/2)
+installed the packages and ran the twelve-node KVM trial on `b037a998`.
+Cloud again stopped before READY on the same three deposit reservations.
+Both copies of fragment 1 recorded eight connection attempts. Copy 0 of
+fragment 2 recorded seven, ending with `helper_other_rejection`. The source
+diagnostic retained a poll timeout for one exchange. The separate helper
+log also recorded a bind rejection. The available records do not establish
+which copy experienced either event or the causes of the intermediate attempts.
+Providers A/B/C retained 6/5/2 leases with zero reserved bytes each. Local
+cleanup and the guest network-state comparison passed. The combined trial
+did not reach repair, cold restore or all-copy deletion.
+[Retained second-attempt archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397819655/artifacts/14475421816)
+has SHA-256 `47a1dbe1618480fb88f7e065a3769b70011cccf906e21b098c2177265a825a53`.
 
 #### Automatic upload integration candidate
 
