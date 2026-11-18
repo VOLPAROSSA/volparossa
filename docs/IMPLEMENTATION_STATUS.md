@@ -341,6 +341,21 @@ first stat. The observer now discards an otherwise valid private inode with zero
 links so its existing bounded poll can reopen the current path. Multiple links,
 wrong ownership or mode, and invalid file size remain fatal.
 
+The [assembled trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44375959400)
+at `c6a810a8` passed the 56-flow publication gate and both applications committed
+eight copies each. Exercise stopped at `image_repair/application_failed`.
+The three stores held 6/7/6 leases and zero reserved bytes. Local cleanup
+and the guest configuration comparison passed. The
+[artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44375959400/artifacts/14463864552)
+has SHA-256 `e54fbdd7eac7d52beeead56af4a644e935038ec8bedfeec72b541acd605a466e`.
+
+The Image fixture now observes repaired membership before the foreground
+restore, which supplies the verified post-read accounting. This removes an
+extra status command that would pause and restart the active owner before the
+actual read. Owner startup, repair observation, restore, decryption and final
+join report separate stages. A closed exercise error survives subsequent owner
+teardown. The earlier generic error does not identify which call failed.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization

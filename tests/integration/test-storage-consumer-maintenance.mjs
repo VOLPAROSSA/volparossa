@@ -1169,6 +1169,17 @@ test('four explicit phases and distinct deterministic incompressible fixture ide
   assert.throws(() => fixtureBytes('other'), /fixture_label/u);
 });
 
+test('Image exercise reports only known error codes from its own stages', () => {
+  const ctx = { provision: '1'.repeat(64), signal: new AbortController().signal, stage: 'image_owner_start' };
+  const failure = code => consumerFailureReport(ctx, 'exercise', Object.assign(new Error('private path'), { code }));
+  assert.equal(failure('maintenance_cleanup_unconfirmed').code, 'maintenance_cleanup_unconfirmed');
+  ctx.stage = 'image_repair';
+  assert.equal(failure('ENOENT').code, 'ENOENT');
+  assert.equal(failure('private path').code, 'application_failed');
+  ctx.stage = 'cloud_repair';
+  assert.equal(failure('ENOENT').code, 'application_failed');
+});
+
 test('same-fd private reads admit exact boundary and reject oversize, writable and symlink inputs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'storage-consumer-inert-'));
   t.after(() => rm(root, { recursive: true, force: true }));

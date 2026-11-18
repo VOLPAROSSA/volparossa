@@ -841,6 +841,16 @@ class ConsumerReceipts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M['validate_node_report'](current, 'finish', PROVISION, prepared())
 
+    def test_image_exercise_failure_codes_are_bound_to_the_exercise_stage(self):
+        value = dict(version=1, kind='storage-consumer-maintenance', phase='exercise', passed=False,
+            provision_sha256=PROVISION, stage='image_owner_start', code='maintenance_cleanup_unconfirmed',
+            cleanup_confirmed=False)
+        self.assertEqual(M['validate_node_report'](value, 'exercise', PROVISION), value)
+        for delta in (dict(phase='publish'), dict(stage='cloud_repair'), dict(code='private path')):
+            invalid = dict(value, **delta)
+            with self.assertRaises(ValueError):
+                M['validate_node_report'](invalid, invalid['phase'], PROVISION)
+
     def test_original_closed_node_failure_survives_without_private_stderr(self):
         value = dict(version=1, kind='storage-consumer-maintenance', phase='exercise', passed=False,
             provision_sha256=PROVISION, stage='image_decrypt', code='image_decrypt', cleanup_confirmed=False)
