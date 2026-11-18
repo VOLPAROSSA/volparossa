@@ -230,6 +230,14 @@ worker lease expiry before dispatch. The caller's earlier deadline takes precede
 The remaining acceptance check is Image and Cloud publication, restoration after
 provider withdrawal, deletion and independent zero usage through route turnover.
 
+On `ff268f3e`, the trial stopped earlier. The foreground `storage peer progress`
+command exited while the maintenance turn was marked `working`. The receipt
+contained no cause for that exit. The fixture now requests a diagnostic from
+that same call and can retain its exit status, typed operation stage, error
+category and bounded agent code. A failure outside a known stage is recorded
+as `unknown`. Image and Cloud were not reached in this run.
+[Foreground trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44332080434)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization

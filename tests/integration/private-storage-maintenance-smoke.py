@@ -760,7 +760,10 @@ def failure_receipt(error):
             code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
             **LIFECYCLE_DIAGNOSTIC, sampler=SAMPLER_DIAGNOSTIC or None)
     upload = UPLOAD_DIAGNOSTIC if STAGE == 'upload' else None
-    return dict(version=3 if upload is not None else 2, success=False,
+    version = 3 if upload is not None else 2
+    if STAGE == 'foreground' and TURN_DIAGNOSTIC and 'foreground_progress' in TURN_DIAGNOSTIC:
+        version = 4
+    return dict(version=version, success=False,
         kind='private-storage-maintenance-failure', stage=STAGE,
         code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
         turn=TURN_DIAGNOSTIC, retirement=RETIREMENT_DIAGNOSTIC,
@@ -988,6 +991,28 @@ def peer_args(root, key):
     return ['--state', root / 'foreground', '--provider-key', key, *unlock(root)]
 
 
+def foreground_progress_failure(exit_status, stdout, _stderr):
+    """Keep only the exit status and the closed diagnostic from this failed Progress call."""
+    if type(exit_status) is not int or not -128 <= exit_status <= 255 or exit_status == 0:
+        return
+    record = dict(exit_status=exit_status, diagnostic_state='missing', diagnostic=None)
+    TURN_DIAGNOSTIC['foreground_progress'] = record
+    if not stdout:
+        return
+    if len(stdout) > 1024:
+        record['diagnostic_state'] = 'oversize'
+        return
+    record['diagnostic_state'] = 'invalid'
+    try:
+        value = json.loads(stdout.decode('utf-8'), object_pairs_hook=CONSUMERS['unique'])
+        require(type(value) is dict and set(value) == {'version', 'operation', 'stage', 'category', 'agent_code'}
+            and type(value['version']) is int and value['version'] == 1 and value['operation'] == 'progress'
+            and CONSUMERS['APP']['valid_peer_failure'](value), 'foreground diagnostic')
+    except (ValueError, RecursionError):
+        return
+    record.update(diagnostic_state='observed', diagnostic=value)
+
+
 def run_turn(root, binary, client, key_b, interrupt=None, *, budget=None):
     """One real daemon-issued turn; no owner-side scheduler or direct provider socket."""
     global TURN_DIAGNOSTIC
@@ -1017,7 +1042,8 @@ def run_turn(root, binary, client, key_b, interrupt=None, *, budget=None):
             else:
                 require(interrupt == 'foreground', 'unknown interruption')
                 TURN_DIAGNOSTIC['substage'] = 'foreground_operation'
-                foreground = invoke(binary, client, ['storage', 'peer', 'progress', *peer_args(root, key_b)])
+                foreground = invoke(binary, client, ['storage', 'peer', 'progress', '--failure-diagnostic',
+                    *peer_args(root, key_b)], failure_observer=foreground_progress_failure)
                 require(foreground['committed'] is True and foreground['stored_bytes'] == len(FG),
                     'independent foreground operation not acknowledged')
         TURN_DIAGNOSTIC['substage'] = 'join_owner'
