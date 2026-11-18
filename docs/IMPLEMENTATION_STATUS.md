@@ -208,6 +208,15 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   The original smoke report SHA-256 is
   `4740742d8d3fa4f11d7ffba41bd50fb38e9a59a8f4df362c15977bf8892c6dae`.
   [Interrupted browser upload and owner recovery](https://github.com/VOLPAROSSA/volparossa/actions/runs/44411591772)
+  An independent run repeated the full interrupted upload, two owner resume
+  commands, two cold Firefox downloads and deletion using the changes based
+  directly on each project's `main`. Core `70430732` and Cloud `396d5d49`
+  preserved the same journal, leases and ciphertext across restart. After
+  deletion all three stores had zero leases, committed bytes and reservations.
+  The public evidence archive SHA-256 is
+  `82ee157d960cca4e2821d58984bfff46f0cab06fc46de29c591513f126709b40`.
+  [Main-based native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416913278)
+  · [Cloud change](https://github.com/VOLPAROSSA/volparossa-cloud/pull/26)
 - **Image** restored a private album into a fresh Immich 3.2.4 instance on
   Image `ef9b2260` and upstream `db355f79`. An authenticated client uploaded
   and read an 8,516-byte PNG. With the server stopped, Image encrypted the
