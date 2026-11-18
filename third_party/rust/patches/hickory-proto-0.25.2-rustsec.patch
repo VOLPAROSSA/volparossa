@@ -186,3 +186,25 @@ index c299524..4ba60db 100644
      #[test]
      fn test_size_of() {
          assert_eq!(u16::size_of(), 2);
+diff --git a/src/op/message.rs b/src/op/message.rs
+index 3689ea31..48b4e6fa 100644
+--- a/src/op/message.rs
++++ b/src/op/message.rs
+@@ -646,3 +646,3 @@ impl Message {
+     pub fn read_queries(decoder: &mut BinDecoder<'_>, count: usize) -> ProtoResult<Vec<Query>> {
+-        let mut queries = Vec::with_capacity(count);
++        let mut queries = Vec::with_capacity(count.min(8));
+         for _ in 0..count {
+@@ -664,3 +664,3 @@ impl Message {
+     ) -> ProtoResult<(Vec<Record>, Option<Edns>, Vec<Record>)> {
+-        let mut records: Vec<Record> = Vec::with_capacity(count);
++        let mut records: Vec<Record> = Vec::with_capacity(count.min(8));
+         let mut edns: Option<Edns> = None;
+@@ -1048,6 +1048,3 @@ impl<'r> BinDecodable<'r> for Message {
+         let count = header.query_count() as usize;
+-        let mut queries = Vec::with_capacity(count);
+-        for _ in 0..count {
+-            queries.push(Query::read(decoder)?);
+-        }
++        let queries = Self::read_queries(decoder, count)?;
+ 
