@@ -24,7 +24,7 @@ use socket2::Socket;
 use thiserror::Error;
 use volparossa_linux_uapi::{
     ensure_default_lifecycle_signal_dispositions, ensure_waitable_sigchld_disposition,
-    install_close_range_on_exec,
+    exit_process_immediately, install_close_range_on_exec,
 };
 
 use crate::{
@@ -326,10 +326,8 @@ fn reap_direct_child_after_channel_close_or_fail_stop(child: &mut Child) {
 
 #[cold]
 fn restart_reaper_fail_stop() -> ! {
-    // This is deliberately the safe rustix `exit_group(2)` wrapper rather than `abort(3)` or
-    // `std::process::exit`: it cannot dump core and cannot run cleanup or atexit handlers. The
-    // fixed nonzero status is also the live manager test's payload-free terminal witness.
-    rustix::runtime::exit_group(REAPER_FAIL_STOP_EXIT_STATUS)
+    // The fixed nonzero status is the live manager test's payload-free terminal witness.
+    exit_process_immediately(REAPER_FAIL_STOP_EXIT_STATUS)
 }
 
 /// Spawn, authenticate, attest and exactly reap one fixed cleanup child.
@@ -744,7 +742,7 @@ fn reject_fail_stop_live_proof_child(
             // A diagnostic setup failure may report ordinary status 1 only after exact reap.
             // Ambiguous retirement is a distinct non-coredumping fail-stop so it cannot be
             // mistaken for the status-70 witness and cannot return with a detached child.
-            rustix::runtime::exit_group(REAPER_LIVE_PROOF_SETUP_FAIL_STOP_EXIT_STATUS)
+            exit_process_immediately(REAPER_LIVE_PROOF_SETUP_FAIL_STOP_EXIT_STATUS)
         }
     }
 }
@@ -1362,7 +1360,9 @@ mod tests {
         assert!(production.contains("ensure_waitable_sigchld_disposition()"));
         assert!(production.contains("open_pidfd_reserve()"));
         assert!(production.contains("child.try_wait()"));
-        assert!(production.contains("rustix::runtime::exit_group(REAPER_FAIL_STOP_EXIT_STATUS)"));
+        assert!(production.contains("exit_process_immediately(REAPER_FAIL_STOP_EXIT_STATUS)"));
+        let setup_exit = "exit_process_immediately(REAPER_LIVE_PROOF_SETUP_FAIL_STOP_EXIT_STATUS)";
+        assert!(production.contains(setup_exit));
         assert!(!production.contains("std::process::abort()"));
         assert!(!production.contains("child.wait()"));
         assert!(!production.contains("child.kill()"));
