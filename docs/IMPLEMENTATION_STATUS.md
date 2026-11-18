@@ -246,6 +246,20 @@ repeated restore and all-copy deletion; SDK source checks do not replace it.
   subsequent reconciliation. Earlier Quality/CodeQL results likewise remain
   bound to their tested composition.
 
+**Current continuation (2026-11-06):** draft PR332 preserves feature parent
+`812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e` and current-main parent
+`235c2c9165c2c07e7cd3bca82ec8b70152bb8d90` in a normal merge. Earlier exact-812
+[Quality 40746019059](https://github.com/VOLPAROSSA/volparossa/actions/runs/40746019059)
+and [public trial 40744937287](https://github.com/VOLPAROSSA/volparossa/actions/runs/40744937287)
+succeeded; those results do not validate this new composition. The maintained
+[resident workflow](../.github/workflows/protected-resident-model.yml) replaces
+the three historical `resident-current-main`, `resident-installer-io` and
+`resident-pinned-compiler` wrappers, whose exact sources remain in
+[feature 812b25ed](https://github.com/VOLPAROSSA/volparossa/tree/812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e/.github/workflows).
+It retains their full existing source-test inventory and an explicitly
+dispatched public trial. Fresh hosted validation is pending; public fixture
+results do not establish private-workload acceptance.
+
 Keep raw host equality separate from configuration-checkpoint acceptance,
 unchanged public-job authority, bounded privacy-safe diagnostics and original
 failures. Public fixture execution is not confidential/private-workload acceptance. The
@@ -354,7 +368,7 @@ using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
 | Work | Retained branch / checkout | Resume boundary |
 | --- | --- | --- |
 | Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
-| Main resident composition | `integration/resident-model-main-20261022`, PR332 | Source gates pass at af9ecc3c and c29f67c5; ordinary merge results bind af9ecc3c, not later runtime compositions. |
+| Main resident composition | `integration/resident-model-main-20261022`, draft PR332 | Current continuation combines parents 812b25ed and 235c2c91; fresh hosted validation is pending. Historical successes remain bound to their exact sources. |
 | Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
 | Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
 | Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |
