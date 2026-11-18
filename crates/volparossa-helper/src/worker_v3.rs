@@ -7318,6 +7318,25 @@ impl WorkerRegistry {
             return Err(WorkerV3Error::Capacity);
         }
 
+        // The child reserves reply time from this deadline. Its connect and descriptor
+        // handoff must both fit inside the registered generation's remaining lease.
+        let deadline = if expires_at < deadline.expires_at()
+            && matches!(request.operation.as_ref(),
+                Some(internal_worker_request::Operation::AcquireTransportSocket(acquire))
+                    if acquire.is_client_mptcp_connect())
+        {
+            let tail = deadline.expires_at().duration_since(expires_at);
+            match deadline.before_tail(tail) {
+                Ok(shorter) => shorter,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    self.quarantine(context_id, generation)?;
+                    return Err(WorkerV3Error::Dead(WorkerDeadReason::LeaseExpired));
+                }
+                Err(error) => return Err(WorkerV3Error::Io(error)),
+            }
+        } else {
+            deadline
+        };
         let (channel, pinned_network_namespace) =
             self.prepare_call_owners(context_id, generation, request, deadline)?;
         ensure_worker_deadline(deadline)?;
@@ -22720,6 +22739,103 @@ mod tests {
                 "registry-locked namespace duplication must not probe the process: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn connected_mptcp_acquire_dispatch_uses_the_shorter_caller_or_lease_deadline() {
+        let context = [26; 16];
+        let connected = acquire(context, 17);
+        let mut listener = connected.clone();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(value)) =
+            listener.operation.as_mut()
+        else {
+            unreachable!("fixture is a socket acquisition")
+        };
+        value.role = InternalEndpointRole::Exit as i32;
+        value.descriptor_kind = InternalTransportSocketKind::MptcpListener as i32;
+        value.expected_remote = None;
+        let mut udp = listener.clone();
+        let Some(internal_worker_request::Operation::AcquireTransportSocket(value)) =
+            udp.operation.as_mut()
+        else {
+            unreachable!("fixture is a socket acquisition")
+        };
+        value.role = InternalEndpointRole::Client as i32;
+        value.descriptor_kind = InternalTransportSocketKind::QuicUdpUnconnected as i32;
+
+        let now = Instant::now();
+        let ttl = Duration::from_secs(5);
+        let expiry = now + ttl;
+        for (request, caller_seconds, clipped) in [
+            (&connected, 9, true),
+            (&connected, 5, false),
+            (&connected, 3, false),
+            (&listener, 9, false),
+            (&udp, 9, false),
+            (&destroy(context, 18), 9, false),
+        ] {
+            let caller = HardDeadline::at(now + Duration::from_secs(caller_seconds)).unwrap();
+            let mut registry = WorkerRegistry::new(1, 4, ttl);
+            let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+            let generation = registry
+                .register(context, process, ttl, now)
+                .expect("register");
+            registry.records.get_mut(&context).unwrap().stable_phase = StablePhase::Committed;
+            let planned = call(
+                registry
+                    .plan_until(context, generation, request, now, caller)
+                    .unwrap(),
+            );
+            let dispatched = planned.token.in_flight.deadline;
+            let expected = if clipped {
+                caller
+                    .before_tail(caller.expires_at().duration_since(expiry))
+                    .unwrap()
+            } else {
+                caller
+            };
+            assert_eq!(dispatched, expected);
+            assert_eq!(registry.records[&context].expires_at, expiry);
+            assert_eq!(
+                registry.tombstones.values().next().unwrap().expires_at,
+                expiry
+            );
+            let detached = registry.mark_ambiguous(planned.token).unwrap().unwrap();
+            drop(planned);
+            stop_and_purge(&mut registry, detached);
+        }
+    }
+
+    #[test]
+    fn lease_expiring_after_admission_sample_quarantines_before_acquire_dispatch() {
+        let context = [26; 16];
+        let sampled_at = Instant::now() - Duration::from_secs(2);
+        let ttl = Duration::from_secs(1);
+        let mut registry = WorkerRegistry::new(1, 4, ttl);
+        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context, process, ttl, sampled_at)
+            .expect("register");
+        registry.records.get_mut(&context).unwrap().stable_phase = StablePhase::Committed;
+        let caller = HardDeadline::after(CHANNEL_TIMEOUT).unwrap();
+        assert!(matches!(
+            registry.plan_until(
+                context,
+                generation,
+                &acquire(context, 17),
+                sampled_at,
+                caller
+            ),
+            Err(WorkerV3Error::Dead(WorkerDeadReason::LeaseExpired))
+        ));
+        assert!(registry.records[&context].quarantined);
+        assert!(registry.records[&context].in_flight.is_none());
+        assert!(registry.tombstones.is_empty());
+        let detached = registry
+            .detach_quarantined(context, generation)
+            .unwrap()
+            .unwrap();
+        stop_and_purge(&mut registry, detached);
     }
 
     #[test]

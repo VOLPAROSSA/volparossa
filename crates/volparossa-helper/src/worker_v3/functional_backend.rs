@@ -3927,9 +3927,7 @@ fn acquire_coordinator_origin(
         WorkerV3Error::RuntimeUnavailable => "runtime_unavailable",
         _ => return AcquireCleanupOrigin::CoordinatorOther,
     };
-    if request.role == InternalEndpointRole::Client as i32
-        && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
-    {
+    if request.is_client_mptcp_connect() {
         tracing::warn!(
             diagnostic_code = "WORKER_TRANSPORT_COORDINATOR_UNAVAILABLE",
             reason
@@ -3989,8 +3987,7 @@ fn classify_acquire_transport_execution(
             // The coordinator has authenticated this exact request-bound, descriptor-free
             // failure. Preserve only the precise existing connect-poll timeout, never infer
             // it from a log, missing errno, a generic Kernel result or another socket kind.
-            let poll_timed_out = request.role == InternalEndpointRole::Client as i32
-                && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+            let poll_timed_out = request.is_client_mptcp_connect()
                 && execution
                     .response
                     .acquire_failure

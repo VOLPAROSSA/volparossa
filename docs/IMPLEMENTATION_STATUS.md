@@ -210,14 +210,25 @@ remain open. The retained ZIP has SHA-256
 `5b4303e602b2ec8b6541cdc93b64421ae010b4b64c12f7858d8bf7bab77ea95b`.
 [Trial artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44301340772/artifacts/14428484479)
 
-The [follow-up trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44313217738)
-uses `8ae10f21` to distinguish worker lease and liveness failures.
-On `0b6de949`, the MPTCP worker bounds its connect poll by both five seconds
-and the original request deadline, reserving 250 ms to return the result.
-The failed-consumer sampler takes one final snapshot. In the inert incomplete-flow
-fixture this used eight control queries, down from 104, with the original
-application error preserved. The complete Image and Cloud lifecycle and
-independent zero provider usage still require a hosted trial on the corrected source.
+Two further hosted trials restored the Core archive and deleted all eleven copies.
+Each recorded zero leases and bytes at the three Core providers. On `8ae10f21`,
+Image FINALIZE waited 90–120 seconds for the challenge length on fragment 2.
+On `43e9027e`, Image RESERVE on that fragment hit the TLS deadline for copy 0
+and helper cleanup was unconfirmed during stream acquisition for copy 1.
+The helper independently recorded `lease_expired` during the publish phase.
+The same route had already served the preceding Core phases for over 561 seconds.
+The log cannot link that expiry to a particular copy. Cloud did not start.
+Consumer providers retained eight leases in the first trial and six in the second.
+[First trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44313217738) · [Second trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44315089745)
+
+The second source bounded the worker connect poll by the five-second cap and
+the original request deadline, reserving 250 ms to return the result. It also
+reduced the failed-consumer sampler to one final snapshot. The inert incomplete-flow
+fixture used eight control queries, down from 104, and preserved the original error.
+The next revision also caps a connected client MPTCP acquisition at the registered
+worker lease expiry before dispatch. The caller's earlier deadline takes precedence.
+The remaining acceptance check is Image and Cloud publication, restoration after
+provider withdrawal, deletion and independent zero usage through route turnover.
 
 #### Automatic upload integration candidate
 
