@@ -310,7 +310,10 @@ jobs:
             cargo fmt --all -- --check
             cargo test --locked --offline -p volparossa-content --lib site::
             cargo test --locked --offline -p volparossa --bin volparossa content::site::
+            cargo test --locked --offline -p volparossa --bin volparossa content::contribution_tests::
             cargo test --locked --offline -p volparossa --test studio_site_restore
+            cargo test --locked --offline -p volparossa-content --lib store::names::tests::cached_named_manifest_reopens_exact_bytes_without_rollback_or_expiry_renewal -- --exact
+            VOLPAROSSA_TEST_ALLOW_SUDO_NETNS=1 cargo test --locked --offline -p volparossa --test named_download_cli site::
             cargo build --locked --offline -p volparossa --bin volparossa
             cargo test --locked --offline -p volparossa-agent --test studio_signed_site_recovery --no-run
             cargo test --locked --offline -p volparossa-agent --test studio_signed_site_recovery -- --skip studio_signed_site_recovery_native_preview_and_browser
