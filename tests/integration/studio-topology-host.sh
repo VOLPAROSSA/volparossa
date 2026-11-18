@@ -68,7 +68,7 @@ consume)
     report="$output/content-repair-smoke.json"
     jq -e --arg rev "$GITHUB_SHA" '.source_revision == $rev and .qemu_started and .qemu_joined and .private_guest_state_removed' \
         "$output/studio-vm-cleanup.json" >/dev/null
-    python3 -B tests/integration/content-repair-smoke.py report "$report" "$GITHUB_SHA"
+    python3 -B tests/integration/content-repair-smoke.py report-studio "$report" "$GITHUB_SHA"
     jq -e --slurpfile producer "$projection" '.repair.offline_site.input == $producer[0]' "$report" >/dev/null
     for phase in before after; do
         test "$(sha256sum "$output/host-state-$phase.json" | cut -d' ' -f1)" = \

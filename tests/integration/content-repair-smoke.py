@@ -301,8 +301,34 @@ def validate_evidence(evidence):
     validate_offline_site(evidence["offline_site"], peers, offline)
 
 
+def validate_owner_restore(owner, expected, publication):
+    source, current, candidate = (owner[key] for key in ("source", "current", "candidate"))
+    for revision, release in enumerate((source, current, candidate), 1):
+        require(release["revision"] == revision and release["expires_unix_seconds"] > 0
+                and all(re.fullmatch(r"[0-9a-f]{64}", release[field]) for field in ("manifest_id", "bundle_sha256")),
+                "invalid reviewed release")
+    require(len({r["manifest_id"] for r in (source, current, candidate)}) == 3
+            and source["bundle_sha256"] == candidate["bundle_sha256"] == expected["bundle_sha256"] != current["bundle_sha256"]
+            and expected["restored_release"] == {"revision": 3, "manifest_id": candidate["manifest_id"]}
+            and publication["manifest_id"] == candidate["manifest_id"]
+            and publication["expires_unix_seconds"] == candidate["expires_unix_seconds"]
+            and owner["owner_state_removed"] is True and owner["restored_bytes_verified"] is True,
+            "restored deployment bytes, signed release or owner cleanup differs")
+    require(owner["restore"] == dict(schema_version=1, operation="local_site_restore", base="reviewed_initial_current",
+            state="activated", publisher_key=expected["publisher_key"], name=expected["name"],
+            source_manifest_id=source["manifest_id"], source_revision=1,
+            previous_manifest_id=current["manifest_id"], previous_revision=2, manifest_id=candidate["manifest_id"],
+            revision=3, bundle_sha256=expected["bundle_sha256"], bundle_bytes=expected["bundle_bytes"],
+            expires_unix_seconds=candidate["expires_unix_seconds"], predecessor_observed_in_this_operation=True,
+            network_publication=False, globally_latest=False), "owner did not activate the reviewed restored release")
+
+
 def validate_offline_site(site, peers, stopped):
     expected, publication = site["input"], site["publish"]
+    is_restored = "restored_release" in expected
+    require(is_restored == ("owner_restore" in site) and not (is_restored and "studio_handoff" in expected),
+            "incomplete or mixed publisher-offline site fixture")
+    revision = 3 if is_restored else 1
     if "studio_handoff" in expected:
         handoff = expected["studio_handoff"]
         studio = runpy.run_path(str(Path(__file__).with_name("studio-topology-input.py")))
@@ -323,12 +349,19 @@ def validate_offline_site(site, peers, stopped):
         size, chunks = SITE["BUNDLE_BYTES"], 9
         require(expected["name"] == SITE["NAME"] and expected["content_type"] == SITE["CONTENT_TYPE"]
                 and expected["assets"] == SITE["inventory"]() and expected["bundle_bytes"] == size
-                and expected["bundle_sha256"] == SITE["BUNDLE_SHA256"] and publication["operation"] == "content_publish",
+                and expected["bundle_sha256"] == SITE["BUNDLE_SHA256"],
                 "site fixture changed")
+        if is_restored:
+            require(publication["operation"] == "content_contribute" and publication["original_signature_reused"] is True
+                    and all(publication[key] is False for key in ("private_keys_transferred", "ownership_changed",
+                                                                 "origin_authenticated")), "owner signature was not deployed")
+            validate_owner_restore(site["owner_restore"], expected, publication)
+        else:
+            require(publication["operation"] == "content_publish", "legacy site publication missing")
     require(publication["network_publication"] is True
             and publication["serving"] is True and publication["name"] == expected["name"]
             and publication["content_type"] == expected["content_type"]
-            and publication["revision"] == 1 and publication["bytes"] == size and publication["chunks"] == chunks
+            and publication["revision"] == revision and publication["bytes"] == size and publication["chunks"] == chunks
             and publication["publisher_key_hex"] == expected["publisher_key"]
             and re.fullmatch(r"[0-9a-f]{64}", expected["publisher_key"])
             and re.fullmatch(r"[0-9a-f]{64}", publication["manifest_id"])
@@ -354,7 +387,7 @@ def validate_offline_site(site, peers, stopped):
     acquisition, app = site["acquire"], site["viewer"]
     require(acquisition["operation"] == "named_content_download"
             and acquisition["publisher_key"] == expected["publisher_key"] and acquisition["name"] == expected["name"]
-            and acquisition["revision"] == 1 and acquisition["manifest_id"] == publication["manifest_id"]
+            and acquisition["revision"] == revision and acquisition["manifest_id"] == publication["manifest_id"]
             and acquisition["publication_expires_unix_seconds"] == publication["expires_unix_seconds"]
             and acquisition["sha256"] == expected["bundle_sha256"] and acquisition["cache_only"] is False,
             "holder acquired a different site")
@@ -401,6 +434,8 @@ def build_evidence(work):
         ("input", "public-input"), ("publish", "publish"), ("source_removed", "source-removed"),
         ("acquire", "acquire"), ("acquisition_removed", "acquisition-removed"), ("holder", "holder"), ("viewer", "viewer"), ("cleanup", "viewer-cleanup"),
         ("boundary", "boundary"))}
+    if "restored_release" in site["input"]:
+        site["owner_restore"] = read(work / f"{prefix}site-owner-restore.json")
     for phase in ("uptake", "view"):
         site[phase] = dict(layout=read(work / f"{prefix}site-{phase}-layout.json"),
             route=read(work / f"{prefix}site-{phase}-live-selection.json"),
@@ -413,7 +448,7 @@ def build_evidence(work):
     return result
 
 
-def validate_report(report, revision):
+def validate_report(report, revision, variant=None):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and report["source_revision"] == revision
             and report["report_kind"] == "volparossa-content-repair" and report["schema_version"] == 2
             and report["publisher_offline_site_verified"] is True
@@ -426,10 +461,15 @@ def validate_report(report, revision):
                 "independent_publisher_node_offline_claimed", "future_availability_guaranteed", "full_alpha_acceptance_claimed")),
             "exact-source completed repair/cleanup or truthful scope missing")
     validate_evidence(report["repair"])
+    if variant is not None:
+        expected = report["repair"]["offline_site"]["input"]
+        require((variant == "restored" and "restored_release" in expected)
+                or (variant == "studio" and "studio_handoff" in expected),
+                "report does not prove the requested publisher-offline release")
 
 
 def main(args):
-    require(len(args) == 3, "usage: cache|output|evidence|report INPUT OUTPUT_OR_REVISION; remove-site-acquisition STATE -")
+    require(len(args) == 3, "usage: cache|output|evidence|report[-studio|-restored] INPUT OUTPUT_OR_REVISION; remove-site-acquisition STATE -")
     command, source, destination = args
     if command == "cache":
         result = cache_snapshot(source)
@@ -442,8 +482,8 @@ def main(args):
         return
     elif command == "evidence":
         result = build_evidence(Path(source))
-    elif command == "report":
-        validate_report(read(source), destination)
+    elif command in ("report", "report-studio", "report-restored"):
+        validate_report(read(source), destination, command.removeprefix("report-") if command != "report" else None)
         print(json.dumps(dict(success=True, report_kind="volparossa-content-repair")))
         return
     else:

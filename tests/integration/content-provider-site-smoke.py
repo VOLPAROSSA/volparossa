@@ -175,6 +175,20 @@ def expected_range(expected):
     return dict(path="/media.bin", start=101, end=4196, sha256=hashlib.sha256(media[101:4197]).hexdigest())
 
 
+def release_arguments(expected, cache_only):
+    if "restored_release" not in expected:
+        return ["--min-revision", "1"]
+    release = expected["restored_release"]
+    require(not cache_only and "studio_handoff" not in expected
+            and expected["name"] == NAME and expected["content_type"] == CONTENT_TYPE
+            and expected["bundle_sha256"] == BUNDLE_SHA256 and expected["bundle_bytes"] == BUNDLE_BYTES
+            and isinstance(release, dict) and set(release) == {"revision", "manifest_id"}
+            and type(release["revision"]) is int and release["revision"] == 3
+            and isinstance(release["manifest_id"], str) and re.fullmatch(r"[0-9a-f]{64}", release["manifest_id"]),
+            "expected a reviewed revision 3 of the generated site")
+    return ["--min-revision", "3", "--expected-manifest-id", release["manifest_id"]]
+
+
 def consume(arguments, cache_only=False):
     binary, control, cache, directory, parent_ns, client_ns, uid, gid, group = arguments
     uid, gid, group = int(uid), int(gid), int(group)
@@ -183,8 +197,9 @@ def consume(arguments, cache_only=False):
     private(directory, True)
     expected = read(directory / "expected.json")
     require({entry.name for entry in directory.iterdir()} == {"expected.json"}, "viewer directory not fresh")
+    selection = release_arguments(expected, cache_only)
     command = [binary, "--control-socket", control, "content", "site", "open",
-               "--publisher-key", expected["publisher_key"], "--name", expected["name"], "--min-revision", "1",
+               "--publisher-key", expected["publisher_key"], "--name", expected["name"], *selection,
                "--cache", cache, "--min-free-bytes", "0", "--lifetime-seconds", "90"]
     if cache_only:
         command += ["--reuse-cache", "--cache-only"]
@@ -202,7 +217,9 @@ def consume(arguments, cache_only=False):
         ready = HTTPS["bounded_json_line"](process.stdout, deadline)
         require(ready["operation"] == "native_site_ready"
                 and ready["bytes"] == expected["bundle_bytes"] and ready["sha256"] == expected["bundle_sha256"]
-                and ready["publisher_key"] == expected["publisher_key"] and ready["name"] == expected["name"],
+                and ready["publisher_key"] == expected["publisher_key"] and ready["name"] == expected["name"]
+                and ready["revision"] == int(selection[1]) and ("restored_release" not in expected
+                or ready["manifest_id"] == expected["restored_release"]["manifest_id"]),
                 "site Ready did not authenticate the exact ordinary publication")
         url = urlsplit(ready["site_url"])
         require(url.scheme == "http" and url.path == "/" and not url.query and not url.fragment
@@ -252,7 +269,8 @@ def consume(arguments, cache_only=False):
                     head=head, byte_range=partial, rejected=rejected, elapsed_ns=time.monotonic_ns()-started,
                     agent_cache=cache, cache_only=cache_only, before=before, after=after,
                     no_manifest_argument=True, browser_engine_executed=bool(browser), sigterm_cleanup=True,
-                    listener_closed=True, private_spool_removed=True, spool_modes="0700/0600", **browser)
+                    listener_closed=True, private_spool_removed=True, spool_modes="0700/0600", **browser,
+                    **({"release_selection": selection} if "restored_release" in expected else {}))
     finally:
         if process.poll() is None:
             process.terminate()
@@ -315,7 +333,7 @@ def validate_evidence(evidence):
     peers, layout, isolation = evidence["expected_peers"], evidence["layout"], evidence["isolation"]
     nodes = layout["provider_nodes"]
     require(evidence["success"] is True and len(nodes) == len(set(nodes)) == 2
-            and set(nodes) <= set(CANDIDATES) and expected["assets"] == inventory()
+            and set(nodes) <= set(CANDIDATES) and "restored_release" not in expected and expected["assets"] == inventory()
             and expected["name"] == NAME and expected["content_type"] == CONTENT_TYPE
             and expected["bundle_bytes"] == BUNDLE_BYTES
             and expected["bundle_sha256"] == BUNDLE_SHA256, "invalid canonical site fixture")
@@ -359,6 +377,12 @@ def validate_application(evidence, app, manifests, cache_only):
     expected, publication = evidence["input"], evidence["publish"]
     peers, layout, isolation = evidence["expected_peers"], evidence["layout"], evidence["isolation"]
     ready, final = app["ready"], app["final"]
+    selection = release_arguments(expected, cache_only)
+    if "restored_release" in expected:
+        require(manifests == {expected["restored_release"]["manifest_id"]}
+                and app.get("release_selection") == selection, "reader did not select the exact restored release")
+    else:
+        require("release_selection" not in app, "unexpected site release pin on a revision 1 read")
     # Both advertised replicas contain the complete site. Unlike the disjoint-chunk
     # aggregation proof, this ordinary viewer must not require an unnecessary worker
     # merely to touch every replica. Receipts still name the exact actual sources.
@@ -372,7 +396,8 @@ def validate_application(evidence, app, manifests, cache_only):
     chunks = (expected["bundle_bytes"] + CHUNK_BYTES - 1) // CHUNK_BYTES
     for receipt, operation in ((ready, "native_site_ready"), (final, "native_site_closed")):
         require(receipt["operation"] == operation and receipt["publisher_key"] == expected["publisher_key"]
-                and receipt["name"] == expected["name"] and receipt["revision"] == 1 and receipt["assets"] == len(expected["assets"])
+                and receipt["name"] == expected["name"] and receipt["revision"] == int(selection[1])
+                and receipt["assets"] == len(expected["assets"])
                 and receipt["bytes"] == expected["bundle_bytes"]
                 and receipt["peer_bytes"] == (0 if cache_only else expected["bundle_bytes"])
                 and receipt["chunks"] == publication["chunks"] == chunks
