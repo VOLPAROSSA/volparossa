@@ -45,8 +45,9 @@ pub(super) async fn deposit(
     let mut diagnostics = Diagnostics::default();
     let mut buffer = vec![0; CHUNK_BYTES];
     for (index, fragment) in set.data.fragments.iter().enumerate() {
-        let staging = set.staging()?;
-        let mut staged = tempfile::NamedTempFile::new_in(staging.path())?;
+        // The transfer only needs a seekable descriptor. The kernel releases
+        // this anonymous fragment even if the owner stops the CLI mid-deposit.
+        let mut staged = tempfile::tempfile_in(state::anchored(&set.directory))?;
         input.seek(SeekFrom::Start(fragment.offset))?;
         let mut remaining = fragment.length;
         let mut digest = Sha256::new();
@@ -64,14 +65,8 @@ pub(super) async fn deposit(
         );
         let mut copies = set.fragment(index)?;
         let retiring = super::placement::retired(set, index);
-        let result = replicas::deposit_selected(
-            &mut copies,
-            socket,
-            signer,
-            staged.as_file_mut(),
-            &retiring,
-        )
-        .await?;
+        let result =
+            replicas::deposit_selected(&mut copies, socket, signer, &mut staged, &retiring).await?;
         diagnostics.append_fragment(index, &result)?;
         // Existing replica deposit deliberately skips explicitly deleted copies. Fragment
         // deposit may not present reduced redundancy as its original requested completion.

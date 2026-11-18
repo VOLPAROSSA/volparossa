@@ -3,6 +3,7 @@
 """Exact-source upload sibling; reuse the unchanged guest-only Cloud provisioner."""
 from pathlib import Path
 import runpy
+import sys
 
 HERE = Path(__file__).resolve().parent
 PIN_PATH = HERE / "cloud-private-upload-pins-paired.json"
@@ -12,12 +13,17 @@ FILES = BASE["FILES"] | frozenset(("src/owner-uploads.mjs", "scripts/upload_lock
                                   "src/storage-upload-maintenance.mjs"))
 
 
-def configured():
+def configured(retained=False):
     state = BASE["load_pins"].__globals__
-    state.update(PINS=PIN_PATH, REVISION="178592a3881d49f839f7716a154f7ef446ecbda5", FILES=FILES)
+    path = HERE / "cloud-retained-upload-pins.json" if retained else PIN_PATH
+    revision = "720f88f2a639ef5e2eecbba18c7bb2acb93f9645" if retained else "178592a3881d49f839f7716a154f7ef446ecbda5"
+    state.update(PINS=path, REVISION=revision, FILES=FILES)
     BASE["load_pins"]()
     return state
 
 
 if __name__ == "__main__":
-    configured()["main"]()
+    retained = sys.argv[1:2] == ["--owner-resume"]
+    if retained:
+        del sys.argv[1]
+    configured(retained)["main"]()

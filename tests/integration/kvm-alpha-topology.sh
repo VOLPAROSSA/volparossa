@@ -1233,7 +1233,7 @@ if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     done
 fi
 if [ "$cloud_private_upload" = yes ]; then
-    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins-paired.json; do
+    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins-paired.json cloud-retained-upload.py cloud-retained-upload-pins.json; do
         [ -f "$source_directory/tests/integration/$upload_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$upload_fixture" ] || exit 69
     done
@@ -3198,6 +3198,10 @@ fi
 if [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-upload-smoke.py" "$WORK/bin/cloud-private-upload-smoke.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins-paired.json" "$WORK/bin/cloud-private-upload-pins-paired.json"
+    if [ "${CLOUD_UPLOAD_PROFILE:-ordinary}" = retained-owner ]; then
+        install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-retained-upload.py" "$WORK/bin/cloud-retained-upload.py"
+        install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-retained-upload-pins.json" "$WORK/bin/cloud-retained-upload-pins.json"
+    fi
 fi
 if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-smoke.py" \
