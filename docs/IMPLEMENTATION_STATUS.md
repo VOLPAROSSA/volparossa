@@ -250,6 +250,20 @@ would use a 105-byte path. The pinned helper allows up to 103 bytes. The
 fixture now uses a 102-byte catalog socket path and checks it before consumer
 publication. The trial did not record which runtime directory GnuPG selected.
 
+The next [catalog trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44348799240)
+at `5186411b` failed during Cloud catalog creation. Its bound restore returned
+`retained_operation_incomplete` with both Core operation completion and restore
+verification false. Providers A/B/C retained 6/6/4 leases with zero reserved
+bytes. Guest cleanup and host comparison passed. The
+[artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44348799240/artifacts/14452602822)
+has SHA-256 `d0a3e132d6cfc0402e63db407b01cc36e7310e0e3cd7d2896712b3e5ddfb8abf`.
+The copy and transport cause of this restore failure are unknown.
+
+Foreground restore now shares one retry per copy across its Progress preflight
+and verified range reads when the agent reports a provider TLS handshake deadline
+before READY. The retry keeps the existing exchange deadline, offset and grant.
+Background turns and ordinary successful flow counts are preserved.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
