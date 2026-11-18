@@ -457,6 +457,18 @@ The Image wiring test's isolated shell selector lacked the empty default for
 the newly integrated optional Studio evidence digest. The complete guest driver
 already initialized it. The test now supplies the same empty default.
 
+The next [maintenance run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44387064217)
+passed preflight and ran on `ac51c47a`. Three Cloud deposit reservations
+failed before a protected stream was available. The corresponding requests
+for fragment/copy (1,0), (1,1) and (2,0) each recorded eight flow acquisition
+attempts with `helper_kernel` at both ends of the summary. A separate phase
+sample observed a socket bind error and a poll timeout. Its records cannot be
+assigned to a particular copy. Providers A/B/C still held 6/5/2 leases with
+zero reserved bytes. Local cleanup and the guest network-state comparison
+passed. The run ended before the Image repair and all-copy deletion stages.
+[Retained archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44387064217/artifacts/14470925130)
+SHA-256 `8b37f49942e02d42f8be595c78f3b9fffd896066ecdc1b68da17a7b13c70d543`.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
