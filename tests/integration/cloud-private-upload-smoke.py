@@ -58,6 +58,7 @@ INVENTORY_ROLES = ("relay0", "relay1", "relay2", "exit", "exit2")
 PRESELECTION_CODES = ("PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
     "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_ENTROPY")
 UPLOAD_FAILURE_CODES = {
+    "image application command failed": "application_cli",
     "upload ciphertext geometry invalid": "geometry",
     "upload fragment count differs": "geometry",
     "upload range differs": "geometry",
@@ -223,10 +224,13 @@ def fixture(root):
 
 def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key_b, key_c):
     global STAGE
-    STAGE = "baseline_import"
+    STAGE = "baseline_source_pins"
     tools()
+    STAGE = "baseline_owner_inputs"
     require(not list(root.iterdir()) and len({key_a, key_b, key_c}) == 3, "fresh owner and providers required")
+    STAGE = "baseline_import"
     receipt, source_url = CLOUD["import_source"](root)
+    STAGE = "baseline_import_receipt"
     require(receipt["version"] == 1 and receipt["encryption"] == "OpenPGP-AES256"
             and receipt["source_consistency"] == "strong-etag-conditional-ranges", "baseline import missing")
     cipher = root / "bundle/file.pgp"
