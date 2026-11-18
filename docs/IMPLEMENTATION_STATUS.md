@@ -217,6 +217,7 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   `82ee157d960cca4e2821d58984bfff46f0cab06fc46de29c591513f126709b40`.
   [Main-based native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416913278)
   · [Cloud change](https://github.com/VOLPAROSSA/volparossa-cloud/pull/26)
+  · [Original Core, browser and cleanup receipt](development/evidence/cloud-owner-resume-44416913278/cloud-private-upload-smoke.json)
 - **Image** restored a private album into a fresh Immich 3.2.4 instance on
   Image `ef9b2260` and upstream `db355f79`. An authenticated client uploaded
   and read an 8,516-byte PNG. With the server stopped, Image encrypted the
