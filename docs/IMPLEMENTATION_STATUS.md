@@ -382,7 +382,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at three Cloud reservations. The latest run stopped during Image deposit with four incomplete copies and one outstanding provider reservation. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -616,6 +616,20 @@ cleanup and the guest network-state comparison passed. The combined trial
 did not reach repair, cold restore or all-copy deletion.
 [Retained second-attempt archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44397819655/artifacts/14475421816)
 has SHA-256 `47a1dbe1618480fb88f7e065a3769b70011cccf906e21b098c2177265a825a53`.
+
+The [next twelve-node run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409967365)
+on `ed1764f6` stopped during Image deposit. The original request for
+fragment 2, copy 0 hit a provider TLS handshake deadline before the agent
+reported READY for Append. The reservations for (2,1) and (3,0) each
+recorded eight flow acquisition attempts, with kernel errors on the first
+and last attempts. Reservation (3,1) returned `CONTENT_POLICY`. The
+helper recorded a bind rejection without a binding to a particular copy.
+The three stores had 1/2/2 leases, 199,787/399,574/199,787 committed bytes,
+and 0/0/199,787 reserved bytes. The guest removed its local fixture and
+owned processes and its host-state files matched. This run did not reach
+Cloud publication, repair, cold restoration or acknowledged remote deletion.
+[Original evidence archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409967365/artifacts/14480386650)
+SHA-256 `a5895c3e122b8559b9703b1bb0b3b9482c90152668cd5b4e850938ae7541a1e4`.
 
 #### Automatic upload integration candidate
 
