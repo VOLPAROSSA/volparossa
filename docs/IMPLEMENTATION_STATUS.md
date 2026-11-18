@@ -47,6 +47,16 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   browser verified the signed local preview, the four assets and the security
   headers. The receipt confirms process, listener and private-state cleanup.
   [Signed recovery trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368339229)
+- **Publisher-offline retrieval** ran in the Debian 13 topology on Core
+  `dc5a1bac`. The original publisher's service, PID and listener were absent
+  before and after retrieval. A fresh client received all 2,097,628 bytes of
+  a four-asset test site from one independent holder with zero origin bytes.
+  The site's protected-route, HTTP and cleanup checks passed when validated
+  against the retained artifact. The enclosing repair scenario failed because
+  its earlier restart capture rejected five IGMPv3 membership-change records.
+  The Silex export and browser rendering were exercised in the separate
+  signed-site trial above.
+  [Original topology run and artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44372819560)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
