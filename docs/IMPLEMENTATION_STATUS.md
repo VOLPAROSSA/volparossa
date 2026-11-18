@@ -340,8 +340,15 @@ IPv6 non-reference-count fields matched. All eleven execution receipts were
 verified in public artifact `13472243011`, SHA-256
 `15663a652423a85056eb7879ff30edd7b66048d12f42af8a4681f039ebb6b6e5`.
 Confidential execution, hardware attestation and independent guest-key origin
-remain open. Cancellation can still arrive between selecting a terminal result
-and writing its receipt.
+remain open.
+
+The controller now stages the complete result in the private evidence directory.
+After cleanup, it blocks its three cancellation signals, checks its deadline and
+takes a pending-signal snapshot. A cancellation already handled or pending at
+that snapshot prevents success. A later signal cannot reverse the decision.
+An atomic link publishes the complete receipt only if the final name is unused.
+Synthetic writer tests exercise these boundaries and preserve existing evidence.
+The public inference result above belongs to its original revision.
 
 The resident workflow consolidates three historical wrappers. Source validation
 passed 143 Rust tests, two documentation tests and 729 Python tests. For an
