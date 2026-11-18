@@ -2,7 +2,7 @@
 //! Recipient-encrypted messages remain the default; ordinary native objects require opt-in.
 
 mod contribution;
-pub(super) use contribution::run as contribute;
+pub(super) use contribution::{Source, run as contribute};
 
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
