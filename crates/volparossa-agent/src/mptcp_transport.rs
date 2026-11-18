@@ -353,13 +353,15 @@ impl ClientMptcpTransport {
             .expect("initial MPTCP stream has not been acquired by a flow")
     }
 
-    /// Acquire one independent connected MPTCP socket while retaining route-level path ownership.
+    /// Acquire an independent MPTCP socket. `None` means the route expired while retiring
+    /// previous flows, before a new helper acquisition was issued.
     pub(crate) async fn acquire_flow(
         &mut self,
         helper: &HelperClient,
         local_port: u16,
         observation: &mut acquire_diagnostic::Observation,
-    ) -> Result<ClientMptcpFlowTransport, MptcpTransportError> {
+        can_acquire: impl FnOnce() -> bool,
+    ) -> Result<Option<ClientMptcpFlowTransport>, MptcpTransportError> {
         use acquire_diagnostic::{Reason, Stage};
 
         observation.reset();
@@ -393,6 +395,10 @@ impl ClientMptcpTransport {
                 .drain(helper)
                 .await
                 .map_err(|error| observation.transport_error(Stage::RetirementDrain, error))?;
+            // Prior retirements may have waited for a helper ACK while the route lock was held.
+            if !can_acquire() {
+                return Ok(None);
+            }
             let mut slot = self
                 .retirements
                 .reserve_classified()
@@ -445,13 +451,13 @@ impl ClientMptcpTransport {
             initial: signal.initial_active_path_ids.clone(),
             retirement,
         };
-        Ok(ClientMptcpFlowTransport {
+        Ok(Some(ClientMptcpFlowTransport {
             stream,
             certificate_der,
             required_subflows: self.required_subflows,
             observations,
             paths,
-        })
+        }))
     }
 
     /// Releases every explicitly owned endpoint before the adopted stream and route are dropped.
