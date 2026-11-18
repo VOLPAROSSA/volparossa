@@ -76,6 +76,17 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   It flagged the length of the contribution test before any editor or guest
   started. The follow-up split signed test setup from the receipt checks.
   [Original joined trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44382248754)
+  The follow-up joined the real editor, signed publication, independent peer
+  storage and a fresh browser in one run on Core `20696912` and Studio
+  `cb66fd7f`. Silex saved and reopened the edited page with its chart. The
+  independent holder retained all nine chunks of the original signed export.
+  While the publisher was offline, Firefox ESR 140.16.0 received all five
+  files (2,358,929 bytes) from the holder, rendered the edited text at 37 px
+  and decoded the 1024 × 768 chart. The origin supplied zero bytes. A 4,096-byte
+  range request, guest state comparison and complete owned cleanup also passed.
+  The original signed bundle SHA-256 is
+  `7a8ca0a33db9854bda2045777b1ce2d6890e5bb150d72e6839e3261d099ccc1e`.
+  [Joined Studio hosting trial and both receipts](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -235,7 +246,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
-| Studio | Real Silex saved-project export, signed local recovery and separate publisher-offline retrieval by a fresh client passed. The joined Silex-to-independent-browser scenario, shared AI and dynamic execution need their own evidence. |
+| Studio | Silex saved-project export, signing, independent retention and publisher-offline rendering in Firefox passed in one run. Revision rollback, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
