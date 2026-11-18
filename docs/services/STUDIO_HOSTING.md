@@ -58,16 +58,17 @@ external requests, service workers and persistent origin storage. Do not weaken
 that sandbox merely to call a Silex export compatible; conventional website and
 dynamic modes need explicit, separately verified origin/execution boundaries.
 
-Silex saved and reopened a page with a chart. After signing, an independent
+On Core `20696912`, Silex saved and reopened a page with a chart. After signing, an independent
 holder retained the five exported files. A fresh Firefox rendered the page
 and decoded the chart while the original publisher was offline. A separate
 owner-local restore activated the original bytes as a new signed revision.
 [Editor-to-browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
 · [Owner restore trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
 
-In a generated-site deployment trial, an independent holder served all four
-files of the restored revision to a fresh HTTP reader that required its exact
-manifest ID. The publisher was offline throughout retrieval.
+On Core `060fcaa3`, the owner restored a generated four-file site as revision 3
+and contributed that signed bundle. An independent holder served all four files
+to a fresh HTTP reader that required the exact manifest ID. The publisher was
+offline throughout retrieval.
 [Restored revision on an independent holder](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835)
 
 Remaining work includes a production editor publication adapter, domain and TLS
