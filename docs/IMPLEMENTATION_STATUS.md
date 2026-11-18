@@ -33,6 +33,13 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 ### Development branches — 18 November 2026
 
+The central build follows the [owner’s development mandate](development/GOAL.md#autonoom-onderhoud-en-updates).
+Each trial below identifies the revision it exercised. The default branches now
+include the [Studio editor export](https://github.com/VOLPAROSSA/volparossa/pull/342),
+the [Weather decoder rebuild](https://github.com/VOLPAROSSA/volparossa/pull/350),
+the [Image owner recovery key](https://github.com/VOLPAROSSA/volparossa-image/pull/21)
+and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-bank/pull/13).
+
 - The [integrated Core quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44372813034)
   passed its Storage contracts, build, integration and unprivileged quality
   jobs on `dc5a1bac`. Cargo reported 4,476 passed and 21 ignored in the
@@ -50,6 +57,9 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   These tests isolate the admission window. The cross-application reservations
   have separate evidence in the Storage section.
   [Route lifetime quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409970591)
+  On the combined `94a0f06d` development revision, all three Quality jobs
+  passed. The workspace step reported 4,495 passed, zero failed and 21 ignored.
+  [Combined Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44412027994)
 - **Studio** saved an edited page, reopened it in a fresh browser context,
   verified its text and 37 px styling, and exported it. The Core CLI packed
   the four files from the 1,474-byte ZIP and the production decoder verified
