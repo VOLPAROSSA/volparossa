@@ -16,6 +16,8 @@ use prost::Message;
 use rand_chacha_10::{ChaCha20Rng, rand_core::SeedableRng};
 use zeroize::{Zeroize as _, Zeroizing};
 
+pub(crate) mod confirmation;
+
 use crate::{ChunkStore, Metadata, Publication, SignedManifest, Validity, VerifiedManifest};
 
 type MessageKem = X25519HkdfSha256;

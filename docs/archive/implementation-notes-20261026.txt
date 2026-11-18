@@ -1,0 +1,501 @@
+Historical documentation excerpts; not current instructions or acceptance.
+Source revision: 682ed8b698014304e74abfcb3e5db558ff71324d
+
+=== native/volparossa-mpquic/README.md: API-v6 foundation/gates ===
+Excerpt SHA-256: 90c3e227828fca80f3ad94242a477efa20c9049313d4df987c749b3f225562f2
+The following historical API-v6 foundation notes are not current completion claims;
+the repository implementation status records later integrated datapath evidence. API
+version 7 additionally exposes the transport counter described above.
+
+API version 6 retained the bounded reverse/session contracts and strict
+single-path exit-listener handoff while adding process-incarnation targeting,
+exact request-digest correlation, signed route-scope fields, and a canonical
+tunnel-assignment response plus client retention policy. It preserves the
+earlier seven process-boundary seams:
+
+1. Reverse datagrams use bounded, request-driven polling with deterministic
+   overflow and explicit memory wiping; the native process never pushes an
+   unsolicited frame.
+2. A nonzero local association identifier is carried and validated through
+   the mqvpn adapter boundary independently of route ID and request nonce.
+   This identifier does not alter the RFC 9484 zero wire Context ID for IP
+   Datagrams.
+3. Multipath QUIC requires at least two paths while general UDP single-path
+   requires exactly one; either mismatch fails without fallback.
+4. Exact-length base64url client auth, TLS server name, and an
+   at-most-fifteen-minute expiry are bound to one `StartSession`; no
+   process-global product credential remains.
+5. Versions 1 through 5, unknown versions, non-minimal varints, reordered fields,
+   duplicate fields, and unknown fields fail closed.
+6. `AddPath` consumes exactly one correlated UDP descriptor and native never
+   opens or binds its own path socket. The descriptor and metadata are checked
+   independently by Rust and C.
+7. `StartExitSession` consumes exactly one separately domain-bound, listener-shaped
+   descriptor, carries its exact overlay peer metadata and bounded unparsed TLS
+   candidate material, and closes the descriptor before the intentionally dormant backend returns
+   unavailable. Every remaining operation carries no descriptor.
+
+Two additional native tests cover a bounded, externally serialized exit-session
+state machine and bounded-chain leaf identity consistency, canonical DER and pin
+verification. These are still isolated foundations: the runtime does not start
+mqvpn's exit server, and they prove neither helper descriptor provenance nor a
+client-to-relay-to-exit datapath.
+
+The following gates remain hard blockers:
+
+1. **No separate role service identity or trusted helper-origin proof.** The
+   current single same-UID socket correlates a process but cannot authenticate
+   native against an untrusted agent, and an agent can still create a conforming
+   descriptor. Packaging needs distinct client/exit service identities and
+   role sockets. Only client `AddPath` checks a same-session namespace cookie;
+   StartExit lacks exact namespace and assigned-address proof. Production
+   adoption remains blocked until an affine helper-to-native capability binds
+   each descriptor to the attested helper acquisition.
+2. **No unique payload-delivery metric.** xquic's counter includes QUIC
+   transport overhead and retransmission. `GetStatus` uses it only to prove
+   per-path transport activity and leaves `NativePathStatus.delivered_bytes`
+   zero; it never relabels those bytes as unique delivered payload.
+3. **No operational exit lifecycle.** The patched mqvpn server can report a
+   session-correlated inbound packet and can initialize xquic from bounded
+   in-memory TLS candidate material without a caller-supplied secret pathname.
+   The native backend remains client-only, and the helper/agent does not yet provide the
+   end-to-end listener provenance/handoff to a reviewed exit factory. API v6
+   accepts and closes the descriptor and carries the TLS material in memory,
+   while a separate callerless foundation verifies bounded-chain leaf/key,
+   a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics,
+   trusted interval, canonical complete-leaf DER and DER-SPKI consistency.
+   Runtime wiring remains blocked on affine helper provenance, exact signed
+   millisecond conversion, a fixed independent Rust/C digest vector, parser
+   fuzzing and trust/usage enforcement; native also does not independently
+   verify the signed reservation scope. Valid
+   `StartExitSession` requests still return
+   `exit_listener_orchestration_unavailable`; no launcher is shipped.
+4. **Process-local replay and BOOTTIME admission are not a production
+   authority.** Native request nonces correlate one response but have no
+   general replay tombstone. The bounded pair ledger and converted BOOTTIME
+   deadline prevent same-process pair reuse and wall-clock lifetime extension,
+   but native does not verify the signed bundle, both changed IDs look like a
+   new scope, tombstones expire, and process restart clears the table.
+   Production still needs cryptographic verification and a preverified affine
+   handoff bound to both process instances.
+5. **Client assignment still lacks production provenance.** The mqvpn adapter
+   now deep-copies exactly one callback assignment, independently enforces the
+   fixed VOLPAROSSA IPv4/optional-IPv6 pools and MTU, rejects changes, publishes
+   only after `ESTABLISHED`, and checks inner source and reverse-destination
+   ownership. Focused C tests prove the pure state and packet policy. There is
+   still no production exit configuring that pool, helper proof that the address
+   belongs to the exact namespace, production caller, or disposable-topology
+   packet evidence, so this client-side state must not be reported as an
+   operational tunnel.
+6. **EDT lacks live-topology acceptance.** Production multipath client and
+   exit sessions use the dedicated VOLPAROSSA xquic callback, which chooses
+   exactly one writable path from live RTT, bytes in flight, bandwidth, cwnd,
+   and recent loss. A deterministic native contract test covers both healthy
+   choices and a congested/lossy loser. No disposable topology has yet proved
+   the expected distribution or failover with real relay paths.
+7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
+   framing, correlation, overflow, and wiping, but no disposable topology has
+   yet proved an exit-originated inner datagram reaches the Rust client.
+8. **No end-to-end dynamic path removal or failover evidence.** The pinned
+   upstream exposes these operations, but the VOLPAROSSA lifecycle has not
+   exercised them across real relay paths.
+9. **No full acceptance evidence.** No disposable namespace test yet proves
+   at least two data-carrying paths via distinct relays, bidirectional
+   CONNECT-IP, loss-aware scheduling, failover, disabled duplication/FEC,
+   privacy packet captures, and unchanged host routes, firewall, and DNS.
+
+The implementation-status dataplane items remain unchecked until these gates
+and the real namespace acceptance suite are complete. Focused API-v6 boundary
+tests and the full API-v6 sanitizer run alone must not be reported as A06/A07
+or full dataplane acceptance.
+
+
+=== docs/COOPERATIVE_BROWSER.md: historical trial records ===
+Excerpt SHA-256: 3df0dfc93d8c1d6bc0b3e9696de384ad21d0664b407b04c838bcc9431e9459f3
+## First live attempt and bounded driver correction
+
+[Run 36728657126](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728657126)
+on core `7c82fc76ab9a2b4256dfd95f428199a0884bd705` and browser
+`3c7894168ce6c1f28e96ce5b95bc99928e6c4304` **fails**.
+The original 18-file artifact ZIP has SHA-256
+`9820ccb3e63490d8675d2a12bbf8c516e2a34b6f0dd99fa2127e78b616bfbdae`.
+Gecko reaches the panel driver, but its closed diagnostic records only
+`panel-cleanup / SCRIPT_FAILED`: a `finally` status update hid the preceding failure
+phase. No WireGuard data or provider application payload was observed in this phase;
+there is no combined answer, peer execution or cancellation proof.
+
+Source inspection identifies a deterministic fresh-marker defect. The driver calls
+`nsIFile.isSymlink()` before creating `pre-consent.json`, whereas the pinned
+[Gecko implementation](https://hg.mozilla.org/releases/mozilla-esr140/file/d864999404b3032f682d74ccc60d1ce38c9ce609/xpcom/io/nsLocalFileUnix.cpp)
+returns an error when `lstat` finds no such file. The correction in browser `326ce0f2`
+creates new markers atomically with `PR_CREATE_FILE | PR_EXCL`, still rejecting existing
+files and dangling symlinks; only the existing private status file may be replaced. It records failure
+before `finally` so cleanup cannot overwrite the original phase. Focused pure helper
+checks cover these semantics; they do not convert the failed run into a pass.
+
+That original attempt nevertheless reports complete cleanup with zero owned objects
+remaining and all four private-job cleanup checks true. The original before/after
+host-state files are byte-identical, SHA-256
+`2ab5456d7d3aea708e6564b060e41d7476b66fb1a4908c0f1e6d83516edfb474`.
+Acceptance still requires a new source-bound run with the real peer result, original
+receipts, cancellation and cleanup checks intact.
+
+## Retained-handle reconciliation and flow capacity
+
+[Run `36746682885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36746682885)
+on core `3f47bbef16bc78ebf45e5c6e98102e08e6463bb9` records six original handles but
+only four terminal receipts. The implemented reconciliation polls both missing handles;
+both exchanges remain unconfirmed, without reaching its deadline. Neither document nor
+answer execution is complete. The terminal-receipt gate correctly quarantines admission.
+Cleanup is complete, zero owned objects remain, and host snapshots are identical.
+
+Independent source inspection identifies a real route-lifetime accounting bug: the helper
+retained issued MPTCP flow capabilities after sockets closed, exhausting its 64-flow bound.
+The new terminal operation closes the exact descriptor-bound socket and obtains a worker
+ownership-release ACK before reclaiming its ledger slot. It does not increase the live
+flow limit, reuse handles, resubmit compute jobs, extend leases or fabricate terminal
+receipts. Tests of the ledger are not proof of more than 64 real overlay transfers; that
+requires the next executable trial. The older artifact lacks enough stage evidence to
+attribute its failed exchanges conclusively to this defect.
+
+The next fixture additionally retains bounded counts of existing fixed compute-RPC stage
+codes. It reads at most the 1,000-record agent ring, reports whether it covers the explicit
+phase baseline, and exports only the allowlisted failure counts. Raw event records,
+session/path identifiers, model inputs, replies and service logs are not exported. A
+missing, invalid or incomplete observation cannot become a success claim. Seven focused
+fixture checks pass, including baseline filtering and rejection of private/unknown data.
+
+## Completed receipts, incomplete joined result
+
+[Run `37021201299`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37021201299)
+on `610866b8770b63719ec1f4b4ce6abb6a83a596ef` retains eleven original handles and eleven
+terminal receipts: document execution and local/remote cleanup are confirmed, without
+reconciliation. Its event ring covers the phase baseline with zero allowlisted RPC
+failures. The original artifact ZIP SHA-256 is
+`f4396c04deba99d81eac3e4d7d5769bd4ece01e31e6f235fe3d5088061c281f4`.
+
+The run nevertheless **fails**. Answer completion is false; Gecko reports
+`first-task / cleanup_unconfirmed`, and the observer exits with status 1. The original
+artifact has neither the observer's failure reason nor a retained wire reply. Its
+ordering therefore cannot establish whether browser termination caused unfinished
+work, or another failure caused the connection to close. The browser contract accepts
+an incomplete answer with confirmed cleanup; those fields alone do not explain the
+observed error. No completed display, synthesis/cancellation proof or improved model
+quality is claimed. Fixture cleanup succeeds with zero owned objects; before/after
+host snapshots both hash to
+`ec97a4e9bcf30dc3013bf5ba98d0abc1ed3ea1772107a3f99733e9ff976f081c`.
+
+The following [run `37024673305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37024673305)
+on `0f05c6ad` preserves the observer's failure position: `completion_check`, with
+the browserdriver already stopped and eleven workers observed. It rules out an
+earlier observer scanning failure as the cause of this attempt's browser shutdown.
+The original ZIP SHA-256 is
+`f23308d804e324b679d50d27922a9eefabac1191a04f91f56e122e2d02324940`.
+
+Core `9b984ad8` fixes a reproduced guard-lifetime defect in `Active::start`:
+disjoint async capture retained only the boolean cleanup field and dropped the
+actual admission guard before backend execution. Explicit whole-guard ownership
+now extends through the backend result. Two real lifecycle tests fail before the
+fix and pass after it; all seven public-service checks pass. Aborting without
+confirmed cleanup still quarantines admission. This does not turn either original
+failed run into success or resolve its separate incomplete-answer condition.
+
+The source-bound [run `37037361187`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
+on `c0362ba5` remains **failed** with an exact cause: ten leaf answers reached the
+135M token limit and one reached EOS. All eleven original worker receipts and
+cleanup are confirmed; no leaf wire truncation, empty answer or unknown ending
+was observed. No synthesis was started. Browser display/cancellation acceptance
+remains unproved. Guest cleanup leaves zero owned objects and equal network
+snapshots. Original ZIP SHA-256:
+`7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
+These completed partial jobs cannot be repaired by increasing observation time
+or relabelling them complete. A separate discovered-360M trial will use the already
+supported larger profile; it will not replace this historical 135M result.
+
+The discovered-360M [run `37042900209`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
+on `e04860bc` also **fails**: two original workers and terminal receipts, one EOS
+answer and one token-limited answer, no synthesis and no live cancellation proof.
+Cleanup leaves zero owned objects and equal guest network snapshots. Original ZIP
+SHA-256: `2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
+The bounded source-refinement implementation follows that failure; it cannot change
+the historical result. Tokenizer-only preflight of both possible original ranges
+finds child prompts of 599/532 and 120/118 tokens respectively, within the unchanged
+1024-token profile. This establishes input fit, not successful model recovery.
+
+The next exact-source [run `37048803131`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
+on `b6f054b4` fails before compute: `agent-jobs-source` reports `JOBS_ROUTE_UNAVAILABLE`
+after successful pinned model provisioning. No brokers, model receipts, refinement or
+synthesis started. The artifact does not retain the underlying route refusal or path-query
+reason; it does not establish a model/refinement failure. Cleanup leaves zero objects
+and identical before/after network-state hashes. Original artifact SHA-256:
+`5fc3a6b48cfe250e61f891da18283f4164fd32d76ffb39aeae6a3202880097c8`.
+The fixture now retains the existing closed route-stage/reason/count diagnostic in both
+cooperative Browser and Code exports, without raw stderr, identities, paths or input data.
+Selection, retries, deadlines and acceptance requirements are unchanged. Fifteen route
+contract tests, eighteen Browser tests, eight Code tests and targeted shell lint pass;
+these checks do not prove that a real route or complete answer is now available.
+
+## Discovery failures during retained-job recovery
+
+[Run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
+on `abb30f3495d3690b8e3a3ab238f44c170f7eb876` remains **failed**. Initial protected
+route setup completes (`SELECTED` / `CONNECTED`). The observer sees four actual workers,
+but the retained task contains four handles and only two terminal receipts. Of the two
+original leaf answers, one reaches EOS and one reaches its token limit. No completed
+refinement result, synthesis, displayed answer or live cancellation proof is retained.
+
+Reconciliation attempts both outstanding handles but records a `peer_rpc` error at
+`poll` with `exchange_unconfirmed`. The bounded event window retains 48
+`COMPUTE_RPC_DISCOVERY_FAILED` events; it does not cover the original phase baseline.
+That source version did not export the underlying discovery reason. These records
+therefore do not identify expiry, connection invalidation, missing targets or provider
+withdrawal as the particular cause. They also do not establish the quality or completion
+of the unjoined child outputs. The browser reports `first-task / cleanup_unconfirmed`;
+the observer ends at `completion_check` without its specific invariant reason retained.
+
+The workflow acceptance step correctly fails first on the nonzero topology exit status;
+the report checker is not reached. Final fixture teardown succeeds with zero owned
+objects and all private-job cleanup checks true. This later forced cleanup does not
+substitute for the missing signed terminal receipts or confirmed normal task cleanup.
+The original records remain unchanged:
+
+- Artifact ZIP SHA-256: `fce562e1f8642dacf87f65d0a9b05378168d0923dec547722dafa95b39fc0461`.
+- Job log SHA-256: `41cbb9c004739f3d1b6d15767451294bc4e02886cd2582913e8605d29163ebbe`.
+- Closed diagnostic SHA-256: `916a7fe1121f1403ae1424700f133dba640c970bb427016f276430bc56e8d45e`.
+- Both host-state snapshots SHA-256: `c5053b9c0181fbefc2f08bed05e7e5a27942320807eaeafaedfa3d7f89168fa0`.
+
+The next source candidate additionally exports allowlisted counts of the existing
+`CONTENT_DISCOVERY_*` / `CONTENT_EXACT_*` failure reasons and, separately, provider
+registration/withdrawal/expiry events. The 1,000-record ring bound, phase baseline and
+coverage flag remain unchanged. Counts describe events, not distinct failed exchanges;
+one exchange can emit several codes. The sampled ring is the client agent's, not an
+inventory of the provider agents' logs. An absent event is not evidence that a provider
+remained registered. No event payload, identity, endpoint, session/path identifier,
+prompt or answer is exported. Nineteen focused Browser fixture checks pass, including
+distinct expiry/connection/target diagnostics and refusal of unknown/private data.
+These synthetic exporter checks do not fix or reclassify the original failed run.
+
+An independently reproduced service-lifecycle fault is now fixed: a temporary `Busy`
+or `Timeout` during advertisement renewal no longer permanently destroys the bound
+listener and its compute registration. Renewal retries on the existing 60-second
+clock; expired/withdrawn advertisements gain no additional authority, and clients
+retain their TTL, identity and policy checks. Invalid authority, invalidation, an
+unavailable service and a closed discovery channel still terminate the listener.
+Only the fixed CONTENT-key Kademlia publication failure is reclassified as temporary,
+after withdrawing its advertisement. Closed retry/recovery/failure events distinguish
+this lifecycle from successful job execution.
+
+Two asynchronous regression tests exercise actual local TCP/TLS and signed compute
+framing across both temporary and four fatal outcomes; their backend explicitly
+refuses inference. Five existing relay/policy lifecycle tests, formatter and strict
+agent-library/test Clippy also pass on this source. This proves listener ownership
+and recovery, not model execution or the cause of the earlier 48 discovery errors.
+The discovered-peer end-to-end trial remains required.
+
+## Joined cleanup, still incomplete answers
+
+[Run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
+on `b76b8a2497a428b96b7379af9939de2c87dcf698` remains **failed** at
+`agent-cooperative-browser-panel / COOPERATIVE_BROWSER_PEER_PROOF_FAILED`.
+Four actual workers are observed and all four retained handles have terminal receipts.
+Execution and normal local/peer cleanup are confirmed; no reconciliation was needed.
+The original two leaf answers remain one EOS and one token-limited answer. The answer
+is incomplete and no synthesis is retained. This source did not export refinement-child
+completion or generation metadata: their particular incomplete subtype is unknown.
+Four terminal receipts are not proof of four EOS answers or successful refinement.
+
+The sampled client event ring contains 1,000 records and zero matching RPC/discovery
+failure events, but does not cover its phase baseline. It cannot prove the entire run
+had no such failures, or reclassify the earlier `abb30f34` failure. Guest exit status is
+1. All four private-job cleanup checks pass; final teardown leaves zero owned objects.
+Guest-root network-state snapshots outside the owned namespaces are byte-identical.
+These are guest observations, not a new physical-host-state claim. Original records:
+
+- Artifact ZIP SHA-256: `06f4789bc13aaa9d6f824797ca6fe90b729a81c4acde5c0ea2d2dd617bf883ac` (20 files).
+- Job log SHA-256: `14dfe6dd264f58010489bd87c9110cc87ade78defb4ad8520aca1aeaece76f67`.
+- Both guest network snapshots SHA-256: `1b5add81e352354d72d59b47634e1b0be169c58147152a40d614c3ba46f22806`.
+
+The shared Browser/Code closed diagnostic now includes retained refinement reasons,
+per-child completion flags and available generation-ending counts. It exports neither
+text nor source ranges, identifiers, manifests, endpoints or private paths. Legacy
+children without generation metadata remain explicitly absent; unknown values never
+become success. Diagnostic flags are observations, not replacement authority for the
+separate signed-receipt, exact-frontier and real-synthesis acceptance checks.
+
+=== docs/applications/BROWSER_NETWORK.md: original combined-run history ===
+Excerpt SHA-256: db791ded12c0a666c4bfa8641177a892987e4faf5ce1d45f6d91ae0eeb436f48
+The [first combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36625896567)
+on `b4b2d62b03046dff9d83e1b8ba1e11bbed92accc` **failed** before HTTPS at
+`BROWSER_NETWORK_APP_BOUNDARY_INVALID`; it does not prove browser overlay traffic. Its
+15 original artifacts retain complete cleanup and matching before/after host-state hashes
+`578e552dc0fa4c9fabed4a26eaa7c7a0d3462e6b5a6fee18b5b7cf587b71cc4b`
+(artifact ZIP SHA-256 `a24aa758425b05386ba1f184b653a4a4c9c8565adff03f89c8c4c24a99e5ec5c`).
+The fixture requested fully numeric `nft -n -j` output but expected the symbolic `ipv6`
+value. It now requires Linux `NFPROTO_IPV6 = 10`, as emitted by nftables' numeric JSON
+serialization, with the same exact UID, loopback address, drop verdicts and chain.
+This corrects a deterministic checker mismatch; the old run did not retain enough boundary
+diagnostics to exclude an additional launch failure. Eight pure fixture checks pass,
+including rejection of weakened guards and closed failure-stage diagnostics; the corrected
+live combined proof remains pending. No firewall or product isolation was relaxed.
+
+The [second combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36714093009)
+on `fd2d7eb2ed11a6b17415faec747115904800d348` passes that actual application boundary,
+but fails at `BROWSER_NETWORK_HTTPS_REQUEST_UNAVAILABLE`. It retains 16 original artifacts
+(ZIP SHA-256 `cf7f30b8aaafd17e60792ec307849b4a32658feb0ffd789f57904393fea04c59`),
+complete cleanup and unchanged host-state hash
+`05a36403bd56c0a962b92113ff73661f4002c583e3803c7ce5face4b2ea8cf07`.
+No browser report or WireGuard payload was observed; pre-browser driver failures were not
+recorded sufficiently to identify their cause. A new closed driver-status export retains
+the last wrapper/namespace/Firefox/attachment stage, canonical error/errno and boolean
+stderr classifications. It exports no raw stderr, browser logs, grants or private paths.
+Nine pure fixture checks pass, including rejection of unexpected diagnostic fields.
+The diagnostic revision changes its driver/tests/documentation, not the network module
+or pinned ESR package.
+
+The [third combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36716815095)
+on `e53034f64ae3faf6c8a09999ead19bbe27767822` still **fails** before HTTPS. Its new
+closed diagnostic identifies `wrapper-launch` / `SUBPROCESS_FAILED`, child exit 1 and a
+permission-denied signal; the child never records runtime validation. All 17 original
+artifacts are retained (ZIP SHA-256
+`3178ac704a14d72ac51f3fa4e91d7a79d640d63aaf88494dcb5f37521efe210e`), with complete
+cleanup and matching host-state hash
+`8b201fe6a22c03c9c59b6d94f9de21719c81b4402c8b8daea33229180ae37445`.
+The fixture inherited the provisioning user's private source-checkout working directory
+after dropping to the application UID. The candidate driver now explicitly enters its
+own fresh `0700` work directory both before and inside bubblewrap. This removes that
+inaccessible-directory dependency without widening source permissions or network access;
+it is not yet a demonstrated live fix. Closed stderr classification now distinguishes
+working-directory from bind/mount failures without exporting private paths. Eight browser
+driver checks and nine core fixture checks pass. Actual browser payloads remain unproven
+until the next combined run passes.
+
+The [fourth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36719104806)
+on `9bb16c996a2bb05adaa27704daca8578e21fc54a` also **fails** before HTTPS with browser driver
+`a82e6c6313a4dc56cebaac4fcdff5cd3d12895d4`: the owned working directory did not resolve
+the observed launch failure. The closed status is still `wrapper-launch` /
+`SUBPROCESS_FAILED`, child exit 1, permission denied, without a child-validation phase.
+Working-directory, mount and namespace classifications are false; they do not identify
+the failing operation, because source/destination lookup, remount and exec messages were
+not classified. No raw stderr is retained or exported, so this evidence cannot establish
+an exact failing path or syscall. All 17 originals remain failed (ZIP SHA-256
+`1ab9e6e8c17fdcd1a8fc2140771eeb93877c18793dea8a706afeec7627f9bc6a`), with complete private
+cleanup and unchanged host-state hash
+`904fa278236acb21131d1881e4bcc148e9c82e44a0de2f65a0c9e56455ed72d3`.
+The next diagnostic retains only fixed bwrap operation flags, never their path/argv suffixes;
+the sandbox, application permissions, pinned browser and core datapath are unchanged.
+This is diagnostic coverage, not a claimed launch or browser-payload fix.
+
+The [fifth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36722045933)
+on `ff98dc8c26a0e94840bfe20eb46a7f1682f634a4` **fails** at the same wrapper boundary.
+It now identifies bwrap directory creation as the failing operation; source lookup,
+readonly remount, identity mapping and exec classifications are false. The original
+diagnostic did not retain the destination, so a permission change is not justified by
+this result. All 17 originals remain retained (ZIP SHA-256
+`373524974dd2bb20c04553179c6240965f98c2af16d06d87f1caa2b31436b5b1`).
+Private cleanup passes; both host snapshots hash to
+`58a90792fd99dbcca21bc6cf50e9aacd6db110f708f678abfee56f1b237b5ca3`.
+The next diagnostic classifies only exact fixture-owned destinations and fixed bwrap
+setup directories, retaining an unknown category rather than exporting paths. Eleven
+focused checks pass. No sandbox permission, browser pin or product datapath changed;
+actual browser-to-overlay payload transfer remains unproven.
+
+The [sixth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36726326554)
+on `4808fe06113915709d61b070c022288cb1e53331` **fails** before child validation or HTTPS.
+Its closed diagnostic identifies `browser_work` as the sole directory-creation target,
+with permission denied. All 17 original artifacts are retained (ZIP SHA-256
+`68f134e5df9061ab7ce2146a72c3fbac7a00890c2be270b969d1d5801f8e2e20`).
+Private cleanup passes, and both host snapshots hash to
+`d8101820722bbbbdddb5afe8866ff8ec5e6aab0e3729d68818576a8a4a3da438`.
+A bounded local bubblewrap-only probe, using UID 985 with zero effective capabilities
+and no-new-privileges, reproduces destination-parent creation denial with an unmapped,
+search-only parent. An anonymous child-only parent shell removes that dependency.
+The candidate driver therefore rebinds only the pinned runtime read-only beneath that
+shell, remounts the shell read-only, and retains the original private writable work bind.
+Other provisioning-home entries are hidden, not copied or made readable. Existing parent,
+runtime and grant permissions, application UID, network namespace and capability checks
+are unchanged. Nine focused browser tests pass. This is a sandbox-launch candidate;
+the next actual combined run must still prove Gecko HTTPS and protected MPTCP payloads.
+
+The [seventh combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36732926403)
+on `cd3e630d243739e1d3188074907af0e8d5e03f81` gets past sandbox setup and launches actual
+ESR 140.16, but **fails at `attach-a` / `unavailable` before Ready**. It observes no
+WireGuard/provider payload. All 18 originals remain retained (ZIP SHA-256
+`b468959bab11bdedb2020696fa6f1ffb6a74beec21b609045339d13d18d0b2d0`). Browser/profile and
+private-file cleanup pass, topology cleanup leaves zero objects, and both host snapshots
+hash to `f4e38c146026adcbb328fd871ef32615655af76a690b1460888f549b3927b4f5`.
+
+The next diagnostic distinguishes fixed socket/stream/bootstrap stages, peer EOF and
+timeout with an optional numeric `nsresult`; it exports no exception text or credentials.
+A non-consuming in-sandbox preflight verifies the actual Unix socket/parent ownership,
+mode, access and peer UID without sending any bytes or claiming a capability. Eleven
+browser checks, twelve core evidence checks and a fresh real-ESR/synthetic-gateway smoke
+pass, including all three TLS responses and cleanup. The exact core bootstrap cause
+and actual browser-to-MPTCP payload remain unproven; no production routing or permission
+change is inferred from the previous generic error.
+
+The [eighth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36738800599)
+on `be2c6cd6baf70da6ec8c8550e88072f2117b4109` **fails** at the new socket preflight:
+`socket-path / OS_ERROR / ENOENT`. All 17 originals are retained (ZIP SHA-256
+`23394cdd6ed6b19abb070c49459941073932e5b2950496cfbfd6ac7aceecfdfb`). Private cleanup
+passes, topology cleanup leaves zero objects, and both host snapshots hash to
+`dd39e154bd1e2ea640e8cdb8ba7b41a609865394950276d57c670cd75f9c0e6b`.
+Source inspection confirms a fixture mount-publication mismatch: the agent binds its
+runtime at `/run/volparossa` and correctly advertises that app socket, while the browser
+sees the external fixture path. The candidate maps only the exact client control directory
+read-only at the unchanged advertised path inside the browser's private `/run`; neither
+the rest of the runtime nor agent state is published there. Parent/socket inode, mode and
+ownership equality, read-only access and the original grant are mandatory proof fields.
+Production Rust, peer UID checks, application credentials and egress restrictions are
+unchanged. Twelve pure browser checks, one actual unprivileged namespace/socket check
+and thirteen core evidence checks pass; actual browser/MPTCP transfer is still pending.
+
+The [ninth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36743469202)
+on `4d60478acbe50873c4b1f167c05b2bc0106314f0` passes the original-inode mount mapping,
+socket access, both real grant attachments and the wrong-scope denial. Actual Gecko then
+**fails at `request-a / SCRIPT_FAILED`**, before observed WireGuard payload. All 18
+original artifacts remain failed (ZIP SHA-256
+`d10f84b04860eafbb0a1bd973007b4683983bfef772ce52a6ebba7ffd4dd115a`). Browser/profile and
+private-file cleanup pass; topology cleanup leaves zero objects and both host snapshots
+hash to `0777714e9b0d08e611e73ecefb892cf591a2245a6a8112b73d696e54bc862873`.
+
+A local replay against the synthetic gateway now also passes at the fixture's destination
+port 18443: three real TLS responses, exact CONNECT authority/header shape and native
+Gecko proxy-response status 200, with complete cleanup. This rules out that port alone;
+it is not evidence of a working overlay route. The next combined candidate preserves
+fixed request stages, numeric native/CONNECT/HTTP statuses and a body-present flag.
+Only the disposable client's gateway tracing target is enabled at debug level. Export
+reads at most the final 64 KiB and retains at most 64 allowlisted CONNECT, policy, route
+or flow stage/error records—no raw logs, addresses, URLs, headers, capabilities or payloads.
+Thirteen pure browser checks and fifteen core checks pass. These are diagnostic changes;
+the route failure is not yet identified or fixed, and real browser/MPTCP payload proof
+remains pending. Existing policy, isolation, lifetime and no-direct-fallback rules remain.
+
+The [tenth combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/36766377022)
+on `3f89c5ab5a43bfa1df19cca55b81ec2bdc1ea839` again **fails at the first request**, now
+with closed native code `NS_ERROR_NET_TIMEOUT` (`0x804b000e`), CONNECT status 0 and no
+response body. The gateway records `connect_header/received` and `accepted`, but never
+route-ready, stream acquisition or forwarding. Both original attachments and namespace
+socket bindings pass. The run does not establish browser payload on either required path.
+All 18 originals are retained (ZIP SHA-256
+`9c9c48f175ee69e6682fe98ebfecf3f2e9f37938f0bed5c77e1a89f81667bee9`), with complete
+browser/profile/private/topology cleanup and unchanged host-state hash
+`ef974fc320c395a70e895e0b7f9332b1afb2fc843f4d4429931d3462a847a780`.
+
+Source inspection identifies a definite ordering bug: core published `Ready` before cold
+route admission, then performed that admission inside HTTP CONNECT. In the exact ESR
+release's [HTTP connection implementation](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_140_16_0esr_RELEASE/netwerk/protocol/http/nsHttpConnection.cpp)
+and [TLS handshaker](https://github.com/mozilla-firefox/firefox/blob/FIREFOX_140_16_0esr_RELEASE/netwerk/protocol/http/TlsHandshaker.cpp),
+TLS setup precedes tunnel establishment and incomplete negotiation is subject to the native
+handshake timeout. The staged runtime's default is 30 seconds. This explains a possible
+timeout boundary; the historical closed events contain no elapsed times, so they do not
+prove that this exact timer caused the failed run or that no additional route failure exists.
+
+The candidate fixes the ordering as described above and retains only closed preparation
+stage/error enums in the existing diagnostic export. The fixture keeps two serial independent
+attachments; its first-request orchestration wait covers both preparations, without extending
+the 300-second grants or altering Firefox network/TLS preferences. Fifteen pure core fixture
+checks and shell syntax pass. Four focused Rust preparation checks are added for central
+execution; neither they nor the browser's simulated-transport checks are live overlay proof.
+The corrected real Firefox/MPTCP trial remains required.
+
+===== END ARCHIVE =====

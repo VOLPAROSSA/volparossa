@@ -19,11 +19,11 @@ const MAX_MPQUIC_PATHS: usize = 8;
 #[derive(Clone, PartialEq, Message)]
 pub struct MpquicSessionPathProof {
     #[prost(bytes = "vec", tag = "1")]
-    signed_relay_reservation: Vec<u8>,
+    relay_reservation: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
-    signed_confirmation: Vec<u8>,
+    confirmation: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
-    signed_confirmation_receipt: Vec<u8>,
+    confirmation_receipt: Vec<u8>,
 }
 
 impl MpquicSessionPathProof {
@@ -35,28 +35,28 @@ impl MpquicSessionPathProof {
         signed_confirmation_receipt: Vec<u8>,
     ) -> Self {
         Self {
-            signed_relay_reservation,
-            signed_confirmation,
-            signed_confirmation_receipt,
+            relay_reservation: signed_relay_reservation,
+            confirmation: signed_confirmation,
+            confirmation_receipt: signed_confirmation_receipt,
         }
     }
 
     /// Data-Relay-signed acceptance for this exact path.
     #[must_use]
     pub fn signed_relay_reservation(&self) -> &[u8] {
-        &self.signed_relay_reservation
+        &self.relay_reservation
     }
 
     /// Client-session-signed return of the exact Relay acceptance.
     #[must_use]
     pub fn signed_confirmation(&self) -> &[u8] {
-        &self.signed_confirmation
+        &self.confirmation
     }
 
     /// Exit-signed receipt for the exact confirmation.
     #[must_use]
     pub fn signed_confirmation_receipt(&self) -> &[u8] {
-        &self.signed_confirmation_receipt
+        &self.confirmation_receipt
     }
 }
 
@@ -137,15 +137,15 @@ impl MpquicSessionStartRequest {
         let mut previous_path_id = 0;
         for proof in &self.paths {
             let relay = signed_payload::<RelayReservation>(
-                &proof.signed_relay_reservation,
+                &proof.relay_reservation,
                 ControlMessageType::RelayReservation,
             )?;
             let confirmation = signed_payload::<ExitReservationConfirmation>(
-                &proof.signed_confirmation,
+                &proof.confirmation,
                 ControlMessageType::ExitReservationConfirmation,
             )?;
             let receipt = signed_payload::<ExitConfirmationReceipt>(
-                &proof.signed_confirmation_receipt,
+                &proof.confirmation_receipt,
                 ControlMessageType::ExitConfirmationReceipt,
             )?;
             if !(1..=u32::try_from(MAX_MPQUIC_PATHS).unwrap_or(u32::MAX)).contains(&relay.path_id)
@@ -155,7 +155,7 @@ impl MpquicSessionStartRequest {
                     &confirmation,
                     &relay,
                     &exit,
-                    &proof.signed_relay_reservation,
+                    &proof.relay_reservation,
                 )
                 || !receipt_matches_path(&receipt, &relay, &exit)
             {

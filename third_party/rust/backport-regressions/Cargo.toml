@@ -11,9 +11,13 @@ rust-version = "1.85"
 [dependencies]
 futures = "0.3.33"
 hickory-proto = { path = "../vendor/hickory-proto-0.25.2", default-features = false, features = ["volparossa-backport-regressions"] }
+hickory-resolver = { path = "../vendor/hickory-resolver-0.25.2", default-features = false, features = ["dnssec-ring"] }
 libp2p-core = "=0.43.2"
 libp2p-yamux = { path = "../vendor/libp2p-yamux-0.47.0" }
 # multibase 0.9.3 pulls base45 3.2, which uses APIs unavailable on Rust 1.85.
 multibase = "=0.9.2"
 time = { path = "../vendor/time-0.3.41", default-features = false, features = ["parsing", "std"] }
 yamux = "=0.13.10"
+
+[patch.crates-io]
+hickory-proto = { path = "../vendor/hickory-proto-0.25.2" }

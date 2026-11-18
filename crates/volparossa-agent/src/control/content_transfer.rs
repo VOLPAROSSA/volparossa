@@ -51,13 +51,12 @@ pub(super) async fn process(
                     .map_err(|_| ControlServerError::InvalidFrame);
             }
         };
-        if let Some(context) = context {
-            if let Err(error) = context.content.check_object_policy(&scope.manifest) {
+        if let Some(context) = context
+            && let Err(error) = context.content.check_object_policy(&scope.manifest) {
                 return write_response(&mut stream, &content_response(request_id, Err(error)))
                     .await
                     .map_err(|_| ControlServerError::InvalidFrame);
             }
-        }
         let withheld = async {
             if let Some(gate) = gate.as_ref() {
                 gate.wait_until_withheld(&scope.manifest).await;

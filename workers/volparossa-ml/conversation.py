@@ -16,6 +16,7 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 QWEN = "qwen3-0.6b-v1"
 QWEN4B = "qwen3-4b-instruct-2507-v1"
 NATIVE_PROFILES = (QWEN, QWEN4B)
+OUTPUT_CONSTRAINT = "qwen_tagged_tool_json_v1"
 
 
 def bounds(profile_name=None):
@@ -69,6 +70,17 @@ def generation_policy(value, profile_name=None):
     return policy
 
 
+def output_constraint(value, profile_name=None):
+    if "output_constraint" not in value:
+        return None
+    constraint = value["output_constraint"]
+    require(profile_name == QWEN4B and type(constraint) is str and constraint == OUTPUT_CONSTRAINT
+            and generation_policy(value, profile_name) == "greedy_v1"
+            and type(value.get("tools")) is list and 1 <= len(value["tools"]) <= 32,
+            "CONVERSATION_OUTPUT_CONSTRAINT")
+    return constraint
+
+
 def validate_call(value, tools, seen):
     custom = value["type"] == "custom_tool_call"
     fields(value, ("type", "call_id", "name", "input" if custom else "arguments"), ("namespace",))
@@ -81,8 +93,10 @@ def validate_call(value, tools, seen):
 
 def validate(value, profile_name=None):
     maximum, instructions, history, tools, message, description = bounds(profile_name)
-    fields(value, ("version", "visibility", "instructions", "history", "tools"), ("generation_policy",))
+    fields(value, ("version", "visibility", "instructions", "history", "tools"),
+           ("generation_policy", "output_constraint"))
     generation_policy(value, profile_name)
+    output_constraint(value, profile_name)
     require(type(value["version"]) is int and value["version"] == 1
             and value["visibility"] == "private_local", "CONVERSATION_SCOPE")
     require(text(value["instructions"], instructions) and type(value["history"]) is list
@@ -194,9 +208,27 @@ def invalid_constant(_value):
     raise ValueError("CONVERSATION_JSON_CONSTANT")
 
 
+def constrained_argument_depth(value):
+    # Count argument containers only: the arguments object is depth one;
+    # the tagged tool envelope and scalar/string contents do not add depth.
+    pending = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if type(item) in (dict, list):
+            if depth > 16:
+                return False
+            pending.extend((child, depth + 1) for child in
+                           (item.values() if type(item) is dict else item))
+    return True
+
+
 def decode(value, output, profile_name=None, request_id=None):
     if profile_name in NATIVE_PROFILES:
-        return native().decode(value, output, request_id)
+        result = native().decode(value, output, request_id)
+        if "output_constraint" in value and result["type"] == "function_call" \
+                and not constrained_argument_depth(result["arguments"]):
+            return {"type": "incomplete", "reason": "invalid_output"}
+        return result
     if output["text_truncated"]:
         return {"type": "incomplete", "reason": "wire_truncated"}
     if output["generation"]["stop_reason"] != "eos":

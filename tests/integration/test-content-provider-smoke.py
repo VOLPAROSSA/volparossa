@@ -11,6 +11,7 @@ import runpy
 import socket
 import struct
 import subprocess
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -19,7 +20,7 @@ HERE = Path(__file__).parent
 CHECK = runpy.run_path(str(HERE / "content-provider-smoke.py"))
 
 
-def fixture(control_node="relay2"):
+def fixture(control_node="relay2", *, include_late=True, include_pressure=True):
     peers = {name: f"peer-{name}" for name in (*CHECK["ROLES"], "relay3", "relay4", "relay5")}
     provider_nodes = [node for node in CHECK["CANDIDATES"] if node != control_node][:2]
     paths = [dict(route_context_id="a" * 32, path_id=index + 1,
@@ -90,7 +91,13 @@ def fixture(control_node="relay2"):
     evidence["ordinary_publication"] = user_fixture(evidence)
     evidence["named_publication"] = named_fixture(evidence)
     evidence["site_publication"] = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))["fixture"](control_node)
+    evidence["filter_snapshot"] = runpy.run_path(str(HERE / "test-content-provider-filter-smoke.py"))["fixture"](control_node)
     evidence["adaptive_workers"] = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["fixture"]()
+    if include_pressure:
+        evidence["pressure"] = runpy.run_path(str(HERE / "test-content-provider-pressure-smoke.py"))["fixture"]()
+    if include_late:
+        evidence["late_provider_recovery"] = runpy.run_path(
+            str(HERE / "test-content-provider-late-recovery.py"))["fixture"]()
     cancellation = runpy.run_path(str(HERE / "content-cancellation-smoke.py"))
     component, _, _ = cancellation["sample"]()
     named_fetch = evidence["named_publication"]["fetch"]
@@ -181,6 +188,125 @@ def user_fixture(base):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_late_recovery_is_separate_and_bound_to_prior_adaptive_context(self):
+        evidence = fixture()
+        CHECK["validate_transfer"](evidence)
+        # Retained component evidence remains readable without acquiring a new claim.
+        CHECK["validate_transfer"](fixture(include_late=False))
+        for mutate in (
+            lambda value: value["late_provider_recovery"].update(success=False),
+            lambda value: value["late_provider_recovery"]["expected_peers"].update(client="wrong-client"),
+            lambda value: value["late_provider_recovery"].update(previous_context="f" * 32),
+            lambda value: value["late_provider_recovery"]["selected_route"].update(route_context_id="a" * 32),
+            lambda value: value["late_provider_recovery"]["publication"].update(
+                publisher_hex=value["publication"]["publisher_hex"]),
+            lambda value: value["late_provider_recovery"]["publication"].update(
+                manifest_id=value["adaptive_workers"]["publication"]["manifest_id"]),
+            lambda value: value.update(provider_payload_overlap_ns=0),
+        ):
+            wrong = copy.deepcopy(evidence)
+            mutate(wrong)
+            with self.assertRaises((ValueError, KeyError)):
+                CHECK["validate_transfer"](wrong)
+
+    def test_late_phase_hooks_preflight_and_cleanup_cannot_be_skipped(self):
+        source = HERE.joinpath("kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        runtime = HERE.joinpath("content-provider-smoke.sh").read_text(encoding="utf-8")
+        self.assertIn("content_provider_adaptive_run\n    content_provider_late_recovery_run\n"
+                      "    content_provider_cancellation_run", runtime)
+        self.assertIn("$evidence.late_provider_recovery.success == true", runtime)
+        self.assertIn("$evidence.pressure.success == true", runtime)
+        self.assertIn("{schema_version:4,report_kind:", runtime)
+        preflight = source.split('for provider_fixture in ', 1)[1].split('; do', 1)[0]
+        for name in ("content-provider-late-recovery.sh", "content-provider-late-recovery.py"):
+            self.assertIn(name, preflight)
+        self.assertIn('. "$source_directory/tests/integration/content-provider-late-recovery.sh"', source)
+        cleanup = source.split("\ncleanup() {\n", 1)[1].split("\n}\n", 1)[0]
+        hook = "content_provider_late_recovery_cleanup || original_status=1"
+        self.assertLess(cleanup.index(hook), cleanup.index('kill -TERM'))
+        self.assertLess(cleanup.index(hook), cleanup.index('retire_unit'))
+        pressure_hook = "content_provider_pressure_cleanup || original_status=1"
+        self.assertLess(cleanup.index(pressure_hook), cleanup.index('kill -TERM'))
+        self.assertLess(cleanup.index(pressure_hook), cleanup.index('retire_unit'))
+        early = cleanup.split('    if [ "$scenario" = dns-cache ]', 1)[0]
+        # Execute the actual trap prelude with inert hooks: failure is retained,
+        # cancellation cleanup still runs, and no service/network tool is called.
+        script = ('set -eu\nscenario=content-provider\nPHASE=late-failure\nOBSERVED_BLOCKER=late-blocker\n'
+                  'FINALIZED=no\ncontent_provider_late_recovery_cleanup() { printf "late\\n"; return "$1"; }\n')
+        # The hook has no arguments; bake the synthetic result into its body.
+        for result, pressure_result in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            prefix = script.replace('return "$1"', f'return {result}')
+            prefix += ('content_provider_pressure_cleanup() { printf "pressure\\n"; '
+                       f'return {pressure_result}; }}\n')
+            prefix += 'content_provider_cancellation_resume() { printf "cancel\\n"; }\n'
+            body = prefix + 'cleanup_prelude() {\n' + early + '\n}\ntrue\ncleanup_prelude\n'
+            body += 'printf "%s:%s:%s\\n" "$original_status" "$failure_phase" "$failure_reason"\n'
+            checked = subprocess.run(["sh", "-eu", "-c", body], capture_output=True, timeout=2, check=False)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(checked.stdout.decode(),
+                             f"pressure\nlate\ncancel\n{max(result, pressure_result)}:late-failure:late-blocker\n")
+        stage = source.split('for late_recovery_helper in ', 1)[1].split('\n    done', 1)[0]
+        for name in ("content-provider-late-recovery.py", "content-provider-https-smoke.py", "content-network-smoke.py"):
+            self.assertIn(name, stage)
+        self.assertIn('install -o root -g root -m 0555', stage)
+        workflow = HERE.parents[1].joinpath('.github/workflows/alpha-topology.yml').read_text(encoding='utf-8')
+        self.assertIn('python3 -B tests/integration/test-content-provider-late-recovery.py', workflow)
+        registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
+        script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
+        for scenario in ("content-provider", "content", "content-https"):
+            for prefix in ("content-provider-late-recovery-privacy", "content-provider-late-recovery-unregistered"):
+                result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
+                                        capture_output=True, timeout=2, check=False)
+                self.assertEqual(result.returncode == 0, scenario == "content-provider"
+                                 and prefix == "content-provider-late-recovery-privacy")
+
+    def test_late_emergency_metadata_survives_bounds_without_claiming_success(self):
+        source = HERE.joinpath("run-alpha-topology-vm.sh").read_text(encoding="utf-8")
+        embedded = source.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split("\nGUEST_DIAGNOSTICS_PYTHON\n", 1)[0]
+        api = {"__name__": "inert_late_collector"}
+        exec(compile(embedded, "late-collector", "exec"), api)
+        self.assertEqual(api["LATE_PROVIDER_NAMES"], {f"content-provider-late-recovery-{suffix}.json"
+            for suffix in ("first-snapshot", "final-snapshot", "object", "run-cleanup", "cleanup", "evidence", "failure", "readiness")})
+        for scenario, oversized_failure in (("content-provider", False), ("content-provider", True), ("content", False)):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                home, opt, proc, cgroups = (base / name for name in ("home", "opt", "proc", "cgroups"))
+                for path in (home, opt, proc, cgroups): path.mkdir()
+                work = opt / ("va." + "a" * 32 + ".ABC123")
+                work.mkdir()
+                (home / "alpha-output").mkdir()
+                # Earlier public content files would consume the old sorted48
+                # scan before the later-named recovery proof was reached.
+                for index in range(60): (work / f"content-before-{index:02}.json").write_text("{}")
+                for name in api["LATE_PROVIDER_NAMES"]: (work / name).write_text('{"observed":true}')
+                failure_name = "content-provider-late-recovery-failure.json"
+                failure_raw = json.dumps(dict(schema_version=1, kind="content-provider-late-recovery-failure",
+                    success=False, stage="gate-install", category="command-failed", command_exit_code=2)).encode()
+                (work / failure_name).write_bytes(b" " * (api["FILE_LIMIT"] + 1) if oversized_failure else failure_raw)
+                oversized = "content-provider-late-recovery-evidence.json"
+                (work / oversized).write_bytes(b" " * (api["FILE_LIMIT"] + 1))
+                alias = "content-provider-late-recovery-cleanup.json"
+                (work / alias).unlink()
+                (work / alias).symlink_to(work / "content-before-00.json")
+                (work / "content-provider-late-recovery-fetch.state").write_text("PRIVATE PROCESS INTENT")
+                (work / "content-provider-late-recovery-unknown.json").write_text("PRIVATE UNKNOWN")
+                (work / "content-provider-late-recovery-fetch.err").write_text("PRIVATE RAW LOG")
+                archive = api["collect"](home, opt, "b" * 40, scenario, 124, cgroups, proc)
+                with tarfile.open(archive, "r:gz") as bundle:
+                    files = {member.name: bundle.extractfile(member).read() for member in bundle.getmembers()}
+                selected = {name.rsplit("/", 1)[-1] for name in files if "late-recovery" in name}
+                expected = api["LATE_PROVIDER_NAMES"] - {oversized, alias} if scenario == "content-provider" else set()
+                if oversized_failure: expected.discard(failure_name)
+                self.assertEqual(selected, expected)
+                if failure_name in selected:
+                    self.assertEqual(files[f"work-1/{failure_name}"], failure_raw)
+                self.assertFalse(any(b"PRIVATE" in value for value in files.values()))
+                summary = json.loads(files["vm-incomplete.json"])
+                self.assertIs(summary["success"], False)
+                self.assertEqual(summary["cleanup"], {"complete": False, "verified": False})
+                self.assertLessEqual(len(summary["diagnostics"]["files"]), 64)
+                self.assertLessEqual(summary["diagnostics"]["captured_bytes"], 8388608)
+
     def test_adaptive_workers_are_required_and_bound_to_real_component_evidence(self):
         evidence = fixture()
         CHECK["validate_transfer"](evidence)
@@ -196,6 +322,34 @@ class ContentProviderContract(unittest.TestCase):
             with self.assertRaises((ValueError, KeyError)):
                 CHECK["validate_transfer"](changed)
 
+    def test_pressure_is_separate_required_and_bound_to_existing_adaptive_proof(self):
+        evidence = fixture()
+        CHECK["validate_transfer"](evidence)
+        changed_statistics = copy.deepcopy(evidence)
+        changed_statistics["pressure"]["selected_route"]["paths"][0].update(
+            reported_bytes=123456, smoothed_rtt_us=456, state=1)
+        CHECK["validate_transfer"](changed_statistics)
+        for mutate in (
+            lambda value: value.pop("pressure"),
+            lambda value: value.update(pressure=None),
+            lambda value: value["pressure"].update(success=False),
+            lambda value: value["pressure"]["expected_peers"].update(client="different-client"),
+            lambda value: value["pressure"]["publication"].update(manifest_id="f" * 64),
+            lambda value: value["pressure"]["selected_route"].update(route_context_id="f" * 32),
+            lambda value: value["pressure"]["selected_route"]["paths"][0].update(exit_peer_id="different-exit"),
+            lambda value: value["pressure"]["selected_route"].update(policy_hash="different-policy"),
+            lambda value: value["pressure"]["scope"].update(owner_goodput_claimed=True),
+            lambda value: value["adaptive_workers"].update(provider_payload_overlap_ns=0),
+        ):
+            changed = copy.deepcopy(evidence)
+            mutate(changed)
+            with self.assertRaises((ValueError, KeyError)):
+                CHECK["validate_transfer"](changed)
+        old = fixture(include_pressure=False)
+        CHECK["validate_transfer"](old, historical_pressure=True)
+        with self.assertRaises(ValueError): CHECK["validate_transfer"](old)
+        with self.assertRaises(ValueError): CHECK["validate_transfer"](evidence, historical_pressure=True)
+
     def test_site_proof_is_required_and_bound_to_parent_topology_and_exact_bundle(self):
         evidence = fixture()
         CHECK["validate_transfer"](evidence)
@@ -206,6 +360,9 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item["site_publication"]["input"].update(bundle_sha256="f"*64),
             lambda item: item["site_publication"]["application"]["ready"].update(peer_bytes=0),
             lambda item: item["site_publication"]["cleanup"].update(user_directory_removed=False),
+            lambda item: item.pop("filter_snapshot"),
+            lambda item: item["filter_snapshot"]["warm"]["application"]["receipt"].update(peer_bytes=1),
+            lambda item: item["filter_snapshot"]["input"].update(publisher_key=item["publication"]["publisher_hex"]),
         ):
             changed = copy.deepcopy(evidence)
             mutate(changed)
@@ -359,17 +516,34 @@ class ContentProviderContract(unittest.TestCase):
             "https": "https-evidence", "selected_route": "live-selection",
             "ordinary_publication": "user-publication",
             "site_publication": "site-evidence",
+            "filter_snapshot": "filter-evidence",
             "adaptive_workers": "adaptive-evidence",
+            "pressure": "pressure-evidence",
+            "late_provider_recovery": "late-recovery-evidence",
             "requester_cancellation": "cancellation",
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
         files.update(site_raw_files(evidence["site_publication"]))
+        files.update(runpy.run_path(str(HERE / "test-content-provider-filter-smoke.py"))["raw_files"](
+            evidence["filter_snapshot"]))
         adaptive_raw = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["raw_files"](
             evidence["adaptive_workers"])
         for name, value in adaptive_raw.items():
             if name in files:
                 self.assertEqual(files[name], value, "component fixture cannot replace earlier proof inputs")
+            files[name] = value
+        pressure_raw = runpy.run_path(str(HERE / "test-content-provider-pressure-smoke.py"))["raw_files"](
+            evidence["pressure"])
+        for name, value in pressure_raw.items():
+            if name in files:
+                self.assertEqual(files[name], value, "pressure cannot replace earlier adaptive proof inputs")
+            files[name] = value
+        late_raw = runpy.run_path(str(HERE / "test-content-provider-late-recovery.py"))["raw_files"](
+            evidence["late_provider_recovery"])
+        for name, value in late_raw.items():
+            if name in files:
+                self.assertEqual(files[name], value, "late recovery cannot replace earlier proof inputs")
             files[name] = value
         named = evidence["named_publication"]
         for key, suffix in (("fetch", "fetch"), ("output", "output"), ("cleanup", "cleanup"),
@@ -392,6 +566,7 @@ class ContentProviderContract(unittest.TestCase):
             work = Path(directory)
             for name, value in files.items():
                 (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="ascii")
+                (work / name).chmod(0o600)
             self.assertEqual(CHECK["build_evidence"](work), evidence)
             # The site must be rebuilt from raw receipts/captures, not accepted by its summary flag.
             site_report = work / "content-provider-site-evidence.json"
@@ -401,6 +576,13 @@ class ContentProviderContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["build_evidence"](work)
             site_report.write_text(json.dumps(evidence["site_publication"]), encoding="ascii")
+            filter_report = work / "content-provider-filter-evidence.json"
+            substituted = copy.deepcopy(evidence["filter_snapshot"])
+            substituted["warm"]["application"]["elapsed_ns"] += 1
+            filter_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            filter_report.write_text(json.dumps(evidence["filter_snapshot"]), encoding="ascii")
             adaptive_report = work / "content-provider-adaptive-evidence.json"
             adaptive_report.unlink()
             with self.assertRaises(OSError):
@@ -411,6 +593,34 @@ class ContentProviderContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["build_evidence"](work)
             adaptive_report.write_text(json.dumps(evidence["adaptive_workers"]), encoding="ascii")
+            pressure_report = work / "content-provider-pressure-evidence.json"
+            pressure_report.unlink()
+            with self.assertRaises(OSError):
+                CHECK["build_evidence"](work)
+            substituted = copy.deepcopy(evidence["pressure"])
+            substituted["success"] = False
+            pressure_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            pressure_report.write_text(json.dumps(evidence["pressure"]), encoding="ascii")
+            controller = work / "content-provider-pressure-controller.json"
+            original_controller = controller.read_text(encoding="ascii")
+            tampered = json.loads(original_controller)
+            tampered["verified_bytes"] = 0
+            controller.write_text(json.dumps(tampered), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            controller.write_text(original_controller, encoding="ascii")
+            late_report = work / "content-provider-late-recovery-evidence.json"
+            late_report.unlink()
+            with self.assertRaises(OSError):
+                CHECK["build_evidence"](work)
+            substituted = copy.deepcopy(evidence["late_provider_recovery"])
+            substituted["output"]["fetch_completed_ns"] += 1
+            late_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            late_report.write_text(json.dumps(evidence["late_provider_recovery"]), encoding="ascii")
             # Keep every existing exact source/destination/gateway/device check after decoding.
             wrong = copy.deepcopy(files["content-provider-control-relay4-out.json"])
             wrong[0]["dev"] = "underlay"
@@ -443,10 +653,10 @@ class ContentProviderContract(unittest.TestCase):
         self.assertEqual(fixture("relay4")["layout"]["provider_nodes"], ["relay5", "relay3"])
 
     def test_exact_scoped_report(self):
-        report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
+        report = dict(schema_version=4, report_kind="volparossa-native-content-providers", source_revision="a" * 40,
                       explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
-                      native_static_site=True,
-                      adaptive_provider_workers=True, requester_cancellation=True,
+                      native_static_site=True, public_filter_snapshot=True,
+                      adaptive_provider_workers=True, pressure=True, late_provider_recovery=True, requester_cancellation=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})
@@ -456,8 +666,22 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item.update(full_c02_claimed=True),
             lambda item: item.update(explicit_origin_authenticated_https=False),
             lambda item: item.update(native_static_site=False),
+            lambda item: item.update(public_filter_snapshot=False),
             lambda item: item.update(adaptive_provider_workers=False),
+            lambda item: item.update(pressure=False),
+            lambda item: item.pop("pressure"),
+            lambda item: item["transfer"].pop("pressure"),
+            lambda item: item["transfer"]["pressure"].update(success=False),
+            lambda item: item.update(late_provider_recovery=False),
+            lambda item: item.pop("late_provider_recovery"),
+            lambda item: item["transfer"].pop("late_provider_recovery"),
+            lambda item: item.update(schema_version=1),
+            lambda item: item.update(schema_version=3),
+            lambda item: item.update(schema_version=2.0),
+            lambda item: item.pop("schema_version"),
             lambda item: item.update(requester_cancellation=False),
+            lambda item: item["transfer"]["requester_cancellation"].update(schema_version=1),
+            lambda item: item["transfer"]["requester_cancellation"].pop("cooldown_prerequisite"),
             lambda item: (item.pop("requester_cancellation"), item["transfer"].pop("requester_cancellation")),
             lambda item: item["cleanup"].update(remaining_owned_objects=1),
             lambda item: item["host_state"].update(after_sha256="c" * 64),
@@ -466,6 +690,44 @@ class ContentProviderContract(unittest.TestCase):
             mutate(wrong)
             with self.assertRaises(ValueError):
                 CHECK["validate_report"](wrong, "a" * 40)
+        older_current = copy.deepcopy(report)
+        older_current["schema_version"] = 3
+        older_current.pop("pressure")
+        older_current["transfer"].pop("pressure")
+        CHECK["validate_report"](older_current, "a" * 40, historical=True)
+        with self.assertRaises(ValueError): CHECK["validate_report"](older_current, "a" * 40)
+        for mutate in (lambda value: value.update(pressure=True),
+                       lambda value: value["transfer"].update(pressure=report["transfer"]["pressure"])):
+            retroactive = copy.deepcopy(older_current)
+            mutate(retroactive)
+            with self.assertRaises(ValueError):
+                CHECK["validate_report"](retroactive, "a" * 40, historical=True)
+        historical = copy.deepcopy(older_current)
+        historical["schema_version"] = 1
+        historical.pop("late_provider_recovery")
+        historical["transfer"].pop("late_provider_recovery")
+        # Actual old receipts had neither the new schema nor the prerequisite.
+        historical["transfer"]["requester_cancellation"]["schema_version"] = 1
+        historical["transfer"]["requester_cancellation"].pop("cooldown_prerequisite")
+        CHECK["validate_report"](historical, "a" * 40, historical=True)
+        with self.assertRaises(ValueError):
+            CHECK["validate_report"](historical, "a" * 40)
+        with self.assertRaises(ValueError):
+            CHECK["validate_report"](report, "a" * 40, historical=True)
+        older_late = copy.deepcopy(older_current)
+        older_late["schema_version"] = 2
+        older_late["transfer"]["late_provider_recovery"]["schema_version"] = 1
+        older_late["transfer"]["late_provider_recovery"].pop("readiness")
+        CHECK["validate_report"](older_late, "a" * 40, historical=True)
+        with self.assertRaises(ValueError): CHECK["validate_report"](older_late, "a" * 40)
+        with self.assertRaises(ValueError): CHECK["validate_report"]({**report, "schema_version": 2}, "a" * 40, historical=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "historical.json"
+            path.write_text(json.dumps(historical), encoding="ascii")
+            for action, expected in (("report", 1), ("historical-report", 0)):
+                result = subprocess.run(["python3", "-B", str(HERE / "content-provider-smoke.py"),
+                                         action, str(path), "a" * 40], capture_output=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_substituted_discovery_providers_or_incomplete_physical_proof_fail(self):
         for mutate in (
@@ -540,9 +802,13 @@ class ContentProviderContract(unittest.TestCase):
                            for target in node.targets))
         parser = compile(ast.Module(body=nodes[start:end], type_ignores=[]), "actual-control-arguments", "exec")
         for interfaces, accepted in ((["cp0", "cp1"], True), (["ac0", "ac1", "ac2"], True),
+                                     (["lc0", "lc1"], True),
                                      (["cp0"], False), (["cp0", "ac1"], False),
                                      (["ac0", "ac1"], False), (["ac0", "ac1", "ac3"], False),
-                                     (["cp0", "cp1", "cp2"], False)):
+                                     (["cp0", "cp1", "cp2"], False),
+                                     (["lc0"], False), (["lc0", "lc0"], False),
+                                     (["lc1", "lc0"], False), (["lc0", "lc2"], False),
+                                     (["lc0", "cp1"], False), (["lc0", "lc1", "lc2"], False)):
             addresses = ["42.158.0.1", "48.164.4.1", "49.165.5.1", "50.166.6.1"][:len(interfaces) + 1]
             environment = dict(socket=socket, sys=SimpleNamespace(argv=["observer", "content-control", "out", "ready",
                 "--content-providers", "--content-control=" + ",".join(addresses), *interfaces]))
@@ -553,6 +819,21 @@ class ContentProviderContract(unittest.TestCase):
             else:
                 with self.assertRaises(SystemExit):
                     exec(parser, environment)
+        # The live late-recovery invocation uses this exact two-interface family;
+        # adding it must not admit malformed, repeated or incomplete endpoints.
+        for control_argument in (
+            "42.158.0.1,49.165.5.1,50.166.6.1",
+            "--content-control=42.158.0.1,49.165.5.1",
+            "--content-control=42.158.0.1,49.165.5.1,50.166.6.1,48.164.4.1",
+            "--content-control=42.158.0.1,49.165.5.1,49.165.5.1",
+            "--content-control=42.158.0.1,42.158.0.1,50.166.6.1",
+            "--content-control=42.158.0.1,not-an-address,50.166.6.1",
+            "--content-control=42.158.0.1,,50.166.6.1",
+        ):
+            environment = dict(socket=socket, sys=SimpleNamespace(argv=["observer", "content-control", "out", "ready",
+                "--content-providers", control_argument, "lc0", "lc1"]))
+            with self.subTest(control_argument=control_argument), self.assertRaises((SystemExit, OSError)):
+                exec(parser, environment)
         function = next(node for node in nodes if isinstance(node, ast.FunctionDef)
                         and node.name == "record_provider_control")
         environment = dict(socket=socket, content_control_pairs={"cp0": ["42.158.0.1", "49.165.5.1"]},
@@ -569,6 +850,26 @@ class ContentProviderContract(unittest.TestCase):
             ("cp0", socket.IPPROTO_UDP, "43.159.1.1", 41000, "49.165.5.1", 41000),
             ("cp1", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000),
         ):
+            record(*args)
+        self.assertEqual(environment["unexpected_provider_control_packets"], 4)
+
+        # Late recovery still observes only the exact broker/provider UDP pairs,
+        # not provider application traffic or another family's interfaces.
+        pairs = {f"lc{index}": ["42.158.0.1", CHECK["PUBLIC_IPS"][node]]
+                 for index, node in enumerate(("relay4", "relay5"))}
+        environment = dict(socket=socket, content_control_pairs=pairs,
+                           content_control_packets={interface: dict(inbound=0, outbound=0) for interface in pairs},
+                           unexpected_provider_control_packets=0)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "actual-late-control", "exec"), environment)
+        record = environment["record_provider_control"]
+        for interface, (source, destination) in pairs.items():
+            record(interface, socket.IPPROTO_UDP, source, 41000, destination, 41000)
+            record(interface, socket.IPPROTO_UDP, destination, 41000, source, 41000)
+            self.assertEqual(environment["content_control_packets"][interface], dict(inbound=1, outbound=1))
+        for args in (("lc0", socket.IPPROTO_TCP, "42.158.0.1", 32000, "49.165.5.1", 18080),
+                     ("lc0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "50.166.6.1", 41000),
+                     ("lc2", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000),
+                     ("ac0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000)):
             record(*args)
         self.assertEqual(environment["unexpected_provider_control_packets"], 4)
         # The additive family has three exact endpoint pairs, not a wildcard control allowance.

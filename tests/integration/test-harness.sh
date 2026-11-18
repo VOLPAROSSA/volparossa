@@ -463,8 +463,26 @@ grep -F './tests/netns/test-lifecycle-contract.sh' "$REPOSITORY_DIRECTORY/justfi
 grep -F './tests/netns/run-benchmarks.sh --preview' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './packaging/build-deb.sh --preview' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
 grep -F './packaging/build-deb.sh --build' "$REPOSITORY_DIRECTORY/justfile" >/dev/null
-grep -F "' \"\$metadata_file\" | LC_ALL=C sort > \"\$package_list\"" \
-    "$REPOSITORY_DIRECTORY/packaging/collect-cargo-licenses.sh" >/dev/null
+# Require the fail-closed resolve selector before consuming validated metadata.
+python3 -B - "$REPOSITORY_DIRECTORY/packaging/collect-cargo-licenses.sh" <<'PY_NOTICE_CONTRACT'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+required = [
+    'set -eu',
+    'resolved_metadata=$destination/.resolved-metadata.json',
+    'python3 -B "$repository_root/packaging/cargo-notice-closure.py" "$metadata_file" > "$resolved_metadata"',
+    "jq -er '",
+    "' \"$resolved_metadata\" | LC_ALL=C sort > \"$package_list\"",
+    'while IFS="\t" read -r crate_name crate_version license_expression license_file manifest_path source; do',
+]
+if any(lines.count(line) != 1 for line in required):
+    raise SystemExit('notice collector must uniquely validate and consume its resolve closure')
+positions = [lines.index(line) for line in required]
+if positions != sorted(positions):
+    raise SystemExit('notice collector must validate the resolve closure before package iteration')
+PY_NOTICE_CONTRACT
 grep -F 'LoadCredentialEncrypted=identity-passphrase:/etc/credstore.encrypted/identity-passphrase' \
     "$REPOSITORY_DIRECTORY/packaging/systemd/volparossa-agent.service" >/dev/null
 grep -F 'ConditionFileIsExecutable=/usr/libexec/volparossa/volparossa-mpquic-launch' \

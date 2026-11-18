@@ -84,7 +84,8 @@ class SignalBackupWiring(unittest.TestCase):
         self.assertNotIn('tar.gz .', archive)
         workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
         self.assertIn("          - signal-backup\n", workflow)
-        self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments') && 150", workflow)
+        self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
+                      "|| inputs.scenario == 'private-storage-maintenance') && 150", workflow)
         gate = workflow.split("      - name: Require real Signal encrypted backup", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
         self.assertIn('signal-backup-smoke.py report "$report" "$GITHUB_SHA"', gate)

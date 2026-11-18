@@ -426,9 +426,11 @@ mod tests {
             wire
         );
         assert!(child.expires_at() <= parent.expires_at());
+        // Compare budgets at the same instant, not across two clock readings.
+        let observed_at = Instant::now();
         assert!(
-            child.remaining().expect("child remaining")
-                <= parent.remaining().expect("parent remaining")
+            child.remaining_at(observed_at).expect("child remaining")
+                <= parent.remaining_at(observed_at).expect("parent remaining")
         );
     }
 

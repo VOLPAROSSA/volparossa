@@ -1,0 +1,24 @@
+--- a/src/caching_client.rs
++++ b/src/caching_client.rs
+@@ -194,6 +194,21 @@
+             response_message
+         };
+ 
++        // A validating handle can return answer records marked Bogus. Reject them
++        // before following aliases or inserting records into the lookup cache.
++        // Backport of hickory-dns 92f93c0, using the existing 0.25 error API.
++        #[cfg(feature = "__dnssec")]
++        if is_dnssec
++            && response_message.as_ref().is_ok_and(|response| {
++                response
++                    .answers()
++                    .iter()
++                    .any(|record| record.proof() == crate::proto::dnssec::Proof::Bogus)
++            })
++        {
++            return Err(ProtoError::from("DNSSEC validation failed"));
++        }
++
+         // TODO: take all records and cache them?
+         //  if it's DNSSEC they must be signed, otherwise?
+         let records: Result<Records, ProtoError> = match response_message {

@@ -51,13 +51,21 @@ def read_deleted_usage(path):
     return value
 
 
-def invoke(binary, socket, args, raw=False, expected=0, deadline=180):
+def invoke(binary, socket, args, raw=False, expected=0, deadline=180, *, failure_observer=None):
     # A failover restore has at most three core exchanges: failed A, B Progress, B ReadRange.
     # Each core exchange retains its own 120s limit. No retry or larger core deadline is added.
     process = subprocess.Popen([binary, "--control-socket", socket, *map(str, args)],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         stdout, stderr = process.communicate(timeout=deadline)
+        if process.returncode != expected and failure_observer is not None:
+            # Best-effort projection of this exact completed call, before the
+            # historical nonzero check discards its report. Never retain a
+            # callback or let diagnostic failure replace the primary CLI error.
+            try:
+                failure_observer(process.returncode, stdout, stderr)
+            except BaseException:
+                pass
         require(process.returncode == expected, "private replica CLI operation failed")
         require(len(stdout) <= 16384 and len(stderr) <= 16384, "replica diagnostics exceeded fixture bound")
         if expected:

@@ -194,14 +194,13 @@ impl ReplicationRuntime {
     }
 
     pub(super) async fn stop(&self) {
-        if let Some(mut task) = self.job.lock().await.take() {
-            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+        if let Some(mut task) = self.job.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
         }
     }
 

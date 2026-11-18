@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::watch,
     time::{self, Instant},
 };
 
@@ -82,6 +83,12 @@ pub struct StreamTransferStats {
     pub exit_to_client_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+struct StreamProgress {
+    last_forwarded: Instant,
+    operations_in_flight: usize,
+}
+
 /// Forward available contiguous bytes in both directions without message-sized
 /// buffering, batching, duplication, or application-protocol reassembly.
 ///
@@ -102,53 +109,103 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     E: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut client_reader, mut client_writer) = io::split(client);
-    let (mut exit_reader, mut exit_writer) = io::split(exit);
-    let mut client_buffer = vec![0_u8; limits.buffer_bytes];
-    let mut exit_buffer = vec![0_u8; limits.buffer_bytes];
-    let mut client_open = true;
-    let mut exit_open = true;
-    let mut statistics = StreamTransferStats::default();
+    let (client_reader, client_writer) = io::split(client);
+    let (exit_reader, exit_writer) = io::split(exit);
+    let (progress, mut changes) = watch::channel(StreamProgress {
+        last_forwarded: Instant::now(),
+        operations_in_flight: 0,
+    });
+    // A blocked write in either direction must not prevent draining the other one.
+    // Both futures stay owned here: cancellation drops both streams and buffers;
+    // no detached copy task or additional per-flow byte queue is created.
+    let transfer = async {
+        let (client_to_exit_bytes, exit_to_client_bytes) = tokio::try_join!(
+            copy_direction(
+                client_reader,
+                exit_writer,
+                limits.buffer_bytes,
+                limits.maximum_client_to_exit_bytes,
+                limits.idle_timeout,
+                &progress,
+            ),
+            copy_direction(
+                exit_reader,
+                client_writer,
+                limits.buffer_bytes,
+                limits.maximum_exit_to_client_bytes,
+                limits.idle_timeout,
+                &progress,
+            ),
+        )?;
+        Ok(StreamTransferStats {
+            client_to_exit_bytes,
+            exit_to_client_bytes,
+        })
+    };
+    tokio::pin!(transfer);
     let idle = time::sleep(limits.idle_timeout);
     tokio::pin!(idle);
 
-    while client_open || exit_open {
+    loop {
+        let observed = *changes.borrow_and_update();
+        idle.as_mut()
+            .reset(observed.last_forwarded + limits.idle_timeout);
         tokio::select! {
-            result = client_reader.read(&mut client_buffer), if client_open => {
-                let count = result?;
-                if count == 0 {
-                    client_open = false;
-                    timed_shutdown(&mut exit_writer, limits.idle_timeout).await?;
-                    continue;
+            biased;
+            result = &mut transfer => return result,
+            // The sender remains owned by this function until both directions finish.
+            _ = changes.changed() => {},
+            () = &mut idle, if observed.operations_in_flight == 0 => {
+                // Polling transfer may just have started or completed a write. Recheck
+                // its latest observation rather than expiring a stale read-idle budget.
+                let current = *changes.borrow();
+                if current.operations_in_flight == 0
+                    && Instant::now() >= current.last_forwarded + limits.idle_timeout
+                {
+                    return Err(TcpProxyError::IdleTimeout);
                 }
-                statistics.client_to_exit_bytes = checked_total(
-                    statistics.client_to_exit_bytes,
-                    count,
-                    limits.maximum_client_to_exit_bytes,
-                )?;
-                timed_write(&mut exit_writer, &client_buffer[..count], limits.idle_timeout).await?;
-                idle.as_mut().reset(Instant::now() + limits.idle_timeout);
-            }
-            result = exit_reader.read(&mut exit_buffer), if exit_open => {
-                let count = result?;
-                if count == 0 {
-                    exit_open = false;
-                    timed_shutdown(&mut client_writer, limits.idle_timeout).await?;
-                    continue;
-                }
-                statistics.exit_to_client_bytes = checked_total(
-                    statistics.exit_to_client_bytes,
-                    count,
-                    limits.maximum_exit_to_client_bytes,
-                )?;
-                timed_write(&mut client_writer, &exit_buffer[..count], limits.idle_timeout).await?;
-                idle.as_mut().reset(Instant::now() + limits.idle_timeout);
-            }
-            () = &mut idle => return Err(TcpProxyError::IdleTimeout),
+            },
         }
     }
+}
 
-    Ok(statistics)
+async fn copy_direction<R, W>(
+    mut reader: R,
+    mut writer: W,
+    buffer_bytes: usize,
+    maximum_bytes: u64,
+    idle_timeout: Duration,
+    progress: &watch::Sender<StreamProgress>,
+) -> Result<u64, TcpProxyError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0_u8; buffer_bytes];
+    let mut total = 0;
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        total = checked_total(total, count, maximum_bytes)?;
+        // Preserve the original operation bounds: the shared read-idle timer was
+        // suspended during write/flush and EOF propagation, each independently
+        // bounded by idle_timeout. Reverse traffic must not extend a blocked write.
+        progress.send_modify(|state| state.operations_in_flight += 1);
+        let result = if count == 0 {
+            timed_shutdown(&mut writer, idle_timeout).await
+        } else {
+            timed_write(&mut writer, &buffer[..count], idle_timeout).await
+        };
+        progress.send_modify(|state| {
+            state.operations_in_flight -= 1;
+            if count != 0 && result.is_ok() {
+                state.last_forwarded = Instant::now();
+            }
+        });
+        result?;
+        if count == 0 {
+            return Ok(total);
+        }
+    }
 }
 
 fn checked_total(current: u64, count: usize, maximum: u64) -> Result<u64, TcpProxyError> {

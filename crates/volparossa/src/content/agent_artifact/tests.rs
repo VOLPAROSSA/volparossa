@@ -327,6 +327,7 @@ async fn serve_import_object(
         request_id: request.request_id.clone(),
         result: ControlResult::Ok as i32,
         diagnostic_code: code.into(),
+        private_storage_remote_detail: None,
         payload: Some(payload),
     };
     write_response(

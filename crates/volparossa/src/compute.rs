@@ -4,6 +4,7 @@ mod broker;
 mod device_capacity;
 mod document_plan;
 mod inference_output;
+mod native_cpu;
 mod owner_control;
 mod peer;
 mod policy_assessment;
@@ -12,6 +13,8 @@ mod private_serve;
 mod private_task;
 mod public_code;
 mod public_serve;
+mod quote;
+mod resident_guest;
 mod resources;
 mod sandbox;
 mod serving_snapshot;
@@ -49,6 +52,10 @@ pub(crate) enum Command {
     PrivateTask(Box<private_task::Options>),
     /// Serve bounded same-owner private questions locally; never exports them to peers.
     PrivateServe(Box<private_serve::Options>),
+    /// Explicit public-input resident guest fixture; not confidential peer admission.
+    ResidentGuest(Box<resident_guest::Options>),
+    /// Exercise one selected public guest with two fixed public prompts, never private files.
+    ResidentPublicTrial(Box<resident_guest::public_trial::Options>),
     /// Serve explicitly public questions using selected real peers and checked synthesis.
     PublicServe(Box<public_serve::Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
@@ -65,6 +72,11 @@ pub(crate) enum Command {
     Peer {
         #[command(subcommand)]
         command: Box<peer::Command>,
+    },
+    /// Explicitly authorize or verify quote-only evidence, without admitting private work.
+    Quote {
+        #[command(subcommand)]
+        command: Box<quote::Command>,
     },
 }
 
@@ -111,6 +123,8 @@ pub(crate) struct Options {
     /// Explicit pinned inference/planning profile; the default also supports training/adapters.
     #[arg(long, default_value_t = ModelProfile::default())]
     model_profile: ModelProfile,
+    #[command(flatten)]
+    native_backend: native_cpu::Options,
     /// Explicit verified adapter directory; cache storage alone never activates an adapter.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -139,6 +153,8 @@ pub(crate) struct Options {
 
 #[derive(Serialize)]
 struct WorkerRequest {
+    #[serde(flatten)]
+    native_backend: native_cpu::Request,
     version: u8,
     id: String,
     mode: Mode,
@@ -154,6 +170,8 @@ struct WorkerRequest {
     max_seconds: u16,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     owner_control: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    private_generation_diagnostics: bool,
 }
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
@@ -162,6 +180,10 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Run(options) => options,
         Command::PrivateTask(options) => return private_task::run(&options).await,
         Command::PrivateServe(options) => return private_serve::run(*options).await,
+        Command::ResidentGuest(options) => return resident_guest::run(*options).await,
+        Command::ResidentPublicTrial(options) => {
+            return resident_guest::public_trial::run(*options).await;
+        }
         Command::PublicServe(options) => return public_serve::run(*options, socket).await,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
@@ -173,6 +195,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,
+        Command::Quote { command } => return quote::run(*command, socket).await,
     };
     options.validate()?;
     if !options.execute {
@@ -225,7 +248,10 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         "compute_unprivileged_user_required"
     );
     let _lease = runtime_lease(&options.runtime_root)?;
-    resources::admission(options.model_profile)?;
+    let memory_diagnostic = options.mode == Mode::PrivateConversation
+        && options.model_profile == ModelProfile::Qwen4bInstruct2507
+        && options.native_backend.enabled();
+    resources::admission(options.model_profile, memory_diagnostic)?;
     if options.spare_capacity {
         let mut capacity = spare_capacity::Budget::new();
         ensure!(
@@ -245,6 +271,11 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
     // This job ID only correlates the local isolated process; it is not a network identity.
     getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
     let request = WorkerRequest {
+        native_backend: options.native_backend.request_for_dataset(
+            options.model_profile,
+            options.mode,
+            &options.dataset,
+        )?,
         version: 1,
         id: hex::encode(nonce),
         mode: options.mode,
@@ -257,13 +288,30 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         threads: options.threads,
         max_seconds: options.max_seconds,
         owner_control: options.spare_capacity,
+        private_generation_diagnostics: options.mode == Mode::PrivateConversation
+            && options.model_profile.is_native_conversation()
+            && tracing::enabled!(target: "volparossa::compute::private_diagnostic", tracing::Level::DEBUG),
     };
+    let cache_hint = request
+        .native_backend
+        .cache_hint_observed(&options.native_backend, options.model_profile);
+    let source_weight_cache = native_cpu::source_weight_cache::Binding::bind(
+        &request.native_backend,
+        &options.native_backend,
+        options.model_profile,
+        &options.model_root,
+    );
     let child = sandbox::command(options)
         .spawn()
         .context("compute_sandbox_spawn")?;
     // Failure does not publish partial adapters or delete diagnostic job artifacts.
     // A later job must use a new output directory, never silently overwrite them.
-    supervise::run(child, &request, options, activity).await
+    let result = supervise::run(child, &request, options, activity).await;
+    // Only a successful supervisor return proves cleanup and result validation.
+    // Keep the advisory syscall inside this runtime lease; never detach it.
+    cache_hint.after_supervisor(&result, options.model_profile, memory_diagnostic);
+    source_weight_cache.after_supervisor(&result, memory_diagnostic);
+    result
 }
 
 impl Options {
@@ -291,6 +339,7 @@ impl Options {
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
         private_directory(&self.runtime_root)?;
         private_directory(&self.model_root)?;
+        self.native_backend.validate(self.model_profile)?;
         if let Some(adapter) = &self.adapter_root {
             private_directory(adapter)?;
         }
@@ -316,6 +365,8 @@ impl Options {
             &dataset,
             self.model_profile,
         )?;
+        self.native_backend
+            .validate_input(self.mode, &dataset, self.model_profile)?;
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",

@@ -618,6 +618,107 @@ non_retained_restart_retirement_failure_detail_category() {
     printf '%s\n' "$non_retained_retirement_detail"
 }
 
+non_retained_production_retirement_stage_is_safe() {
+    [ "$#" -eq 1 ] || return 1
+    case $1 in
+        affine-state|unit-not-collected|runtime-fence) return 0 ;;
+        *) non_retained_restart_retirement_stage_is_safe "$1" ;;
+    esac
+}
+
+report_non_retained_production_retirement_diagnostic() {
+    [ "$#" -eq 1 ] || return 1
+    non_retained_production_retirement_capture=$1
+    [ -f "$non_retained_production_retirement_capture" ] \
+        && [ ! -L "$non_retained_production_retirement_capture" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$non_retained_production_retirement_capture" \
+        2>/dev/null || true)" = "1:$(id -u):600" ] || return 1
+    non_retained_production_retirement_size=$(stat -Lc '%s' \
+        "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+    [ "$non_retained_production_retirement_size" -le 1048576 ] || return 1
+    require_no_private_key_marker "$non_retained_production_retirement_capture" >/dev/null 2>&1 || return 1
+    [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' \
+        "$non_retained_production_retirement_capture" 2>/dev/null)" -eq 1 ] || return 1
+    grep -Fxq 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' \
+        "$non_retained_production_retirement_capture" 2>/dev/null || return 1
+    non_retained_production_retirement_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$non_retained_production_retirement_prefix" \
+        "$non_retained_production_retirement_capture" 2>/dev/null)" -eq 1 ] || return 1
+    non_retained_production_retirement_line=$(grep -F "$non_retained_production_retirement_prefix" \
+        "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+    case $non_retained_production_retirement_line in
+        "$non_retained_production_retirement_prefix"*) ;;
+        *) return 1 ;;
+    esac
+    non_retained_production_retirement_stage=${non_retained_production_retirement_line#"$non_retained_production_retirement_prefix"}
+    non_retained_production_retirement_stage_is_safe "$non_retained_production_retirement_stage" || return 1
+    non_retained_retirement_first_reason=
+    non_retained_retirement_launch_stage=
+    non_retained_retirement_functional_value=
+    for non_retained_retirement_optional_prefix in \
+        VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1= \
+        VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1= \
+        VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=; do
+        if non_retained_retirement_optional_count=$(grep -Fc "$non_retained_retirement_optional_prefix" \
+            "$non_retained_production_retirement_capture" 2>/dev/null); then
+            :
+        else
+            [ "$?" -eq 1 ] || return 1
+        fi
+        case $non_retained_retirement_optional_count in
+            0) continue ;;
+            1) ;;
+            *) return 1 ;;
+        esac
+        non_retained_retirement_optional_line=$(grep -F "$non_retained_retirement_optional_prefix" \
+            "$non_retained_production_retirement_capture" 2>/dev/null) || return 1
+        case $non_retained_retirement_optional_line in
+            "$non_retained_retirement_optional_prefix"*) ;;
+            *) return 1 ;;
+        esac
+        non_retained_retirement_optional_value=${non_retained_retirement_optional_line#"$non_retained_retirement_optional_prefix"}
+        case $non_retained_retirement_optional_prefix in
+            VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=)
+                non_retained_proof_failure_reason_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_first_reason=$non_retained_retirement_optional_value ;;
+            VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=)
+                [ "$non_retained_retirement_first_reason" = production-launch-status ] || return 1
+                non_retained_production_launch_stage_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_launch_stage=$non_retained_retirement_optional_value ;;
+            VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=)
+                case $non_retained_retirement_launch_stage in
+                    functional-probe-wait|functional-client-release|functional-exit-release|functional-probe-finish) ;;
+                    *) return 1 ;;
+                esac
+                non_retained_functional_probe_failure_value_is_safe "$non_retained_retirement_optional_value" || return 1
+                non_retained_retirement_functional_value=$non_retained_retirement_optional_value ;;
+        esac
+    done
+    printf '%s\n' 'non-retained helper-boundary PR smoke failure category: production-retirement' >&2
+    printf 'non-retained helper-boundary PR smoke production retirement stage: %s\n' \
+        "$non_retained_production_retirement_stage" >&2
+    if [ -n "$non_retained_retirement_first_reason" ]; then
+        printf 'non-retained helper-boundary PR smoke first proof failure: %s\n' \
+            "$non_retained_retirement_first_reason" >&2
+    fi
+    if [ "$non_retained_retirement_first_reason" = production-launch-status ]; then
+        printf 'non-retained helper-boundary PR smoke production launch diagnostic: %s\n' \
+            "${non_retained_retirement_launch_stage:-unavailable}" >&2
+    fi
+    if [ -n "$non_retained_retirement_functional_value" ]; then
+        printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
+            "$non_retained_retirement_functional_value" >&2
+    fi
+    if [ "$non_retained_production_retirement_stage" = runtime-fence ] \
+        && [ "$non_retained_retirement_first_reason" = production-launch-status ] \
+        && [ "$non_retained_retirement_launch_stage" = functional-relay-traffic ] \
+        && grep -F 'VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=' \
+            "$non_retained_production_retirement_capture" >/dev/null 2>&1; then
+        report_non_retained_relay_traffic_diagnostic \
+            "$non_retained_production_retirement_capture" retirement-runtime-fence || :
+    fi
+}
+
 non_retained_restart_launch_failure_category() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
@@ -1170,6 +1271,14 @@ non_retained_production_launch_stage_is_safe() {
     [ "$#" -eq 1 ] || return 1
     case $1 in
         preflight-runtime|\
+        preflight-contracts|\
+        preflight-socket-wait|\
+        preflight-directory-metadata|\
+        preflight-socket-metadata|\
+        preflight-token-metadata|\
+        preflight-journal-metadata|\
+        preflight-journal-lock-metadata|\
+        preflight-journal-next-present|\
         identity-socket|\
         identity-lock|\
         identity-manager|\
@@ -1208,6 +1317,57 @@ non_retained_production_launch_stage_is_safe() {
         functional-probe-socket|\
         functional-probe-fdstore|\
         functional-worker-observation|\
+        functional-worker-child|\
+        functional-worker-custody|\
+        functional-worker-pidfd-identity|\
+        functional-worker-namespace-identity|\
+        functional-worker-fdstore|\
+        functional-worker-namespace-distinct|\
+        functional-worker-process-revalidate|\
+        functional-worker-namespace-revalidate|\
+        functional-worker-namespace-open|\
+        functional-worker-process-open|\
+        functional-worker-namespace-stat|\
+        functional-worker-namespace-pin|\
+        functional-worker-process-stat|\
+        functional-worker-process-pin|\
+        functional-worker-custody-repeat|\
+        functional-worker-custody-stability|\
+        functional-worker-process-status|\
+        functional-worker-helper-stability|\
+        functional-worker-wireguard-interface|\
+        functional-worker-wireguard-name|\
+        functional-worker-peer-address|\
+        functional-worker-local-address|\
+        functional-worker-wireguard-state|\
+        functional-worker-public-key-read|\
+        functional-worker-public-key-shape|\
+        functional-worker-public-key-unique|\
+        functional-worker-port-read|\
+        functional-worker-port-shape|\
+        functional-worker-port-distinct|\
+        functional-worker-counters|\
+        functional-worker-custody-parent-netns|\
+        functional-worker-custody-parent-netns-shape|\
+        functional-worker-custody-empty|\
+        functional-worker-custody-readlink|\
+        functional-worker-custody-pidfd|\
+        functional-worker-custody-pidfd-conflict|\
+        functional-worker-custody-process-target|\
+        functional-worker-custody-process|\
+        functional-worker-custody-process-conflict|\
+        functional-worker-custody-netns|\
+        functional-worker-custody-netns-conflict|\
+        functional-worker-custody-missing-pins|\
+        functional-worker-fdstore-count-before-read|\
+        functional-worker-fdstore-count-before|\
+        functional-worker-fdstore-object|\
+        functional-worker-fdstore-dump-read|\
+        functional-worker-fdstore-dump-size|\
+        functional-worker-fdstore-dump-exact|\
+        functional-worker-fdstore-name|\
+        functional-worker-fdstore-count-after-read|\
+        functional-worker-fdstore-count-after|\
         functional-relay-fixture|\
         functional-relay-traffic|\
         functional-relay-cleanup|\
@@ -1264,6 +1424,94 @@ non_retained_functional_probe_failure_value_is_safe() {
     esac
 }
 
+relay_traffic_diagnostic_value_is_safe() {
+    [ "$#" -eq 1 ] && [ "${#1}" -le 960 ] || return 1
+    printf '%s\n' "$1" | /usr/bin/awk -F ';' '
+        function u64(value) {
+            if (value == "0") return 1
+            if (value !~ /^[1-9][0-9]*$/ || length(value) > 20) return 0
+            return length(value) < 20 || ("x" value) <= "x18446744073709551615"
+        }
+        function tuple(field, key, values, count, position) {
+            if (index(field, key "=") != 1) return 0
+            count = split(substr(field, length(key) + 2), values, ",")
+            if (count != 3) return 0
+            if (values[1] == "unavailable" && values[2] == "unavailable" \
+                && values[3] == "unavailable") return 1
+            for (position = 1; position <= 3; position++) if (!u64(values[position])) return 0
+            return 1
+        }
+        function handshake(values) {
+            if (values[1] == "unavailable") return "unavailable"
+            return values[1] == "0" ? "zero" : "nonzero"
+        }
+        {
+            records++
+            if (NF != 9 || $1 !~ /^predicate=(ping|worker-snapshot|worker-growth|relay-snapshot|relay-growth|fixture)$/) exit 1
+            predicate = substr($1, 11)
+            expected = predicate == "ping" ? "ping-exit-zero" : \
+                (predicate ~ /snapshot$/ ? "canonical-u64-snapshot" : \
+                (predicate ~ /growth$/ ? "handshake-nonzero-rx-tx-increase" : "fixture-exact"))
+            if ($2 != "expected=" expected || $3 !~ /^ping=(0|[1-9][0-9]*)$/) exit 1
+            status = substr($3, 6)
+            if (length(status) > 3 || status + 0 > 255 \
+                || (predicate == "ping" ? status == "0" : status != "0")) exit 1
+            if (!tuple($4, "worker-baseline", before) || !tuple($5, "worker-current", worker) \
+                || $6 != "relay-reference=0,0,0" || !tuple($7, "relay-current", relay) \
+                || $8 != "worker-handshake=" handshake(worker) \
+                || $9 != "relay-handshake=" handshake(relay)) exit 1
+            valid = 1
+        }
+        END { if (records != 1 || !valid) exit 1 }
+    '
+}
+
+report_non_retained_relay_traffic_diagnostic() {
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 1
+    case ${2:-launch} in
+        launch|retirement-runtime-fence) rt_diag_mode=${2:-launch} ;;
+        *) return 1 ;;
+    esac
+    rt_diag_capture=$1
+    [ -f "$rt_diag_capture" ] && [ ! -L "$rt_diag_capture" ] || return 1
+    [ "$(stat -Lc '%h:%u:%a' "$rt_diag_capture" 2>/dev/null || true)" \
+        = "1:$(id -u):600" ] || return 1
+    [ "$(stat -Lc '%s' "$rt_diag_capture")" -le 1048576 ] || return 1
+    require_no_private_key_marker "$rt_diag_capture" >/dev/null 2>&1 || return 1
+    [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=' \
+        "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(grep -Fxc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=functional-relay-traffic' \
+        "$rt_diag_capture")" -eq 1 ] || return 1
+    case $rt_diag_mode in
+        launch)
+            [ "$(grep -Fc 'live worker-identity proof failed: predicate rejected: ' \
+                "$rt_diag_capture")" -eq 1 ] || return 1
+            rt_diag_failure='live worker-identity proof failed: predicate rejected: production-launch-status'
+            ;;
+        retirement-runtime-fence)
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_DRIVER_PHASE_V1=production-retirement' "$rt_diag_capture" || return 1
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_DIAGNOSTIC_V1=runtime-fence' "$rt_diag_capture" || return 1
+            [ "$(grep -Fc 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=' "$rt_diag_capture")" -eq 1 ] || return 1
+            grep -Fxq 'VOLPAROSSA_HELPER_LIVE_PRODUCTION_RETIREMENT_FIRST_FAILURE_V1=production-launch-status' "$rt_diag_capture" || return 1
+            rt_diag_failure='live worker-identity proof failed: production unit retirement fence did not settle'
+            ;;
+    esac
+    [ "$(grep -Fc 'live worker-identity proof failed: ' "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(grep -Fxc "$rt_diag_failure" "$rt_diag_capture")" -eq 1 ] || return 1
+    [ "$(tail -n 1 -- "$rt_diag_capture")" = "$rt_diag_failure" ] || return 1
+    rt_diag_prefix=VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=
+    [ "$(grep -Fc "$rt_diag_prefix" "$rt_diag_capture")" -eq 1 ] || return 1
+    rt_diag_record=$(grep -F "$rt_diag_prefix" "$rt_diag_capture") || return 1
+    [ "${#rt_diag_record}" -le 1023 ] || return 1
+    case $rt_diag_record in "$rt_diag_prefix"*) ;; *) return 1 ;; esac
+    rt_diag_value=${rt_diag_record#"$rt_diag_prefix"}
+    relay_traffic_diagnostic_value_is_safe "$rt_diag_value" || return 1
+    printf 'non-retained helper-boundary PR smoke relay traffic diagnostic: %s\n' \
+        "$rt_diag_value" >&2
+}
+
 report_non_retained_production_launch_diagnostic() {
     [ "$#" -eq 1 ] || return 1
     non_retained_diagnostic=$1
@@ -1286,7 +1534,7 @@ report_non_retained_production_launch_diagnostic() {
     non_retained_production_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=
     [ "$(grep -Ec "^$non_retained_production_diagnostic_prefix" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
-    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
+    non_retained_production_diagnostic_pattern='^VOLPAROSSA_HELPER_LIVE_PRODUCTION_LAUNCH_DIAGNOSTIC_V1=(preflight-runtime|preflight-contracts|preflight-socket-wait|preflight-directory-metadata|preflight-socket-metadata|preflight-token-metadata|preflight-journal-metadata|preflight-journal-lock-metadata|preflight-journal-next-present|identity-socket|identity-lock|identity-manager|identity-launch|identity-birth|identity-process|identity-stability|identity-publication|active-lock|protocol-bind-before|protocol-frame-bounds|protocol-wire-shapes|protocol-wrong-uid|protocol-wrong-gid|protocol-root-peer|protocol-bind-after|functional-underlay|functional-underlay-parent-contract|functional-underlay-pristine-namespace|functional-underlay-pristine-link|functional-underlay-pristine-ipv-four|functional-underlay-pristine-ipv-six|functional-underlay-absent|functional-underlay-link|functional-underlay-address|functional-underlay-route|functional-underlay-ifindex|functional-underlay-readback-link|functional-underlay-readback-address|functional-underlay-readback-route|functional-probe-ready|functional-probe-fixture|functional-probe-launch|functional-probe-wait|functional-probe-identity|functional-probe-socket|functional-probe-fdstore|functional-worker-observation|functional-worker-child|functional-worker-custody|functional-worker-pidfd-identity|functional-worker-namespace-identity|functional-worker-fdstore|functional-worker-namespace-distinct|functional-worker-process-revalidate|functional-worker-namespace-revalidate|functional-worker-namespace-open|functional-worker-process-open|functional-worker-namespace-stat|functional-worker-namespace-pin|functional-worker-process-stat|functional-worker-process-pin|functional-worker-custody-repeat|functional-worker-custody-stability|functional-worker-process-status|functional-worker-helper-stability|functional-worker-wireguard-interface|functional-worker-wireguard-name|functional-worker-peer-address|functional-worker-local-address|functional-worker-wireguard-state|functional-worker-public-key-read|functional-worker-public-key-shape|functional-worker-public-key-unique|functional-worker-port-read|functional-worker-port-shape|functional-worker-port-distinct|functional-worker-counters|functional-worker-custody-parent-netns|functional-worker-custody-parent-netns-shape|functional-worker-custody-empty|functional-worker-custody-readlink|functional-worker-custody-pidfd|functional-worker-custody-pidfd-conflict|functional-worker-custody-process-target|functional-worker-custody-process|functional-worker-custody-process-conflict|functional-worker-custody-netns|functional-worker-custody-netns-conflict|functional-worker-custody-missing-pins|functional-worker-fdstore-count-before-read|functional-worker-fdstore-count-before|functional-worker-fdstore-object|functional-worker-fdstore-dump-read|functional-worker-fdstore-dump-size|functional-worker-fdstore-dump-exact|functional-worker-fdstore-name|functional-worker-fdstore-count-after-read|functional-worker-fdstore-count-after|functional-relay-fixture|functional-relay-traffic|functional-relay-cleanup|functional-client-release|functional-client-cleanup|functional-exit-ready|functional-exit-worker-observation|functional-exit-relay-fixture|functional-exit-relay-traffic|functional-exit-relay-cleanup|functional-exit-release|functional-exit-cleanup|functional-relay-pair-ready|functional-relay-pair-worker-observation|functional-relay-pair-fixtures|functional-relay-pair-traffic|functional-relay-pair-cleanup|functional-probe-finish|functional-cleanup|publication)$'
     [ "$(grep -Ec "$non_retained_production_diagnostic_pattern" \
         "$non_retained_diagnostic")" -eq 1 ] || return 1
     non_retained_functional_diagnostic_prefix=VOLPAROSSA_HELPER_LIVE_FUNCTIONAL_CLIENT_LEASE_DIAGNOSTIC_V1=
@@ -1336,6 +1584,10 @@ report_non_retained_production_launch_diagnostic() {
     if [ -n "$non_retained_functional_failure_value" ]; then
         printf 'non-retained helper-boundary PR smoke Client/Exit/Relay-pair lease diagnostic: %s\n' \
             "$non_retained_functional_failure_value" >&2
+    fi
+    if grep -F 'VOLPAROSSA_HELPER_RELAY_TRAFFIC_DIAGNOSTIC_V1=' \
+        "$non_retained_diagnostic" >/dev/null 2>&1; then
+        report_non_retained_relay_traffic_diagnostic "$non_retained_diagnostic" || :
     fi
 }
 
@@ -1406,8 +1658,8 @@ repository_directory=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 manifest=$script_directory/debian13-amd64-image-v1.json
 report_validator=$script_directory/validate-helper-boundary-evidence-v1.sh
 restart_report_validator=$script_directory/validate-helper-restart-exact-present-evidence-v1.sh
-environment_validator=$script_directory/validate-helper-boundary-vm-environment-v1.sh
-restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v1.sh
+environment_validator=$script_directory/validate-helper-boundary-vm-environment-v3.sh
+restart_environment_validator=$script_directory/validate-helper-restart-vm-environment-v3.sh
 qemu_supervisor=$script_directory/qemu-pidfd-supervisor.py
 manifest_sha256=c535c54e44f724aa05278fe2bfa7bf607ecd285b83f35e136f16b99d1b99392a
 image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -2045,9 +2297,9 @@ scrub_sensitive_run_state() {
         helper-boundary-proof.stderr.log helper-boundary-evidence-v1.json.sha256 \
         helper-restart-exact-present-evidence-v1.json \
         helper-restart-exact-present-evidence-v1.json.sha256 \
-        helper-restart-vm-environment-v1.json restart-validator.stdout \
+        helper-restart-vm-environment-v3.json compiler-receipt.json restart-validator.stdout \
         restart-validator.stderr restart-environment-validator.stdout \
-        restart-environment-validator.stderr vm-environment-v1.json \
+        restart-environment-validator.stderr vm-environment-v3.json \
         validator.stdout validator.stderr \
         environment-validator.stdout environment-validator.stderr vm-console.log \
         console.fifo console.done
@@ -2124,7 +2376,7 @@ chmod 0700 "$run_directory"
 console_log=$run_directory/vm-console.log
 published_console_log=$output_directory/vm-console.log
 proof_stderr_log=$output_directory/helper-boundary-proof.stderr.log
-environment_report=$output_directory/vm-environment-v1.json
+environment_report=$output_directory/vm-environment-v3.json
 : >"$console_log"
 : >"$proof_stderr_log"
 chmod 0600 "$console_log" "$proof_stderr_log"
@@ -2249,6 +2501,9 @@ cat >"$guest_setup" <<'GUEST_SETUP'
 set -eu
 export LC_ALL=C
 umask 077
+# Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+# Keep other SSH/Git variables for the source policy to reject.
+unset SSH_CLIENT SSH_CONNECTION
 expected_commit=$1
 archive_sha256=$2
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
@@ -2256,10 +2511,8 @@ case $archive_sha256 in *[!0-9a-f]*|'') exit 64 ;; esac
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
-    build-essential ca-certificates cargo cmake curl dbus gdb git iproute2 iputils-ping jq nftables \
-    pkg-config rustc sudo util-linux wireguard-tools
-test "$(rustc --version | awk '{print $2}')" = 1.85.0
-test "$(cargo --version | awk '{print $2}')" = 1.85.0
+    build-essential ca-certificates cmake curl dbus gdb git iproute2 iputils-ping jq nftables \
+    pkg-config python3 sudo util-linux wireguard-tools xz-utils
 # shellcheck disable=SC1091
 test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
@@ -2274,6 +2527,10 @@ cd source
 test "$(git rev-parse HEAD)" = "$expected_commit"
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 test -z "$(git remote)"
+python3 -B scripts/provision-rust189.py guest
+export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+export PATH="/home/volparossa/.local/volparossa-rust-1.89.0/bin:$PATH"
 cargo fetch --locked
 test -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
 GUEST_SETUP
@@ -2284,11 +2541,16 @@ cat >"$guest_proof" <<'GUEST_PROOF'
 set -eu
 export LC_ALL=C
 umask 077
+# Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+# Keep other SSH/Git variables for the source policy to reject.
+unset SSH_CLIENT SSH_CONNECTION
 expected_commit=$1
 case $expected_commit in *[!0-9a-f]*|'') exit 64 ;; esac
 cd /home/volparossa/source
-test "$(rustc --version | awk '{print $2}')" = 1.85.0
-test "$(cargo --version | awk '{print $2}')" = 1.85.0
+export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+python3 -B scripts/provision-rust189.py guest-check
+export PATH="/home/volparossa/.local/volparossa-rust-1.89.0/bin:$PATH"
 # shellcheck disable=SC1091
 test "$(. /etc/os-release; printf '%s' "$ID:$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
@@ -2641,6 +2903,8 @@ if [ "$guest_status" -ne 0 ]; then
         elif report_non_retained_boundary_validator_failure_category \
             "$proof_stderr_log"; then
             :
+        elif report_non_retained_production_retirement_diagnostic "$proof_stderr_log"; then
+            :
         elif report_non_retained_proof_failure_reason "$proof_stderr_log"; then
             if [ "$non_retained_failure_reason" = worker-launch-status ]; then
                 report_non_retained_worker_launch_diagnostic \
@@ -2678,6 +2942,14 @@ bounded_run retrieve-restart-report 2 guest_scp_from_raw \
     "$retrieved_restart_report" \
     || failed 'the canonical restart report could not be retrieved'
 
+bounded_run retrieve-compiler-receipt 2 guest_scp_from_raw \
+    /home/volparossa/.local/volparossa-rust-1.89.0/receipt.json "$run_directory/compiler-receipt.json" \
+    || failed 'the exact compiler observation could not be retrieved'
+if [ ! -f "$run_directory/compiler-receipt.json" ] || [ -L "$run_directory/compiler-receipt.json" ] \
+    || [ ! -s "$run_directory/compiler-receipt.json" ] \
+    || [ "$(stat -Lc '%s' "$run_directory/compiler-receipt.json")" -gt 32768 ]; then
+    failed 'the compiler observation is outside its fixed input bound'
+fi
 guest_ssh_raw sudo -n systemctl poweroff >/dev/null 2>&1 || true
 reap_qemu yes || failed 'the restricted proof VM did not power off cleanly'
 bounded_run proof-kvm-uevent-settle 1 udevadm settle --timeout=10 \
@@ -2750,39 +3022,43 @@ restart_report_hash=$(sha256sum "$retrieved_restart_report" | awk '{print $1}') 
 restart_report_hash_file=$run_directory/helper-restart-exact-present-evidence-v1.json.sha256
 printf '%s  helper-restart-exact-present-evidence-v1.json\n' \
     "$restart_report_hash" >"$restart_report_hash_file"
-successful_environment=$run_directory/vm-environment-v1.json
+successful_environment=$run_directory/vm-environment-v3.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
     --arg image_sha512 "$image_sha512" \
     --arg report_sha256 "$report_hash" \
     --arg release_build 20260826-2582 \
+    --slurpfile toolchain "$run_directory/compiler-receipt.json" \
     '{expected_commit: $commit,
-      guest: {architecture: "amd64", cargo_version: "1.85.0",
-        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+      guest: {architecture: "amd64", cargo_commit: "c24e10642",
+        debian_version: "13", rustc_version: "1.89.0", systemd_version: 257,
         virtualization: "kvm"},
       image_release_build: $release_build,
       image_sha512: $image_sha512,
       proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
       report_kind: "volparossa-helper-boundary-vm-environment",
       report_sha256: $report_sha256,
-      schema_version: 1,
+      toolchain: $toolchain[0],
+      schema_version: 3,
       status: "PASS"}' >"$successful_environment"
-successful_restart_environment=$run_directory/helper-restart-vm-environment-v1.json
+successful_restart_environment=$run_directory/helper-restart-vm-environment-v3.json
 jq -S -c -n \
     --arg commit "$expected_commit" \
     --arg image_sha512 "$image_sha512" \
     --arg report_sha256 "$restart_report_hash" \
     --arg release_build 20260826-2582 \
+    --slurpfile toolchain "$run_directory/compiler-receipt.json" \
     '{expected_commit: $commit,
-      guest: {architecture: "amd64", cargo_version: "1.85.0",
-        debian_version: "13", rustc_version: "1.85.0", systemd_version: 257,
+      guest: {architecture: "amd64", cargo_commit: "c24e10642",
+        debian_version: "13", rustc_version: "1.89.0", systemd_version: 257,
         virtualization: "kvm"},
       image_release_build: $release_build,
       image_sha512: $image_sha512,
       proof_network: {external_https: "denied", mode: "qemu-user-restrict-on"},
       report_kind: "volparossa-helper-restart-vm-environment",
       report_sha256: $report_sha256,
-      schema_version: 1,
+      toolchain: $toolchain[0],
+      schema_version: 3,
       status: "PASS"}' >"$successful_restart_environment"
 
 environment_validator_stdout=$run_directory/environment-validator.stdout
@@ -2825,7 +3101,7 @@ if [ "$proof_mode" = retained-main ]; then
     install -m 0600 -- "$restart_report_hash_file" \
         "$output_directory/helper-restart-exact-present-evidence-v1.json.sha256"
     install -m 0600 -- "$successful_restart_environment" \
-        "$output_directory/helper-restart-vm-environment-v1.json"
+        "$output_directory/helper-restart-vm-environment-v3.json"
     printf '%s\n' \
         'PASS: retained canonical helper-boundary evidence from the disposable Debian 13 KVM.' >&2
 else

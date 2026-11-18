@@ -14,10 +14,11 @@ use std::{
 
 use rand_core::{OsRng, RngCore};
 use socket2::SockRef;
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use volparossa_routing::{HelperResult, RetireMptcpFlow};
 
 use super::MptcpTransportError;
+use super::acquire_diagnostic::{Observation, Reason, Stage};
 use crate::helper::{HelperClient, HelperClientError};
 
 const MAX_FLOWS: usize = 64;
@@ -61,15 +62,25 @@ impl Retirements {
     }
 
     pub(super) fn reserve(&self) -> io::Result<Reservation> {
+        self.reserve_classified().map_err(|(error, _)| error)
+    }
+
+    pub(super) fn reserve_classified(&self) -> Result<Reservation, (io::Error, Reason)> {
         if self.0.acquire_unconfirmed.load(Ordering::Acquire) {
-            return Err(io::Error::other("MPTCP acquire requires route retirement"));
+            return Err((
+                io::Error::other("MPTCP acquire requires route retirement"),
+                Reason::Unconfirmed,
+            ));
         }
-        let slot = self
-            .0
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| io::Error::other("MPTCP flow retirement capacity pending"))?;
+        let slot = self.0.slots.clone().try_acquire_owned().map_err(|error| {
+            (
+                io::Error::other("MPTCP flow retirement capacity pending"),
+                match error {
+                    TryAcquireError::NoPermits => Reason::LocalCapacity,
+                    TryAcquireError::Closed => Reason::LocalUnavailable,
+                },
+            )
+        })?;
         Ok(Reservation {
             owner: self.clone(),
             slot: Some(slot),
@@ -139,6 +150,34 @@ impl Reservation {
         self.acquire_started = true;
     }
 
+    pub(super) fn acquire_failed_classified(
+        &mut self,
+        error: HelperClientError,
+        observation: &mut Observation,
+    ) -> MptcpTransportError {
+        observation.record(Stage::HelperAcquire, Reason::helper(&error));
+        self.acquire_failed(error)
+    }
+
+    /// Preserve the shared route only when the authenticated, correlated helper response proves
+    /// that this request issued no descriptor or flow capability. The helper's definite kernel
+    /// rejection and pre-issuance capacity/unavailable results leave existing flows untouched.
+    /// All lost, malformed, cancelled or cleanup-ambiguous handoffs still poison this reservation;
+    /// clearing its flag must never clear another reservation's unconfirmed acquisition.
+    pub(super) fn acquire_failed(&mut self, error: HelperClientError) -> MptcpTransportError {
+        if matches!(
+            error,
+            HelperClientError::Rejected(
+                HelperResult::Kernel | HelperResult::Capacity | HelperResult::Unavailable
+            )
+        ) {
+            self.acquire_started = false;
+            MptcpTransportError::Helper(error)
+        } else {
+            MptcpTransportError::AcquireUnconfirmed
+        }
+    }
+
     pub(super) fn bind(mut self, request: RetireMptcpFlow, descriptor: OwnedFd) -> Guard {
         let mut request_id = [0; 16];
         OsRng.fill_bytes(&mut request_id);
@@ -192,7 +231,11 @@ impl Drop for Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Read as _, os::unix::net::UnixStream, time::Duration};
+    use std::{
+        io::{Read as _, Write as _},
+        os::unix::net::UnixStream,
+        time::Duration,
+    };
 
     fn pair(owner: &Retirements) -> (Guard, UnixStream) {
         let (socket, peer) = UnixStream::pair().unwrap();
@@ -218,6 +261,111 @@ mod tests {
         assert!(matches!(
             owner
                 .drain_with(|_, _, _| async { panic!("no fabricated retirement") })
+                .await,
+            Err(MptcpTransportError::AcquireUnconfirmed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn definite_acquire_rejection_preserves_live_sibling_and_retry_capacity() {
+        for result in [
+            HelperResult::Kernel,
+            HelperResult::Capacity,
+            HelperResult::Unavailable,
+        ] {
+            let owner = Retirements::new();
+            let (guard, mut peer) = pair(&owner);
+            let mut sibling = std::fs::File::from(
+                guard
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .descriptor
+                    .try_clone()
+                    .unwrap(),
+            );
+            let mut slot = owner.reserve().unwrap();
+            slot.begin_acquire();
+            assert!(matches!(
+                slot.acquire_failed(HelperClientError::Rejected(result)),
+                MptcpTransportError::Helper(HelperClientError::Rejected(actual)) if actual == result
+            ));
+            drop(slot);
+            assert_eq!(owner.0.slots.available_permits(), MAX_FLOWS - 1);
+            owner
+                .drain_with(|_, _, _| async { panic!("live sibling must not be retired") })
+                .await
+                .unwrap();
+            // The definite rejection permits another attempt without closing a sibling. These
+            // real Unix-stream bytes test ownership only, not the protected MPTCP datapath.
+            drop(owner.reserve().unwrap());
+            sibling.write_all(b"still live").unwrap();
+            let mut received = [0; 10];
+            peer.read_exact(&mut received).unwrap();
+            assert_eq!(&received, b"still live");
+            drop(sibling);
+            drop(guard);
+            assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+            assert_eq!(owner.0.pending.lock().unwrap().len(), 1);
+            assert_eq!(owner.0.slots.available_permits(), MAX_FLOWS - 1);
+            owner.drain_with(|_, _, _| async { Ok(()) }).await.unwrap();
+            assert_eq!(owner.0.slots.available_permits(), MAX_FLOWS);
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_or_nonallowlisted_acquire_failure_still_requires_route_retirement() {
+        let errors = [
+            HelperClientError::Timeout,
+            HelperClientError::Io(io::Error::other("lost response")),
+            HelperClientError::Correlation,
+            HelperClientError::DescriptorHandoff(io::Error::other("lost descriptor")),
+            HelperClientError::DescriptorValidation(io::Error::other("invalid descriptor")),
+            HelperClientError::UntrustedServer,
+            HelperClientError::RuntimeChanged,
+            HelperClientError::Rejected(HelperResult::NotFound),
+            HelperClientError::Rejected(HelperResult::CleanupIncomplete),
+            HelperClientError::Rejected(HelperResult::InvalidRequest),
+            HelperClientError::Rejected(HelperResult::UnauthorisedPeer),
+            HelperClientError::Rejected(HelperResult::AlreadyExists),
+            HelperClientError::Rejected(HelperResult::Expired),
+        ];
+        for error in errors {
+            let owner = Retirements::new();
+            let mut slot = owner.reserve().unwrap();
+            slot.begin_acquire();
+            assert!(matches!(
+                slot.acquire_failed(error),
+                MptcpTransportError::AcquireUnconfirmed
+            ));
+            drop(slot);
+            assert!(owner.reserve().is_err());
+            assert!(matches!(
+                owner
+                    .drain_with(|_, _, _| async { panic!("unknown capability cannot be retired") })
+                    .await,
+                Err(MptcpTransportError::AcquireUnconfirmed)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn definite_rejection_never_clears_another_unconfirmed_acquisition() {
+        let owner = Retirements::new();
+        let mut unknown = owner.reserve().unwrap();
+        let mut rejected = owner.reserve().unwrap();
+        unknown.begin_acquire();
+        rejected.begin_acquire();
+        drop(unknown);
+        assert!(matches!(
+            rejected.acquire_failed(HelperClientError::Rejected(HelperResult::Kernel)),
+            MptcpTransportError::Helper(HelperClientError::Rejected(HelperResult::Kernel))
+        ));
+        drop(rejected);
+        assert!(owner.reserve().is_err());
+        assert!(matches!(
+            owner
+                .drain_with(|_, _, _| async { panic!("unknown acquisition remains poisoned") })
                 .await,
             Err(MptcpTransportError::AcquireUnconfirmed)
         ));
@@ -295,3 +443,6 @@ mod tests {
         assert_eq!(owner.0.slots.available_permits(), MAX_FLOWS);
     }
 }
+
+#[cfg(test)]
+mod diagnostic_tests;

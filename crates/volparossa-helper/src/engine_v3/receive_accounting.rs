@@ -175,29 +175,30 @@ impl HelperEngine {
         let result = completion
             .filter(|value| value.binding == binding)
             .map_or(Err(BackendError::CleanupIncomplete), |value| value.result);
-        if let Ok(ingress_ifindex) = result {
-            if ingress_ifindex > 1 && i32::try_from(ingress_ifindex).is_ok() {
-                self.inner
-                    .state
-                    .lock()
-                    .await
-                    .accounting
-                    .as_mut()
-                    .expect("reserved accounting owner")
-                    .active = true;
-                return response(
-                    request,
-                    HelperResult::Ok,
-                    "RECEIVE_ACCOUNTING_INSTALLED",
-                    Some(helper_response::Outcome::InstalledReceiveAccounting(
-                        InstalledReceiveAccounting {
-                            accounting_runtime_id: binding.accounting_runtime_id.to_vec(),
-                            accounting_handle: binding.accounting_handle.to_vec(),
-                            ingress_ifindex,
-                        },
-                    )),
-                );
-            }
+        if let Ok(ingress_ifindex) = result
+            && ingress_ifindex > 1
+            && i32::try_from(ingress_ifindex).is_ok()
+        {
+            self.inner
+                .state
+                .lock()
+                .await
+                .accounting
+                .as_mut()
+                .expect("reserved accounting owner")
+                .active = true;
+            return response(
+                request,
+                HelperResult::Ok,
+                "RECEIVE_ACCOUNTING_INSTALLED",
+                Some(helper_response::Outcome::InstalledReceiveAccounting(
+                    InstalledReceiveAccounting {
+                        accounting_runtime_id: binding.accounting_runtime_id.to_vec(),
+                        accounting_handle: binding.accounting_handle.to_vec(),
+                        ingress_ifindex,
+                    },
+                )),
+            );
         }
         let error = result.err().unwrap_or(BackendError::Kernel);
         let complete = self.cleanup_accounting().await;
@@ -284,14 +285,14 @@ impl HelperEngine {
             Ok(value) => value,
             Err(result) => return response(request, result, "ACCOUNTING_OWNER_MISMATCH", None),
         };
-        if let Some(binding) = binding {
-            if !self.destroy_accounting_binding(binding).await {
-                return backend_response(
-                    request,
-                    BackendError::CleanupIncomplete,
-                    "RECEIVE_ACCOUNTING_CLEANUP_INCOMPLETE",
-                );
-            }
+        if let Some(binding) = binding
+            && !self.destroy_accounting_binding(binding).await
+        {
+            return backend_response(
+                request,
+                BackendError::CleanupIncomplete,
+                "RECEIVE_ACCOUNTING_CLEANUP_INCOMPLETE",
+            );
         }
         response(
             request,

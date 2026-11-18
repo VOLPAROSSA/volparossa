@@ -51,6 +51,7 @@ QWEN4B_WEIGHTS = {"layout": "safetensors_shards_concat_v1", "bytes": 8044982000,
 GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                  "adapter_version": 1, "schema_version": 3,
                  "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
+NATIVE_CONVERTER = {"implementation": "llama_cpp_bf16_v1", "dependencies": {"sentencepiece": "0.2.1"}}
 RESERVE_BYTES = 64 * 1024 * 1024
 ALLOWED_HOSTS = frozenset({
     "files.pythonhosted.org", "download.pytorch.org", "download-r2.pytorch.org",
@@ -83,8 +84,10 @@ class OfficialRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
-def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
+def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False, native_cpu_converter=False):
     require(model_profile in PROFILES, "unsupported model profile")
+    require(not native_cpu_converter or (model_profile == QWEN4B_MODEL_PROFILE and not task_graph_decoder),
+            "native converter requires the explicit 4B profile without graph decoder")
     model_id, revision = PROFILES[model_profile]
     pins = json.loads((HERE / "model-pins.json").read_text())
     if model_profile in PROFILE_PINS:
@@ -144,6 +147,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
     require(actual == expected, "requirements.lock does not exactly match artifact pins")
     if task_graph_decoder:
         add_graph_decoder(pins)
+    if native_cpu_converter:
+        add_native_converter(pins)
     return pins
 
 
@@ -180,15 +185,60 @@ def add_graph_decoder(pins):
     pins["task_graph_decoder"] = extra["decoder"]
 
 
+def native_converter_pins():
+    extra = json.loads((HERE / "native-converter-pins.json").read_text())
+    require(extra["format_version"] == 1 and extra["platform"] == "cpython-3.13-linux-x86_64"
+            and extra["converter"] == NATIVE_CONVERTER and len(extra["wheels"]) == 1
+            and extra["source_revision"] == "31646a467d2051eb904e0b45de3a73e91fe1c1e3"
+            and extra["wheel_source_build_claimed"] is False, "unsupported native converter pins")
+    item = extra["wheels"][0]
+    name = "sentencepiece-0.2.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    require(item["name"] == "sentencepiece" and item["version"] == "0.2.1" and item["path"] == name
+            and item["bytes"] == 1387882
+            and item["sha256"] == "c7f0fd2f2693309e6628aeeb2e2faf6edd221134dfccac3308ca0de01f8dab47"
+            and item["metadata_sha256"] == "ce0a2e9c599cd060a7bc3dffb18be5cfc3d5f293533e3ee4e870eaef0a5500fd"
+            and item["license"] == "Apache-2.0", "native converter wheel identity differs")
+    expected_url = "https://files.pythonhosted.org/packages/96/df/0cfe748ace5485be740fed9476dee7877f109da32ed0d280312c94ec259f/" + name
+    require(official_url(item["url"]) == expected_url, "native converter wheel origin differs")
+    lock = (HERE / "native-converter-requirements.lock").read_text()
+    require([line for line in lock.splitlines() if line and not line.startswith("#")]
+            == [f"{item['name']}=={item['version']} --hash=sha256:{item['sha256']}"],
+            "native converter lock differs from pins")
+    expected_notices = {"LICENSE", "third_party/absl/LICENSE", "third_party/darts_clone/LICENSE",
+                        "third_party/esaxx/LICENSE", "third_party/protobuf-lite/LICENSE"}
+    require(len(extra["notices"]) == 5 and {notice["source"] for notice in extra["notices"]} == expected_notices,
+            "native converter original notices differ")
+    for notice in extra["notices"]:
+        local = "native-cpu/sentencepiece" + ("" if notice["source"] == "LICENSE" else "-" + notice["source"].split("/")[1]) + "-LICENSE"
+        require(notice["path"] == local and notice["url"] == "https://raw.githubusercontent.com/google/sentencepiece/"
+                + extra["source_revision"] + "/" + notice["source"], "native converter notice provenance differs")
+        raw = (HERE / local).read_bytes()
+        require(len(raw) == notice["bytes"] and hashlib.sha256(raw).hexdigest() == notice["sha256"],
+                "native converter original notice bytes differ")
+    return extra
+
+
+def add_native_converter(pins):
+    extra = native_converter_pins()
+    item = extra["wheels"][0]
+    require(not any(row["name"] == item["name"] or row["path"] == item["path"] for row in pins["wheels"]),
+            "native converter cannot override a pinned distribution")
+    pins["wheels"] += extra["wheels"]
+    pins["native_cpu_converter"] = extra["converter"]
+
+
 def retained_pin_files(pins):
     """Return exact retained bytes, including the original baseline without the opt-in."""
-    enabled = "task_graph_decoder" in pins
+    enabled = "task_graph_decoder" in pins or "native_cpu_converter" in pins
     pin_bytes = ((HERE / "model-pins.json").read_bytes() if pins["model_id"] == MODEL_ID and not enabled
                  else (json.dumps(pins, indent=2) + "\n").encode())
     requirements = (HERE / "requirements.lock").read_bytes()
-    if enabled:
+    if "task_graph_decoder" in pins:
         requirements += (b"" if requirements.endswith(b"\n") else b"\n")
         requirements += (HERE / "graph-decoder-requirements.lock").read_bytes()
+    if "native_cpu_converter" in pins:
+        requirements += (b"" if requirements.endswith(b"\n") else b"\n")
+        requirements += (HERE / "native-converter-requirements.lock").read_bytes()
     return pin_bytes, requirements
 
 
@@ -388,7 +438,45 @@ def run_checked(command, environment, root, deadline):
     subprocess.run(command, env=environment, cwd=root, check=True, timeout=remaining)
 
 
+def native_cpu_options(args):
+    source = getattr(args, "native_cpu_source", None)
+    build = getattr(args, "native_cpu_build", None)
+    if source is None and build is None:
+        return None
+    require(source is not None and build is not None and args.model_profile == QWEN4B_MODEL_PROFILE,
+            "native CPU conversion requires both local source/build paths and the exact 4B profile")
+    require(all(Path(path).is_absolute() for path in (source, build)), "native CPU input paths must be absolute")
+    return {"source": str(source), "build": str(build), "kind": "llama_cpp_bf16_v1"}
+
+
+def provision_native_cpu(args, root, python, environment, deadline, used_bytes):
+    selection = native_cpu_options(args)
+    if selection is None:
+        return None
+    remaining_budget = args.budget_bytes - used_bytes
+    require(remaining_budget >= QWEN4B_WEIGHTS["bytes"] + 256 * 1024 * 1024,
+            "same provisioning budget cannot hold additional verified BF16 GGUF")
+    remaining_seconds = min(1800, int(deadline - time.monotonic()))
+    require(remaining_seconds >= 1, "native conversion has no remaining original provisioning deadline")
+    target = root / "native-backend"
+    # The existing pinned venv executes only the fixed local conversion tool.
+    # No model inference, package installation or extra download is added here.
+    run_checked([python, "-B", str(HERE / "convert_llama_cpu.py"),
+                 "--source", selection["source"], "--build", selection["build"],
+                 "--model", str(root / "model"), "--root", str(target),
+                 "--budget-bytes", str(remaining_budget), "--timeout-seconds", str(remaining_seconds),
+                 "--execute", "--yes", "--disposable-guest"], environment, root, deadline)
+    manifest = target / "backend.json"
+    info = manifest.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= 65536 and info.st_mode & 0o077 == 0,
+            "native conversion did not produce private bounded manifest")
+    return {"kind": selection["kind"], "root": str(target),
+            "backend_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()}
+
+
 def execute(args, pins):
+    require(("native_cpu_converter" in pins) == (native_cpu_options(args) is not None),
+            "native converter dependencies and explicit source/build selection differ")
     root, guest_kind = execution_root(args)
     total = download_total(pins)
     require(args.budget_bytes >= total + RESERVE_BYTES, "budget cannot hold pinned downloads")
@@ -444,6 +532,13 @@ def execute(args, pins):
                      "print('OFFLINE_CPU_RUNTIME_IMPORT_OK')"], environment, root, deadline)
         if "task_graph_decoder" in pins:
             run_checked([python, "-I", "-B", "-c", CHECK_GRAPH_DECODER], environment, root, deadline)
+        if "native_cpu_converter" in pins:
+            run_checked([python, "-I", "-B", "-c", "import sentencepiece;"
+                         "assert sentencepiece.__version__=='0.2.1';"
+                         "assert callable(sentencepiece.SentencePieceProcessor);"
+                         "print('OFFLINE_NATIVE_CONVERTER_IMPORT_OK')"], environment, root, deadline)
+        native_backend = provision_native_cpu(args, root, python, environment, deadline,
+                                             total + expanded + RESERVE_BYTES)
         report = {
             "format_version": 1, "success": True, "guest": guest_kind,
             "runtime_root": str(runtime), "model_root": str(model),
@@ -461,6 +556,10 @@ def execute(args, pins):
             report["weights"] = pins["weights"]
         if "task_graph_decoder" in pins:
             report["task_graph_decoder"] = pins["task_graph_decoder"]
+        if "native_cpu_converter" in pins:
+            report["native_cpu_converter"] = pins["native_cpu_converter"]
+        if native_backend is not None:
+            report["native_backend"] = native_backend
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report), flush=True)
     except BaseException:
@@ -483,10 +582,13 @@ def main(argv=None):
     parser.add_argument("--model-profile", choices=PROFILES, default=DEFAULT_MODEL_PROFILE)
     parser.add_argument("--task-graph-decoder", action="store_true",
                         help="explicitly add the three pinned optional constrained-graph decoder wheels")
+    parser.add_argument("--native-cpu-source", help="explicit clean pinned local llama.cpp source for offline BF16 conversion")
+    parser.add_argument("--native-cpu-build", help="explicit local source-built CPU adapter; no automatic source download")
     args = parser.parse_args(argv)
     try:
         require(1 <= args.timeout_seconds <= 3600, "timeout must be 1..3600 seconds")
-        pins = load_pins(args.model_profile, args.task_graph_decoder)
+        native_backend = native_cpu_options(args)
+        pins = load_pins(args.model_profile, args.task_graph_decoder, native_backend is not None)
         plan = {
             "mode": "execute" if args.execute else "preview", "root": args.root,
             "model_id": pins["model_id"], "revision": pins["revision"], "wheel_count": len(pins["wheels"]),
@@ -500,6 +602,9 @@ def main(argv=None):
             plan["model_profile"] = args.model_profile
         if args.task_graph_decoder:
             plan["task_graph_decoder"] = pins["task_graph_decoder"]
+        if native_backend is not None:
+            plan["native_backend"] = dict(native_backend, conversion="offline_exact_bf16_values",
+                                           shared_original_deadline=True, shared_original_disk_budget=True)
         print(json.dumps(plan, indent=2), flush=True)
         if args.execute:
             execute(args, pins)

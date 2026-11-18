@@ -1,6 +1,6 @@
 //! Real signatures over synthetic transport fixtures, not model execution or semantic evidence.
 
-use std::{os::unix::fs::PermissionsExt as _, sync::Arc};
+use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
 use volparossa_content::{

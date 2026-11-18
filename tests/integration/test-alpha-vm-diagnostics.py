@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tarfile
 import tempfile
@@ -31,8 +32,8 @@ class VmFailureDiagnostics(unittest.TestCase):
         self.work.mkdir()
         (self.guest / "alpha-output").mkdir()
 
-    def snapshot(self):
-        archive = MODULE["collect"](self.guest, self.opt, "b" * 40, "wifi-link", 124,
+    def snapshot(self, scenario="wifi-link"):
+        archive = MODULE["collect"](self.guest, self.opt, "b" * 40, scenario, 124,
                                     self.root / "cgroups", self.root / "proc")
         with tarfile.open(archive) as bundle:
             contents = {member.name: bundle.extractfile(member).read()
@@ -113,6 +114,113 @@ class VmFailureDiagnostics(unittest.TestCase):
         self.assertFalse(report["diagnostics"]["available"])
         self.assertFalse(report["cleanup"]["verified"])
         self.assertIn('ssh_base() { ssh_bounded 2400s "$@"; }', SOURCE)
+
+    def test_maintenance_keeps_exact_transition_and_phase_layouts(self):
+        names = {"private-storage-maintenance-control-transition.json"} | {
+            f"private-storage-fragments-{phase}-layout.json"
+            for phase in ("upload", "lifecycle", "restore", "finish")}
+        self.assertTrue(names <= MODULE["MAINTENANCE_NAMES"])
+        for name in names:
+            (self.work / name).write_text('{"closed_fixture":true}\n')
+        (self.work / "private-storage-maintenance-control-private.json").write_text('{"not_public":true}')
+        files, summary = self.snapshot("private-storage-maintenance")
+        for name in names:
+            self.assertEqual(files["work-1/" + name], b'{"closed_fixture":true}\n')
+        self.assertFalse(any("control-private" in name for name in files))
+        self.assertFalse(summary["success"])
+        self.assertLessEqual(len(summary["diagnostics"]["files"]), 128)
+        self.assertLessEqual(summary["diagnostics"]["captured_bytes"], MODULE["TOTAL_LIMIT"])
+
+    def test_only_three_maintenance_aggregates_get_normal_one_mib_ceiling(self):
+        names = {"private-storage-maintenance-smoke.json", "private-storage-maintenance-evidence.json",
+            "storage-consumer-evidence.json"}
+        self.assertEqual(MODULE["MAINTENANCE_LARGE_NAMES"], names)
+        payload = json.dumps({"inert": "x" * (MODULE["FILE_LIMIT"] + 1)}).encode()
+        for name in names | {"private-storage-maintenance-control-transition.json"}:
+            (self.work / name).write_bytes(payload)
+        files, summary = self.snapshot("private-storage-maintenance")
+        for name in names:
+            self.assertEqual(files["work-1/" + name], payload)
+        self.assertFalse(any("control-transition" in name for name in files))
+        self.assertFalse(any(entry["truncated"] for entry in summary["diagnostics"]["files"]))
+        self.assertEqual(MODULE["FILE_LIMIT"], 131072)
+        self.assertEqual(MODULE["TOTAL_LIMIT"], 8 * 1024 * 1024)
+
+    def test_consumer_matrix_exact_exports_are_whole_bounded_json_not_private_inputs(self):
+        names = {'storage-consumer-control-underlay.json'} | {
+            f'storage-consumer-{phase}-control-{suffix}.json'
+            for phase in ('publish', 'exercise', 'finish')
+            for suffix in ('before', 'after', 'relay0', 'relay1', 'relay2')}
+        self.assertEqual(len(names), 16)
+        self.assertTrue(names <= MODULE['MAINTENANCE_NAMES'])
+        for name in names: (self.work / name).write_bytes(b'{"synthetic":true}')
+        (self.work / 'consumer-control-raw.private').write_bytes(b'PRIVATE')
+        (self.work / 'storage-consumer-publish-control-relay0.log').write_bytes(b'PRIVATE')
+        files, summary = self.snapshot('private-storage-maintenance')
+        self.assertTrue(all(files['work-1/' + name] == b'{"synthetic":true}' for name in names))
+        self.assertFalse(any(b'PRIVATE' in raw for raw in files.values()))
+        self.assertFalse(summary['success'])
+        for name in names: (self.work / name).unlink()
+        (self.work / 'storage-consumer-control-underlay.json').write_bytes(b'"' + b'x' * 131072 + b'"')
+        (self.work / 'storage-consumer-publish-control-before.json').symlink_to(self.work / 'consumer-control-raw.private')
+        os.mkfifo(self.work / 'storage-consumer-publish-control-after.json')
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertFalse(any(name.startswith('work-1/') for name in files))
+
+    def test_maintenance_rejects_oversized_or_broken_json_and_unsafe_aggregate_files(self):
+        (self.work / "private-storage-maintenance-smoke.json").write_bytes(
+            json.dumps({"inert": "x" * 1048576}).encode())
+        (self.work / "private-storage-maintenance-evidence.json").write_bytes(b'{"incomplete":')
+        (self.work / "secret").write_text('{"not_public":true}')
+        (self.work / "storage-consumer-evidence.json").symlink_to(self.work / "secret")
+        os.mkfifo(self.work / "private-storage-maintenance-control-transition.json")
+        files, summary = self.snapshot("private-storage-maintenance")
+        self.assertFalse(any(name.startswith("work-1/") for name in files))
+        self.assertFalse(summary["success"])
+
+    def test_helper_acquire_sidecar_exports_only_valid_closed_whole_json(self):
+        helper = RUNNER.with_name('storage-acquire-diagnostic.py')
+        module = runpy.run_path(str(helper))
+        staged = self.guest / 'source/tests/integration/storage-acquire-diagnostic.py'
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(helper.read_bytes())
+        payload = module['empty']('absent')
+        encoded = module['encoded'](payload)
+        path = self.work / module['NAME']
+        path.write_bytes(encoded)
+        (self.work / 'helper-client.log').write_bytes(b'PRIVATE_HELPER_LOG')
+        files, summary = self.snapshot('private-storage-maintenance')
+        self.assertEqual(files['work-1/' + module['NAME']], encoded)
+        self.assertFalse(any(b'PRIVATE_HELPER_LOG' in raw for raw in files.values()))
+        self.assertFalse(summary['success'])
+        invalid = [dict(payload, private='PRIVATE_CANARY'),
+                   dict(payload, causal_attribution=True), dict(payload, event_absence_proven=True),
+                   dict(payload, records=[dict(operation='connect', failure_class='io', errno=0)])]
+        for value in invalid:
+            with self.subTest(value=value):
+                path.write_text(json.dumps(value))
+                files, _ = self.snapshot('private-storage-maintenance')
+                self.assertNotIn('work-1/' + module['NAME'], files)
+                self.assertFalse(any(b'PRIVATE_CANARY' in raw for raw in files.values()))
+        path.write_bytes(b' ' * module['MAX_BYTES'] + encoded)
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + module['NAME'], files)
+
+    def test_helper_acquire_sidecar_requires_original_validator_and_safe_file(self):
+        helper = runpy.run_path(str(RUNNER.with_name('storage-acquire-diagnostic.py')))
+        path = self.work / helper['NAME']
+        path.write_bytes(helper['encoded'](helper['empty']('absent')))
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + helper['NAME'], files)
+        path.unlink()
+        path.symlink_to(self.work / 'secret')
+        (self.work / 'secret').write_bytes(b'PRIVATE_CANARY')
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertFalse(any(b'PRIVATE_CANARY' in raw for raw in files.values()))
+        path.unlink()
+        os.mkfifo(path)
+        files, _ = self.snapshot('private-storage-maintenance')
+        self.assertNotIn('work-1/' + helper['NAME'], files)
 
     def test_uplink_guest_requires_actual_egress_namespace_proof(self):
         driver = SOURCE.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]

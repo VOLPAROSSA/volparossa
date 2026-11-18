@@ -27,9 +27,17 @@ pub(super) enum Operation {
         context: String,
     },
     ConversationCapabilities {
-        #[serde(default, deserialize_with = "present_generation_policy_version")]
+        #[serde(default, deserialize_with = "present_version")]
         generation_policy_version: Option<u8>,
+        #[serde(default, deserialize_with = "present_version")]
+        execution_error_version: Option<u8>,
+        #[serde(default, deserialize_with = "present_version")]
+        output_constraint_version: Option<u8>,
+        #[serde(default, deserialize_with = "present_version")]
+        native_session_version: Option<u8>,
     },
+    OpenNativeSession {},
+    CloseNativeSession {},
     SubmitConversation {
         conversation: super::super::private_conversation::Input,
     },
@@ -38,7 +46,7 @@ pub(super) enum Operation {
     },
 }
 
-fn present_generation_policy_version<'de, D: serde::Deserializer<'de>>(
+fn present_version<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<u8>, D::Error> {
     u8::deserialize(deserializer).map(Some)
@@ -72,11 +80,26 @@ impl Request {
         );
         if let Operation::ConversationCapabilities {
             generation_policy_version,
+            execution_error_version,
+            output_constraint_version,
+            native_session_version,
         } = &self.operation
         {
             ensure!(
                 generation_policy_version.is_none_or(|version| version == 1),
                 "private_ipc_generation_policy_version"
+            );
+            ensure!(
+                execution_error_version.is_none_or(|version| version == 1),
+                "private_ipc_execution_error_version"
+            );
+            ensure!(
+                output_constraint_version.is_none_or(|version| version == 1),
+                "private_ipc_output_constraint_version"
+            );
+            ensure!(
+                native_session_version.is_none_or(|version| version == 1),
+                "private_ipc_native_session_version"
             );
         }
         if let Operation::Cancel { task_id } = &self.operation {

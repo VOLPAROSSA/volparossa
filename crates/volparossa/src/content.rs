@@ -21,6 +21,9 @@ use zeroize::Zeroizing;
 pub(crate) mod agent_artifact;
 mod browser_download;
 mod custody;
+mod filter_serve;
+mod filter_snapshot;
+mod fixture_correlation;
 mod handoff;
 mod https_download;
 mod mailbox;
@@ -30,6 +33,7 @@ pub(crate) mod policy_bundle;
 pub(crate) mod policy_decision;
 pub(crate) mod policy_exchange;
 mod private_message;
+mod provider_activity;
 pub(crate) use private_message::Unlock as IdentityUnlock;
 pub(crate) mod public_text;
 mod retain;
@@ -74,6 +78,14 @@ pub(crate) enum Command {
     Fetch(Fetch),
     /// Resolve an explicit public publisher/name and stream verified bytes to your new local file.
     FetchName(FetchName),
+    /// Fetch one explicitly authorized immutable public domain-block snapshot; no browser changes.
+    ///
+    /// Accepts only ||lowercase.domain^ rules, blank lines and an optional first-line
+    /// [Adblock Plus 2.0] header, at most 1 MiB and 4096 rules. No comments, options,
+    /// exceptions, scriptlets, remote includes or preprocessing directives are supported.
+    FilterSnapshot(Box<filter_snapshot::Options>),
+    /// Explicit same-owner read-only broker for one independently authorized public filter snapshot.
+    FilterServe(Box<filter_serve::Options>),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
     /// Offer one verified HTTPS object as a short-lived localhost browser download.
@@ -82,6 +94,10 @@ pub(crate) enum Command {
     Stop,
     /// Inspect explicit content service and the current route's control Relay; no network I/O.
     Status,
+    /// Read finite local provider activity; no peer queries or storage acceptance claims.
+    ProviderActivity,
+    /// Private development-fixture correlation; bounded JSON input on stdin only.
+    FixtureCorrelation,
 }
 
 #[derive(Debug, Args)]
@@ -312,6 +328,9 @@ pub(crate) struct Publish {
     /// Existing encrypted identity file; defaults to the normal node identity path.
     #[arg(long)]
     identity: Option<PathBuf>,
+    /// Require the unlocked identity to match this independently selected publisher key.
+    #[arg(long, value_parser = parse_publisher_key)]
+    expected_publisher_key: Option<VerifyingKey>,
     /// Existing strict 0600 passphrase file; otherwise prompt without echo.
     #[arg(long)]
     passphrase_file: Option<PathBuf>,
@@ -375,6 +394,7 @@ impl Publish {
             lifetime_seconds: MAX_VALIDITY_SECONDS,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),
+            expected_publisher_key: None,
             passphrase_file: Some(args.passphrase_file),
             limits: args.limits,
         }
@@ -396,6 +416,7 @@ impl Publish {
             lifetime_seconds: args.lifetime_seconds,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),
+            expected_publisher_key: None,
             passphrase_file: Some(args.passphrase_file),
             limits: args.limits,
         }
@@ -551,6 +572,8 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             return super::print_response(super::control::request(socket, operation).await?);
         }
         Command::FetchName(args) => return named_download::run(&args, socket).await,
+        Command::FilterSnapshot(args) => filter_snapshot::run(&args, socket).await?,
+        Command::FilterServe(args) => return filter_serve::run(&args, socket).await,
         Command::FetchHttps(args) => {
             if let Some(output) = &args.local_output {
                 return https_download::run(&args, socket, output).await;
@@ -568,6 +591,8 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 super::control::request(socket, Operation::ContentStatus(Empty {})).await?,
             );
         }
+        Command::ProviderActivity => return provider_activity::run(socket).await,
+        Command::FixtureCorrelation => return fixture_correlation::run(socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -760,6 +785,12 @@ fn publish(args: &Publish) -> Result<Published> {
     let now = now_seconds()?;
     let expires = args.expiry(now)?;
     let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
+    if args
+        .expected_publisher_key
+        .is_some_and(|expected| expected != signer.verifying_key())
+    {
+        bail!("content publisher does not match the expected publisher key");
+    }
     let expected_public = signer.verifying_key().to_bytes();
     let mut manifest_output = tempfile::NamedTempFile::new_in(output_parent(&args.manifest))?;
     let limits = args.limits.cache_limits()?;
@@ -1482,6 +1513,7 @@ mod tests {
             lifetime_seconds: 300,
             expires_not_after: None,
             identity: Some(identity_path.clone()),
+            expected_publisher_key: None,
             passphrase_file: Some(password_file),
             limits: limits(),
         };
@@ -1971,6 +2003,7 @@ mod contribution_tests {
             request_id: request.request_id.clone(),
             result: ControlResult::Ok as i32,
             diagnostic_code: diagnostic.into(),
+            private_storage_remote_detail: None,
             payload: Some(payload),
         };
         write_response(

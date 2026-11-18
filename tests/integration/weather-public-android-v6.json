@@ -1,0 +1,188 @@
+{
+  "schema": 1,
+  "kind": "volparossa-weather-public-android-admission",
+  "scope": "disposable-joined-android-core-only",
+  "sources": {
+    "weather": {
+      "commit": "3b90442a9d5be4db73ccf83cba2028364980c3ca"
+    }
+  },
+  "artifacts": {
+    "decoder": {
+      "bytes": 14057646,
+      "commit": "7d61077aa415de8f46f79384a1dd08f403c4898c",
+      "id": 11731895956,
+      "name": "hosted-decoder-unadmitted-7d61077aa415de8f46f79384a1dd08f403c4898c",
+      "repository": "VOLPAROSSA/volparossa-weather",
+      "run_id": 38214736539,
+      "sha256": "e9a8a6b3530ae5fadf19d4f9bf0271013f8d1fdcd4ac3745723644b5d9372197"
+    },
+    "abi": {
+      "bytes": 22790,
+      "commit": "be2977ac6d1d520caea29c96df759ea2d90c943c",
+      "id": 11732188075,
+      "name": "weather-decoder-debian13-be2977ac6d1d520caea29c96df759ea2d90c943c",
+      "repository": "VOLPAROSSA/volparossa",
+      "run_id": 38216142236,
+      "sha256": "15622809d9aa7c46eb6b80ac76f9a6252966d25478dfeddd4262238846f1b586"
+    }
+  },
+  "files": {
+    "decoder/grib_ls": {
+      "bytes": 31383992,
+      "sha256": "d99425a1b44fe11b9ff77918310bc1b1a2114957558481bd705851e314a59930"
+    },
+    "decoder/licenses/ecbuild-source/COPYING": {
+      "bytes": 11392,
+      "sha256": "e66e138859d69f0a9f85ff83caa3a7dd4be46871036b3ddb483e97fc92c19120"
+    },
+    "decoder/licenses/ecbuild-source/LICENSE": {
+      "bytes": 10751,
+      "sha256": "b8cd06462fcd1691d120610d7c2a868796809f520c9977b10eace0fc91a9dbf4"
+    },
+    "decoder/licenses/ecbuild-source/NOTICE": {
+      "bytes": 744,
+      "sha256": "e7338a08ea2e75ad7936781fc7fda0cbc18758370bfedabdb6e9a2965df319f5"
+    },
+    "decoder/licenses/eccodes-source/COPYING": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "decoder/licenses/eccodes-source/LICENSE": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "decoder/licenses/eccodes-source/NOTICE": {
+      "bytes": 771,
+      "sha256": "8a73c2ffa4c7b56513d27830fbb22eb30bb73df80612c1395b416570f1637393"
+    },
+    "decoder/licenses/eccodes-source/third_party/expected/COPYING": {
+      "bytes": 7048,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    "decoder/licenses/libaec-source/LICENSE.txt": {
+      "bytes": 1346,
+      "sha256": "66924e663d6e156dc45fe5aba993f5dcb131a8a5400b5580d956877c2c77c717"
+    },
+    "decoder/probe.grib2": {
+      "bytes": 828,
+      "sha256": "551114e2f896b62e3f6901330876040015ed2b7ae483f5798ddb18a8ae233eec"
+    },
+    "runtime/node": {
+      "bytes": 125989464,
+      "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"
+    },
+    "runtime/node.LICENSE": {
+      "bytes": 157606,
+      "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"
+    },
+    "volparossa-weather/LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi.json": {
+      "bytes": 2279,
+      "sha256": "0712bb183f490bf17068bb87b1017a591966cc1c96771ca5ff085a8fbed640d2"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi/decode-first.log": {
+      "bytes": 269,
+      "sha256": "769c46ff19c8985759a280c4abbc669a6e79b5018800239ead554e55d53585f7"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi/decode-last.log": {
+      "bytes": 273,
+      "sha256": "fc2fac05c4976dff2e9b135666bded45595bd4568cccb4fd2737d3f9679f58d2"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi/elf.log": {
+      "bytes": 11515,
+      "sha256": "c84fb3519c4e3ef1f3f0a991da86c8ab7c33dd3af2e1b548cfb93dea90d66c99"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi/sandbox.log": {
+      "bytes": 73,
+      "sha256": "923942205c3c961ec30f9d1a22aeff13ab41cc2b2a2d4a9ddffbac89be105b5f"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-abi/version.log": {
+      "bytes": 25,
+      "sha256": "9a44b8f4c22b2b88686807288404b8b042bcfe6c63c294002b5df9b7e75a1e03"
+    },
+    "volparossa-weather/integrations/overmorrow/android-core-inputs/decoder-build.json": {
+      "bytes": 26940,
+      "sha256": "ad40c6c7228984356de6e65480a850ccbcc48a690bfa8af370f860b354ad9d64"
+    },
+    "volparossa-weather/scripts/air-quality.mjs": {
+      "bytes": 3312,
+      "sha256": "b5a9c64e5dc9faa8920aa0f4bc728c79446ee5a73516f498654cc68d632450e3"
+    },
+    "volparossa-weather/scripts/build_eccodes.py": {
+      "bytes": 11634,
+      "sha256": "5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"
+    },
+    "volparossa-weather/scripts/forecast.mjs": {
+      "bytes": 4364,
+      "sha256": "9f3cc2726464dfbe1c8b717d24f7173c9f9056ea5eac4547be5ce53a4e8fcb3d"
+    },
+    "volparossa-weather/scripts/prepare_hosted_decoder.py": {
+      "bytes": 25078,
+      "sha256": "1c9b10e294189ffc0fd5a2064c4e436f691aa4e50cd0eea258e7976740ac17e4"
+    },
+    "volparossa-weather/scripts/serve-provider.mjs": {
+      "bytes": 3435,
+      "sha256": "0f34cfb272a38adca2ee736ab99d09e3d154878abb095061149dc373caf9b90c"
+    },
+    "volparossa-weather/src/air-quality-core.mjs": {
+      "bytes": 255,
+      "sha256": "1fba6eb570eb186fa3fefd2c06ebad8d426983e442cfea7ceab1fb2a6f048db2"
+    },
+    "volparossa-weather/src/air-quality-provider.mjs": {
+      "bytes": 1940,
+      "sha256": "3ef3c7b3a731e2d41d6c60dc240ec1d0bda0f925c8bf9b814d6f9d7bd09f6fb9"
+    },
+    "volparossa-weather/src/air-quality.mjs": {
+      "bytes": 9022,
+      "sha256": "c69432ead935a81d3ae28a5259201f98a8845eaef96019121ab9bf3c8f7fced7"
+    },
+    "volparossa-weather/src/android-proof-receipts.mjs": {
+      "bytes": 8689,
+      "sha256": "a8ce21b87fcdf34a8bca0c06da023940983f7f9eebe8e813310ca294c9f1649b"
+    },
+    "volparossa-weather/src/core-cache.mjs": {
+      "bytes": 11574,
+      "sha256": "670b1b64d12a9f28b4f7df16ded6477d3291dcc2535adaecde72783dc629183f"
+    },
+    "volparossa-weather/src/ecmwf.mjs": {
+      "bytes": 18956,
+      "sha256": "749afbabc00457047d46adf57cd9c7cfdfda858b011a41c5e3e27cd5e4ebb132"
+    },
+    "volparossa-weather/src/forecast.mjs": {
+      "bytes": 13170,
+      "sha256": "5a3d71b0c1735e5a7716a1d126fe39c5595232d07ef54f876b8838bc5ccd14e4"
+    },
+    "volparossa-weather/src/noaa-gefs.mjs": {
+      "bytes": 18016,
+      "sha256": "a5ac4875157744115b4b53e933bdb50db182d385c27b3e7bd062e59c0e2ba093"
+    },
+    "volparossa-weather/src/provider-core.mjs": {
+      "bytes": 1407,
+      "sha256": "6b2c332b9ba004339a31502ca06525136a41151a160378239ff59b9b948e4e00"
+    },
+    "volparossa-weather/src/provider-http.mjs": {
+      "bytes": 26300,
+      "sha256": "2157732370e73c05f78f9e0b3cfd1dfb995105ed280d3f7fe5d3d708a41fbf03"
+    },
+    "volparossa-weather/src/provider.mjs": {
+      "bytes": 3479,
+      "sha256": "d2dcf5b3817b148721632c74684ce83770bb670feb18872aec5a71157542b7ee"
+    },
+    "volparossa-weather/third_party/eccodes-sources.json": {
+      "bytes": 2087,
+      "sha256": "f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"
+    },
+    "volparossa-weather/third_party/hosted-runtime-inputs.json": {
+      "bytes": 2451,
+      "sha256": "8d122cd42bc2e3eca7c040ae5e847dc5b14e91ac7f30b508fc25beb5f5e860aa"
+    },
+    "volparossa-weather/third_party/noaa-gefs.json": {
+      "bytes": 1518,
+      "sha256": "21f6e8e94fb9c5abb54c868515f04443dedac34b433cea58a136a32cb335c5e9"
+    }
+  }
+}

@@ -474,6 +474,71 @@ pub(crate) struct ActivationFailureDiagnostic {
     pub(crate) errno: Option<i32>,
 }
 
+/// One observed connected-MPTCP operation, never an address or inferred remote cause.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum AcquireFailureOperation {
+    Unspecified = 0,
+    SocketCreate = 1,
+    Ipv6OnlySet = 2,
+    Bind = 3,
+    Connect = 4,
+    Poll = 5,
+    ConnectSocketError = 6,
+    SocketDomain = 7,
+    SocketType = 8,
+    SocketProtocol = 9,
+    LocalAddress = 10,
+    ListenerState = 11,
+    SocketError = 12,
+    Ipv6OnlyGet = 13,
+    DescriptorFlags = 14,
+    StatusFlags = 15,
+    PeerAddress = 16,
+    MptcpInfo = 17,
+    ConnectReadiness = 18,
+}
+
+/// Closed original failure classes; missing errno is unknown, not zero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum AcquireFailureClass {
+    Unspecified = 0,
+    Io = 1,
+    TimedOut = 2,
+    AmbiguousReadiness = 3,
+}
+
+/// Diagnostic-only copy; it never changes `Kernel`, retry or cleanup authority.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub(crate) struct AcquireFailureDiagnostic {
+    #[prost(enumeration = "AcquireFailureOperation", tag = "1")]
+    pub(crate) operation: i32,
+    #[prost(enumeration = "AcquireFailureClass", tag = "2")]
+    pub(crate) class: i32,
+    #[prost(int32, optional, tag = "3")]
+    pub(crate) errno: Option<i32>,
+}
+
+impl AcquireFailureDiagnostic {
+    pub(crate) fn validate(self) -> Result<(), InternalProtocolError> {
+        let operation = AcquireFailureOperation::try_from(self.operation)
+            .map_err(|_| InternalProtocolError::Invalid)?;
+        let class = AcquireFailureClass::try_from(self.class)
+            .map_err(|_| InternalProtocolError::Invalid)?;
+        if operation == AcquireFailureOperation::Unspecified
+            || class == AcquireFailureClass::Unspecified
+            || self.errno.is_some_and(|errno| !(1..=4095).contains(&errno))
+            || ((operation == AcquireFailureOperation::ConnectReadiness)
+                != (class == AcquireFailureClass::AmbiguousReadiness))
+            || (class == AcquireFailureClass::AmbiguousReadiness && self.errno.is_some())
+        {
+            return Err(InternalProtocolError::Invalid);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Message)]
 pub(crate) struct InternalWorkerResponse {
     #[prost(uint32, tag = "1")]
@@ -488,6 +553,8 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) request_digest: Vec<u8>,
     #[prost(message, optional, tag = "6")]
     pub(crate) activation_failure: Option<ActivationFailureDiagnostic>,
+    #[prost(message, optional, tag = "7")]
+    pub(crate) acquire_failure: Option<AcquireFailureDiagnostic>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
         tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27"
@@ -874,6 +941,16 @@ pub(crate) fn validate_response_for_request(
         && !matches!(
             request.operation,
             Some(internal_worker_request::Operation::ActivateLeases(_))
+        )
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    if response.acquire_failure.is_some()
+        && !matches!(
+            request.operation,
+            Some(internal_worker_request::Operation::AcquireTransportSocket(ref acquire))
+                if acquire.role == InternalEndpointRole::Client as i32
+                    && acquire.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
         )
     {
         return Err(InternalProtocolError::Invalid);
@@ -1330,9 +1407,7 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
     if value.request_digest.len() != 32 {
         return Err(InternalProtocolError::Invalid);
     }
-    if let Some(diagnostic) = &value.activation_failure {
-        validate_activation_failure(result, diagnostic)?;
-    }
+    validate_response_diagnostics(result, value)?;
     match (result, value.outcome.as_ref()) {
         (InternalWorkerResult::Ok, Some(outcome)) => match outcome {
             Outcome::Initialised(outcome) => route_id(&outcome.route_context_id),
@@ -1427,6 +1502,25 @@ fn validate_applied_downlink(
 ) -> Result<(), InternalProtocolError> {
     if value.sequence == 0 || !(1..=262_144).contains(&value.maximum_queued_bytes) {
         return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
+}
+
+fn validate_response_diagnostics(
+    result: InternalWorkerResult,
+    value: &InternalWorkerResponse,
+) -> Result<(), InternalProtocolError> {
+    if let Some(diagnostic) = &value.activation_failure {
+        validate_activation_failure(result, diagnostic)?;
+    }
+    if let Some(diagnostic) = value.acquire_failure {
+        diagnostic.validate()?;
+        if result != InternalWorkerResult::Kernel
+            || value.activation_failure.is_some()
+            || value.outcome.is_some()
+        {
+            return Err(InternalProtocolError::Invalid);
+        }
     }
     Ok(())
 }
@@ -2068,6 +2162,7 @@ mod tests {
             result: result as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
             activation_failure: None,
+            acquire_failure: None,
             outcome,
         }
     }
@@ -2160,6 +2255,7 @@ mod tests {
                 result: InternalWorkerResult::Ok as i32,
                 request_digest: vec![8; 32],
                 activation_failure: None,
+                acquire_failure: None,
                 outcome: Some(outcome),
             };
             let encoded = encode_response(&value).expect("sixteen-lease response");
@@ -2659,6 +2755,123 @@ mod tests {
         assert!(validate_response_for_request(&activate, &failure).is_ok());
     }
 
+    fn acquire_diagnostic() -> AcquireFailureDiagnostic {
+        AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::Bind as i32,
+            class: AcquireFailureClass::Io as i32,
+            errno: Some(libc::EADDRINUSE),
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_round_trip_is_exactly_request_bound() {
+        let request = acquire();
+        let mut failure = correlated_response(&request, InternalWorkerResult::Kernel, None);
+        let absent = failure.encode_to_vec();
+        let mut legacy = vec![0x08, 4, 0x12, 8];
+        legacy.extend_from_slice(b"VPWKR3\0\0");
+        legacy.extend_from_slice(&[0x1a, 16]);
+        legacy.extend_from_slice(&failure.request_id);
+        legacy.extend_from_slice(&[0x20, 5, 0x2a, 32]);
+        legacy.extend_from_slice(&failure.request_digest);
+        assert_eq!(absent, legacy);
+        assert_eq!(decode_response(&absent).expect("old absent field"), failure);
+        failure.acquire_failure = Some(acquire_diagnostic());
+        let bytes = failure.encode_to_vec();
+        assert_eq!(decode_response(&bytes).expect("closed detail"), failure);
+        validate_response_for_request(&request, &failure).expect("exact request");
+        for change_digest in [false, true] {
+            let mut wrong = failure.clone();
+            if change_digest {
+                wrong.request_digest[0] ^= 1;
+            } else {
+                wrong.request_id[0] ^= 1;
+            }
+            assert!(validate_response_for_request(&request, &wrong).is_err());
+        }
+        failure.acquire_failure = None;
+        assert_eq!(failure.encode_to_vec(), absent);
+        let mut noncanonical = bytes;
+        noncanonical.extend_from_slice(&[0xa0, 0x06, 0x01]);
+        assert!(decode_response(&noncanonical).is_err());
+    }
+
+    #[test]
+    fn acquire_diagnostic_rejects_other_operations_results_and_activation_detail() {
+        let request = acquire();
+        let mut failure = correlated_response(&request, InternalWorkerResult::Kernel, None);
+        failure.acquire_failure = Some(acquire_diagnostic());
+        for result in [
+            InternalWorkerResult::Ok,
+            InternalWorkerResult::Invalid,
+            InternalWorkerResult::CleanupIncomplete,
+            InternalWorkerResult::NotFound,
+        ] {
+            let mut wrong = failure.clone();
+            wrong.result = result as i32;
+            assert!(encode_response(&wrong).is_err());
+        }
+        let destroy = self::request(internal_worker_request::Operation::DestroyContext(
+            DestroyContext {
+                route_context_id: vec![1; 16],
+            },
+        ));
+        let mut wrong = correlated_response(&destroy, InternalWorkerResult::Kernel, None);
+        wrong.acquire_failure = failure.acquire_failure;
+        assert!(validate_response_for_request(&destroy, &wrong).is_err());
+        for kind in [
+            InternalTransportSocketKind::QuicUdpUnconnected,
+            InternalTransportSocketKind::MptcpListener,
+        ] {
+            let mut other = request.clone();
+            let Some(internal_worker_request::Operation::AcquireTransportSocket(value)) =
+                &mut other.operation
+            else {
+                panic!("Acquire fixture");
+            };
+            value.descriptor_kind = kind as i32;
+            value.expected_remote = None;
+            if kind == InternalTransportSocketKind::MptcpListener {
+                value.role = InternalEndpointRole::Exit as i32;
+            }
+            let mut response = correlated_response(&other, InternalWorkerResult::Kernel, None);
+            response.acquire_failure = failure.acquire_failure;
+            assert!(validate_response_for_request(&other, &response).is_err());
+        }
+        failure.activation_failure = Some(ActivationFailureDiagnostic {
+            phase: ActivationFailurePhase::WireguardActivate as i32,
+            class: ActivationFailureClass::Io as i32,
+            errno: None,
+        });
+        assert!(encode_response(&failure).is_err());
+        failure.activation_failure = None;
+        failure.outcome = Some(internal_worker_response::Outcome::Destroyed(
+            ContextDestroyed {},
+        ));
+        assert!(encode_response(&failure).is_err());
+    }
+
+    #[test]
+    fn acquire_diagnostic_closed_values_and_errno_bound_are_exhaustive() {
+        for operation in 0..=19 {
+            for class in 0..=4 {
+                for errno in [None, Some(-1), Some(0), Some(1), Some(4095), Some(4096)] {
+                    let value = AcquireFailureDiagnostic {
+                        operation,
+                        class,
+                        errno,
+                    };
+                    let expected = (1..=18).contains(&operation)
+                        && (1..=3).contains(&class)
+                        && errno.is_none_or(|value| (1..=4095).contains(&value))
+                        && ((operation == 18) == (class == 3))
+                        && (class != 3 || errno.is_none());
+                    assert_eq!(value.validate().is_ok(), expected);
+                }
+            }
+        }
+    }
+
     #[test]
     fn response_requires_typed_outcome_and_request_digest() {
         let value = InternalWorkerResponse {
@@ -2668,6 +2881,7 @@ mod tests {
             result: InternalWorkerResult::Ok as i32,
             request_digest: vec![8; 32],
             activation_failure: None,
+            acquire_failure: None,
             outcome: Some(internal_worker_response::Outcome::Activated(
                 ActivatedLeases {
                     leases: vec![ActivatedLease {

@@ -9,6 +9,39 @@ use super::{ComputeError, EXCHANGE_SECONDS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTE
 
 const DOMAIN: &[u8] = b"VOLPAROSSA/compute-control/v1\0";
 
+/// Fixed local selection, never a peer-supplied arbitrary signing domain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Purpose {
+    ComputeV1,
+    QuoteV1,
+    QuoteConfirmationV1,
+}
+
+impl Purpose {
+    const fn domain(self) -> &'static [u8] {
+        match self {
+            Self::ComputeV1 => DOMAIN,
+            Self::QuoteV1 => b"VOLPAROSSA/compute-quote/v1\0",
+            Self::QuoteConfirmationV1 => b"VOLPAROSSA/compute-quote-confirmation/v1\0",
+        }
+    }
+
+    const fn request_bound(self) -> usize {
+        match self {
+            Self::ComputeV1 => MAX_REQUEST_BYTES,
+            Self::QuoteV1 => super::guest::MAX_QUOTE_REQUEST_BYTES,
+            Self::QuoteConfirmationV1 => super::quote::confirmation::MAX_PROBE_BYTES,
+        }
+    }
+
+    const fn response_bound(self) -> usize {
+        match self {
+            Self::ComputeV1 => MAX_RESPONSE_BYTES,
+            Self::QuoteV1 | Self::QuoteConfirmationV1 => super::guest::MAX_QUOTE_RESPONSE_BYTES,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum Kind {
@@ -50,6 +83,7 @@ struct Envelope {
 }
 
 pub(super) struct Record {
+    purpose: Purpose,
     body: Body,
     signature: [u8; 64],
     sender: [u8; 32],
@@ -57,12 +91,21 @@ pub(super) struct Record {
 
 impl Record {
     pub(super) fn challenge(key: &SigningKey, now: u64) -> Result<Self, ComputeError> {
+        Self::challenge_for(key, now, Purpose::ComputeV1)
+    }
+
+    pub(super) fn challenge_for(
+        key: &SigningKey,
+        now: u64,
+        purpose: Purpose,
+    ) -> Result<Self, ComputeError> {
         let mut nonce = [0; 32];
         getrandom::fill(&mut nonce).map_err(|_| ComputeError::Entropy)?;
         let expires = now
             .checked_add(EXCHANGE_SECONDS)
             .ok_or(ComputeError::Expired)?;
         Self::sign(
+            purpose,
             key,
             Kind::Challenge,
             nonce.to_vec(),
@@ -82,6 +125,7 @@ impl Record {
     ) -> Result<Self, ComputeError> {
         challenge.check(Kind::Challenge, now)?;
         Self::sign(
+            challenge.purpose,
             key,
             Kind::Request,
             challenge.body.nonce.clone(),
@@ -102,6 +146,7 @@ impl Record {
     ) -> Result<Self, ComputeError> {
         challenge.check(Kind::Challenge, now)?;
         Self::sign(
+            challenge.purpose,
             key,
             Kind::Reply,
             challenge.body.nonce.clone(),
@@ -118,6 +163,7 @@ impl Record {
         reason = "Complete domain-separated signed record fields"
     )]
     fn sign(
+        purpose: Purpose,
         key: &SigningKey,
         kind: Kind,
         nonce: Vec<u8>,
@@ -140,8 +186,9 @@ impl Record {
             request_hash,
             challenge_hash,
         };
-        let signature = key.sign(&signing_bytes(&body)).to_bytes();
+        let signature = key.sign(&signing_bytes(&body, purpose)).to_bytes();
         let record = Self {
+            purpose,
             body,
             signature,
             sender,
@@ -159,17 +206,36 @@ impl Record {
     }
 
     pub(super) fn decode(bytes: &[u8], kind: Kind, now: u64) -> Result<Self, ComputeError> {
-        Self::decode_at(bytes, kind, Some(now))
+        Self::decode_for(bytes, kind, now, Purpose::ComputeV1)
+    }
+
+    pub(super) fn decode_for(
+        bytes: &[u8],
+        kind: Kind,
+        now: u64,
+        purpose: Purpose,
+    ) -> Result<Self, ComputeError> {
+        Self::decode_at(bytes, kind, Some(now), purpose)
     }
 
     /// Check an original signature and its internally bounded signed validity.
     /// No wall-clock freshness or current authorization follows from this check.
     pub(super) fn decode_historical(bytes: &[u8], kind: Kind) -> Result<Self, ComputeError> {
-        Self::decode_at(bytes, kind, None)
+        Self::decode_at(bytes, kind, None, Purpose::ComputeV1)
     }
 
-    fn decode_at(bytes: &[u8], kind: Kind, now: Option<u64>) -> Result<Self, ComputeError> {
-        if bytes.is_empty() || bytes.len() > MAX_REQUEST_BYTES + super::FRAME_OVERHEAD {
+    fn decode_at(
+        bytes: &[u8],
+        kind: Kind,
+        now: Option<u64>,
+        purpose: Purpose,
+    ) -> Result<Self, ComputeError> {
+        let bound = if purpose == Purpose::ComputeV1 || kind == Kind::Request {
+            purpose.request_bound()
+        } else {
+            purpose.response_bound()
+        };
+        if bytes.is_empty() || bytes.len() > bound + super::FRAME_OVERHEAD {
             return Err(ComputeError::Invalid);
         }
         let envelope = Envelope::decode(bytes).map_err(|_| ComputeError::Invalid)?;
@@ -188,6 +254,7 @@ impl Record {
             .try_into()
             .map_err(|_| ComputeError::Invalid)?;
         let result = Self {
+            purpose,
             body,
             signature,
             sender,
@@ -196,7 +263,7 @@ impl Record {
         VerifyingKey::from_bytes(&sender)
             .map_err(|_| ComputeError::Authentication)?
             .verify_strict(
-                &signing_bytes(&result.body),
+                &signing_bytes(&result.body, purpose),
                 &Signature::from_bytes(&signature),
             )
             .map_err(|_| ComputeError::Authentication)?;
@@ -219,13 +286,13 @@ impl Record {
             }
             Kind::Request => {
                 !b.payload.is_empty()
-                    && b.payload.len() <= MAX_REQUEST_BYTES
+                    && b.payload.len() <= self.purpose.request_bound()
                     && b.request_hash.is_empty()
                     && b.challenge_hash.len() == 32
             }
             Kind::Reply => {
                 !b.payload.is_empty()
-                    && b.payload.len() <= MAX_RESPONSE_BYTES
+                    && b.payload.len() <= self.purpose.response_bound()
                     && b.request_hash.len() == 32
                     && b.challenge_hash.len() == 32
             }
@@ -245,7 +312,8 @@ impl Record {
     }
 
     pub(super) fn matches_challenge(&self, challenge: &Self) -> Result<(), ComputeError> {
-        if self.body.nonce != challenge.body.nonce
+        if self.purpose != challenge.purpose
+            || self.body.nonce != challenge.body.nonce
             || self.body.expires != challenge.body.expires
             || self.body.created < challenge.body.created
             || self.body.challenge_hash.as_slice() != Sha256::digest(challenge.encode()).as_slice()
@@ -271,8 +339,8 @@ impl Record {
     }
 }
 
-fn signing_bytes(body: &Body) -> Vec<u8> {
-    let mut bytes = DOMAIN.to_vec();
+fn signing_bytes(body: &Body, purpose: Purpose) -> Vec<u8> {
+    let mut bytes = purpose.domain().to_vec();
     bytes.extend_from_slice(&body.encode_to_vec());
     bytes
 }
@@ -287,7 +355,7 @@ fn copied_nonce_signed_by_another_provider_cannot_forward_client_authorization()
     let mut forwarded = Record::challenge(&intermediary, 100).unwrap();
     forwarded.body.nonce.clone_from(&original.body.nonce);
     forwarded.signature = intermediary
-        .sign(&signing_bytes(&forwarded.body))
+        .sign(&signing_bytes(&forwarded.body, Purpose::ComputeV1))
         .to_bytes();
     let verified = Record::decode(&forwarded.encode(), Kind::Challenge, 101).unwrap();
     let request = Record::request(&client, &verified, b"submit".to_vec(), 101).unwrap();

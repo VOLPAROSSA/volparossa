@@ -1,0 +1,95 @@
+{
+  "retrieved": "2026-10-30",
+  "files": {
+    "firefox.png": {
+      "url": "https://www.firefox.com/media/img/favicons/firefox/browser/favicon-196x196.59e3822720be.png",
+      "sha256": "1d58e7af9c848ae3ae30c795a16732d6ebc72d216a8e63078cf4efde4beb3805",
+      "bytes": 8050,
+      "modified": false
+    },
+    "thunderbird.png": {
+      "url": "https://www.thunderbird.net/media/img/thunderbird/favicon-196.png",
+      "sha256": "8629f1128a5011b42edd09b00aba627c0dbd505fe11c333e350b6c53a7010942",
+      "bytes": 28027,
+      "modified": false
+    },
+    "signal.svg": {
+      "url": "https://raw.githubusercontent.com/signalapp/Signal-Desktop/5dad34ad5ea1a5b6229412e5c8ac0a696ff7532d/images/signal-logo.svg",
+      "sha256": "fa35613b9df137966fa1873ad2acc41655b2cbdf11003bd87913abb02060940e",
+      "bytes": 2061,
+      "modified": false
+    },
+    "organic-maps.png": {
+      "url": "https://raw.githubusercontent.com/organicmaps/organicmaps/b20d1417eef1e3c63a447ac8658db4307a066024/android/libs/branding/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+      "sha256": "fcd77150375551a6431e5236b7c40367232603eba007b15e84217d09ef66fc3e",
+      "bytes": 8007,
+      "modified": false
+    },
+    "silex.svg": {
+      "url": "https://raw.githubusercontent.com/silexlabs/Silex/672efed69dda04c0a1e968859239e042f00d9538/logos/logo_by_ceubri/picto-silex.svg",
+      "sha256": "d7bd4cafa7ba9087f4bde4694d1f526c03d1b61b245a29283c703381785296a9",
+      "bytes": 2849,
+      "modified": false
+    },
+    "drizzli.svg": {
+      "url": "https://raw.githubusercontent.com/open-meteo/drizz.li/d2a6839e2b3f2e561b849d83014fc5959bed39cc/static/favicon.svg",
+      "sha256": "b00a3171cb1a704c4920003f42f74fc193aab5fa9c81ea039cb6865181a4f91b",
+      "bytes": 1793,
+      "modified": false
+    },
+    "overmorrow.png": {
+      "url": "https://raw.githubusercontent.com/bmaroti9/Overmorrow/97995e2e00e454389e00e35f1e65654afe3e8bed/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+      "sha256": "42f3c46cfa9b18ce6a983f9aab3332ffe50ed86da5135f00848c351da5ea3c45",
+      "bytes": 6596,
+      "modified": false
+    },
+    "SIGNAL-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/signalapp/Signal-Desktop/5dad34ad5ea1a5b6229412e5c8ac0a696ff7532d/LICENSE",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "bytes": 34523,
+      "modified": false
+    },
+    "ORGANIC-MAPS-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/organicmaps/organicmaps/b20d1417eef1e3c63a447ac8658db4307a066024/LICENSES/Apache-2.0.txt",
+      "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+      "bytes": 10280,
+      "modified": false
+    },
+    "ORGANIC-MAPS-NOTICE.txt": {
+      "url": "https://raw.githubusercontent.com/organicmaps/organicmaps/b20d1417eef1e3c63a447ac8658db4307a066024/NOTICE",
+      "sha256": "5a6de5958934e42968c20ff6d98fada69079b66b60de67d551c68aff1bbf8014",
+      "bytes": 1608,
+      "modified": false
+    },
+    "SILEX-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/silexlabs/Silex/672efed69dda04c0a1e968859239e042f00d9538/LICENSE",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+      "bytes": 34523,
+      "modified": false
+    },
+    "DRIZZLI-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/open-meteo/drizz.li/d2a6839e2b3f2e561b849d83014fc5959bed39cc/LICENSE",
+      "sha256": "20b067f86de375aae6db0f283ab2e65de24d537733b89bd58432c101259d84cf",
+      "bytes": 34522,
+      "modified": false
+    },
+    "OVERMORROW-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/bmaroti9/Overmorrow/97995e2e00e454389e00e35f1e65654afe3e8bed/LICENSE",
+      "sha256": "3743f7a4ab5132f7dbeb88e68097657ab8374e74b46b6402efbe80ccfb1b6488",
+      "bytes": 35128,
+      "modified": false
+    },
+    "opencloud.svg": {
+      "url": "https://raw.githubusercontent.com/opencloud-eu/docs/63b6a88d6570189212e91c5733940ff54fbade82/static/img/oc-favicon.svg",
+      "sha256": "77b8afc0644b41105470eddd7259a63e9349477f23fda8882de567fc91309ea5",
+      "bytes": 1015,
+      "modified": false
+    },
+    "OPENCLOUD-LICENSE.txt": {
+      "url": "https://raw.githubusercontent.com/opencloud-eu/docs/63b6a88d6570189212e91c5733940ff54fbade82/LICENSE",
+      "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "bytes": 34523,
+      "modified": false
+    }
+  }
+}

@@ -20,31 +20,27 @@ proof of a production transport datapath.
 
 ## Process API and containment
 
-The version-6, 1 MiB bounded Protocol Buffers API first preflights an exact client or exit process
-role and a fresh instance per process start. Later operations target that instance and are
-correlated by nonce plus an exact canonical-request digest. They are limited to starting/stopping a
-client or exit context, adopting one request-bound UDP descriptor for a fixed path or exit listener,
-adding/removing a fixed overlay path, sending/polling an already-authorized inner IP datagram, and
-retrieving bounded status. There is no free-form interface name, pathname, command, configuration
-text, or arbitrary destination. The current same-UID socket provides channel correlation, not
-binary attestation or authentication against a compromised agent; separate client/exit service
-identities and role sockets remain required.
+The active process API is version 7, canonical protobuf bounded to 1 MiB. It
+preflights an exact immutable Client or Exit role and fresh process instance, then
+correlates each typed request and any adopted descriptor by nonce, instance and
+canonical-request digest. Older executables fail preflight without downgrade.
 
-The exit SPKI/certificate hashes (SHA-256 over the leaf's DER `SubjectPublicKeyInfo` and complete
-leaf-certificate DER, respectively), TLS name, MASQUE context, route context, signed reservation and
-finalize IDs, bearer commitment, both native instances, path/reservation proof, destination policy,
-and minimum-path count are fixed before native activation. Rust validates response identity,
-request correlation, and the exact tunnel-assignment policy. The native client retains a valid
-assignment immutably, publishes it only after `ESTABLISHED`, and independently checks outbound
-source and reverse destination ownership. A callerless native foundation verifies bounded-chain
-leaf/key, a non-wildcard DNS hostname under case-insensitive X.509 DNS semantics, trusted interval,
-canonical complete-leaf DER and DER-SPKI consistency, but is not wired into the runtime and does
-not validate chain trust. No production caller or disposable
-datapath proof exists yet, and helper provenance, server-side pool configuration, assigned-address
-and namespace ownership, independent signed-bundle replay verification plus affine handoff,
-millisecond conversion, a fixed Rust/C digest vector, parser fuzzing, trust/usage enforcement, and
-byte-counter evidence remain fail-closed requirements. Native's process-local pair ledger and
-BOOTTIME deadline do not replace that missing production authority.
+The [protocol reference](../architecture/PROTOCOL.md#agent-to-native-mpquic-api)
+specifies allowed operations, field tags and descriptor domains; the
+[native contract](../../native/volparossa-mpquic/README.md) specifies adoption,
+TLS identity, replay, deadline, tunnel-assignment and backend behavior. Start fixes
+SPKI/certificate digests, TLS name, MASQUE/route context, signed reservation/finalize
+scope, bearer commitment, both native instances, path proofs, destination policy
+and minimum-path count. Exact helper/namespace provenance and authority must precede
+adoption; generic wire values or a same-UID socket are not independent attestation.
+There is no free-form interface, path, command, configuration or mutable destination.
+
+The integrated baseline has real Client and Exit transport execution, not a
+client-only dormant-exit facade. Its source-bound A01–A15 result is indexed in
+[implementation status](../IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint).
+This does not prove a release build, another composition, unique inner-byte accounting,
+or every newer path-growth requirement. Original API6 limitations remain in the
+[development archive](../archive/network-architecture-notes-20261026.txt).
 
 ## Scheduling
 
@@ -86,5 +82,5 @@ upstream reference, and rebase procedure.
 Acceptance checks A06–A07 require a real browser/HTTP3 transfer whose native and independent packet
 counters prove at least two relay paths carried unique bytes. Removing one relay must preserve the
 inner QUIC flow where the protocol permits, without a direct route or single-path downgrade. CPU,
-memory, bytes-in-flight, loss, failover time, and net-versus-tunnel bytes must be reported. Until that
-evidence exists, MPQUIC is incomplete.
+memory, bytes-in-flight, loss, failover time, and net-versus-tunnel bytes must be reported. Each implementation claim must bind that
+evidence to its exact source; an older passing source does not qualify another build.

@@ -1,0 +1,89 @@
+{
+  "evidence": {
+    "artifacts": {
+      "decoder": {
+        "id": 11731895956,
+        "sha256": "e9a8a6b3530ae5fadf19d4f9bf0271013f8d1fdcd4ac3745723644b5d9372197"
+      },
+      "provenance": {
+        "id": 11732430773,
+        "sha256": "f858cf8819b01a5f6d0cfdca5d4399854ed55f353e865cd21411f800694d0b0b"
+      }
+    },
+    "receipts": {
+      "hosted-decoder-ci/decode-ccsds-first.log": "769c46ff19c8985759a280c4abbc669a6e79b5018800239ead554e55d53585f7",
+      "hosted-decoder-ci/decode-ccsds-last.log": "fc2fac05c4976dff2e9b135666bded45595bd4568cccb4fd2737d3f9679f58d2",
+      "hosted-decoder-ci/hosted-build-receipt.json": "ad40c6c7228984356de6e65480a850ccbcc48a690bfa8af370f860b354ad9d64",
+      "hosted-decoder-ci/test-libaec.log": "cfa636457d3b7e8a480b7c757e80a88755e5542b72ee51dd29a47399421c1938",
+      "hosted-decoder-ci/version-eccodes.log": "9a44b8f4c22b2b88686807288404b8b042bcfe6c63c294002b5df9b7e75a1e03",
+      "hosted-sandbox-ci/audit.json": "06ffeedca3a5d24832688427daa2039ae48cc7fec084609b81a3a4446d06d1cf",
+      "hosted-sandbox-ci/baseline.json": "6fe5bd3806817f2c014a57fc47764cd13e9836faffa4e121f3f0d3c6f523a084",
+      "hosted-sandbox-ci/cleanup.json": "68ca7279d5ca1a7266eadbe5dcc72d10401d9f5d2a1e4dd91b6c7491544d75da",
+      "hosted-sandbox-ci/preflight.json": "d6ce6bab4b0c3e38340e1ee4f09d7e07c6f029e4aacdd6dd712350b27190e929",
+      "hosted-sandbox-ci/result.json": "09f2f1120b260d851a1098da5c2c4770f0cc4664fa1e40af2edb6615ac674831",
+      "hosted-toolchain-ci/toolchain.json": "7a90b46ca314137354c0cae21c5b92860412fd4ea94215322914ccf1f77a3d4c"
+    }
+  },
+  "files": {
+    "ecbuild-source/COPYING": {
+      "bytes": 11392,
+      "sha256": "e66e138859d69f0a9f85ff83caa3a7dd4be46871036b3ddb483e97fc92c19120"
+    },
+    "ecbuild-source/LICENSE": {
+      "bytes": 10751,
+      "sha256": "b8cd06462fcd1691d120610d7c2a868796809f520c9977b10eace0fc91a9dbf4"
+    },
+    "ecbuild-source/NOTICE": {
+      "bytes": 744,
+      "sha256": "e7338a08ea2e75ad7936781fc7fda0cbc18758370bfedabdb6e9a2965df319f5"
+    },
+    "eccodes-build/bin/codes_info": {
+      "bytes": 31159792,
+      "sha256": "04aab8b1726d003b584b581dd513f970ee4cad2cf4db4c8e19a6ba36dfe89126"
+    },
+    "eccodes-build/bin/grib_filter": {
+      "bytes": 31337144,
+      "sha256": "98512f452643c3ffd6edef7841776e5143b024be134c7f23699bf506cbd0ec19"
+    },
+    "eccodes-build/bin/grib_ls": {
+      "bytes": 31383992,
+      "sha256": "d99425a1b44fe11b9ff77918310bc1b1a2114957558481bd705851e314a59930"
+    },
+    "eccodes-source/COPYING": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/LICENSE": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "eccodes-source/NOTICE": {
+      "bytes": 771,
+      "sha256": "8a73c2ffa4c7b56513d27830fbb22eb30bb73df80612c1395b416570f1637393"
+    },
+    "eccodes-source/third_party/expected/COPYING": {
+      "bytes": 7048,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    "hosted-build-receipt.json": {
+      "bytes": 26940,
+      "sha256": "ad40c6c7228984356de6e65480a850ccbcc48a690bfa8af370f860b354ad9d64"
+    },
+    "libaec-source/LICENSE.txt": {
+      "bytes": 1346,
+      "sha256": "66924e663d6e156dc45fe5aba993f5dcb131a8a5400b5580d956877c2c77c717"
+    },
+    "probe.grib2": {
+      "bytes": 828,
+      "sha256": "551114e2f896b62e3f6901330876040015ed2b7ae483f5798ddb18a8ae233eec"
+    }
+  },
+  "hosted_run": {
+    "attempt": 1,
+    "id": 38214736539
+  },
+  "kind": "volparossa-weather-decoder-abi-admission",
+  "schema": 1,
+  "scope": "disposable-debian13-abi-only",
+  "weather_commit": "7d61077aa415de8f46f79384a1dd08f403c4898c"
+}

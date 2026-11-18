@@ -64,8 +64,8 @@ use crate::{
     },
     internal_protocol::{
         AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
-        AcquireClientIngressSocket as InternalAcquireClientIngressSocket,
-        AcquireTransportSocket as InternalAcquireTransportSocket,
+        AcquireClientIngressSocket as InternalAcquireClientIngressSocket, AcquireFailureClass,
+        AcquireFailureOperation, AcquireTransportSocket as InternalAcquireTransportSocket,
         ActivateClientIngress as InternalActivateClientIngress, ActivateLeases,
         AddMptcpEndpoint as InternalAddMptcpEndpoint,
         DestroyClientIngress as InternalDestroyClientIngress, DestroyContext,
@@ -1299,13 +1299,18 @@ impl FunctionalAlphaLeaseBackend {
             .execute_until(key.context_id, generation, request, operation_deadline)
             .await;
         let descriptor = match execution {
-            Ok(execution) => match classify_acquire_transport_execution(execution, &internal) {
-                AcquireTransportExecution::Ready(descriptor) => descriptor,
-                AcquireTransportExecution::Definite(error) => return Err(error),
-                AcquireTransportExecution::RequiresCleanup(error) => {
-                    return Err(self.cleanup_after_failure(key, deadline, error).await);
+            Ok(execution) => {
+                // The coordinator has validated credentials, the complete canonical response,
+                // request digest and descriptor-free failure binding before this observation.
+                log_acquire_failure(&execution);
+                match classify_acquire_transport_execution(execution, &internal) {
+                    AcquireTransportExecution::Ready(descriptor) => descriptor,
+                    AcquireTransportExecution::Definite(error) => return Err(error),
+                    AcquireTransportExecution::RequiresCleanup(error) => {
+                        return Err(self.cleanup_after_failure(key, deadline, error).await);
+                    }
                 }
-            },
+            }
             Err(WorkerV3Error::Capacity) => return Err(BackendError::Capacity),
             Err(_) => {
                 return Err(self
@@ -2705,18 +2710,18 @@ impl FunctionalAlphaLeaseBackend {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.as_mut().and_then(|entry| entry.parent_policy.take())
         };
-        if let Some(parent_policy) = parent_policy {
-            if super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err() {
-                let mut state = self
-                    .ingress_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(entry) = state.as_mut() {
-                    entry.parent_policy = Some(parent_policy);
-                    entry.phase = OpenIngressPhase::Quarantined;
-                }
-                return false;
+        if let Some(parent_policy) = parent_policy
+            && super::client_ingress_policy::remove_parent(&parent_policy, deadline).is_err()
+        {
+            let mut state = self
+                .ingress_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = state.as_mut() {
+                entry.parent_policy = Some(parent_policy);
+                entry.phase = OpenIngressPhase::Quarantined;
             }
+            return false;
         }
         let parent_routing = {
             let mut state = self
@@ -3106,13 +3111,12 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .map(|entry| (entry.client_runtime_id, entry.backend_generation));
-                    if let Some((client_runtime_id, backend_generation)) = ingress {
-                        if !self
+                    if let Some((client_runtime_id, backend_generation)) = ingress
+                        && !self
                             .cleanup_ingress_exact(client_runtime_id, backend_generation, deadline)
                             .await
-                        {
-                            return request.complete(Err(BackendError::CleanupIncomplete));
-                        }
+                    {
+                        return request.complete(Err(BackendError::CleanupIncomplete));
                     }
                     let keys = lock_state(&self.state).keys().copied().collect::<Vec<_>>();
                     for key in keys {
@@ -3881,6 +3885,23 @@ enum AcquireTransportExecution {
     RequiresCleanup(BackendError),
 }
 
+fn log_acquire_failure(execution: &crate::worker_transport::CredentialedWorkerExecution) {
+    if execution.response.result != InternalWorkerResult::Kernel as i32
+        || execution.response.outcome.is_some()
+        || execution.descriptor.is_some()
+    {
+        return;
+    }
+    if let Some(diagnostic) = execution.response.acquire_failure {
+        tracing::warn!(
+            diagnostic_code = "WORKER_TRANSPORT_ACQUIRE_FAILED",
+            operation = diagnostic.operation,
+            class = diagnostic.class,
+            errno = diagnostic.errno,
+        );
+    }
+}
+
 fn classify_acquire_transport_execution(
     mut execution: crate::worker_transport::CredentialedWorkerExecution,
     request: &InternalAcquireTransportSocket,
@@ -3912,7 +3933,25 @@ fn classify_acquire_transport_execution(
             AcquireTransportExecution::Definite(BackendError::Invalid)
         }
         Some(InternalWorkerResult::Kernel) => {
-            AcquireTransportExecution::Definite(BackendError::Kernel)
+            // The coordinator has authenticated this exact request-bound, descriptor-free
+            // failure. Preserve only the precise existing connect-poll timeout, never infer
+            // it from a log, missing errno, a generic Kernel result or another socket kind.
+            let poll_timed_out = request.role == InternalEndpointRole::Client as i32
+                && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+                && execution
+                    .response
+                    .acquire_failure
+                    .is_some_and(|diagnostic| {
+                        diagnostic.validate().is_ok()
+                            && diagnostic.operation == AcquireFailureOperation::Poll as i32
+                            && diagnostic.class == AcquireFailureClass::TimedOut as i32
+                            && diagnostic.errno.is_none()
+                    });
+            AcquireTransportExecution::Definite(if poll_timed_out {
+                BackendError::MptcpConnectPollTimedOut
+            } else {
+                BackendError::Kernel
+            })
         }
         Some(
             InternalWorkerResult::Conflict
@@ -5991,16 +6030,323 @@ pub(super) mod tests {
 
     use super::*;
     use crate::{
-        internal_protocol::ContextDestroyed,
+        internal_protocol::{
+            AcquireFailureDiagnostic, ContextDestroyed,
+            InternalWorkerResponse as DiagnosticResponse,
+        },
         worker_transport::{
-            ExpectedUnixCredentials, private_credential_worker_channel,
-            receive_credential_worker_request, send_credential_worker_response,
+            CredentialedWorkerExecution as DiagnosticExecution, ExpectedUnixCredentials,
+            private_credential_worker_channel, receive_credential_worker_request,
+            send_credential_worker_response,
         },
         worker_v3::{
             BootstrapChallenge, DurableWorkerPrepareOutcome, DurableWorkerPrepareTerminal,
             SpawnedWorker, StablePhase, WorkerProcess, correlated_response,
         },
     };
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum AcquireLogValue {
+        Integer(i64),
+        Text(String),
+        Unexpected,
+    }
+
+    type AcquireLogEvent = BTreeMap<String, AcquireLogValue>;
+
+    #[derive(Default)]
+    struct AcquireLogFields(AcquireLogEvent);
+
+    impl tracing::field::Visit for AcquireLogFields {
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0
+                .insert(field.name().to_owned(), AcquireLogValue::Integer(value));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(
+                field.name().to_owned(),
+                AcquireLogValue::Text(value.to_owned()),
+            );
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_owned(), AcquireLogValue::Unexpected);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AcquireLogCapture(Arc<Mutex<Vec<AcquireLogEvent>>>);
+
+    impl tracing::Subscriber for AcquireLogCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = AcquireLogFields::default();
+            event.record(&mut fields);
+            self.0.lock().expect("test event capture").push(fields.0);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn acquire_log_execution(errno: Option<i32>) -> DiagnosticExecution {
+        DiagnosticExecution {
+            response: DiagnosticResponse {
+                protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
+                magic: INTERNAL_WORKER_MAGIC.to_vec(),
+                request_id: vec![0xa1; 16],
+                request_digest: vec![0xb2; 32],
+                result: InternalWorkerResult::Kernel as i32,
+                activation_failure: None,
+                acquire_failure: Some(AcquireFailureDiagnostic {
+                    operation: AcquireFailureOperation::Bind as i32,
+                    class: AcquireFailureClass::Io as i32,
+                    errno,
+                }),
+                outcome: None,
+            },
+            descriptor: None,
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_tracing_is_closed_typed_and_unknown_errno_is_absent() {
+        // This checks actual tracing fields, not a substitute JSON formatter. The helper-entry
+        // owns the existing JSON formatter; the fixture parser separately tests its closed JSON.
+        for errno in [None, Some(libc::EADDRINUSE)] {
+            let capture = AcquireLogCapture::default();
+            tracing::subscriber::with_default(capture.clone(), || {
+                log_acquire_failure(&acquire_log_execution(errno));
+            });
+            let mut expected = BTreeMap::from([
+                (
+                    "diagnostic_code".to_owned(),
+                    AcquireLogValue::Text("WORKER_TRANSPORT_ACQUIRE_FAILED".to_owned()),
+                ),
+                ("operation".to_owned(), AcquireLogValue::Integer(3)),
+                ("class".to_owned(), AcquireLogValue::Integer(1)),
+            ]);
+            if let Some(errno) = errno {
+                expected.insert(
+                    "errno".to_owned(),
+                    AcquireLogValue::Integer(i64::from(errno)),
+                );
+            }
+            assert_eq!(*capture.0.lock().expect("captured fields"), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_tracing_skips_old_responses_and_nonfailure_shapes() {
+        let capture = AcquireLogCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            let mut execution = acquire_log_execution(None);
+            execution.response.acquire_failure = None;
+            log_acquire_failure(&execution);
+            for result in [
+                InternalWorkerResult::Invalid,
+                InternalWorkerResult::CleanupIncomplete,
+            ] {
+                let mut execution = acquire_log_execution(None);
+                execution.response.result = result as i32;
+                log_acquire_failure(&execution);
+            }
+            let mut execution = acquire_log_execution(None);
+            execution.response.outcome = Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            ));
+            log_acquire_failure(&execution);
+            let (descriptor, _peer) = std::os::unix::net::UnixStream::pair().expect("test FD");
+            let mut execution = acquire_log_execution(None);
+            execution.descriptor = Some(descriptor.into());
+            log_acquire_failure(&execution);
+        });
+        assert!(capture.0.lock().expect("captured fields").is_empty());
+    }
+
+    #[test]
+    fn acquire_diagnostic_does_not_change_definite_kernel_classification() {
+        let request = InternalAcquireTransportSocket {
+            route_context_id: vec![1; 16],
+            path_id: 1,
+            role: InternalEndpointRole::Client as i32,
+            descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+            expected_local: None,
+            expected_remote: None,
+        };
+        for present in [false, true] {
+            let mut execution = acquire_log_execution(Some(libc::EADDRINUSE));
+            if !present {
+                execution.response.acquire_failure = None;
+            }
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+    }
+
+    fn mptcp_connect_poll_timeout_execution() -> DiagnosticExecution {
+        let mut execution = acquire_log_execution(None);
+        execution.response.acquire_failure = Some(AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::Poll as i32,
+            class: AcquireFailureClass::TimedOut as i32,
+            errno: None,
+        });
+        execution
+    }
+
+    fn mptcp_connected_acquire_request() -> InternalAcquireTransportSocket {
+        InternalAcquireTransportSocket {
+            route_context_id: vec![1; 16],
+            path_id: 1,
+            role: InternalEndpointRole::Client as i32,
+            descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+            expected_local: None,
+            expected_remote: None,
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_preserves_only_exact_mptcp_connect_poll_timeout() {
+        let request = mptcp_connected_acquire_request();
+        assert!(matches!(
+            classify_acquire_transport_execution(mptcp_connect_poll_timeout_execution(), &request),
+            AcquireTransportExecution::Definite(BackendError::MptcpConnectPollTimedOut)
+        ));
+        // Every other declared operation/class and unknown values retain Kernel.
+        for operation in (0..=19).filter(|value| *value != AcquireFailureOperation::Poll as i32) {
+            let mut execution = mptcp_connect_poll_timeout_execution();
+            execution
+                .response
+                .acquire_failure
+                .as_mut()
+                .unwrap()
+                .operation = operation;
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+        for class in (0..=4).filter(|value| *value != AcquireFailureClass::TimedOut as i32) {
+            let mut execution = mptcp_connect_poll_timeout_execution();
+            execution.response.acquire_failure.as_mut().unwrap().class = class;
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+        for errno in [-1, 0, libc::ETIMEDOUT, 4095, 4096] {
+            let mut execution = mptcp_connect_poll_timeout_execution();
+            execution.response.acquire_failure.as_mut().unwrap().errno = Some(errno);
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+        let mut absent = mptcp_connect_poll_timeout_execution();
+        absent.response.acquire_failure = None;
+        assert!(matches!(
+            classify_acquire_transport_execution(absent, &request),
+            AcquireTransportExecution::Definite(BackendError::Kernel)
+        ));
+    }
+
+    #[test]
+    fn acquire_diagnostic_timeout_never_promotes_other_socket_or_role() {
+        for kind in [
+            InternalTransportSocketKind::MptcpListener,
+            InternalTransportSocketKind::QuicUdpUnconnected,
+            InternalTransportSocketKind::NativeProbeUdpConnected,
+            InternalTransportSocketKind::Unspecified,
+        ] {
+            let mut request = mptcp_connected_acquire_request();
+            request.descriptor_kind = kind as i32;
+            assert!(matches!(
+                classify_acquire_transport_execution(
+                    mptcp_connect_poll_timeout_execution(),
+                    &request,
+                ),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+        for role in [
+            InternalEndpointRole::Exit,
+            InternalEndpointRole::RelayClient,
+            InternalEndpointRole::RelayExit,
+            InternalEndpointRole::Unspecified,
+        ] {
+            let mut request = mptcp_connected_acquire_request();
+            request.role = role as i32;
+            assert!(matches!(
+                classify_acquire_transport_execution(
+                    mptcp_connect_poll_timeout_execution(),
+                    &request,
+                ),
+                AcquireTransportExecution::Definite(BackendError::Kernel)
+            ));
+        }
+    }
+
+    #[test]
+    fn acquire_diagnostic_timeout_keeps_invalid_response_cleanup_and_closes_descriptor() {
+        let request = mptcp_connected_acquire_request();
+        let mut execution = mptcp_connect_poll_timeout_execution();
+        execution.response.outcome = Some(internal_worker_response::Outcome::Destroyed(
+            ContextDestroyed {},
+        ));
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, &request),
+            AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete)
+        ));
+        let (descriptor, mut peer) = std::os::unix::net::UnixStream::pair().expect("test FD");
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        let mut execution = mptcp_connect_poll_timeout_execution();
+        execution.descriptor = Some(descriptor.into());
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, &request),
+            AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete)
+        ));
+        let mut byte = [0];
+        assert_eq!(
+            std::io::Read::read(&mut peer, &mut byte).expect("closed FD"),
+            0
+        );
+        let mut execution = mptcp_connect_poll_timeout_execution();
+        execution.response.result = InternalWorkerResult::Invalid as i32;
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, &request),
+            AcquireTransportExecution::Definite(BackendError::Invalid)
+        ));
+        for result in [
+            InternalWorkerResult::CleanupIncomplete,
+            InternalWorkerResult::Conflict,
+            InternalWorkerResult::NotFound,
+            InternalWorkerResult::Unspecified,
+            InternalWorkerResult::Ok,
+        ] {
+            let mut execution = mptcp_connect_poll_timeout_execution();
+            execution.response.result = result as i32;
+            assert!(matches!(
+                classify_acquire_transport_execution(execution, &request),
+                AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete)
+            ));
+        }
+    }
 
     fn fixture_underlays(
         candidate: UnderlayCandidate,
@@ -8254,6 +8600,7 @@ pub(super) mod tests {
                 result: result as i32,
                 request_digest: vec![0xd2; 32],
                 activation_failure: None,
+                acquire_failure: None,
                 outcome,
             },
             descriptor: None,
@@ -8474,7 +8821,7 @@ pub(super) mod tests {
         // Any registration reply lost after a possible mutation is promoted to Ambiguous. A
         // non-Ambiguous persistence error is returned only after the complete journal boundary is
         // confirmed unchanged, so the registration can be dropped without orphaning its Intent.
-        assert!(actor.contains("operation.complete_unstarted_deadline();"));
+        assert!(actor.contains("(*operation).complete_unstarted_deadline();"));
         assert!(actor.contains("fence_terminal(&self.lifecycle, Lifecycle::Ambiguous)"));
         assert!(actor.contains("self.journal.confirm_retry_safe_after_definite_failure()"));
         assert!(journal.contains("fn confirm_retry_safe_after_definite_failure(&mut self)"));
@@ -10733,6 +11080,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![0x92; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11384,6 +11732,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::Activated(
                         crate::internal_protocol::ActivatedLeases {
                             leases: vec![crate::internal_protocol::ActivatedLease {
@@ -11573,6 +11922,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11655,6 +12005,7 @@ pub(super) mod tests {
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
                     activation_failure: None,
+                    acquire_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases { leases },
                     )),

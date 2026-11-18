@@ -4,6 +4,301 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit llama.cpp CPU inference candidate
+
+The optional `qwen_tagged_tool_json_v1` profile also uses the pinned internal
+`src/llama-grammar.h` API for grammar initialization, cloning, string acceptance,
+candidate filtering and freeing. VOLPAROSSA's `output-constraint.h` and `.cpp`
+wrap this unchanged upstream implementation; they are original GPL-3.0-only
+code, not an upstream patch. Build manifest v3 binds these wrapper files along
+with the existing adapter and loader patch. Synthetic-piece tests link the exact
+grammar engine without loading a model. API compatibility and sanitizer behavior
+require a fresh source build; previous backend receipts do not validate this
+extension.
+
+The opt-in CPU backend uses [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
+at exact commit `7fe450e19305b828c199d602c23a8337aaa1f03b` (resolved release tag
+`v0.5.0`; MIT). The tag is unsigned. No prebuilt upstream executable, server,
+GPU backend or implicit artifact download is used. The original checkout remains
+unchanged; the build applies the explicitly recorded loader and CPU patches below
+to fresh staged copies. The GPL-3.0-only adapter exposes a fixed owned C ABI and
+source-build flags.
+The builder preserves tracked upstream licenses/notices, including ggml and
+the Mozilla tinyBLAS notice, unchanged in the generated artifact.
+Static GCC runtime archives retain measured hashes and the original Debian GCC
+copyright/runtime-exception notice; compiler versions are recorded, not silently
+treated as upstream llama.cpp source or reproducible-build proof.
+
+`workers/volparossa-ml/native-cpu/bounded-tensor-validation.patch` changes both
+asynchronous tensor-validation launches to deferred, single-thread execution and
+polls the existing cancellation callback between validation results. It preserves
+every tensor check, error aggregation and final completion callback. The MIT
+upstream code and notices retain their original license; the surrounding owned
+adapter and test harness remain GPL-3.0-only. Build manifest v2 records the clean
+tree `fd570ef54b10ec5fecb739e7e04c8ce44a6f415a` and these SHA-256 digests:
+
+- Original `src/llama-model-loader.cpp`: `efdb5f273bd1ab77301f2cadea1a5a804bafb28040aca033e45605a97a450242`.
+- Patch: `388fff7d5d9ca812abfeb27fddd1629144b7de6284e4bf685fbc8c147891e8c1`.
+- Effective staged loader: `fcd26ea4ae21ea04954b275287c41a35e383015b736bbbe2e68f2ab5f6d095f9`.
+
+The builder verifies that the compilation database selects exactly the staged
+loader. It rejects changed source/patch bytes and retains the clean upstream
+checkout and original notices. This is a local patch, not an upstream release.
+
+`workers/volparossa-ml/native-cpu/q1-aligned-load.patch` replaces one AVX2
+pointer-cast load in `ggml_vec_dot_q1_0_q8_0` with a 16-byte `memcpy` into an
+aligned four-element `uint32_t` array. Arithmetic, quantization formats and the
+upstream all-type test remain unchanged. The original MIT license is preserved.
+Build-v4 provenance records this separate `cpu_source_overlay` and checks both
+the selected translation unit and its compiler command against the staged file:
+
+- Original `ggml/src/ggml-cpu/arch/x86/quants.c`: `3c489fdc77e3ab484a5f188bff9c60c0e9483c951ed65c1a562a04c249d5628e`.
+- Patch: `563a178667eeac17e7072c343d1d21a3f641d78c284acbeb2633db26e1c36369`.
+- Effective staged CPU source: `b9a63f032ad048a688357194fa535d852959ffee0942c93d4b8fb9544febf6d2`.
+
+Historical builds omit this provenance pair and do not establish the correction.
+The source-only normal and sanitizer builds must verify the new source before
+its acceptance; no existing failed sanitizer result is replaced or suppressed.
+
+The separate offline conversion candidate starts only from the existing pinned
+Apache-2.0 `Qwen/Qwen3-4B-Instruct-2507` revision
+`cdbee75f17c01a7cc42f958dc650907174af0554`. It compares every original BF16 tensor
+value, allowing only exact F32 promotion for norm/one-dimensional tensors; it
+does not quantize weights. Original shard identity and the measured GGUF digest
+are distinct. The original Qwen license accompanies converted artifacts.
+See [the native CPU contract](workers/volparossa-ml/native-cpu/README.md) for
+source/build/conversion provenance, instruction requirements and remaining proof.
+Source and inert tests are not claims of successful guest inference or coding.
+
+The explicit native conversion, not the baseline 38-wheel runtime, adds the
+official [SentencePiece 0.2.1 wheel](https://pypi.org/project/sentencepiece/0.2.1/)
+for CPython 3.13 / manylinux 2.27+ x86-64: 1,387,882 bytes, SHA-256
+`c7f0fd2f2693309e6628aeeb2e2faf6edd221134dfccac3308ca0de01f8dab47`.
+Exact origin, metadata hash and optional lock are retained in
+`workers/volparossa-ml/native-converter-pins.json`; it is a pinned published
+binary, not a claim of a locally reproduced source build. Its Apache-2.0 release
+source is [google/sentencepiece at 31646a467d2051eb904e0b45de3a73e91fe1c1e3](https://github.com/google/sentencepiece/tree/31646a467d2051eb904e0b45de3a73e91fe1c1e3)
+(`v0.2.1`). The wheel contains no license files. Original release LICENSE and
+the original bundled absl, darts_clone, esaxx and protobuf-lite licenses from
+that revision are therefore retained unchanged under
+`workers/volparossa-ml/native-cpu/sentencepiece*-LICENSE`, with exact source
+URLs, sizes and hashes in the optional pins. Converted artifacts include all
+five notices; no notice is replaced by this summary.
+
+## Public immutable guest boot prerequisite
+
+The disposable boot candidate reuses the exact Debian 13 cloud image in
+[`debian13-amd64-image-v1.json`](tests/helper/debian13-amd64-image-v1.json).
+Its reviewed SHA-512 comes from Debian's published checksums, not a detached
+release signature. The kernel package is `6.12.105-1`, with release
+`6.12.105+deb13-cloud-amd64`. Image packages retain their own original notices
+and distribution patches; they are not relicensed as VOLPAROSSA code.
+
+The image downloader also permits the exact same-path HTTPS redirect to
+`saimei.ftp.acc.umu.se` observed from the pinned Debian URL. Debian lists
+`ftp.acc.umu.se` among its [registered image mirrors](https://www.debian.org/CD/http-ftp/).
+This transport exception does not change the original image SHA-512, permit
+arbitrary mirrors or replace the required content verification.
+
+The [additional package pins](tests/integration/protected-resident-image-pins-v1.json)
+bind each official Debian download by exact version, size and SHA-256:
+
+- `cryptsetup-bin` and `libcryptsetup12`, both `2:2.7.5-2`, supply veritysetup
+  and its library. The [original cryptsetup copyright record](https://metadata.ftp-master.debian.org/changelogs/main/c/cryptsetup/cryptsetup_2.7.5-2_copyright)
+  includes GPL-2-or-later with an OpenSSL exception and LGPL-2.1-or-later
+  components; the complete per-file notices remain authoritative.
+- `busybox-static`, `1:1.37.0-6+b9`, supplies the fixed initrd shell and utilities.
+  Its [original Debian copyright record](https://metadata.ftp-master.debian.org/changelogs/main/b/busybox/busybox_1.37.0-6_copyright)
+  specifies GPL version 2 and retains the component copyrights.
+
+Only authenticated package contents are extracted, without maintainer-script
+execution or local patches to these binaries. The staged root retains their
+`/usr/share/doc` notices and Debian's common license texts. VOLPAROSSA supplies
+its own fixed bootstrap and test entrypoint rather than running the image's
+original cloud initialization. No guest image, initrd or executable is published
+as a workflow artifact; the retained output is bounded public test evidence.
+A distributable guest requires a separate complete notice/source-compliance and
+release review. Observed hosted build-tool hashes are not a reproducible or
+independently approved production toolchain.
+
+### Resident model build package addition
+
+The separate [resident model package lock](tests/integration/protected-resident-model-debian-lock-v1.json)
+records exact Debian package versions, official download origins, sizes, hashes
+and authenticated index provenance. Its reviewed build-only addition is
+`curl 8.14.1-2+deb13u7`, SHA-256
+`135636bd8b713c582d33e50ec4e36ea55cc3c5da3f12bbeb6b87d2bcbd3a0649`,
+from Debian's Trixie security archive. It matches the already selected libcurl;
+the existing package pins and runtime selection are unchanged.
+Upstream curl 8.14.1 uses the [curl permission notice](https://github.com/curl/curl/blob/curl-8_14_1/COPYING).
+The Debian package retains its distribution patches and complete per-file
+copyright notices; VOLPAROSSA adds no patch to this binary and does not replace
+those notices. This is an isolated build input, not a published client update.
+
+## Public SNP verifier fixture trial
+
+The disposable public-fixture workflow selects
+[`virtee/sev`](https://github.com/virtee/sev) version 8.0.0 at exact commit
+`a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5`, tree
+`636379a232b75ad3c0f2a079acc1788dc13a920f`. The upstream Apache-2.0
+[license](third_party/licenses/virtee-sev-8.0.0-Apache-2.0.txt) is retained
+unchanged. One explicit lockfile-only correction is applied as described below.
+This is a source-built CI probe,
+not a production dependency, prebuilt worker or task-release authority.
+
+The [exact pinset](tests/integration/protected-compute-verifier-pins.json)
+records bytes and SHA-256 for the original Cargo.toml, Cargo.lock, license,
+four-test target and public Milan certificate/report inputs. The original
+lockfile remains available unchanged in the verified upstream Git commit.
+The pinned commit updates the `rand` package to `0.8.8` but leaves
+`num-bigint-dig 0.8.6` referring to absent `rand 0.8.5`. The
+[fixture preparer](tests/integration/protected-compute-verifier.py) changes
+only that one reference to `rand 0.8.8`, without changing any package version,
+checksum or executable source. Both lockfiles are 66,223 bytes: original SHA-256
+`fe1511ef932c1a54d0cd70ac470b41de8357ab2efca9ed6b3a4ea22c3b7d3bd0`,
+effective SHA-256 `7b7dbf853cecf44a8d2a6b51283012b446db97600f4e19af36a1c642b8bfa7cb`.
+Schema-two pins and result receipts distinguish both identities; only this exact
+unstaged change is accepted after pristine-source verification. Rust 1.85.0,
+`--locked` and the `snp,crypto_nossl` feature selection
+are explicit; native compilation is confined to the disposable hosted runner.
+The compiler comes from the pinned-version Rust toolchain distribution, not a
+reproduced compiler source build. The upstream checkout and dependency sources
+retain their own notices there; neither binaries nor a vendored dependency tree
+are distributed by this change. See [trial scope and remaining requirements](docs/development/PROTECTED_COMPUTE_VERIFIER.md).
+
+## Core signature verification dependency
+
+The core [signature-facts module](crates/volparossa-content/src/provider/compute/attestation.rs)
+selects the same exact `sev` revision with default features disabled and only
+`snp,crypto_nossl`. It uses upstream Milan ARK/ASK bytes as cryptographic reference
+roots, not as independently authorized production trust. Its two unchanged
+public regression inputs are copied from `tests/certs_data/` into
+`crates/volparossa-content/tests/fixtures/snp/`: `report_milan.hex` (2,368 bytes,
+SHA-256 `3d956e9104969a038031a6b63dd6c4b60000619d37702065994f7da76f88ae7d`)
+and `vcek_milan.der` (1,360 bytes, SHA-256
+`3bbfb6ee259f75a95d13168cfdf2e034181bb93c7c016825731cbe8ea16c95e1`). They
+remain Apache-2.0 inputs under the unchanged upstream license linked above.
+`x509-cert` is constrained to 0.2.5 (Apache-2.0 OR MIT) from
+[RustCrypto formats](https://github.com/RustCrypto/formats/tree/x509-cert/v0.2.5/x509-cert)
+for certificate validity access; it is also the version in the pinned upstream
+lockfile. The workspace now adopts the exact dependency lock compiled and tested
+by [core trial 38432553365](https://github.com/VOLPAROSSA/volparossa/actions/runs/38432553365):
+143,756 bytes, SHA-256
+`f87bfe531b282c83665a066daec181564edf8d256a08a6b024e2d5810f5abbac`.
+All 531 original package identities, versions and checksums are retained. The
+29 additions belong to the verifier dependency closure; the seven additional
+feature edges at existing packages were checked against their upstream manifests.
+The 28 new registry archives match their lockfile checksums and retain compatible
+upstream licenses; the remaining addition is the exact pinned SEV Git source.
+The license collector accepts only that Git identity and unchanged Apache-2.0
+license bytes, SHA-256
+`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`.
+Current hosted checks use `cargo fetch --locked`, followed by locked/offline
+metadata, tests and Clippy. The standalone probe and its separate lock correction
+remain historical evidence, not substitutes for the core build.
+
+### RSA advisory scope
+
+`rsa 0.9.10` is affected by
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html), which
+concerns private-key leakage through timing. It is **not patched** here. The
+selected [SEV verification code](https://github.com/virtee/sev/blob/a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5/src/certs/snp/cert_nossl.rs)
+uses `RsaPublicKey` and PSS/SHA-384 verification only. Its RSA operation applies
+the public exponent to a public signature; no RSA private key, decryption,
+signing or key generation is used by this core call path.
+
+The dependency check admits this advisory as non-applicable only after checking
+the exact source, features, incoming dependency edges and reviewed verifier
+source. It then creates a temporary root-only audit configuration. The ordinary
+deny configuration has no global exemption, and the separate fuzz graph neither
+uses RSA/SEV nor receives this exception. A changed dependency or use requires
+fresh review; this finding is not permission to use RSA private-key operations.
+
+The module has no vendor-collateral downloader or task-release hook. VCEK
+extension-to-chip and reported-TCB binding is checked. Production trust, current
+vendor security policy and complete worker appraisal remain separate requirements. AMD's
+[VCEK and KDS specification 57230](https://docs.amd.com/v/u/en-US/57230), revision
+1.05, identifies the product CRL endpoint and certificate extensions. Those
+vendor inputs are distinct from local authorization of roots and workload code;
+neither is supplied by a peer assertion or a successful signature check.
+
+### Guest firmware quote request
+
+The guest-session candidate reuses the same exact Apache-2.0 `sev` dependency,
+features and committed lockfile. Its only additional upstream production call
+path is [guest firmware `open` and `get_report`](https://github.com/virtee/sev/blob/a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5/src/firmware/guest/mod.rs):
+open the fixed `/dev/sev-guest` device and return the original `SNP_GET_REPORT`
+bytes with explicit message-version/VMPL inputs. No extended-report allocation,
+certificate downloader, derived-key operation, RSA signing, RSA decryption or
+RSA key generation is added. The public-RSA guard separately pins the reviewed
+guest source; this does not broaden the advisory exception or the fuzz graph.
+
+The guest's own ephemeral key uses the existing `RecipientKeyPair` implementation,
+not this RSA dependency. Original upstream source and notices are unchanged;
+there is no new binary, dependency version or local upstream patch. Compilation
+or synthetic collection tests cannot establish that actual firmware ran, that
+the key is protected from the host, or that the guest is an authorized worker.
+
+### Supplied Milan revocation list
+
+The candidate session verifier also uses `rsa =0.9.10` directly for public-only
+PSS/SHA-384 verification of a supplied ARK revocation list. This is the same
+Apache-2.0 OR MIT package already pinned in the lockfile, with checksum
+`b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d`;
+no package version is changed. The exact-source and dependency-graph guard
+now covers this second public-verification path. The advisory remains unpatched
+and the restriction against private-key operations is unchanged.
+
+The public fixture `ark_milan_20260922.crl` was retrieved unchanged from
+[AMD's Milan CRL endpoint](https://kdsintf.amd.com/vcek/v1/Milan/crl) on
+2026-10-14 (Europe/Amsterdam). It contains 866 bytes and has SHA-256
+`dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525`.
+Its ARK-Milan signature authenticates CRL number 12, valid from
+2026-09-22 07:35:42 UTC until 2026-11-09 01:00:00 UTC, with no listed
+revocations. This is public issuer-signed validation data, not VOLPAROSSA
+source code or a production trust grant; the binary has no local patches.
+
+The closed profile follows AMD 57230 revision 1.05 and
+[RFC 5280 CRL processing](https://www.rfc-editor.org/rfc/rfc5280.html#section-6.3).
+It checks the fixed Milan certificate path and a complete ARK-issued list for
+that path's ASK. It does not prove individual VCEK revocation status, absence
+of newer collateral, an acceptable firmware version or private execution.
+The fixture's validity dates do not authorize future use outside that interval.
+
+## CometBFT ABCI transaction adapter inputs
+
+The TEST-only transaction adapter generates its wire bindings from the official
+CometBFT v0.40.0 schemas at commit
+`0880b4d378f347ab16e54ec677ff50d803f37d62` (Apache-2.0). The five schema files,
+original LICENSE and NOTICE are retained verbatim under `third_party/cometbft/`.
+Their Gogo options come from cosmos/gogoproto v1.7.2 at
+`cf5213e4dcbf1fea203185c0af00840e566790d9` (BSD-3-Clause), matching the pinned
+CometBFT go.mod. The Timestamp, Duration and Descriptor imports come from Protocol
+Buffers v21.12 at `f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c` (BSD-3-Clause).
+Both projects' original license texts are included unchanged.
+
+[The source manifest](third_party/cometbft/sources.json) records exact paths,
+revisions, Git blobs, byte counts and SHA-256 values; no upstream patches are
+applied. [The offline verifier](third_party/cometbft/verify.py) checks these inputs
+without fetching or executing a consensus engine. Generated bindings and schema
+integrity do not establish distributed consensus. A separate source-built
+validator fixture must retain its own Go toolchain/dependency provenance and
+notices before any runtime result is claimed.
+
+The separate, disposable transaction fixture pins the official Go 1.27.1 Linux
+amd64 compiler archive, 70,553,950 bytes, SHA-256
+`63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445`,
+as published in [Go's release metadata](https://go.dev/dl/?mode=json).
+This is an explicitly downloaded upstream compiler binary, not a reproduced
+compiler source build or a prebuilt CometBFT engine. Its source tag resolves to
+`862c888e612ac346c7c4d99c9392bdfd265f33b0`; the unchanged BSD-3-Clause
+[LICENSE](third_party/licenses/go1.27.1-BSD-3-Clause.txt) is retained separately.
+The complete compiler distribution and its notices must remain intact inside the
+guest. CometBFT itself is built there from the pinned source, with automatic Go
+toolchain switching disabled and module versions constrained by the original
+go.mod/go.sum. No Go installation on the development host is authorized by this
+fixture. Source staging and compiler integrity are not evidence of consensus.
+
 ## Explicit native editor integration trial
 
 The `agent-native-editor` guest trial uses VOLPAROSSA Code commit
@@ -105,6 +400,25 @@ The guest reuses the separately pinned Firefox ESR 140.16.0 runtime from
 `browser-network-pins.json`, preserving Debian's original copyright notice.
 Neither successful source compilation nor verified browser staging establishes
 that the UI has retrieved a file from protected peers; that requires the joined trial.
+
+## Explicit Image and Cloud maintenance trial
+
+The consumer continuation of `private-storage-maintenance` separately pins
+VOLPAROSSA Image `aade424c3e96d0934edbddf31d2434757aa08564` and VOLPAROSSA Cloud
+`9cb94fbb83e9f503ff5a66d43ed814f556d4a3af`. Each staged source file's length and
+SHA-256 are recorded in `tests/integration/storage-consumer-maintenance-pins.json`.
+Original GPL-3.0-only licenses and the Cloud vendor provenance are retained;
+the shared Image adapter, snapshot helper and license must match byte for byte.
+These are additional trial pins, not replacements for earlier consumer trials.
+
+The explicit guest-only provisioner reuses verified Node 24.19.0: the official
+Linux x64 archive is 31,633,904 bytes with SHA-256
+`14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647`.
+The unchanged runtime LICENSE contains its bundled third-party notices.
+Debian GnuPG and tar package versions and executable hashes are retained in the
+provision receipt. No npm install, SDK/browser build, application server or
+development-host installation is performed by this profile. Verified staging
+does not itself prove peer storage, repair or application restoration.
 
 ## Explicit development ML inputs
 
@@ -232,6 +546,25 @@ The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux reso
 tools as separate executables, not vendored copies. The sandbox argument vector is part of our
 source; [upstream Bubblewrap](https://github.com/containers/bubblewrap) explicitly makes its
 security policy the caller's responsibility. No development-host package installation occurs.
+
+For the optional public-fixture startup stage classifier, the inspected source is
+[Bubblewrap v0.12.0](https://github.com/containers/bubblewrap/tree/2a76602a8c71f36c1527cf9fc3417d9149822e0c),
+commit `2a76602a8c71f36c1527cf9fc3417d9149822e0c` (annotated tag object
+`014a04330642e5c870418beb621532cb896e0002`). The inspected `bubblewrap.c` is
+SPDX `LGPL-2.0-or-later`, SHA-256
+`3f17ee26057cae9d660801ca8d9ba84722f1bafdcd072d5151ee1c64eeeb15f4`.
+It byte-matches the orig source for Debian `0.12.0-1~deb13u1` in the existing model lock.
+[Debian's source declaration](https://security.debian.org/pool/main/b/bubblewrap/bubblewrap_0.12.0-1~deb13u1.dsc)
+records `bubblewrap_0.12.0.orig.tar.xz`, 126452 bytes, SHA-256
+`9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314`, and
+`bubblewrap_0.12.0-1~deb13u1.debian.tar.xz`, 13728 bytes, SHA-256
+`7b54f121aebf5d4b38360ea728274c26fa471582bc3e6658379b679ecd8b5a2f`.
+Both archives were checked against that declaration. Its sole patch changes the
+namespace-permission explanatory suffix; the classifier's stable prefix is unchanged.
+The source diagnostic emitters are `bubblewrap.c`, `utils.c` and `bind-mount.c`.
+Only closed source-family labels are projected: no upstream code is imported,
+no original license/notice is changed, and matching a prefix proves neither the
+actual failing branch nor its errno, timing or underlying cause.
 
 ## Native MPQUIC audit state
 
@@ -620,34 +953,42 @@ license/NOTICE files; it fails on an unapproved source or missing notice.
 
 ### Debian 13 compatible Rust security overrides
 
-Three crates.io packages are overridden with verified project-local source.
+Four crates.io packages are overridden with verified project-local source.
 The Hickory and time fixed releases require Rust 1.88, while the future
 single-backend libp2p-yamux release also raises its MSRV above Debian 13's
 Rust 1.85:
 
 | Component | Exact source and upstream revision | License | Local security patch |
 |---|---|---|---|
-| hickory-proto 0.25.2 | crates.io SHA-256 `f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502`; git `527c9f470a418cf6b92da902ea0aaa5749963d59` | Apache-2.0 OR MIT; original license files preserved | `third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch`, SHA-256 `bd1d5df1a13574d5c8b546e1a53dfde04d524353a646c8235786d7724215828a`; bounds compression candidates, rejects cross-zone NSEC3 proofs, and adds a non-default regression-only adapter |
+| hickory-proto 0.25.2 | crates.io SHA-256 `f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502`; git `527c9f470a418cf6b92da902ea0aaa5749963d59` | Apache-2.0 OR MIT; original license files preserved | `third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch`, SHA-256 `151a1d425a6fc3a056753f740e35ab9a67e769255f07d756f8e2c697576a9b77`; bounds initial decoder allocation and compression candidates, rejects cross-zone NSEC3 proofs, and adds a non-default regression-only adapter |
+| hickory-resolver 0.25.2 | crates.io SHA-256 `dc62a9a99b0bfb44d2ab95a7208ac952d31060efc16241c87eaf36406fecf87a`; git `527c9f470a418cf6b92da902ea0aaa5749963d59` | MIT OR Apache-2.0; original license files preserved | `third_party/rust/patches/hickory-resolver-0.25.2-dnssec.patch`, SHA-256 `2e070665e78337e620dfb3f8c15ff09a938ad3fa711e240798732de4c204f1b2`; rejects bogus answers before cache insertion and CNAME following; the archive's non-authoritative development lock is omitted from the vendor tree |
 | time 0.3.41 | crates.io SHA-256 `8a7619e19bc266e0f9c5e6686659d394bc57973859340060a69221e57dbc0c40`; git `cc35dcfcde917bb833c114e2b4c00292a374c4ba` | Apache-2.0 OR MIT; original license files preserved | `third_party/rust/patches/time-0.3.41-rustsec.patch`, SHA-256 `bc4ad8b199c3284c59b1aa259d5ec907d43f7cb898083a8d5ab99a71cc7a5c8a`; bounds RFC 2822 comment recursion |
 | libp2p-yamux 0.47.0 | crates.io SHA-256 `f15df094914eb4af272acf9adaa9e287baa269943f32ea348ba29cfb9bfc60d8`; git `9736aacf814eb7b9df0372c5f9adcffba8a4b212` | MIT; exact upstream repository license retained | `third_party/rust/patches/libp2p-yamux-0.47.0-single-backend.patch`, SHA-256 `1a845f6cfaa57c993b54f654dc8e9294a450de8c46be323618481a7cc750740d`; removes the retired 0.12 backend, pins fixed yamux 0.13.10, and preserves read-after-close policy |
 
 The complete sources, patch review notes, resulting tree hashes, test
 contract, and removal condition are in `third_party/rust/README.md`.
-`scripts/check-rust-dependencies.sh` reconstructs all three trees from the exact
+`scripts/check-rust-dependencies.sh` reconstructs all four trees from the exact
 archives, applies the locked patches, byte-compares the result, verifies
 unchanged licenses and the feature graph, runs CVSS 4.0-capable cargo-deny
 advisory/license/ban/source checks, and performs an independent no-fetch cargo-audit scan against a
 local RustSec checkout. It prints that checkout's exact commit.
 
 The GPL-3.0-only harness under `third_party/rust/backport-regressions` has a
-rustc-1.85-resolved lockfile (SHA-256
-`08e7bcd46d2e3f7411e8f4e855c70027f627be6061f63ab459c43f41a687c5cc`)
-and executes all five dependency-security regressions offline. Its Hickory feature calls the same
+Rust-1.85-targeted lockfile (SHA-256
+`965c606acf0c93d9a9d6b8415b3ae503185e8b3ec7eecf3d6251c9047cd14659`)
+and executes the dependency-security regressions offline. Its Hickory feature calls the same
 private NSEC3 validator through a doc-hidden adapter; that feature is absent
 from and forbidden in the production dependency graph. Its bounded Yamux raw
 frame test proves an oversized first-stream body fails closed without an
 unwind; its public-wrapper test preserves `set_max_num_streams` and
 `read_after_close(false)` semantics.
+
+The resolver-specific check rejects DNSSEC-bogus answers before cache insertion
+and alias following, backporting upstream commit
+`92f93c0b889f6a292bc943304d88c4c6561fe1b9` for GHSA-5j98-2g5x-46v6.
+The separate CNAME advisory GHSA-6f2x-v7q7-m7m5 is assessed against the pinned
+0.25 stub and the absence of the separate recursor crate in both graphs, with
+targeted regression and graph checks. Neither GHSA receives a new scanner waiver.
 
 RustSec scanners still identify the unchanged semantic versions as affected.
 `RUSTSEC-2026-0009`, `RUSTSEC-2026-0118`, and
@@ -666,7 +1007,7 @@ The dependency gate requires CVSS 4.0-capable `cargo-deny >= 0.18.6` and
 provides an independent advisory scan.
 
 Candidate packaging excludes workspace members and admits path dependencies
-only at the three exact verified vendor paths above.
+only at the four exact verified vendor paths above.
 `yamux 0.13.10` omits license files from its crate archive, so exact
 Apache-2.0 and MIT files from official release tag
 `70db05dc63e8368bd0559a5ec0dba6e5fc2bdd41` are retained under
@@ -706,18 +1047,285 @@ Runtime transitive system dependencies are libc6, libevent and OpenSSL;
 `dns-root-data` supplies read-only root hints/anchors and retains its own notices.
 The package does not depend on or start the standalone Unbound daemon.
 
+### Maintained D-Bus client and pinned compiler candidate
+
+The workspace pins `zbus` 6.1.0 with default features disabled and only Tokio
+and client-proxy support. `zbus_names`, `zvariant` and `zvariant_derive` are
+merged into the maintained package; no compatibility fork or advisory ignore
+is added. Exact official crates.io archive SHA-256 values and upstream VCS
+metadata for zbus6.1.0, zbus_macros6.1.0, zbus_utils6.0.0, zcheapstr1.0.0 and
+zruntime0.2.0 are recorded in [the source pinset](third_party/rust/zbus6-sources.json).
+Their original MIT notices are retained unchanged under
+`third_party/rust/licenses/<package>-<version>/LICENSE`. No local upstream
+source patch is applied. The zbus/macros source commit is
+[`90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2`](https://github.com/z-galaxy/zbus/tree/90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2).
+
+The earlier build candidate used exact Rust1.99.1, retained as a reference profile.
+The reviewed official distribution
+manifest is `https://static.rust-lang.org/dist/channel-rust-1.99.1.toml`, SHA-256
+`fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463`.
+[Component metadata](scripts/rust199-components.json) binds the exact dated
+compiler/Cargo/standard-library/Clippy/rustfmt archive URLs and hashes,
+including real i686-musl std. The provisioning script accepts only that fixed
+profile on disposable hosted runners or the fixed KVM guest accounts, verifies
+archive hashes before extraction/install, and installs under a local prefix.
+Original distribution notices remain in the installed components. This uses
+published compiler binaries; it does not claim a compiler reproduced from source
+or local upstream-GPG verification. Full actual version output is retained;
+Cargo's manifest package version0.100.0 is not relabelled as an executable version.
+No new compiler was downloaded, installed or executed on the development host.
+
+The concrete `jni`0.22.4 and `jni-macros`0.22.4 registry archives omit top-level
+notices. The existing fallback table now binds each exact package/version/license,
+its own VCS commit and crate archive SHA-256. The original MIT and Apache-2.0
+texts were fetched independently at
+[`5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7`](https://github.com/jni-rs/jni-rs/tree/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7)
+and [`33045a124105c939d1e2cbdcb5a39e5d868ffa03`](https://github.com/jni-rs/jni-rs/tree/33045a124105c939d1e2cbdcb5a39e5d868ffa03)
+respectively and retained with their own SHA256SUMS. Both texts compare equal
+only after independent retrieval. The collector rejects changed archives,
+VCS metadata, versions and license expressions. This exact correction does not
+claim closure of the separate full all-platform notice inventory.
+
+### Maintained YAML configuration packages
+
+The workspace dependency named `serde_yaml` is a Cargo alias for exact registry
+[`yaml_serde` 0.10.7](https://crates.io/crates/yaml_serde/0.10.7), maintained by
+the YAML Organization at upstream commit
+[`22a7009e918620b523ea06e54ca75275eabe8027`](https://github.com/yaml/yaml-serde/tree/22a7009e918620b523ea06e54ca75275eabe8027).
+Its exact crates.io archive SHA-256 is
+`33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918`.
+The unchanged upstream [MIT](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-MIT)
+and [Apache-2.0](third_party/rust/licenses/yaml_serde-0.10.7/LICENSE-APACHE)
+texts are retained. Its declared minimum Rust version is 1.82.
+
+The root lockfile selects exact registry
+[`libyaml-rs` 0.3.0](https://crates.io/crates/libyaml-rs/0.3.0), upstream commit
+[`66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2`](https://github.com/yaml/libyaml-rs/tree/66d8ae3d348b328ef2159e3dc0bc53f1deb4c3a2),
+archive SHA-256
+`2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777`.
+The unchanged [MIT text](third_party/rust/licenses/libyaml-rs-0.3.0/LICENSE-MIT)
+is retained. Its declared minimum Rust version is 1.60. Both packages use
+unmodified published source; there are no local patches. The dependency checker
+guards these exact package versions. The maintained libyaml fork remains an
+unsafe C2Rust translation; this migration does not claim a safe-Rust parser.
+The existing package license collector copies the resolved crates' original
+notices; the retained copies here additionally preserve their reviewed provenance.
+
 ### Rust dependency families
 
 | Component family | Purpose | Upstream license expression to verify in release audit |
 |---|---|---|
 | Tokio, tracing, futures | async runtime and structured diagnostics | MIT |
-| serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
+| serde, serde_json, yaml_serde (aliased as serde_yaml), prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
-| `hpke` 0.14.0 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
+| `hpke` 0.14.1 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
 | rusqlite and SQLite bundle | bounded local peer/session state | MIT for wrapper; SQLite is public domain |
 | rtnetlink, netlink-sys, wireguard-uapi, nix, libc | Linux networking and OS boundary | mixed permissive licenses; inspect every resolved crate |
 
 This table is descriptive rather than a claim that every transitive Rust
 dependency has already been approved. Never replace the native provenance
 record with an unverified version tag or a downloaded executable.
+
+## Development-only audit-tool cache action
+
+Quality uses the separate `restore` and `save` entrypoints of
+[actions/cache v6.1.0](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9),
+pinned to `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`. Origin:
+`https://github.com/actions/cache`; license:
+[MIT, unchanged upstream notice](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/LICENSE).
+There are no local upstream patches or vendored action binaries. This is external
+CI tooling, not a VOLPAROSSA runtime dependency. Only this workflow's checked,
+source-built `cargo-deny 0.18.6` and `cargo-audit 0.22.1` are cached; their build
+versions, locked upstream dependencies and audit/license obligations are retained.
+
+
+## Silex Studio baseline research (2026-10-22; no source imported)
+
+- Origin: https://github.com/silexlabs/Silex
+- Selected release: v3.9.0; exact commit `672efed69dda04c0a1e968859239e042f00d9538`.
+- Inspected editor/Node server and Rust `silex-server` source notices:
+  AGPL-3.0-or-later; root package uses the shorthand AGPL-3.0.
+- Desktop Tauri metadata differs by source at that pin: the
+  [Cargo manifest](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/Cargo.toml)
+  declares AGPL-3.0-or-later; the
+  [main.rs header](https://github.com/silexlabs/Silex/blob/672efed69dda04c0a1e968859239e042f00d9538/desktop/src-tauri/src/main.rs)
+  states GNU GPL version 3-or-later. A separate GPL file is present. Preserve both
+  observations rather than assigning one label to the manifest and source header.
+- The pre-existing Studio GPLv3 license file is preserved. Do not use it to
+  relabel upstream AGPL components or infer fulfilled network-service/source obligations.
+- No downloaded executable, vendored source, local patch or build was part of this
+  initial research record. Studio's `upstream.lock.json` binds reviewed file blobs;
+  the later bounded hosted edit/export/Core-pack fixture built and ran the pinned
+  source, as recorded in [Studio hosting](docs/services/STUDIO_HOSTING.md#audited-starting-point--2026-10-22).
+  Full dependency audit and complete Studio acceptance remain open. Preserve
+  notices and record future patches, distribution/network-source obligations and
+  asset licenses before activation.
+- Primary files and adapter/telemetry/update boundaries are linked in
+  [Studio hosting](docs/services/STUDIO_HOSTING.md#silex-source-selection-and-interfaces).
+
+## F04 fixed P-384 source candidate, 27 October 2026
+
+The current source candidate patches the original Apache-2.0 SEV 8.0.0 Git
+revision `a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5` through a local vendor
+override. The unchanged original license is included in
+`third_party/rust/vendor/sev-8.0.0/LICENSE`; the existing Git revision and
+historical notice above remain provenance. The reviewed patch updates the
+P-384 dependency and adapts fixed-width signature decoding and the existing
+SHA-384 digest-to-prehash API boundary. It does not modify trust anchors,
+RSA certificate verification or cryptographic arithmetic algorithms.
+
+Fixed `crypto-bigint 0.7.9` requires `ctutils 0.4.5`, whose complete original
+Apache-2.0 and MIT source and licenses are retained without modification in
+`third_party/rust/vendor/ctutils-0.4.5`. The earlier 0.4.4 compatibility source,
+patch and evidence remain historical. Exact source/archive/patch/tree hashes
+and the pending resolver, cryptographic and codegen evidence are recorded in
+[the dependency review](third_party/rust/README.md#current-f04-source-candidate-fixed-p-384-arithmetic-27-october-2026).
+No exception is added for `RUSTSEC-2026-0387`; fixed graph guards remain fatal.
+
+## ctutils 0.4.4 Rust 1.85 compatibility adaptation
+
+Origin: [RustCrypto/utils](https://github.com/RustCrypto/utils), exact release
+commit `a993c0ba50db6510d8db15a6219572de65115438`;
+crates.io source archive SHA-256
+`12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865`.
+The complete source is retained under `third_party/rust/vendor/ctutils-0.4.4`
+with its original **Apache-2.0 OR MIT** notices unchanged. The package notice
+collector includes those exact files and labels the source as locally adapted.
+
+Local patch `third_party/rust/patches/ctutils-0.4.4-rust1.85.patch` adapts the
+manifest MSRV, same-width casts and twenty public const qualifications for
+Rust 1.85; it preserves upstream's runtime security fixes and algorithms.
+Exact hashes, compile-time API limitations, reconstruction/scope guards and
+pending hosted/codegen acceptance are documented in `third_party/rust/README.md`.
+This is modified upstream source, not an unchanged official 0.4.4 release.
+
+The separate `jni-sys-macros`0.4.1 archive (SHA-256
+`38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264`)
+also omits its original notices. Its exact fallback is bound to VCS
+`64d77b7a5f119d7b55b4e2c169a4668067ff59e6`, path `jni-sys-macros`,
+version and `MIT OR Apache-2.0` metadata. Unchanged originals come from
+[jni-sys LICENSE-MIT](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT)
+and [LICENSE-APACHE](https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE).
+Both differ from the earlier jni/jni-macros texts; their own SHA256SUMS preserve
+the exact upstream bytes. This corrects this package's omission only.
+
+
+The current minimum build profile is Rust1.89.0. Its original official
+[distribution manifest](https://static.rust-lang.org/dist/channel-rust-1.89.0.toml)
+has SHA-256 `fbd1662e100e7b305908ece23b441cb7534eadfa6336c5f173ff08d1cec174a1`.
+All six component URLs, versions and original archive checksums are fixed in
+`scripts/rust189-components.json`; the separately pinned provisioner authenticates
+the complete payload before execution. The previous1.99 profile and notices are
+retained. This selects a minimum stable compiler for this reviewed dependency
+combination, not a claim of current upstream compiler security support.
+
+The minimum profile is limited to the controlled Core build entrypoints. Cargo
+1.89 remains affected by the [tar extraction advisory](https://blog.rust-lang.org/2026/03/21/cve-2026-33056/),
+[registry symlink advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5223/)
+and [registry credential advisory](https://blog.rust-lang.org/2026/05/25/cve-2026-5222/).
+The Rust project supplies security updates only for its
+[current supported releases](https://rust-lang.org/security/). This profile is
+not an upstream patch or a generally supported Cargo replacement.
+
+`scripts/cargo-source-policy.py` establishes the source/configuration/authentication
+boundary before the first Cargo operation, including implicit downloads and the
+older Cargo versions used to build the pinned audit tools. The profile requires
+fresh private Cargo homes, canonical public sparse crates.io sources, authenticated
+locked inputs, no registry credentials and no inherited configuration/cache
+authority. Only its own fixed configuration and the existing exact offline
+resolver diagnostic configuration are admitted. Cargo Git metadata uses the CLI
+with fixed HTTPS-only, noninteractive process configuration and fresh repositories.
+The policy helper does not inspect operator Git configuration or credential
+contents; Cargo network Git fetches do not inherit user/system configuration.
+No global user configuration is modified. This does not claim that every
+libgit2 internal metadata operation avoids reading Git configuration. The source
+scope sidecars are distinct from the unchanged official compiler-component
+receipts. These constraints do not apply an upstream fix to the older binaries;
+actual hosted execution must establish the bounded profile's acceptance.
+
+### Exact resolved-package notice recovery — 2026-10-27
+
+The published archives for libp2p-metrics0.17.0, libp2p-upnp0.5.0,
+prometheus-client-derive-encode0.4.2 and valuable0.1.1 omit their upstream
+license files. The packaging collector retains unchanged notices fetched from
+each archive's exact `.cargo_vcs_info.json` commit. r-efi5.3.0 and6.0.0 place
+their MIT permission notice and copyright attribution in `AUTHORS`; those exact
+upstream files are retained in full. Gossipsub0.49.5 likewise omits a top-level notice, but its authenticated
+published archive contains complete MIT copyright, permission and disclaimer
+headers. All27 original Rust source files are retained unchanged, including
+all22 files with complete MIT headers and the remaining original source files;
+archive/member hashes bind these primary notice bytes. The published VCS commit
+is retained as metadata even though its upstream Git object returned404. No
+replacement license text is invented.
+
+`third_party/rust/licenses/registry-fallbacks.tsv` binds each recovery to its
+exact package/version/license, root-lock archive SHA256, VCS commit and path.
+The original notice bytes have independent `SHA256SUMS`; immutable upstream
+URLs and content hashes are recorded in
+`third_party/rust/licenses/registry-fallback/full-notice-provenance.json`.
+The collector also recognizes the existing license/notice basename patterns
+without ASCII case sensitivity, preserving original names and bytes; this
+covers the lower-case license files already supplied by24 Windows packages.
+These additions do not establish a successful full hosted notice inventory:
+rustls-platform-verifier-android0.1.1 has no published VCS receipt and its
+bounded AAR/JAR inspection found no original license/notice terms. Its
+provenance remains unresolved and the collector continues to reject it. In particular, unavailable upstream source is not license-violation
+proof and is not authorization to skip a package.
+
+### GPSD public Linux adapter fixture — Debian 3.25-5+deb13u2
+
+The opt-in GPSD proof builds the complete pinned Debian GPSD source and its eleven
+quilt patches in a disposable hosted runner. It does not install a system service
+or ship a GPSD source snapshot/binary. `third_party/gpsd/pins.json` records exact
+source/package origins, sizes, SHA256 values, upstream tag/commit metadata and the
+Debian archive authentication chain. Bare upstream 3.25 is not the execution input.
+
+GPSD's default license is **BSD-2-Clause**, with **ISC** and **IBM** exceptions in
+the retained complete Debian inventory. Original upstream `COPYING`, Debian
+copyright and selected original per-file notice blocks are preserved unchanged
+under `third_party/gpsd/`; all original notices remain in the reconstructed source.
+Private SCons/setuptools/pkg-resources build-support packages retain their packaged
+notices. Original VOLPAROSSA proof scripts are GPL-3.0-only; GPSD's licenses remain
+unchanged. This fixture establishes no sensor or physical-accuracy acceptance.
+
+## Resident model host-observation diagnostics
+
+The pure IPv6 proc-row parser/comparator in
+`tests/integration/protected-resident-model-host-observation.py` reuses original
+VOLPAROSSA Map code from `https://github.com/VOLPAROSSA/volparossa-map`, commit
+`8a227709e99f25b1b07ed0eaf88999e1a0dfc1fc`, `integrations/dps-native/hosted.py`
+blob `d7e8015f8a0aa26e946e97890adb1259c43167fa`, file SHA-256
+`6cc55f6d28ebe56e7b097e58c4cd0eb9737c46d04e69ce4c53ccb84875ea8b96`.
+The Map repository's unchanged GPLv3 license remains authoritative. The reused
+function bodies are unchanged; only the snapshot docstring describes the
+non-accepting fingerprints and separate configuration policy. New surrounding code is GPL-3.0-only.
+No Map configuration-acceptance exception or upstream Linux code is imported.
+
+Primary renderer evidence is `net/ipv6/ip6_fib.c` at these exact upstream commits:
+
+- [Linux v6.8](https://github.com/torvalds/linux/blob/e8f897f4afef0031fe618a8e94127a0934896aba/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `85d34af1d3fee187c8da53989c3e143ac9b4be2e20f78fe85b8831b07319fdb6`.
+- [Linux v6.17](https://github.com/torvalds/linux/blob/e5f0a698b34ed76002dc5cff3804a61c80233a7a/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `45d20b9c0713d7173909424b760e0ddd1e7ae9aae8e9f9f735bee9f26f9ba5a2`.
+- [Linux v7.0](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/net/ipv6/ip6_fib.c),
+  whole-file SHA-256 `05b965a73f3e07dd110530a751e847ebb1314cb6bd574a5050d9e130bc8e8dc8`.
+
+These files retain SPDX `GPL-2.0-or-later`. The exact 918-byte
+`ipv6_route_native_seq_show` function slices are identical, SHA-256
+`93ca160d4d293117f2064e48065d5d6b75956d177744cf0a5ea2fdbd518ab120`.
+The selected column reads `fib6_ref` through `refcount_read`; retained Map source
+review also binds its `refcount_t` declaration and atomic-read helper. This
+supports the three narrow renderer profiles, with strict observed-layout checks.
+It does not verify Ubuntu Azure's downstream patch lineage, attest the running
+kernel's source or identify a historical changed field/actor. The legacy diagnostic
+projection remains diagnostic-only, including its truthful raw-equality result.
+A separate versioned configuration checkpoint now derives eligibility from complete,
+validated captures with identical supported full renderer descriptors, exact IPv4/DNS
+fingerprints and exact ordered IPv6 non-reference bytes and row count. It permits
+only unchanged configuration or reference-metadata-only differences; raw-only
+inconsistency and all other or unavailable observations fail closed. Trial acceptance
+also requires normal workload, corruption and source checks, joined VM/tool/scratch
+cleanup, and a terminal cancellation/deadline guard. Historical failed trials remain
+failed. This bounded checkpoint makes no firewall, leak, transient-state, route-lineage,
+Ubuntu vendor verification or running-kernel attestation claim.

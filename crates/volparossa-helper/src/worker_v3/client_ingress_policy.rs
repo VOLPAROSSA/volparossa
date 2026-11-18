@@ -1379,7 +1379,7 @@ mod tests {
         fs::File,
         io::{self, BufReader, Write as _},
         net::UdpSocket,
-        os::fd::{AsFd as _, AsRawFd as _, OwnedFd},
+        os::fd::{AsRawFd as _, OwnedFd},
         process::{Command, Stdio},
         time::Duration,
     };

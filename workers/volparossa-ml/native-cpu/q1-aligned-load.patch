@@ -1,0 +1,12 @@
+--- a/ggml/src/ggml-cpu/arch/x86/quants.c
++++ b/ggml/src/ggml-cpu/arch/x86/quants.c
+@@ -580,7 +580,8 @@
+ 
+     for (int ib = 0; ib < nb; ++ib) {
+         const float d0 = GGML_CPU_FP16_TO_FP32(x[ib].d);
+-        const uint32_t * GGML_RESTRICT qs32 = (const uint32_t *) x[ib].qs;
++        uint32_t qs32[4];
++        memcpy(qs32, x[ib].qs, sizeof(qs32));
+         const block_q8_0 * GGML_RESTRICT y_ptr = &y[ib * 4];
+ 
+         __m256 acc_block;

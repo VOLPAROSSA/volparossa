@@ -1,6 +1,6 @@
 //! Inert journal/filesystem contracts, not evidence of aggregation, approval or training.
 
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _, symlink};
+use std::os::unix::fs::{DirBuilderExt as _, symlink};
 
 use super::*;
 

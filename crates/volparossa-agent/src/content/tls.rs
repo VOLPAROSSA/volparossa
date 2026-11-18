@@ -5,7 +5,7 @@
 //! never disclosed to a content destination. Neither certificate nor offer authenticates an
 //! Internet origin, publication or whitelist grant. Those authorities remain independent.
 
-use std::{sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 
 use libp2p::{PeerId, identity};
 use rustls::{
@@ -21,6 +21,7 @@ use tokio_rustls::{
     TlsAcceptor, TlsConnector, client::TlsStream as ClientStream, server::TlsStream as ServerStream,
 };
 use volparossa_content::provider::VerifiedProviderOffer;
+use volparossa_local_control::{PrivateStorageTlsCloseFailure, PrivateStorageTlsFailure};
 
 const CONTENT_ALPN: &[u8] = b"volparossa-content/1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -75,17 +76,39 @@ impl ContentTlsServer {
         })
     }
 
+    #[cfg(test)]
     pub(super) async fn accept<S>(&self, stream: S) -> Result<ServerStream<S>, ContentTlsError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let tls = timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream))
+        self.accept_observed(stream, &super::fixture_correlation::Guard::default())
             .await
-            .map_err(|_| ContentTlsError::Handshake)?
-            .map_err(|_| ContentTlsError::Handshake)?;
+    }
+
+    pub(super) async fn accept_observed<S>(
+        &self,
+        stream: S,
+        fixture: &super::fixture_correlation::Guard,
+    ) -> Result<ServerStream<S>, ContentTlsError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use volparossa_local_control::StorageFixtureCorrelationTerminal as Terminal;
+        let tls = match timeout(HANDSHAKE_TIMEOUT, self.acceptor.accept(stream)).await {
+            Ok(Ok(tls)) => tls,
+            Ok(Err(_)) => {
+                fixture.finish(Terminal::TlsError);
+                return Err(ContentTlsError::Handshake);
+            }
+            Err(_) => {
+                fixture.finish(Terminal::TlsTimeout);
+                return Err(ContentTlsError::Handshake);
+            }
+        };
         if tls.get_ref().1.alpn_protocol() != Some(CONTENT_ALPN)
             || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
         {
+            fixture.finish(Terminal::TlsError);
             return Err(ContentTlsError::Handshake);
         }
         Ok(tls)
@@ -101,28 +124,71 @@ pub(super) async fn connect<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    validate_offer(peer, offer)?;
+    connect_observed(stream, peer, offer)
+        .await
+        .map_err(|(error, _)| error)
+}
+
+/// Same TLS exchange, with a closed local failure class, never a remote cause.
+/// An underlying protected stream can itself return a TLS or I/O error.
+pub(super) async fn connect_observed<S>(
+    stream: S,
+    peer: PeerId,
+    offer: &VerifiedProviderOffer,
+) -> Result<ClientStream<S>, (ContentTlsError, PrivateStorageTlsFailure)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    validate_offer(peer, offer).map_err(|error| (error, PrivateStorageTlsFailure::Offer))?;
     // libp2p TLS requires mutual authentication. A one-session key avoids turning a cache
     // request into a durable Client-node-to-publication association at the provider.
     let ephemeral = identity::Keypair::generate_ed25519();
-    let mut config = libp2p::tls::make_client_config(&ephemeral, Some(peer))
-        .map_err(|_| ContentTlsError::Configuration)?;
+    let mut config = libp2p::tls::make_client_config(&ephemeral, Some(peer)).map_err(|_| {
+        (
+            ContentTlsError::Configuration,
+            PrivateStorageTlsFailure::Configuration,
+        )
+    })?;
     config.alpn_protocols = vec![CONTENT_ALPN.to_vec()];
     config.enable_sni = true;
     let hostname = ServerName::try_from(offer.endpoint().hostname().to_owned())
-        .map_err(|_| ContentTlsError::Offer)?;
+        .map_err(|_| (ContentTlsError::Offer, PrivateStorageTlsFailure::Offer))?;
     let connector = TlsConnector::from(Arc::new(config));
     let tls = timeout(HANDSHAKE_TIMEOUT, connector.connect(hostname, stream))
         .await
-        .map_err(|_| ContentTlsError::Handshake)?
-        .map_err(|_| ContentTlsError::Handshake)?;
-    validate_offer(peer, offer)?;
+        .map_err(|_| {
+            (
+                ContentTlsError::Handshake,
+                PrivateStorageTlsFailure::HandshakeDeadline,
+            )
+        })?
+        .map_err(|error| (ContentTlsError::Handshake, handshake_failure(&error)))?;
+    validate_offer(peer, offer).map_err(|error| (error, PrivateStorageTlsFailure::Offer))?;
     if tls.get_ref().1.alpn_protocol() != Some(CONTENT_ALPN)
         || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
     {
-        return Err(ContentTlsError::Handshake);
+        return Err((
+            ContentTlsError::Handshake,
+            PrivateStorageTlsFailure::TlsOther,
+        ));
     }
     Ok(tls)
+}
+
+fn handshake_failure(error: &io::Error) -> PrivateStorageTlsFailure {
+    // tokio-rustls retains its concrete rustls error inside io::Error. Inspect only
+    // its type/variant, never its text or certificate/peer data. An I/O TimedOut
+    // is not evidence that our own ten-second handshake deadline elapsed.
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented) => {
+            PrivateStorageTlsFailure::Authentication
+        }
+        Some(_) => PrivateStorageTlsFailure::TlsOther,
+        None => PrivateStorageTlsFailure::Io,
+    }
 }
 
 fn validate_offer(peer: PeerId, offer: &VerifiedProviderOffer) -> Result<(), ContentTlsError> {
@@ -144,26 +210,46 @@ pub(super) async fn finish<S>(stream: &mut S) -> Result<(), ContentTlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    finish_classified(stream)
+        .await
+        .map_err(|_| ContentTlsError::Close)
+}
+
+/// The same close operation, retaining only its local failure boundary.
+pub(super) async fn finish_classified<S>(
+    stream: &mut S,
+) -> Result<(), PrivateStorageTlsCloseFailure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     timeout(CLOSE_TIMEOUT, async {
         stream
             .shutdown()
             .await
-            .map_err(|_| ContentTlsError::Close)?;
+            .map_err(|_| PrivateStorageTlsCloseFailure::ShutdownIo)?;
         let count = stream
             .read(&mut [0_u8; 1])
             .await
-            .map_err(|_| ContentTlsError::Close)?;
+            .map_err(|_| PrivateStorageTlsCloseFailure::ReadIo)?;
         if count != 0 {
-            return Err(ContentTlsError::Close);
+            return Err(PrivateStorageTlsCloseFailure::TrailingData);
         }
         Ok(())
     })
     .await
-    .map_err(|_| ContentTlsError::Close)?
+    .map_err(|_| PrivateStorageTlsCloseFailure::InternalDeadline)?
 }
 
 #[cfg(test)]
+mod close_diagnostic_tests;
+
+#[cfg(test)]
+mod diagnostic_tests;
+
+#[cfg(test)]
 mod tests {
+    mod kernel_close;
+
     use super::*;
     use ed25519_dalek::SigningKey;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};

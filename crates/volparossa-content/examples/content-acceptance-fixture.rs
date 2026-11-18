@@ -10,6 +10,9 @@ mod adaptive;
 #[path = "content-acceptance-fixture/repair.rs"]
 mod repair;
 
+#[path = "content-acceptance-fixture/readiness.rs"]
+mod readiness;
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -37,9 +40,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [mode, socket, manifest, publisher] if mode == "discover-providers" => {
+            readiness::discover(Path::new(socket), Path::new(manifest), publisher).await
+        }
         [mode, root] if mode == "seed" => seed(Path::new(root), None),
         [mode, root, first, second] if mode == "seed-providers" => {
-            seed_replicas(Path::new(root), None, Path::new(first), Path::new(second))
+            seed_replicas(Path::new(root), None, Path::new(first), Path::new(second), false)
+        }
+        [mode, root, first, second] if mode == "seed-late-providers" => {
+            seed_replicas(Path::new(root), None, Path::new(first), Path::new(second), true)
         }
         [mode, root, first, second, third] if mode == "seed-adaptive-providers" => {
             adaptive::seed(Path::new(root), [Path::new(first), Path::new(second), Path::new(third)])
@@ -73,7 +82,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-adaptive-providers ROOT CACHE_A CACHE_B CACHE_C | seed-replication ROOT CACHE_P CACHE_Q | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-late-providers ROOT CACHE_A CACHE_B | seed-adaptive-providers ROOT CACHE_A CACHE_B CACHE_C | seed-replication ROOT CACHE_P CACHE_Q | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
     }
 }
 
@@ -95,6 +104,7 @@ fn seed(root: &Path, recipient: Option<[u8; 32]>) -> Result<()> {
         recipient,
         &root.join("replica-a"),
         &root.join("replica-b"),
+        false,
     )
 }
 
@@ -105,6 +115,7 @@ fn seed_replicas(
     recipient: Option<[u8; 32]>,
     first: &Path,
     second: &Path,
+    late: bool,
 ) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let origin = tempfile::tempdir_in(root)?;
@@ -118,9 +129,12 @@ fn seed_replicas(
     // Distinct, deterministic public fixture bytes: every full chunk has a different hash.
     let mut content = Vec::with_capacity(8 * CHUNK_BYTES + 123);
     for index in 0_u8..8 {
-        content.extend(vec![b'A' + index; CHUNK_BYTES]);
+        content.extend(vec![
+            if late { 0x10 + index } else { b'A' + index };
+            CHUNK_BYTES
+        ]);
     }
-    content.extend(vec![b'Z'; 123]);
+    content.extend(vec![if late { 0x19 } else { b'Z' }; 123]);
     let validity = Validity {
         created: now,
         expires: now + 3600,
@@ -132,7 +146,12 @@ fn seed_replicas(
             &mut content.as_slice(),
             Publication {
                 metadata: Metadata {
-                    name: "disposable-native-network-publication".into(),
+                    name: if late {
+                        "disposable-late-native-publication"
+                    } else {
+                        "disposable-native-network-publication"
+                    }
+                    .into(),
                     revision: 1,
                     content_type: "application/octet-stream".into(),
                 },
@@ -169,8 +188,8 @@ fn seed_replicas(
         return Err("publisher directory survived removal".into());
     }
     write_new(&root.join("manifest.bin"), &signed.encode())?;
-    let report = json!({
-        "report_kind": "volparossa-content-seed",
+    let mut report = json!({
+        "report_kind": if late { "volparossa-content-late-provider-seed" } else { "volparossa-content-seed" },
         "publisher_hex": hex::encode(trusted_publisher.as_bytes()),
         "manifest_id": hex::encode(manifest.manifest_id()),
         "object_sha256": expected_hash.to_string(),
@@ -184,6 +203,11 @@ fn seed_replicas(
         "publisher_private_key_persisted": false,
         "recipient_encrypted": recipient.is_some(),
     });
+    if late {
+        report["name"] = json!("disposable-late-native-publication");
+        report["created_unix_seconds"] = json!(now);
+        report["expires_unix_seconds"] = json!(now + 3600);
+    }
     write_report(&root.join("publication.json"), &report)
 }
 
@@ -557,7 +581,7 @@ mod tests {
         let root = temporary.path().join("publication");
         let first = temporary.path().join("provider-a-cache");
         let second = temporary.path().join("provider-b-cache");
-        seed_replicas(&root, None, &first, &second)?;
+        seed_replicas(&root, None, &first, &second, false)?;
         let report: Value =
             serde_json::from_slice(&read_bounded(&root.join("publication.json"), 4096)?)?;
         assert_eq!(report["publisher_removed"], true);
@@ -586,6 +610,55 @@ mod tests {
             ChunkId::digest(&output).to_string(),
             "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn late_provider_seed_has_fresh_chunks_and_complementary_final_stores() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("late-publication");
+        let first_path = temporary.path().join("late-a");
+        let second_path = temporary.path().join("late-b");
+        seed_replicas(&root, None, &first_path, &second_path, true)?;
+        let report: Value =
+            serde_json::from_slice(&read_bounded(&root.join("publication.json"), 4096)?)?;
+        assert_eq!(
+            report["report_kind"],
+            "volparossa-content-late-provider-seed"
+        );
+        assert_eq!(report["publisher_removed"], true);
+        assert_eq!(report["publisher_private_key_persisted"], false);
+        assert_eq!(report["replica_a_chunks"], 5);
+        assert_eq!(report["replica_b_chunks"], 4);
+        assert_eq!(fs::read_dir(&root)?.count(), 2);
+        let verified = manifest(
+            &root.join("manifest.bin"),
+            report["publisher_hex"].as_str().ok_or("publisher absent")?,
+        )?;
+        let mut first = ChunkStore::open(&first_path, limits())?;
+        let mut second = ChunkStore::open(&second_path, limits())?;
+        for (index, chunk) in verified.chunks().iter().enumerate() {
+            assert_eq!(first.get(chunk.id())?.is_some(), index % 2 == 0);
+            assert_eq!(second.get(chunk.id())?.is_some(), index % 2 == 1);
+            for byte in b'A'..b'A' + 60 {
+                assert_ne!(*chunk.id(), ChunkId::digest(&vec![byte; CHUNK_BYTES]));
+            }
+        }
+        let mut restored = Vec::new();
+        reassemble(
+            &verified,
+            &mut [&mut first, &mut second],
+            unix_seconds()?,
+            &mut restored,
+        )?;
+        assert_eq!(restored.len(), 2_097_275);
+        assert_eq!(
+            report["object_sha256"],
+            ChunkId::digest(&restored).to_string()
+        );
+        assert_eq!(restored[0], 0x10);
+        assert_eq!(restored.last(), Some(&0x19));
+        assert!(seed_replicas(&root, None, &first_path, &second_path, true).is_err());
         Ok(())
     }
 }

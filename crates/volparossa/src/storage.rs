@@ -31,14 +31,74 @@ pub(crate) enum Command {
     },
     /// Retain explicit independently pinned provider copies, with non-consuming restore failover.
     Replicas {
+        /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
+        #[arg(long, global = true, conflicts_with_all = ["flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9", "challenge_read_diagnostics_v10"])]
+        append_diagnostics_v7: bool,
+        /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "tls_close_diagnostics_v9", "challenge_read_diagnostics_v10"])]
+        flow_acquire_diagnostics_v8: bool,
+        /// Opt in to outer TLS close failures and all v8 diagnostic fields (version 9).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8", "challenge_read_diagnostics_v10"])]
+        tls_close_diagnostics_v9: bool,
+        /// Opt in to challenge frame-read steps and all v9 diagnostic fields (version 10).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9"])]
+        challenge_read_diagnostics_v10: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::Command>,
     },
     /// Split already encrypted archives across explicit providers with per-fragment copies.
     Fragments {
+        /// Opt in to coarse local APPEND timing in diagnostic reports (version 7).
+        #[arg(long, global = true, conflicts_with_all = ["flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9", "challenge_read_diagnostics_v10"])]
+        append_diagnostics_v7: bool,
+        /// Opt in to closed local flow-acquisition detail and v7 APPEND timing (version 8).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "tls_close_diagnostics_v9", "challenge_read_diagnostics_v10"])]
+        flow_acquire_diagnostics_v8: bool,
+        /// Opt in to outer TLS close failures and all v8 diagnostic fields (version 9).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8", "challenge_read_diagnostics_v10"])]
+        tls_close_diagnostics_v9: bool,
+        /// Opt in to challenge frame-read steps and all v9 diagnostic fields (version 10).
+        #[arg(long, global = true, conflicts_with_all = ["append_diagnostics_v7", "flow_acquire_diagnostics_v8", "tls_close_diagnostics_v9"])]
+        challenge_read_diagnostics_v10: bool,
         #[command(subcommand)]
         command: Box<peer::replicas::fragments::Command>,
     },
+}
+
+impl Command {
+    fn validate_diagnostics(&self) -> Result<(), clap::Error> {
+        // Global values can arrive from different subcommand scopes. Recheck
+        // the final selection before constructing or polling any storage work.
+        let selectors = match self {
+            Self::Replicas {
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
+                challenge_read_diagnostics_v10,
+                ..
+            }
+            | Self::Fragments {
+                append_diagnostics_v7,
+                flow_acquire_diagnostics_v8,
+                tls_close_diagnostics_v9,
+                challenge_read_diagnostics_v10,
+                ..
+            } => [
+                *append_diagnostics_v7,
+                *flow_acquire_diagnostics_v8,
+                *tls_close_diagnostics_v9,
+                *challenge_read_diagnostics_v10,
+            ],
+            _ => [false; 4],
+        };
+        if selectors.into_iter().filter(|enabled| *enabled).count() > 1 {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                "storage diagnostic version selectors are mutually exclusive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,14 +170,51 @@ pub(crate) enum LocalCommand {
 }
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
+    command.validate_diagnostics()?;
     let command = match command {
         Command::Local { command } => command,
         Command::Peer { command } => return peer::run(*command, socket).await,
-        Command::Replicas { command } => return peer::replicas::run(*command, socket).await,
-        Command::Fragments { command } => {
-            return peer::replicas::fragments::run(*command, socket).await;
+        Command::Replicas {
+            command,
+            append_diagnostics_v7,
+            flow_acquire_diagnostics_v8,
+            tls_close_diagnostics_v9,
+            challenge_read_diagnostics_v10,
+        } => {
+            return Box::pin(peer::with_challenge_read_diagnostics(
+                challenge_read_diagnostics_v10,
+                peer::with_all_diagnostics(
+                    append_diagnostics_v7,
+                    flow_acquire_diagnostics_v8,
+                    tls_close_diagnostics_v9 || challenge_read_diagnostics_v10,
+                    peer::replicas::run(*command, socket),
+                ),
+            ))
+            .await;
+        }
+        Command::Fragments {
+            command,
+            append_diagnostics_v7,
+            flow_acquire_diagnostics_v8,
+            tls_close_diagnostics_v9,
+            challenge_read_diagnostics_v10,
+        } => {
+            return Box::pin(peer::with_challenge_read_diagnostics(
+                challenge_read_diagnostics_v10,
+                peer::with_all_diagnostics(
+                    append_diagnostics_v7,
+                    flow_acquire_diagnostics_v8,
+                    tls_close_diagnostics_v9 || challenge_read_diagnostics_v10,
+                    peer::replicas::fragments::run(*command, socket),
+                ),
+            ))
+            .await;
         }
     };
+    run_local(command)
+}
+
+fn run_local(command: LocalCommand) -> Result<()> {
     match command {
         LocalCommand::Init {
             store,

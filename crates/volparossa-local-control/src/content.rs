@@ -754,6 +754,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_POLICY_APPLIED".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentPolicy(receipt.clone())),
         };
         assert_eq!(
@@ -808,6 +809,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "NAMED_CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::NamedContentTransferReady(
                 NamedContentTransferReady {
                     manifest: vec![4; 1024],
@@ -1002,6 +1004,7 @@ mod tests {
             request_id: vec![3; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::ContentTransferReady(ready.clone())),
         };
         assert_eq!(
@@ -1161,6 +1164,7 @@ mod tests {
             request_id: vec![4; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());
@@ -1227,6 +1231,7 @@ mod tests {
             request_id: request.request_id,
             result: ControlResult::Ok as i32,
             diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::HttpsContentTransferReady(ready.clone())),
         };
         assert_eq!(
@@ -1293,6 +1298,7 @@ mod tests {
                 request_id: vec![1; 16],
                 result: ControlResult::Ok as i32,
                 diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+                private_storage_remote_detail: None,
                 payload: Some(Payload::HttpsContentTransferReady(ready)),
             };
             assert_eq!(
@@ -1306,7 +1312,7 @@ mod tests {
     #[test]
     fn https_checksum_mode_is_exclusive_bounded_and_legacy_agents_fail_closed() {
         let mut fetch = https_request();
-        assert!(fetch.checksum_path.is_empty());
+        assert_eq!(fetch.checksum_path, "");
         fetch.checksum_path = "/SHA256SUMS".into();
         assert!(fetch.validate().is_err());
         fetch.metadata_path.clear();
@@ -1339,11 +1345,7 @@ mod tests {
         assert!(ready.validate().is_ok());
         ready.origin_digest = true;
         assert!(ready.validate().is_err());
-        assert!(
-            HttpsContentTransferReady::default()
-                .checksum_path
-                .is_empty()
-        );
+        assert_eq!(HttpsContentTransferReady::default().checksum_path, "");
         assert_eq!(ContentReceipt::default().origin_authority_body_bytes, 0);
     }
 
@@ -1481,6 +1483,7 @@ mod tests {
             request_id: vec![6; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_HTTPS_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());
@@ -1594,6 +1597,7 @@ mod tests {
             request_id: vec![8; 16],
             result: ControlResult::Ok as i32,
             diagnostic_code: "CONTENT_OK".into(),
+            private_storage_remote_detail: None,
             payload: Some(Payload::Content(value)),
         };
         let valid = response(receipt.clone());

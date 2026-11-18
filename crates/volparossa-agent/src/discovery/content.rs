@@ -96,32 +96,76 @@ impl DiscoveryControlHandle {
         tokio::sync::mpsc::Receiver<usize>,
         tokio::task::JoinHandle<usize>,
     ) {
+        let replies = outcomes
+            .into_iter()
+            .map(|outcome| {
+                let (reply, receiver) = oneshot::channel();
+                reply.send(outcome).unwrap();
+                receiver
+            })
+            .collect();
+        Self::content_refresh_latched_for_test(provider, replies)
+    }
+
+    /// Hold real registration replies without blocking the actor's withdrawal queue.
+    #[cfg(test)]
+    pub(crate) fn content_refresh_latched_for_test(
+        provider: Libp2pPeerId,
+        replies: Vec<oneshot::Receiver<Result<(), ContentDiscoveryError>>>,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<usize>,
+        tokio::task::JoinHandle<usize>,
+    ) {
+        type PendingRegistration = (
+            VerifiedProviderOffer,
+            oneshot::Sender<Result<VerifiedProviderOffer, ContentDiscoveryError>>,
+            oneshot::Receiver<Result<(), ContentDiscoveryError>>,
+        );
         let (sender, mut commands) = tokio::sync::mpsc::channel(4);
         let (observed, receiver) = tokio::sync::mpsc::channel(16);
         let task = tokio::spawn(async move {
-            let mut outcomes = outcomes.into_iter();
+            let mut replies = replies.into_iter();
+            let mut pending: Option<PendingRegistration> = None;
             let mut registrations = 0;
-            while let Some(command) = commands.recv().await {
-                match command {
-                    DiscoveryCommand::Content(ContentCommand::Register { offer, reply }) => {
+            loop {
+                tokio::select! {
+                command = commands.recv() => match command {
+                    Some(DiscoveryCommand::Content(ContentCommand::Register { offer, reply })) => {
+                        if reply.is_closed() { continue; }
+                        assert!(pending.is_none(), "refresh registrations must never overlap");
                         let verified = verify_provider(provider, &offer.encode(), unix_seconds())
                             .expect("actual signed fixture offer");
-                        let result = outcomes.next().unwrap_or(Ok(())).map(|()| verified);
-                        reply.send(result).expect("active registration caller");
+                        if let Some(gate) = replies.next() {
+                            pending = Some((verified, reply, gate));
+                        } else {
+                            let _ = reply.send(Ok(verified));
+                        }
                         registrations += 1;
-                        observed
-                            .send(registrations)
-                            .await
-                            .expect("live test observer");
+                        observed.send(registrations).await.expect("live test observer");
                     }
-                    DiscoveryCommand::Content(ContentCommand::Withdraw { reply }) => {
+                    Some(DiscoveryCommand::Content(ContentCommand::Withdraw { reply })) => {
+                        if let Some((_, registration, _)) = pending.take() {
+                            assert!(registration.is_closed(), "stop must cancel registration before withdrawal");
+                        }
                         reply.send(Ok(())).expect("active withdrawal caller");
-                        break;
+                        return registrations;
                     }
+                    None => panic!("serving owner disappeared without withdrawal"),
                     _ => panic!("unexpected command in registration-only test actor"),
+                },
+                outcome = async {
+                    if let Some((_, _, gate)) = pending.as_mut() {
+                        gate.await
+                    } else {
+                        std::future::pending().await
+                    }
+                }, if pending.is_some() => {
+                    let (verified, reply, _) = pending.take().unwrap();
+                    let _ = reply.send(outcome.expect("explicit fixture outcome").map(|()| verified));
+                }
                 }
             }
-            registrations
         });
         (Self { sender }, receiver, task)
     }
@@ -811,6 +855,11 @@ impl DiscoveryRuntime {
                     return;
                 }
                 let policy = state.read().await.active_policy(unix_millis());
+                // The serving owner can stop while this task waits for policy state.
+                // Do not publish a cancelled refresh after that last await.
+                if reply.is_closed() {
+                    return;
+                }
                 let result = policy
                     .as_ref()
                     .ok_or(ContentDiscoveryError::Unavailable)
@@ -1197,6 +1246,54 @@ mod tests {
         assert!(
             runtime.content.local.is_none(),
             "explicit service stop still withdraws"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_waiting_for_policy_cannot_publish_late() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let (mut runtime, state, _directory) = Box::pin(registered_content_runtime()).await;
+        runtime.withdraw_content_registration();
+        let pair = runtime
+            .identity
+            .keypair()
+            .clone()
+            .try_into_ed25519()
+            .unwrap();
+        let bytes = zeroize::Zeroizing::new(pair.to_bytes());
+        let signer = SigningKey::from_keypair_bytes(&bytes).unwrap();
+        let created = unix_seconds();
+        let offer = SignedProviderOffer::sign(
+            &signer,
+            ProviderEndpoint::new("replica.volparossa.test", 18443).unwrap(),
+            Validity {
+                created,
+                expires: created + 300,
+            },
+        )
+        .unwrap();
+        let held_policy = state.write().await;
+        let (reply, response) = oneshot::channel();
+        let mut registration = Box::pin(runtime.handle_content_command(
+            ContentCommand::Register {
+                offer: Box::new(offer),
+                reply,
+            },
+            &state,
+        ));
+        poll_fn(|context| {
+            assert!(registration.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(response);
+        drop(held_policy);
+        timeout(Duration::from_secs(5), registration).await.unwrap();
+        assert!(
+            runtime.content.local.is_none(),
+            "cancelled refresh republished an offer"
         );
     }
 

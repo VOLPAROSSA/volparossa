@@ -1,0 +1,270 @@
+name: Storage post-acquire route freshness
+
+on:
+  push:
+    branches: [fix/storage-post-acquire-clock, fix/storage-post-acquire-clock-completion-20261021]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-post-acquire-clock-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_BASE: 3ab2f6cb9476623234191a7b416934960538ef9d
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contracts:
+    if: >-
+      github.repository == 'VOLPAROSSA/volparossa' &&
+      (github.ref == 'refs/heads/fix/storage-post-acquire-clock' ||
+      github.ref == 'refs/heads/fix/storage-post-acquire-clock-completion-20261021')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the exact three-file correction and unchanged dependencies
+        id: source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git merge-base --is-ancestor "$SOURCE_BASE" HEAD
+          umask 077
+          mkdir post-acquire-evidence
+          python3 -B - <<'PY'
+          import json, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          allowed = {
+              '.github/workflows/storage-post-acquire-clock.yml',
+              'crates/volparossa-agent/src/route_setup.rs',
+              'crates/volparossa-agent/src/route_setup/tests/tcp_flow_admission_tests.rs',
+          }
+          base = os.environ['SOURCE_BASE']
+          changed = git('diff', '--name-only', base, 'HEAD').splitlines()
+          assert set(changed) == allowed and len(changed) == len(allowed)
+          if os.environ['GITHUB_REF'] == 'refs/heads/fix/storage-post-acquire-clock-completion-20261021':
+              completion_base = '139573f351b945c68dc800391ba82befc86f50ef'
+              subprocess.run(['git', 'merge-base', '--is-ancestor', completion_base, 'HEAD'], check=True)
+              completion_changed = git('diff', '--name-only', completion_base, 'HEAD').splitlines()
+              assert set(completion_changed) == allowed and len(completion_changed) == len(allowed)
+          dependencies = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
+              'crates/volparossa-agent/Cargo.toml',
+              'crates/volparossa-agent/src/mptcp_transport.rs',
+              'crates/volparossa-agent/src/mptcp_flow_runtime.rs',
+              'crates/volparossa-tcp-proxy/src/tls.rs',
+              'crates/volparossa-helper/src/worker_transport.rs',
+              'crates/volparossa-helper/src/engine_v3.rs',
+              'tests/integration/storage-consumer-maintenance-pins-v10.json',
+              'tests/helper/debian13-amd64-image-v1.json')
+          for name in dependencies:
+              assert git('rev-parse', 'HEAD:' + name) == git('rev-parse', base + ':' + name)
+          receipt = dict(version=1, source_commit=os.environ['GITHUB_SHA'],
+              workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+              source_tree=git('rev-parse', 'HEAD^{tree}'), base_commit=base,
+              source_blobs={name:git('rev-parse', 'HEAD:' + name) for name in sorted(allowed)},
+              dependency_blobs={name:git('rev-parse', 'HEAD:' + name) for name in dependencies},
+              scope='post-acquire-expiry-before-tls', original_timeout_cause_proven=False,
+              live_consumer_acceptance=False, real_relay_datapath=False)
+          pathlib.Path('post-acquire-evidence/source.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+
+      - name: Install the existing pinned compiler on the disposable runner
+        id: toolchain
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          # Reuse the reviewed official Noble security family from core Quality.
+          # Published 2026-10-20; signed apt metadata authenticates the packages.
+          # https://security.ubuntu.com/ubuntu/dists/noble-security/universe/binary-amd64/Packages.xz
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Compile the affected agent and its callers
+        id: build
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo test --locked --offline -p volparossa-agent --no-run --message-format=json \
+            > post-acquire-evidence/build.jsonl 2> post-acquire-evidence/build.log
+
+      - name: Run acquisition expiry and retained cleanup regressions
+        run: |
+          set -euo pipefail
+          group() {
+            local label="$1" filter="$2"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-agent --lib "$filter" -- --list \
+              2>&1 | tee "post-acquire-evidence/$label-inventory.log"
+            timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-agent --lib "$filter" \
+              2>&1 | tee "post-acquire-evidence/$label-test.log"
+          }
+          group retirement lost_helper_retirement_
+          group admission tcp_flow_admission_
+          group disconnect route_setup::tests::client_disconnect_
+          group expiry route_setup::tests::client_route_expiry_
+          group classification route_setup::tests::mptcp_acquire_
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('post-acquire-evidence')
+          expected = dict(retirement=7, admission=15, disconnect=3, expiry=2, classification=1)
+          counts, all_names = {}, []
+          for label, count in expected.items():
+              names = re.findall(r'^(.+): test$', (root / (label + '-inventory.log')).read_text(), re.M)
+              output = (root / (label + '-test.log')).read_text()
+              assert len(names) == len(set(names)) == count, label
+              assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;', output, re.M) == [str(count)]
+              for name in names:
+                  assert len(re.findall(r'^test ' + re.escape(name) + r' \.\.\. ok$', output, re.M)) == 1
+              counts[label] = count
+              all_names.extend(names)
+          assert len(all_names) == len(set(all_names)) == 28
+          (root / 'tests.json').write_text(json.dumps(dict(version=1, counts=counts,
+              unique_tests=len(all_names), test_names=sorted(all_names),
+              original_timeout_cause_proven=False, live_consumer_acceptance=False,
+              real_relay_datapath=False), sort_keys=True) + '\n')
+          PY
+
+      - name: Prove delayed successful acquisition is rejected by the new guard
+        run: |
+          set -euo pipefail
+          mutation_root=$(mktemp -d "$RUNNER_TEMP/vp-post-acquire-negative.XXXXXX")
+          git worktree add --detach "$mutation_root" "$GITHUB_SHA"
+          trap 'git worktree remove --force "$mutation_root"' EXIT
+          export MUTATION_ROOT="$mutation_root"
+          python3 -B - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['MUTATION_ROOT'])
+          assert root.resolve(strict=True).parent == pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+          assert root.name.startswith('vp-post-acquire-negative.')
+          assert subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
+          path = root / 'crates/volparossa-agent/src/route_setup.rs'
+          original = path.read_text()
+          first = '        let mut flow = Some(flow);'
+          last = ('        Ok((\n'
+                  '            flow.expect("admitted acquired TCP stream"),\n'
+                  '            activation_at_ms,\n'
+                  '        ))')
+          assert original.count(first) == original.count(last) == 1
+          start, stop = original.index(first), original.index(last) + len(last)
+          assert start < stop and 'async fn complete_tcp_flow_acquire' in original[:start]
+          # Remove only the new completion check. Keep the caller and test code,
+          # helper signature, compilation and refreshed-clock return intact.
+          replacement = '''        let _ = (expired, start_retirement, failure);
+                  let (activation_at_ms, _) = clock();
+                  drop(state);
+                  Ok((flow, activation_at_ms))'''
+          mutated = original[:start] + replacement + original[stop:]
+          path.write_text(mutated)
+          pathlib.Path('post-acquire-evidence/negative-source.json').write_text(json.dumps(dict(
+              version=1, source_commit=os.environ['GITHUB_SHA'],
+              original_sha256=hashlib.sha256(original.encode()).hexdigest(),
+              mutated_sha256=hashlib.sha256(mutated.encode()).hexdigest(),
+              scope='omit-post-acquire-admission-only', original_worktree_modified=False), sort_keys=True) + '\n')
+          PY
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$mutation_root/Cargo.toml" \
+            --locked --offline -p volparossa-agent --lib --no-run \
+            > post-acquire-evidence/negative-build.log 2>&1
+          negative_case() {
+            local label="$1" name="$2"
+            set +e
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" timeout --kill-after=5s 180s cargo test \
+              --manifest-path "$mutation_root/Cargo.toml" --locked --offline -p volparossa-agent \
+              --lib "route_setup::tests::tcp_flow_admission_tests::$name" -- --exact \
+              > "post-acquire-evidence/negative-$label.log" 2>&1
+            local result=$?
+            set -e
+            printf '%s\n' "$result" > "post-acquire-evidence/negative-$label.exit"
+          }
+          negative_case wall tcp_flow_admission_post_acquire_wall_expiry_drops_stream_before_retirement
+          negative_case monotonic tcp_flow_admission_post_acquire_monotonic_expiry_survives_wall_rollback
+          negative_case live tcp_flow_admission_post_acquire_live_success_refreshes_activation_without_rebasing
+          python3 -B - <<'PY'
+          import json, pathlib, re
+          root = pathlib.Path('post-acquire-evidence')
+          cases = {
+              'wall': 'tcp_flow_admission_post_acquire_wall_expiry_drops_stream_before_retirement',
+              'monotonic': 'tcp_flow_admission_post_acquire_monotonic_expiry_survives_wall_rollback',
+              'live': 'tcp_flow_admission_post_acquire_live_success_refreshes_activation_without_rebasing',
+          }
+          results = {}
+          for label, case in cases.items():
+              name = 'route_setup::tests::tcp_flow_admission_tests::' + case
+              output = (root / ('negative-' + label + '.log')).read_text()
+              status = int((root / ('negative-' + label + '.exit')).read_text())
+              passed = label == 'live'
+              assert status == (0 if passed else 101), (label, status)
+              result = 'ok' if passed else 'FAILED'
+              assert re.findall(r'^test (.+) \.\.\. ' + result + '$', output, re.M) == [name]
+              summary = r'^test result: ' + (r'ok\. 1 passed; 0 failed;' if passed else r'FAILED\. 0 passed; 1 failed;') + r' 0 ignored; 0 measured; \d+ filtered out;'
+              assert len(re.findall(summary, output, re.M)) == 1
+              if not passed:
+                  assert 'expired successful acquire must be refused' in output
+              results[label] = dict(test=name, exit_status=status, passed=passed)
+          (root / 'negative-control.json').write_text(json.dumps(dict(version=1,
+              mutation_compiled=True, only_new_completion_guard_removed=True, cases=results,
+              delayed_acquire_regression_confirmed=True, original_timeout_cause_proven=False), sort_keys=True) + '\n')
+          PY
+
+      - name: Lint the affected agent without changing source
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline -p volparossa-agent --all-targets --all-features -- -D warnings \
+            2>&1 | tee post-acquire-evidence/clippy.log
+
+      - name: Check formatting without changing source
+        if: ${{ always() && steps.source.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee post-acquire-evidence/format.log
+
+      - name: Bind the final tested source
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          python3 -B - <<'PY'
+          import json, os, pathlib, subprocess
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          pathlib.Path('post-acquire-evidence/source-final.json').write_text(json.dumps(dict(
+              version=1, source_commit=os.environ['GITHUB_SHA'], source_tree=tree,
+              tracked_source_unchanged=True), sort_keys=True) + '\n')
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        if: always()
+        with:
+          name: storage-post-acquire-clock-contracts
+          path: post-acquire-evidence
+          if-no-files-found: error
+          retention-days: 14

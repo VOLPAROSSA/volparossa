@@ -773,13 +773,12 @@ async fn ready_round(
 ) -> Result<serde_json::Value> {
     // New rows have never been leased. A fresh authorized cohort may accept them without
     // retargeting any old handle; those handles are still observed under their original lease.
-    if later_attempt {
-        if let Some(authorization) = authorization {
-            if let Ok(selected) = executors::discover(authorization, socket, cancelled).await {
-                options.providers.clone_from(&selected.providers);
-                options.executor_admission = Some((authorization.clone(), selected));
-            }
-        }
+    if later_attempt
+        && let Some(authorization) = authorization
+        && let Ok(selected) = executors::discover(authorization, socket, cancelled).await
+    {
+        options.providers.clone_from(&selected.providers);
+        options.executor_admission = Some((authorization.clone(), selected));
     }
     let first = batch::report_ready_with_activity(&options, socket, cancelled).await;
     let Some(authorization) = authorization else {

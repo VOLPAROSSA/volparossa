@@ -1,0 +1,205 @@
+name: Storage directory lock lifetime regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/storage-directory-lock-lifecycle]
+    paths:
+      - .github/workflows/storage-lock-lifecycle.yml
+      - crates/volparossa/src/storage/peer_state.rs
+      - crates/volparossa/src/storage/fragments_state.rs
+      - crates/volparossa/src/storage/replicas_state.rs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-lock-lifecycle-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BASELINE_COMMIT: dd590d1a78fcf658425d6397f26ba8193e51199a
+  CANDIDATE_COMMIT: ${{ github.sha }}
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: '1'
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Guard the disposable source and bounded regression scope
+        id: scope
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(id -u)" != 0
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_REF" = refs/heads/fix/storage-directory-lock-lifecycle
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          output="$RUNNER_TEMP/storage-lock-lifecycle"
+          target="$RUNNER_TEMP/storage-lock-lifecycle-target"
+          test ! -e "$output"
+          test ! -e "$target"
+          install -d -m 0700 "$output" "$target"
+          printf 'LOCK_OUTPUT=%s\nCARGO_TARGET_DIR=%s\n' "$output" "$target" >> "$GITHUB_ENV"
+          jq -n --arg candidate "$CANDIDATE_COMMIT" --arg baseline "$BASELINE_COMMIT" \
+            --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{version:1,candidate_commit:$candidate,candidate_tree:$tree,
+              baseline_commit:$baseline,run_id:$run,run_attempt:$attempt,
+              scope:"three_directory_lock_regressions_and_one_uniform_lifecycle",
+              namespace_trials:false,model_execution:false,
+              original_quality_failure_cause_proven:false,
+              distributed_storage_acceptance:false}' > "$output/scope.json"
+
+      - name: Install pinned official Rust and formatting tools
+        run: |
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Install the reviewed compiler only on this disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(dpkg --print-architecture)" = amd64
+          # Same Noble security compiler/library family as Quality (2026-10-20).
+          sudo -n apt-get update
+          sudo -n apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4 \
+            libprotoc32t64=3.21.12-8.2ubuntu0.4 \
+            libprotobuf32t64=3.21.12-8.2ubuntu0.4
+          test "$(protoc --version)" = 'libprotoc 3.21.12'
+
+      - name: Check out unchanged locking plus only the three regressions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dd590d1a78fcf658425d6397f26ba8193e51199a
+          persist-credentials: false
+
+      - name: Require the two shared-description cases to fail on the original locking
+        id: baseline
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASELINE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git rev-parse 'HEAD^{tree}' > "$LOCK_OUTPUT/baseline-tree.txt"
+          set +e
+          timeout --kill-after=10s 900s \
+            cargo test --locked --workspace --all-features --bin volparossa \
+            storage::peer::state::directory_lock_tests:: \
+            2>&1 | tee "$LOCK_OUTPUT/baseline.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$LOCK_OUTPUT/baseline.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 101
+          grep -F 'test result: FAILED. 1 passed; 2 failed; 0 ignored;' "$LOCK_OUTPUT/baseline.log"
+          for case in directory_lock_drop_releases_shared_description_without_unlocking_successor \
+            directory_lock_error_cleanup_releases_shared_description; do
+            grep -F "test storage::peer::state::directory_lock_tests::$case ... FAILED" "$LOCK_OUTPUT/baseline.log"
+          done
+          grep -F 'private archive state is already in use' "$LOCK_OUTPUT/baseline.log"
+          git diff --exit-code
+
+      - name: Restore the exact candidate, retaining only disposable build outputs
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check formatting and require all three guard regressions to pass
+        id: candidate
+        if: ${{ !cancelled() && steps.scope.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          cargo fmt --all -- --check
+          set +e
+          timeout --kill-after=10s 600s \
+            cargo test --locked --workspace --all-features --bin volparossa \
+            storage::peer::state::directory_lock_tests:: \
+            2>&1 | tee "$LOCK_OUTPUT/candidate.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$LOCK_OUTPUT/candidate.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 0
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$LOCK_OUTPUT/candidate.log"
+          git diff --exit-code
+
+      - name: Preserve the real legacy uniform-storage lifecycle
+        id: lifecycle
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          set +e
+          timeout --kill-after=10s 300s \
+            cargo test --locked --offline --workspace --all-features --bin volparossa \
+            storage::peer::replicas::fragments::retained::uniform_tests::uniform_policy_preserves_legacy_three_copy_lifecycle_and_actual_charges \
+            -- --exact 2>&1 | tee "$LOCK_OUTPUT/lifecycle.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > "$LOCK_OUTPUT/lifecycle.status"
+          test "${statuses[1]}" -eq 0
+          test "${statuses[0]}" -eq 0
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$LOCK_OUTPUT/lifecycle.log"
+
+      - name: Preserve original outcomes and reject missing or failed phases
+        if: always() && steps.scope.outcome == 'success'
+        env:
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          LIFECYCLE_OUTCOME: ${{ steps.lifecycle.outcome }}
+        run: |
+          set -euo pipefail
+          jq -n --arg baseline "$BASELINE_OUTCOME" --arg candidate "$CANDIDATE_OUTCOME" \
+            --arg lifecycle "$LIFECYCLE_OUTCOME" \
+            '{version:1,expected_baseline_rejection:$baseline,candidate:$candidate,
+              lifecycle:$lifecycle,original_quality_failure_cause_proven:false,
+              distributed_storage_acceptance:false}' > "$LOCK_OUTPUT/outcomes.json"
+          test "$BASELINE_OUTCOME" = success
+          test "$CANDIDATE_OUTCOME" = success
+          test "$LIFECYCLE_OUTCOME" = success
+          test "$(cat "$LOCK_OUTPUT/baseline.status")" = 101
+          test "$(cat "$LOCK_OUTPUT/candidate.status")" = 0
+          test "$(cat "$LOCK_OUTPUT/lifecycle.status")" = 0
+
+      - name: Retain only regression observations and logs
+        if: always() && steps.scope.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-lock-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/storage-lock-lifecycle/scope.json
+            ${{ runner.temp }}/storage-lock-lifecycle/outcomes.json
+            ${{ runner.temp }}/storage-lock-lifecycle/baseline-tree.txt
+            ${{ runner.temp }}/storage-lock-lifecycle/baseline.log
+            ${{ runner.temp }}/storage-lock-lifecycle/baseline.status
+            ${{ runner.temp }}/storage-lock-lifecycle/candidate.log
+            ${{ runner.temp }}/storage-lock-lifecycle/candidate.status
+            ${{ runner.temp }}/storage-lock-lifecycle/lifecycle.log
+            ${{ runner.temp }}/storage-lock-lifecycle/lifecycle.status
+          if-no-files-found: error
+          retention-days: 14

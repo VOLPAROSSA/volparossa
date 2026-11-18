@@ -36,3 +36,13 @@ uint	0.10.0	MIT OR Apache-2.0	63c5afbf8e0e903439d3c127c59b0e4a7991000b	parity-co
 uuid-simd	0.8.0	MIT	d74c030d9dc4f3cae02146d1f497ff62726ef09a	simd-d74c030d
 vsimd	0.8.0	MIT	d74c030d9dc4f3cae02146d1f497ff62726ef09a	simd-d74c030d
 yasna	0.5.2	MIT OR Apache-2.0	b7e65f9a4c317494cce2d18ea02b3d6eaaea7985	yasna-b7e65f9a
+jni	0.22.4	MIT OR Apache-2.0	5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7	jni-5ae9458a	5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498
+jni-macros	0.22.4	MIT OR Apache-2.0	33045a124105c939d1e2cbdcb5a39e5d868ffa03	jni-macros-33045a12	a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3
+jni-sys-macros	0.4.1	MIT OR Apache-2.0	64d77b7a5f119d7b55b4e2c169a4668067ff59e6	jni-sys-macros-64d77b7a	38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264
+libp2p-metrics	0.17.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	libp2p-metrics-0.17.0	805a555148522cb3414493a5153451910cb1a146c53ffbf4385708349baf62b7	misc/metrics
+libp2p-upnp	0.5.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	libp2p-upnp-0.5.0	4757e65fe69399c1a243bbb90ec1ae5a2114b907467bf09f3575e899815bb8d3	protocols/upnp
+prometheus-client-derive-encode	0.4.2	Apache-2.0 OR MIT	9d4ba09ec5bfc15522eb75145a5e850efd6fb628	prometheus-client-derive-encode-0.4.2	440f724eba9f6996b75d63681b0a92b06947f1457076d503a4d2e2c8f56442b8	derive-encode
+r-efi	5.3.0	MIT OR Apache-2.0 OR LGPL-2.1-or-later	97b55bed1c2c91dcbf787674849f05337ff80b33	r-efi-5.3.0	69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f	.
+r-efi	6.0.0	MIT OR Apache-2.0 OR LGPL-2.1-or-later	7e1b0322d31d625f81a5656096330934f9cd835d	r-efi-6.0.0	f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf	.
+valuable	0.1.1	MIT	9efc29b6e58cef28f6566a47aa7e142a55fead77	valuable-0.1.1	ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65	valuable
+libp2p-gossipsub	0.49.5	MIT	d6a16b6a88959d1b25e9807d89959b2f9127724c	libp2p-gossipsub-0.49.5	3573f3d8e30bd62cda336df5c7c1041a1caa40a648376b8e1e274d585c0ed25c	protocols/gossipsub

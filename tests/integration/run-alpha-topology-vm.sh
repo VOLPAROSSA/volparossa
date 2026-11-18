@@ -22,6 +22,14 @@ scenario=alpha
 code_bundle=
 code_manifest_sha256=
 browser_native_bundle=
+browser_filter_bundle=
+browser_filter_manifest_sha256=
+weather_client_bundle=
+weather_client_manifest_sha256=
+weather_android_source=
+weather_android_commit=
+weather_client_version=
+decoder_abi_inputs=
 
 guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
@@ -39,11 +47,15 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
-        '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser proofs.' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
-        '       Native-editor and cooperative-code optionally accept --host-tools-directory PATH (verified workspace-only QEMU).'
+        '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
+        '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
+        '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
+        '       weather-decoder-abi requires --decoder-abi-inputs DIRECTORY (source-admitted exact public files; no --mpquic).' \
+        '       Native-editor, cooperative-code, content-provider and weather-decoder-abi accept --host-tools-directory PATH (verified workspace-only QEMU).'
     printf '%s\n' '       browser-network optionally accepts --host-tools-directory PATH --browser-native-bundle PATH'
 }
 
@@ -67,7 +79,13 @@ print_plan() {
             '  retain sanitized decision evidence; product and internal overlay IPv6 remain unchanged.'
         ;;
     esac
-    if [ "$scenario" = agent-reasoning ]; then
+    if [ "$scenario" = weather-decoder-abi ]; then
+        printf '%s\n' \
+            'Weather-decoder ABI: verify only the source-reviewed public artifact members before copying;' \
+            '  install minimal Debian guest tools, then execute the admitted decoder unprivileged/offline;' \
+            '  require ecCodes 2.44.0 and the exact nonconstant 496-point CCSDS probe (0 and 495);' \
+            '  no core build, topology, weather-origin request, browser execution or production decoder admission.'
+    elif [ "$scenario" = agent-reasoning ]; then
         printf '%s\n' \
             'Agent-reasoning: one explicit pinned 1.7B BF16 public worker, original 444-byte source/question;' \
             '  two threads, 600s worker deadline, retained actual answer/RSS/CPU and cleanup;' \
@@ -332,12 +350,18 @@ print_plan() {
             '  remove sender application keys/input, disconnect, reopen one durable provider cache;' \
             '  fresh protected owner route, no manifest/ID input, exact plaintext/two ACKs/empty second receive;' \
             '  both identities share one Client agent; complete privacy and cleanup, no independent sender-node/full-C07 claim.'
+    elif [ "$scenario" = protected-quote ]; then
+        printf '%s\n' \
+            'Protected-quote: real signed device-unavailable refusal through the production provider route;' \
+            '  wrong-requester and one-attempt exhaustion guards, physical captures and bounded VM cleanup;' \
+            '  no synthetic firmware, positive hardware quote, private work or two-subflow bulk claim.'
     elif [ "$scenario" = content-provider ]; then
         printf '%s\n' \
             'Content-provider scenario: two of Relay3/4/5 serve disjoint caches, excluding the current control relay;' \
             '  two disposable UDP41000-only broker-provider links with exact route and drained capture evidence;' \
             '  actual generic DHT/control-relay discovery and protected MPTCP reconstruction after publisher removal;' \
             '  exact policy-only DNS destinations, isolated Client files, both provider PeerIds and complete privacy/cleanup;' \
+            '  separate late complementary-provider phase: first one-offer snapshot, bounded gate, real rediscovery and no retry substitution;' \
             '  cooperative-origin HTTPS same-object complete/missing-ranges cases; no general NAT/browser HTTPS/full-C02 claim.'
     elif [ "$scenario" = cloud-private-upload ]; then
         printf '%s\n' \
@@ -356,6 +380,11 @@ print_plan() {
             '  encrypt synthetic quiesced snapshot, spread signed fragments across protected MPTCP providers;' \
             '  lose one provider, restore twice, decrypt into new directories and verify original bytes;' \
             '  owner keys never go to peers; no running Immich/database restore or mobile/web service claim.'
+    elif [ "$scenario" = private-storage-maintenance ]; then
+        printf '%s\n' \
+            'Private-storage-maintenance: finite owner authority and actual idle core turns;' \
+            '  renewal, foreground preemption, core restart/reconnect, owner stop/resume;' \
+            '  protected repair, two B/C restores, retained charges and exact private/host cleanup.'
     elif [ "$scenario" = private-storage-fragments ]; then
         printf '%s\n' \
             'Private-storage-fragments scenario: four signed fragments, two copies across three protected MPTCP providers;' \
@@ -427,6 +456,12 @@ print_plan() {
         printf '%s\n' \
             'Wi-Fi link scenario: exact generic guest kernel and two simulated radios; agent-created mesh;' \
             '  mDNS bootstrap, protected consume/GIVE plus retained Ethernet; no physical radio or capacity claim.'
+    elif [ "$scenario" = transaction-abci ]; then
+        printf '%s\n' \
+            'Transaction TEST scenario: exact source-built Comet and Rust ABCI, four private validators/stores;' \
+            '  signed conflicting spends and commit, real 3/1 and 2/2 namespace partitions, rejoin and crash recovery;' \
+            '  unchanged 4 CPU / 4096 MiB / 16 GiB guest and 2400s driver budget; complete owned-state cleanup;' \
+            '  not Byzantine equivocation, overlay transport, independent clients or real financial settlement.'
     elif [ "$scenario" = wifi-mesh ]; then
         printf '%s\n' \
             'Wi-Fi mesh scenario: install one exact hash-verified official generic guest kernel and reboot once;' \
@@ -494,12 +529,42 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --code-bundle)
             if [ "$#" -lt 2 ] || [ -n "$code_bundle" ]; then usage >&2; exit 64; fi
             code_bundle=$2
+            shift
+            ;;
+        --browser-filter-bundle)
+            if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            browser_filter_bundle=$2
+            shift
+            ;;
+        --browser-filter-manifest-sha256)
+            if [ "$#" -lt 2 ] || [ -n "$browser_filter_manifest_sha256" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            browser_filter_manifest_sha256=$2
+            shift
+            ;;
+        --weather-client-bundle)
+            if [ "$#" -lt 2 ] || [ -n "$weather_client_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            weather_client_bundle=$2
+            shift
+            ;;
+        --weather-client-manifest-sha256)
+            if [ "$#" -lt 2 ] || [ -n "$weather_client_manifest_sha256" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            weather_client_manifest_sha256=$2
+            shift
+            ;;
+        --weather-android-source)
+            if [ "$#" -lt 2 ] || [ -n "$weather_android_source" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            weather_android_source=$2
+            shift
+            ;;
+        --decoder-abi-inputs)
+            if [ "$#" -lt 2 ] || [ -n "$decoder_abi_inputs" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
+            decoder_abi_inputs=$2
             shift
             ;;
         --code-manifest-sha256)
@@ -561,7 +626,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
         usage >&2
         exit 64
     fi
@@ -580,9 +645,18 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-native-coding ] && [ "$scenario" != agent-native-editor ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != weather-decoder-abi ] && [ "$scenario" != wifi-mesh ] && [ "$scenario" != transaction-abci ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-native-coding ] && [ "$scenario" != agent-native-editor ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
+if [ "$scenario" = weather-decoder-abi ]; then
+    case $decoder_abi_inputs in /*) ;; *) usage >&2; exit 64 ;; esac
+    case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    # This is a distinct source-admitted ABI fixture, never a caller-selected
+    # runtime or a disguised content-provider/browser/native scenario.
+    [ -z "$mpquic_path$package_path$native_runtime_path$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256" ] || exit 64
+elif [ -n "$decoder_abi_inputs" ]; then
+    exit 64
+fi
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     case $code_bundle in /*) ;; *) exit 64 ;; esac
     case $code_manifest_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -590,12 +664,30 @@ if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative
 elif [ -n "$code_bundle$code_manifest_sha256" ]; then
     exit 64
 fi
+if [ -n "$browser_filter_bundle$browser_filter_manifest_sha256" ]; then
+    [ "$scenario" = content-provider ] || exit 64
+    case $browser_filter_bundle in /*) ;; *) exit 64 ;; esac
+    case $browser_filter_manifest_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#browser_filter_manifest_sha256}" -eq 64 ] || exit 64
+fi
+if [ -n "$weather_client_bundle$weather_client_manifest_sha256" ]; then
+    [ "$scenario" = content-provider ] && [ -z "$browser_filter_bundle$browser_filter_manifest_sha256" ] || exit 64
+    case $weather_client_bundle in /*) ;; *) exit 64 ;; esac
+    case $weather_client_bundle in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    case $weather_client_manifest_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#weather_client_manifest_sha256}" -eq 64 ] || exit 64
+fi
+if [ -n "$weather_android_source" ]; then
+    [ "$scenario" = content-provider ] && [ -n "$weather_client_bundle" ] || exit 64
+    case $weather_android_source in /*) ;; *) exit 64 ;; esac
+    case $weather_android_source in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+fi
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
 case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
 
 if [ -n "$host_tools_directory" ]; then
-    case $scenario in browser-network|agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal) ;; *) exit 64 ;; esac
+    case $scenario in browser-network|agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal|content-provider|weather-decoder-abi) ;; *) exit 64 ;; esac
     case $host_tools_directory in /*) ;; *) exit 64 ;; esac
     python3 -B "$(dirname -- "$0")/browser-native-tools.py" --verify --output "$host_tools_directory"
     PATH=$host_tools_directory/bin:$PATH
@@ -711,27 +803,85 @@ elif [ -n "$browser_native_bundle" ]; then
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=browser-native-kvm
+elif [ "$scenario" = weather-decoder-abi ]; then
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=weather-decoder-abi-kvm
+    runner_scratch_filesystem=$(stat -f -c '%T' -- "$RUN_DIRECTORY_PARENT") || exit 69
+    case $runner_scratch_filesystem in
+        ''|tmpfs|ramfs)
+            printf '%s\n' 'Decoder ABI VM scratch requires non-memory-backed workspace storage' >&2
+            exit 69 ;;
+    esac
+elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ]; then
+    # Every provider proof builds Rust in this 4 GiB guest. A growing qcow2
+    # overlay on tmpfs otherwise competes directly with the guest's RAM.
+    # Keep scratch beside validated workspace evidence, never in its export.
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=content-provider-kvm
+    [ -z "$browser_filter_bundle" ] || RUN_DIRECTORY_PREFIX=browser-filter-kvm
+    [ -z "${weather_client_bundle:-}" ] || RUN_DIRECTORY_PREFIX=weather-client-kvm
+    runner_scratch_filesystem=$(stat -f -c '%T' -- "$RUN_DIRECTORY_PARENT") || exit 69
+    case $runner_scratch_filesystem in
+        ''|tmpfs|ramfs)
+            printf '%s\n' 'Content-provider VM scratch requires non-memory-backed workspace storage' >&2
+            exit 69 ;;
+    esac
 fi
 RUN_DIRECTORY=$(mktemp -d "$RUN_DIRECTORY_PARENT/$RUN_DIRECTORY_PREFIX.XXXXXX")
 case $RUN_DIRECTORY in "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????) ;; *) exit 69 ;; esac
 chmod 0700 "$RUN_DIRECTORY"
 QEMU_PID=
+QEMU_STARTED=no
+QEMU_JOINED=no
+WEATHER_ANDROID_OWNER_PID=
+QEMU_BIRTH=
+QEMU_STOP_ATTEMPTED=no
 FINISHED=no
+
+stop_qemu_child() {
+    [ -n "$QEMU_PID" ] || return 0
+    # A failed/interrupted shutdown is not retried by EXIT with a fresh budget.
+    [ "$QEMU_STOP_ATTEMPTED" = no ] || return 1
+    QEMU_STOP_ATTEMPTED=yes
+    [ -n "$QEMU_BIRTH" ] || return 1
+    if ! timeout --signal=TERM --kill-after=2s 45s \
+        python3 -B "$HERE/qemu-child-lifecycle.py" stop "$QEMU_PID" "$$" "$QEMU_BIRTH" "$1"; then
+        return 1
+    fi
+    # The original child is now confirmed terminated, so this is a reap, not
+    # an unbounded wait for a live process. Its status is not the guest result.
+    wait "$QEMU_PID" 2>/dev/null || true
+    QEMU_JOINED=yes
+    QEMU_PID=
+    return 0
+}
 
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
-    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
-        kill -TERM "$QEMU_PID" 2>/dev/null || true
-        wait_attempt=0
-        while kill -0 "$QEMU_PID" 2>/dev/null && [ "$wait_attempt" -lt 50 ]; do
-            sleep 0.1
-            wait_attempt=$((wait_attempt + 1))
-        done
-        if kill -0 "$QEMU_PID" 2>/dev/null; then
-            kill -KILL "$QEMU_PID" 2>/dev/null || true
+    # A shell-only cancellation must reach the Android owner too. Wait for its
+    # bounded child cleanup before destroying the guest or its private files.
+    if [ -n "$WEATHER_ANDROID_OWNER_PID" ]; then
+        if kill -0 "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null; then
+            kill -TERM "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null || true
+            owner_wait_attempt=0
+            while kill -0 "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null && [ "$owner_wait_attempt" -lt 400 ]; do
+                sleep 0.1
+                owner_wait_attempt=$((owner_wait_attempt + 1))
+            done
+            if kill -0 "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null; then
+                kill -KILL "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null || true
+                status=1
+            fi
         fi
-        wait "$QEMU_PID" 2>/dev/null || true
+        wait "$WEATHER_ANDROID_OWNER_PID" 2>/dev/null || true
+        WEATHER_ANDROID_OWNER_PID=
+    fi
+    if ! stop_qemu_child abort; then
+        [ "$status" -ne 0 ] || status=1
+        printf '%s\n' 'QEMU exit unconfirmed; private VM scratch retained' >&2
     fi
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
         install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
@@ -748,11 +898,47 @@ cleanup() {
         install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
             2>/dev/null || status=1
     fi
-    case $RUN_DIRECTORY in
-        "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????)
-            rm -rf --one-file-system -- "$RUN_DIRECTORY" ;;
-        *) status=69 ;;
-    esac
+    if [ -z "$QEMU_PID" ]; then
+        case $RUN_DIRECTORY in
+            "$RUN_DIRECTORY_PARENT"/"$RUN_DIRECTORY_PREFIX".??????)
+                rm -rf --one-file-system -- "$RUN_DIRECTORY" ;;
+            *) status=69 ;;
+        esac
+    fi
+    if [ "${weather_client_version:-}" = 6 ]; then
+        # Record whether private guest state and temporary SSH keys were removed
+        # after the bounded shutdown attempt. The later hosted gate must
+        # also validate the exact native/core evidence; cleanup alone is not it.
+        android_private_removed=false
+        if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then android_private_removed=true; fi
+        if [ "$android_private_removed" != true ]; then
+            [ "$status" -ne 0 ] || status=1
+        fi
+        if ! (set -C
+            jq -n --arg core_commit "$expected_commit" --arg weather_commit "$weather_android_commit" \
+                --arg manifest_sha256 "$WEATHER_CLIENT_MANIFEST_SHA256" \
+                --arg driver_finished "$FINISHED" --arg qemu_started "$QEMU_STARTED" --arg qemu_joined "$QEMU_JOINED" \
+                --argjson private_guest_state_removed "$android_private_removed" --argjson owner_exit_status "$status" \
+                '{schema:6,kind:"weather-android-vm-cleanup",core_commit:$core_commit,weather_commit:$weather_commit,
+                  manifest_sha256:$manifest_sha256,driver_finished:($driver_finished == "yes"),
+                  qemu_started:($qemu_started == "yes"),qemu_joined:($qemu_joined == "yes"),
+                  private_guest_state_removed:$private_guest_state_removed,owner_exit_status:$owner_exit_status,
+                  joined_core_acceptance:false}' >"$output_directory/weather-android-vm-cleanup.json"
+        ); then status=1; fi
+    fi
+    if [ "$scenario" = protected-quote ]; then
+        quote_private_removed=false
+        if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then quote_private_removed=true; fi
+        [ "$quote_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
+        if ! (set -C
+            jq -n --arg revision "$expected_commit" --arg started "$QEMU_STARTED" --arg joined "$QEMU_JOINED" \
+                --argjson removed "$quote_private_removed" \
+                '{schema_version:1,source_revision:$revision,qemu_started:($started == "yes"),
+                  qemu_joined:($joined == "yes"),private_guest_state_removed:$removed}' \
+                >"$output_directory/protected-quote-vm-cleanup.json"); then
+            [ "$status" -ne 0 ] || status=1
+        fi
+    fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -766,13 +952,56 @@ git -C "$REPOSITORY" archive --format=tar --prefix=source/ "$expected_commit" \
 [ "$(stat -Lc '%s' "$SOURCE_ARCHIVE")" -gt 0 ] || exit 69
 [ "$(stat -Lc '%s' "$SOURCE_ARCHIVE")" -le 536870912 ] || exit 69
 SOURCE_SHA256=$(sha256sum "$SOURCE_ARCHIVE" | awk '{ print $1 }')
+BROWSER_FILTER_ARCHIVE=$RUN_DIRECTORY/browser-filter.tar
+BROWSER_FILTER_ARCHIVE_SHA256=none
+BROWSER_FILTER_MANIFEST_SHA256=none
+if [ -n "$browser_filter_bundle" ]; then
+    python3 -B "$HERE/browser-filter-bundle.py" verify "$browser_filter_bundle" "$browser_filter_manifest_sha256"
+    install -m 0600 "$browser_filter_bundle" "$BROWSER_FILTER_ARCHIVE"
+    python3 -B "$HERE/browser-filter-bundle.py" verify "$BROWSER_FILTER_ARCHIVE" "$browser_filter_manifest_sha256"
+    BROWSER_FILTER_ARCHIVE_SHA256=$(sha256sum "$BROWSER_FILTER_ARCHIVE" | awk '{ print $1 }')
+    BROWSER_FILTER_MANIFEST_SHA256=$browser_filter_manifest_sha256
+    printf '%s\n' 'Additional proof: exact Browser/ESR/signed-addons bundle, real core filter broker, uBO engine probes and revocation.'
+fi
 CODE_ARCHIVE=$RUN_DIRECTORY/cooperative-code.tar
+WEATHER_CLIENT_ARCHIVE=$RUN_DIRECTORY/weather-client.tar
+WEATHER_CLIENT_ARCHIVE_SHA256=none
+WEATHER_CLIENT_MANIFEST_SHA256=none
+if [ -n "$weather_client_bundle" ]; then
+    python3 -B "$HERE/weather-client-bundle.py" verify-runtime "$weather_client_bundle" "$weather_client_manifest_sha256"
+    install -m 0600 "$weather_client_bundle" "$WEATHER_CLIENT_ARCHIVE"
+    python3 -B "$HERE/weather-client-bundle.py" verify-runtime "$WEATHER_CLIENT_ARCHIVE" "$weather_client_manifest_sha256"
+    WEATHER_CLIENT_ARCHIVE_SHA256=$(sha256sum "$WEATHER_CLIENT_ARCHIVE" | awk '{ print $1 }')
+    WEATHER_CLIENT_MANIFEST_SHA256=$weather_client_manifest_sha256
+    weather_client_version=$(python3 -B "$HERE/weather-client-bundle.py" runtime-version \
+        "$WEATHER_CLIENT_ARCHIVE" "$WEATHER_CLIENT_MANIFEST_SHA256" | jq -er '.bundle_version')
+    if [ "${weather_client_version:-}" = 6 ]; then
+        [ -n "$weather_android_source" ] || exit 64
+        weather_android_commit=$(jq -er '.sources.weather.commit' "$HERE/weather-public-android-v6.json")
+        # Native compilation and immutable preparation happened earlier on the
+        # hosted runner, never inside the publication's finite lifetime.
+        python3 -B "$HERE/weather-android-owner.py" preflight --weather-root "$weather_android_source" \
+            --core-commit "$expected_commit" --weather-commit "$weather_android_commit" --kvm-output "$output_directory" \
+            --kvm-baseline "$RUN_DIRECTORY/kvm-before-vm.json"
+    else
+        [ -z "$weather_android_source" ] || exit 64
+    fi
+    printf '%s\n' 'Additional proof: public model HTTPS acquisition (ECMWF, plus NOAA for the two-product profiles), protected peer transfer and the exact bundled Drizz.li or Overmorrow UI; origin acquisition is not an overlay claim.'
+fi
 CODE_ARCHIVE_SHA256=none
 CODE_MANIFEST_SHA256=none
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     python3 -B "$HERE/cooperative-code-bundle.py" capture "$code_bundle" "$CODE_ARCHIVE" "$code_manifest_sha256" "$scenario"
     CODE_ARCHIVE_SHA256=$(sha256sum "$CODE_ARCHIVE" | awk '{ print $1 }')
     CODE_MANIFEST_SHA256=$code_manifest_sha256
+fi
+DECODER_ABI_DIRECTORY=$RUN_DIRECTORY/weather-decoder-inputs
+if [ "$scenario" = weather-decoder-abi ]; then
+    # The reviewed source record, not a CLI hash or artifact receipt, chooses
+    # every admitted byte. These operations never execute an input binary.
+    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
+    python3 -B "$HERE/weather-decoder-abi.py" stage-inputs "$decoder_abi_inputs" "$DECODER_ABI_DIRECTORY"
+    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$DECODER_ABI_DIRECTORY"
 fi
 
 OVERLAY=$RUN_DIRECTORY/overlay.qcow2
@@ -851,6 +1080,9 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "private-unbound-proof.json", "private-unbound-build.log",
               "private-unbound-package.json", "private-unbound-package-lifecycle.json",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
+              "content-provider-adaptive-worker-budget.json", "content-provider-adaptive-https-worker-budget.json",
+              "content-provider-adaptive-continuation.json", "content-provider-adaptive-https-continuation.json",
+              "content-provider-adaptive-resource-ready.json", "content-provider-adaptive-https-resource-ready.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "mptcp-refill-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
@@ -981,6 +1213,58 @@ FRAGMENTS_NAMES = {"a01-expected-peers.json"} | {
       for role in ("client", "relay0", "relay1", "relay2", "exit")),
 )}
 
+MAINTENANCE_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "private-storage-fragments-evidence.json"}) | {
+    "private-storage-maintenance-smoke.json", "private-storage-maintenance-evidence.json",
+    "private-storage-maintenance-lifecycle.json",
+    "private-storage-maintenance-lifecycle-failure.json",
+    "private-storage-maintenance-route-diagnostic.json",
+    "private-storage-maintenance-provider-events.json",
+    "private-storage-maintenance-helper-acquire.json",
+    "private-storage-provider-activity.json",
+    "private-storage-fixture-correlation.json",
+    "storage-consumer-provider-usage.json",
+    "storage-consumer-failure-boundary.json",
+    "private-storage-maintenance-inventory.json",
+    "private-storage-maintenance-supervisor.json",
+    "private-storage-maintenance-control-transition.json",
+    *(f"private-storage-fragments-{phase}-layout.json"
+      for phase in ("upload", "lifecycle", "restore", "finish")),
+    "private-storage-fragments-lifecycle-live-selection.json",
+    "private-storage-fragments-lifecycle-gates.json",
+    "content-provider-adaptive-private-storage-fragments-lifecycle-control.json",
+    *(f"private-storage-fragments-lifecycle-privacy-{role}.json"
+      for role in ("client", "relay0", "relay1", "relay2", "exit")),
+}
+MAINTENANCE_NAMES |= {f"storage-consumer-{name}.json" for name in (
+    "provision", "prepare", "publish", "exercise", "finish", "withdrawal",
+    "private-cleanup", "evidence", "isolation")
+} | {f"private-storage-fragments-consumer_{name}_usage.json" for name in (
+    "uploaded", "restored", "deleted")
+} | {name for phase in ("publish", "exercise", "finish") for name in (
+    f"private-storage-fragments-consumer-{phase}-layout.json",
+    f"private-storage-fragments-consumer-{phase}-live-selection.json",
+    f"private-storage-fragments-consumer-{phase}-gates.json",
+    f"content-provider-adaptive-private-storage-fragments-consumer-{phase}-control.json",
+    *(f"private-storage-fragments-consumer-{phase}-privacy-{role}.json"
+      for role in ("client", "relay0", "relay1", "relay2", "exit")),
+)}
+MAINTENANCE_LARGE_NAMES = {
+    "private-storage-maintenance-smoke.json", "private-storage-maintenance-evidence.json",
+    "storage-consumer-evidence.json",
+}
+CONSUMER_CONTROL_NAMES = {"storage-consumer-control-underlay.json"} | {
+    f"storage-consumer-{phase}-control-{suffix}.json"
+    for phase in ("publish", "exercise", "finish")
+    for suffix in ("before", "after", "relay0", "relay1", "relay2")
+}
+MAINTENANCE_NAMES |= CONSUMER_CONTROL_NAMES
+MAINTENANCE_PRIORITY_NAMES = {
+    name for name in MAINTENANCE_NAMES if name not in CONSUMER_CONTROL_NAMES and (
+    name.startswith("storage-consumer-") or name.startswith("private-storage-maintenance-")
+    or name.endswith("_usage.json") or name.endswith("private_cleanup.json"))
+} | {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase",
+     "private-storage-provider-activity.json", "private-storage-fixture-correlation.json"}
+
 SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
     "guest-exit-status", "current-phase"} | {
@@ -1032,6 +1316,201 @@ COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
     "content-provider-custody-executor-discovery-control.json",
 } | {f"content-custody-executor-discovery-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
+
+BROWSER_FILTER_NAMES = {f"browser-filter-delivery-{suffix}.json" for suffix in (
+    "original-report", "original-outer-cleanup", "original-diagnostic", "evidence", "prepared", "cache-before", "cache-after",
+    "launch", "tree-before", "tree-after", "input-cleanup", "retained", "artifacts")}
+BROWSER_FILTER_HELPERS = ("browser-filter-delivery.py", "browser-filter-bundle.py",
+    "content-provider-filter-smoke.py", "content-provider-site-smoke.py",
+    "content-network-smoke.py", "content-provider-https-smoke.py")
+WEATHER_CLIENT_NAMES = {f"weather-client-delivery-{suffix}.json" for suffix in (
+    "cold-evidence", "evidence", "acquisition", "original-report", "tree-before", "tree-after",
+    "cache-before", "cache-after", "input-cleanup")}
+WEATHER_CLIENT_HELPERS = ("weather-client-delivery.py", "weather-client-bundle.py",
+    "browser-filter-bundle.py", "content-provider-https-smoke.py", "content-network-smoke.py")
+WEATHER_PRODUCTS_NAMES = {name.replace("weather-client-delivery-", "weather-products-delivery-", 1)
+    for name in WEATHER_CLIENT_NAMES}
+WEATHER_PRODUCTS_FAILURE_NAMES = {f"weather-products-delivery-{suffix}.json" for suffix in (
+    "acquisition-failure", "export-status", "tree-before", "input-cleanup")}
+WEATHER_PRODUCTS_HELPERS = ("weather-products-delivery.py", "weather-source-observer.mjs",
+    "weather-public-drizzli-v4.json", *WEATHER_CLIENT_HELPERS)
+WEATHER_PRODUCTS_V5_ADMISSION = "weather-public-overmorrow-v5.json"
+WEATHER_ANDROID_NAMES = {"weather-android-delivery-evidence.json"}
+WEATHER_ANDROID_HELPERS = ("weather-android-evidence.py", "weather-android-api.py",
+    "weather-android-delivery.py", "weather-android-control.py", "weather-public-android-v6.json",
+    *WEATHER_PRODUCTS_HELPERS)
+LATE_PROVIDER_NAMES = {f"content-provider-late-recovery-{suffix}.json" for suffix in (
+    "first-snapshot", "final-snapshot", "object", "run-cleanup", "cleanup", "evidence", "failure", "readiness")}
+PRESSURE_PROVIDER_NAMES = {f"content-provider-pressure-{suffix}.json" for suffix in (
+    "worker-budget", "continuation", "resource-ready", "evidence", "ready", "controller", "cleanup",
+    "object", "fetch", "selection", "live-selection", "status-before", "status-after",
+    "qdisc-before", "qdisc-limited", "qdisc-after", "qdisc-profile", "control-privacy")}
+PRESSURE_PROVIDER_NAMES.update(f"content-provider-pressure-privacy-{node}.json"
+    for node in ("client", "relay0", "relay1", "relay2", "exit"))
+PRESSURE_PROVIDER_NAMES.update(f"content-provider-pressure-{node}-{operation}.json"
+    for node in ("relay3", "relay4", "relay5") for operation in ("reset", "serve", "status", "stop"))
+PRESSURE_PRIORITY_NAMES = {f"content-provider-pressure-{suffix}.json" for suffix in (
+    "worker-budget", "continuation", "resource-ready", "evidence", "ready", "controller", "cleanup", "object", "fetch")}
+
+
+def joined_client_helper(work, names, entrypoint):
+    """Trust only the topology's immutable root-staged validation closure."""
+    try:
+        directory = work / "bin"
+        if directory.resolve(strict=True) != directory:
+            return None
+        for parent in (directory, *directory.parents):
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                return None
+        for name in names:
+            path = directory / name
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                    or info.st_mode & 0o022 or not 0 < info.st_size <= 262144):
+                return None
+        return directory / entrypoint
+    except OSError:
+        return None
+
+
+def browser_filter_helper(work):
+    return joined_client_helper(work, BROWSER_FILTER_HELPERS, "browser-filter-delivery.py")
+
+
+def weather_client_helper(work):
+    # An Android closure never falls back to browser evidence or exports its
+    # private receipt/configuration files, including after an interrupted run.
+    try:
+        (work / "bin/weather-android-evidence.py").lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    else:
+        return joined_client_helper(work, WEATHER_ANDROID_HELPERS, "weather-android-evidence.py")
+    # A present v2 entrypoint selects the complete v2 validation closure. If
+    # unsafe, reject it rather than silently interpreting v2 evidence as v1.
+    try:
+        (work / "bin/weather-products-delivery.py").lstat()
+    except FileNotFoundError:
+        return joined_client_helper(work, WEATHER_CLIENT_HELPERS, "weather-client-delivery.py")
+    except OSError:
+        return None
+    names = WEATHER_PRODUCTS_HELPERS
+    # A v5 run stages its extra authority beside the immutable helpers. Check
+    # it when present (including unsafe links), without requiring it for v1-4.
+    # The evidence helper still requires the exact admission for a v5 manifest.
+    try:
+        (work / "bin" / WEATHER_PRODUCTS_V5_ADMISSION).lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    else:
+        names = (*names, WEATHER_PRODUCTS_V5_ADMISSION)
+    return joined_client_helper(work, names, "weather-products-delivery.py")
+
+
+def weather_client_candidates(root, label, helper, target):
+    # No raw forecast, request/config, CLI receipt or process log is exported.
+    names = {"weather-client-delivery.py": WEATHER_CLIENT_NAMES,
+        "weather-products-delivery.py": WEATHER_PRODUCTS_NAMES,
+        "weather-android-evidence.py": WEATHER_ANDROID_NAMES}.get(helper.name)
+    if names is None:
+        return []
+    action = "copy-artifacts"
+    if helper.name == "weather-products-delivery.py":
+        try:
+            (root / "weather-products-delivery-acquisition-failure.json").lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return []
+        else:
+            # Marker trust is checked by the immutable helper, never inferred
+            # from existence; unsafe markers have no success-export fallback.
+            action = "copy-failure-artifacts"
+    validated = Path(tempfile.mkdtemp(prefix="weather-client-validated.", dir=target))
+    export_status = 0
+    try:
+        subprocess.run(["/usr/bin/python3", "-I", "-B", str(helper), action, str(root),
+                        str(validated), str(os.getuid()), str(os.getgid())],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       cwd="/", env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=3, check=True)
+    except subprocess.CalledProcessError as error:
+        if action != "copy-failure-artifacts" or error.returncode != 1:
+            return []
+        export_status = 1
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if action == "copy-failure-artifacts":
+        names = weather_failure_exports(validated, export_status)
+    return [(validated / name, f"{label}/{name}") for name in sorted(names)
+            if (validated / name).is_file() and not (validated / name).is_symlink()]
+
+
+def weather_failure_exports(validated, returncode):
+    """Keep only a completed dedicated failure export, never a crashed partial write."""
+    status_name = "weather-products-delivery-export-status.json"
+
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate status key")
+            value[key] = item
+        return value
+
+    def safe_file(path):
+        info = path.lstat()
+        return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                and info.st_uid == os.getuid() and info.st_gid == os.getgid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 65536)
+
+    try:
+        status_path = validated / status_name
+        if not safe_file(status_path):
+            return set()
+        observed = read_tail(status_path, 65536)
+        if observed is None or observed[1] > 65536:
+            return set()
+        value = json.loads(observed[0], object_pairs_hook=unique)
+        if (type(value) is not dict or set(value) != {"schema", "kind", "complete", "success", "exported", "rejected"}
+                or type(value["schema"]) is not int or value["schema"] != 2
+                or value["kind"] != "weather-products-failure-export"
+                or value["complete"] is not True or value["success"] is not (returncode == 0)):
+            return set()
+        allowed = {"acquisition-failure", "tree-before", "input-cleanup"}
+        exported, rejected = value["exported"], value["rejected"]
+        if (type(exported) is not list or type(rejected) is not list
+                or not all(type(item) is str for item in exported + rejected)
+                or len(exported) != len(set(exported)) or len(rejected) != len(set(rejected))
+                or not set(exported) <= allowed or not set(rejected) <= allowed | {"acquisition"}
+                or set(exported) & set(rejected) or "acquisition-failure" not in exported
+                or value["success"] is not (not rejected)):
+            return set()
+        names = {f"weather-products-delivery-{suffix}.json" for suffix in exported} | {status_name}
+        if not names <= WEATHER_PRODUCTS_FAILURE_NAMES or not all(safe_file(validated / name) for name in names):
+            return set()
+        return names
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def browser_filter_candidates(root, label, helper, target):
+    # Reuse the closed recursive JSON validator, never import the worker's
+    # Browser tree or copy its logs. A failed/missing validator yields no files.
+    validated = Path(tempfile.mkdtemp(prefix="browser-filter-validated.", dir=target))
+    try:
+        subprocess.run(["/usr/bin/python3", "-I", "-B", str(helper), "copy-artifacts", str(root),
+                        str(validated), str(os.getuid()), str(os.getgid())],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       cwd="/", env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=3, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [(validated / name, f"{label}/{name}") for name in sorted(BROWSER_FILTER_NAMES)
+            if (validated / name).is_file() and not (validated / name).is_symlink()]
 
 
 def read_tail(path, limit=FILE_LIMIT):
@@ -1088,6 +1567,7 @@ def collect(home, opt, revision, scenario, guest_status,
     target = Path(tempfile.mkdtemp(prefix="alpha-incomplete.", dir=home))
     entries = []
     seen_sources = set()
+    seen_maintenance_bytes = set()
     total = 0
     browser_names = set()
     if scenario == "browser-network":
@@ -1106,7 +1586,7 @@ def collect(home, opt, revision, scenario, guest_status,
     file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment") else FILE_COUNT_LIMIT
     if scenario == "agent-autonomous-aggregation":
         file_count_limit = 192
-    if scenario in ("reciprocity-private-dns", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+    if scenario in ("reciprocity-private-dns", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
         # Bounded DNS and six-phase custody evidence exceed the default file count.
         file_count_limit = 128
     candidates = [(home / name, f"driver/{name}") for name in
@@ -1120,12 +1600,16 @@ def collect(home, opt, revision, scenario, guest_status,
                       (home / "signal-backup-runtime/provision.json", "driver/signal-backup-provision.json")]
     if scenario in ("agent-private-conversation", "agent-native-coding", "agent-native-editor"):
         candidates = [(home / name, f"driver/{name}") for name in ("guest-phase.txt", "cargo-build.log")]
-    if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+    if scenario == "weather-decoder-abi":
+        candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
+    if scenario in ("private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
         if scenario == "image-snapshot":
             candidates.append((opt / "volparossa-image/provision.json", "driver/image-snapshot-provision.json"))
         elif scenario in ("cloud-private-file", "cloud-private-upload"):
             candidates.append((opt / "volparossa-cloud/provision.json", f"driver/{scenario}-provision.json"))
+        elif scenario == "private-storage-maintenance":
+            candidates.append((opt / "volparossa-storage-consumers/provision.json", "driver/storage-consumer-provision.json"))
     roots = [(home / "alpha-output", "published")]
     pattern = "vu.*" if scenario == "cloud-private-upload" else "va.*"
     name_pattern = r"vu\.[A-Za-z0-9]{6}" if scenario == "cloud-private-upload" else r"va\.[0-9a-f]{32}\.[A-Za-z0-9]{6}"
@@ -1134,6 +1618,47 @@ def collect(home, opt, revision, scenario, guest_status,
             roots.append((path, f"work-{len(roots)}"))
             if len(roots) == 5:
                 break
+    if scenario == "private-storage-maintenance":
+        # Keep terminal receipts before packet evidence across both published
+        # and interrupted work roots, under the existing 128-file/byte bounds.
+        for root, label in roots:
+            if root.is_dir() and not root.is_symlink():
+                candidates.extend((root / name, f"{label}/{name}")
+                    for name in sorted(MAINTENANCE_PRIORITY_NAMES))
+    if scenario == "content-provider":
+        # Keep the aggregate outcome/terminal phase even if later diagnostics
+        # fill the unchanged emergency file budget.
+        for root, label in roots:
+            if root.is_dir() and not root.is_symlink():
+                candidates.extend((root / name, f"{label}/{name}")
+                    for name in ("content-provider-smoke.json", "current-phase"))
+        # Prioritize already validated exact Browser receipts before generic
+        # diagnostics consume the existing file-count/byte limits. This is
+        # recovery evidence only, even when an inner receipt says passed=true.
+        helper = next((found for root, _ in roots[1:]
+                       if (found := browser_filter_helper(root)) is not None), None)
+        if helper is not None:
+            for root, label in roots:
+                if root.is_dir() and not root.is_symlink():
+                    candidates.extend(browser_filter_candidates(root, label, helper, target))
+        helper = next((found for root, _ in roots[1:]
+                       if (found := weather_client_helper(root)) is not None), None)
+        if helper is not None:
+            for root, label in roots:
+                if root.is_dir() and not root.is_symlink():
+                    candidates.extend(weather_client_candidates(root, label, helper, target))
+        # Preserve the small, exact late-provider diagnostic set before older
+        # content globs exhaust the unchanged bounds. These are incomplete-run
+        # observations, never proof of successful cleanup or live acceptance.
+        for root, label in roots:
+            if root.is_dir() and not root.is_symlink():
+                candidates.extend((root / name, f"{label}/{name}") for name in sorted(LATE_PROVIDER_NAMES))
+        # Preserve the closed pressure outcome first; the remaining exact raw
+        # evidence is best effort under the same 64-file/8MiB emergency bounds.
+        for names in (PRESSURE_PRIORITY_NAMES, PRESSURE_PROVIDER_NAMES - PRESSURE_PRIORITY_NAMES):
+            for root, label in roots:
+                if root.is_dir() and not root.is_symlink():
+                    candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
     for root, label in roots:
         if root.is_symlink() or not root.is_dir():
             continue
@@ -1147,6 +1672,21 @@ def collect(home, opt, revision, scenario, guest_status,
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(
                 SIGNAL_FRAGMENT_NAMES if scenario == "signal-backup-fragments" else SIGNAL_NAMES))
             continue
+        if scenario == "transaction-abci":
+            # Closed receipts only: never scan validator stores, account seeds or logs.
+            if label == "published":
+                candidates.extend((root / name, f"{label}/{name}") for name in (
+                    "transaction-abci-build.json", "transaction-abci-inner.json",
+                    "transaction-abci-acceptance.json", "guest-exit-status", "guest-phase"))
+            continue
+        if scenario == "weather-decoder-abi":
+            # Only this synthetic public probe's bounded named outputs; never
+            # copy admitted tools, source archives, private scratch or raw keys.
+            if label == "published":
+                candidates.extend((root / name, f"{label}/{name}") for name in (
+                    "report.json", "elf.log", "sandbox.log", "version.log", "decode-first.log",
+                    "decode-last.log", "current-phase", "guest-exit-status"))
+            continue
         if scenario in ("agent-private-conversation", "agent-native-coding", "agent-native-editor"):
             # The owned private root, prompts, raw model answers and client logs are never scanned.
             if label == "published":
@@ -1159,8 +1699,8 @@ def collect(home, opt, revision, scenario, guest_status,
                                         "host-state-before.json", "host-state-after.json"}
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(selected))
             continue
-        if scenario in ("private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
-            names = UPLOAD_NAMES if scenario == "cloud-private-upload" else CLOUD_NAMES if scenario == "cloud-private-file" else IMAGE_NAMES if scenario == "image-snapshot" else FRAGMENTS_NAMES
+        if scenario in ("private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload"):
+            names = MAINTENANCE_NAMES if scenario == "private-storage-maintenance" else UPLOAD_NAMES if scenario == "cloud-private-upload" else CLOUD_NAMES if scenario == "cloud-private-file" else IMAGE_NAMES if scenario == "image-snapshot" else FRAGMENTS_NAMES
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
             candidates.extend((root / name, f"{label}/{name}") for name in
                               ("host-state-before.json", "host-state-after.json", "guest-exit-status"))
@@ -1275,13 +1815,22 @@ def collect(home, opt, revision, scenario, guest_status,
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
                           if re.fullmatch(r"download-sharing-[a-z0-9-]+\.(json|txt|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("content-*"))[:48]
-                          if re.fullmatch(r"content-[a-z0-9-]+\.(json|txt|log|err|out)", path.name))
+                          if re.fullmatch(r"content-[a-z0-9-]+\.(json|txt|log|err|out)", path.name)
+                          and (not path.name.startswith("content-provider-late-recovery-")
+                               or scenario == "content-provider" and path.name in LATE_PROVIDER_NAMES)
+                          and (not path.name.startswith("content-provider-pressure-")
+                               or scenario == "content-provider" and path.name in PRESSURE_PROVIDER_NAMES))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-public-task-*"))[:32]
                           if re.fullmatch(r"agent-public-task-[a-z0-9-]+\.(json|err|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-public-document-*"))[:32]
                           if re.fullmatch(r"agent-public-document-[a-z0-9-]+\.(json|err|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-owner-cancel-*"))[:32]
                           if re.fullmatch(r"agent-owner-cancel-[a-z0-9-]+\.(json|stdout|stderr|log)", path.name))
+    if scenario == "protected-quote":
+        # Do not recover raw service logs, quote inputs or report files. Only
+        # the original closed guest projection can survive an early retrieval.
+        candidates = [(root / "protected-quote-route.json", f"{label}/protected-quote-route.json")
+                      for root, label in roots]
     for path, relative in candidates:
         if len(entries) >= file_count_limit or total >= TOTAL_LIMIT:
             break
@@ -1289,10 +1838,76 @@ def collect(home, opt, revision, scenario, guest_status,
             continue
         seen_sources.add(path)
         per_file = 1048576 if scenario == "browser-network" and path.name == "browser-network-evidence.json" else FILE_LIMIT
+        if scenario == "private-storage-maintenance" and path.name in MAINTENANCE_LARGE_NAMES:
+            # These aggregates embed the original bounded control-transition
+            # readbacks. Match the normal export ceiling for only these names;
+            # standalone receipts and the total byte/file bounds are unchanged.
+            per_file = 1048576
+        if scenario == "protected-quote" and path.name == "protected-quote-route.json":
+            per_file = 262144
         observed = read_tail(path, min(per_file, TOTAL_LIMIT - total))
         if observed is None:
             continue
         data, original_size = observed
+        if path.name == "storage-consumer-failure-boundary.json":
+            if original_size > 131072 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-consumer-failure-boundary.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if path.name == "storage-consumer-provider-usage.json":
+            if original_size > 4096 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-consumer-provider-usage.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if path.name == "private-storage-fixture-correlation.json":
+            if original_size > 16384 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-fixture-correlation-sampler.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue  # Missing/invalid closed projection is never raw export authority.
+        if path.name == "private-storage-maintenance-helper-acquire.json":
+            if original_size > 16384 or original_size != len(data):
+                continue
+            try:
+                subprocess.run(["/usr/bin/python3", "-I", "-B", str(home / "source/tests/integration/storage-acquire-diagnostic.py"),
+                    "validate-stdin"], input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+            except (OSError, subprocess.SubprocessError):
+                continue  # A filename alone never authorizes arbitrary log fields.
+        if scenario == "private-storage-maintenance":
+            if original_size > len(data):
+                continue  # A truncated JSON tail is not structured evidence.
+            if relative.endswith(".json"):
+                try:
+                    json.loads(data)
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+            # Published and work copies of the same original bytes need only
+            # one slot. Never deduplicate different contents or different names.
+            identity = (Path(relative).name, data)
+            if identity in seen_maintenance_bytes:
+                continue
+            seen_maintenance_bytes.add(identity)
+        if scenario == "protected-quote" and original_size > len(data):
+            continue  # Never turn a closed quote receipt into an unvalidated raw tail.
+        if path.name in BROWSER_FILTER_NAMES | WEATHER_CLIENT_NAMES | WEATHER_PRODUCTS_NAMES | WEATHER_PRODUCTS_FAILURE_NAMES | WEATHER_ANDROID_NAMES | LATE_PROVIDER_NAMES | PRESSURE_PROVIDER_NAMES and original_size > len(data):
+            continue  # Preserve complete validated original bytes, never a JSON tail.
+        if path.name in PRESSURE_PROVIDER_NAMES:
+            try:
+                json.loads(data)
+            except (ValueError, UnicodeError, RecursionError):
+                continue  # Interrupted/malformed pressure JSON is not raw-log authority.
         if scenario == "browser-network" and path.name in browser_names and original_size > len(data):
             # A truncated JSON tail is not reconstructible structured evidence.
             continue
@@ -1332,8 +1947,8 @@ def collect(home, opt, revision, scenario, guest_status,
 if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
-    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+    if sys.argv[2] not in ("weather-decoder-abi", "alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
+                           "sharing", "download-sharing", "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "protected-quote", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -1364,6 +1979,10 @@ native_runtime_sha256=none
 browser_native_sha256=none
 code_archive_sha256=none
 code_manifest_sha256=none
+browser_filter_archive_sha256=none
+browser_filter_manifest_sha256=none
+weather_client_archive_sha256=none
+weather_client_manifest_sha256=none
 # Native, browser and cooperative bundles share positions only in disjoint scenarios.
 case $scenario in
     agent-native-coding|agent-native-editor)
@@ -1379,13 +1998,96 @@ case $scenario in
         [ "$#" -eq 6 ] || exit 64
         browser_native_sha256=${6:-none}
         ;;
+    content-provider)
+        if [ "$#" -eq 8 ]; then
+            [ "$6" = weather-client ] || exit 64
+            weather_client_archive_sha256=$7
+            weather_client_manifest_sha256=$8
+            case $weather_client_archive_sha256:$weather_client_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
+            [ "${#weather_client_archive_sha256}" -eq 64 ] && [ "${#weather_client_manifest_sha256}" -eq 64 ] || exit 64
+        elif [ "$#" -eq 7 ]; then
+            browser_filter_archive_sha256=$6
+            browser_filter_manifest_sha256=$7
+            case $browser_filter_archive_sha256:$browser_filter_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
+            [ "${#browser_filter_archive_sha256}" -eq 64 ] && [ "${#browser_filter_manifest_sha256}" -eq 64 ] || exit 64
+        else
+            [ "$#" -eq 5 ] || exit 64
+        fi
+        ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
-case $scenario in alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
+prepare_current_compiler() {
+    # Drop only metadata added by the fixed no-TTY, no-agent SSH transport.
+    # Keep other SSH/Git variables for the source policy to reject.
+    unset SSH_CLIENT SSH_CONNECTION
+    python3 -B scripts/provision-rust189.py alpha-guest
+    export CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+    export PATH="/home/vpci/.local/volparossa-rust-1.89.0/bin:$PATH"
+}
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+if [ "$scenario" = weather-decoder-abi ]; then
+    # A standalone ABI proof exits before the general native/core build path.
+    test "$(id -un)" = vpci
+    test "$(id -u)" -ne 0
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt --vm)" = kvm
+    test "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13
+    test "$(dpkg --print-architecture)" = amd64
+    tar -xzf source.tar.gz
+    cd source
+    decoder_abi_output=/home/vpci/alpha-output
+    test ! -e "$decoder_abi_output" && test ! -L "$decoder_abi_output"
+    decoder_abi_finalize() {
+        decoder_abi_status=$?
+        trap - EXIT HUP INT TERM
+        set +e
+        if [ ! -e "$decoder_abi_output" ] && [ ! -L "$decoder_abi_output" ]; then
+            mkdir -m 0700 "$decoder_abi_output" || exit 1
+        fi
+        [ -d "$decoder_abi_output" ] && [ ! -L "$decoder_abi_output" ] \
+            && [ "$(stat -c '%u:%a' "$decoder_abi_output")" = "$(id -u):700" ] || exit 1
+        # A missing report cannot turn a successful command into ABI evidence.
+        if [ "$decoder_abi_status" -eq 0 ] && { [ ! -f "$decoder_abi_output/report.json" ] || [ -L "$decoder_abi_output/report.json" ]; }; then
+            decoder_abi_status=1
+        fi
+        printf '%s\n' "$decoder_abi_status" >"$decoder_abi_output/guest-exit-status" || exit 1
+        cp /home/vpci/guest-phase.txt "$decoder_abi_output/current-phase" || exit 1
+        : >/home/vpci/weather-decoder-export.list || exit 1
+        for decoder_abi_name in report.json elf.log sandbox.log version.log decode-first.log decode-last.log current-phase guest-exit-status; do
+            decoder_abi_file=$decoder_abi_output/$decoder_abi_name
+            if [ -e "$decoder_abi_file" ] || [ -L "$decoder_abi_file" ]; then
+                [ -f "$decoder_abi_file" ] && [ ! -L "$decoder_abi_file" ] \
+                    && [ "$(stat -c '%u:%h' "$decoder_abi_file")" = "$(id -u):1" ] \
+                    && [ "$(stat -c '%s' "$decoder_abi_file")" -le 65536 ] || exit 1
+                chmod 0600 "$decoder_abi_file" || exit 1
+                printf '%s\n' "$decoder_abi_name" >>/home/vpci/weather-decoder-export.list || exit 1
+            fi
+        done
+        tar --no-recursion -C "$decoder_abi_output" -czf /home/vpci/alpha-output.tar.gz \
+            -T /home/vpci/weather-decoder-export.list || exit 1
+        exit "$decoder_abi_status"
+    }
+    trap decoder_abi_finalize EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    guest_phase weather-decoder-inputs
+    python3 -B tests/integration/weather-decoder-abi.py verify-inputs /home/vpci/weather-decoder-inputs
+    guest_phase weather-decoder-packages
+    timeout --signal=TERM --kill-after=10s 240s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
+    timeout --signal=TERM --kill-after=10s 240s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
+        --yes --no-install-recommends python3 bubblewrap binutils util-linux libc6 libstdc++6
+    guest_phase weather-decoder-offline
+    timeout --signal=TERM --kill-after=5s 150s python3 -B tests/integration/weather-decoder-abi.py execute \
+        --inputs /home/vpci/weather-decoder-inputs --output "$decoder_abi_output" --expected-commit "$expected_commit"
+    guest_phase weather-decoder-complete
+    exit 0
+fi
 if [ "$scenario" = agent-native-editor ]; then
     guest_phase agent-native-editor-stage
     test "$(hostname)" = volparossa-alpha
@@ -1414,6 +2116,7 @@ if [ "$scenario" = agent-reasoning ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-reasoning-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-conversation ]; then
@@ -1422,6 +2125,7 @@ if [ "$scenario" = agent-private-conversation ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-conversation.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-private-code ]; then
@@ -1430,6 +2134,7 @@ if [ "$scenario" = agent-private-code ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --code
 fi
 if [ "$scenario" = agent-private-browser ]; then
@@ -1438,6 +2143,7 @@ if [ "$scenario" = agent-private-browser ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit" --browser
 fi
 if [ "$scenario" = agent-private-task ]; then
@@ -1446,6 +2152,7 @@ if [ "$scenario" = agent-private-task ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"
 fi
 if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] || [ "$scenario" = agent-owner-cancel ]; then
@@ -1454,7 +2161,17 @@ if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] ||
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit" --scenario "$scenario"
+fi
+if [ "$scenario" = transaction-abci ]; then
+    guest_phase transaction-abci
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    prepare_current_compiler
+    exec sh tests/integration/transaction-abci-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-mesh ]; then
     guest_phase wifi-mesh-backend
@@ -1462,12 +2179,13 @@ if [ "$scenario" = wifi-mesh ]; then
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
+    prepare_current_compiler
     exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-link ]; then
     guest_phase wifi-kernel
     tar -xzf source.tar.gz
-    (cd source && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
+    (cd source && prepare_current_compiler && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
 fi
 printf '%s  volparossa-mpquic\n' "$mpquic_sha256" | sha256sum --check --strict -
 [ "$(stat -Lc '%s' volparossa-mpquic)" -le 67108864 ]
@@ -1495,10 +2213,10 @@ fi
 if [ "$scenario" = agent-public-network-sources ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
-if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
+if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$scenario" = private-storage-maintenance ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends gpg gpg-agent gpgconf tar
 fi
-if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
+if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$browser_filter_manifest_sha256" != none ] || [ "$weather_client_manifest_sha256" != none ]; then
     # Exact pinned ESR is extracted separately, not installed; these are its
     # ordinary Debian dependencies plus the isolated browser/HTTPS fixture tools.
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
@@ -1526,7 +2244,29 @@ if [ "$scenario" = reciprocity-private-dns ]; then
 fi
 tar -xzf source.tar.gz
 cd source
+prepare_current_compiler
 test -x tests/integration/kvm-alpha-topology.sh
+if [ "$browser_filter_manifest_sha256" != none ]; then
+    guest_phase browser-filter-inputs
+    printf '%s  /home/vpci/browser-filter.tar\n' "$browser_filter_archive_sha256" | sha256sum --check --strict -
+    python3 -B tests/integration/browser-filter-bundle.py verify /home/vpci/browser-filter.tar "$browser_filter_manifest_sha256"
+fi
+if [ "$weather_client_manifest_sha256" != none ]; then
+    guest_phase weather-client-inputs
+    printf '%s  /home/vpci/weather-client.tar\n' "$weather_client_archive_sha256" | sha256sum --check --strict -
+    python3 -B tests/integration/weather-client-bundle.py verify-runtime /home/vpci/weather-client.tar "$weather_client_manifest_sha256"
+    weather_guest_profile=$(python3 -B tests/integration/weather-client-bundle.py runtime-version \
+        /home/vpci/weather-client.tar "$weather_client_manifest_sha256" | jq -er '.bundle_version')
+    if [ "$weather_guest_profile" = 6 ]; then
+        # Fixed API-only doorway. It accepts no arbitrary root operation or
+        # user-supplied socket path; the controller publishes the sole endpoint.
+        sudo -n install -d -o root -g root -m 0755 /usr/local/libexec
+        test ! -e /usr/local/libexec/volparossa-weather-android-tunnel.py
+        test ! -L /usr/local/libexec/volparossa-weather-android-tunnel.py
+        sudo -n install -o root -g root -m 0555 tests/integration/weather-android-tunnel.py \
+            /usr/local/libexec/volparossa-weather-android-tunnel.py
+    fi
+fi
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     guest_phase code-inputs
     case $code_archive_sha256:$code_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
@@ -1545,6 +2285,10 @@ if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ];
 elif [ "$scenario" = image-snapshot ]; then
     guest_phase image-runtime-provision
     sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+elif [ "$scenario" = private-storage-maintenance ]; then
+    guest_phase storage-consumer-runtime-provision
+    sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10
+    /opt/volparossa-node/bin/node --test tests/integration/test-storage-consumer-maintenance.mjs
 elif [ "$scenario" = cloud-private-upload ]; then
     guest_phase cloud-upload-runtime-provision
     sudo -n python3 -B tests/integration/cloud-private-upload-provision.py provision --download
@@ -1562,6 +2306,29 @@ elif [ "$scenario" = browser-network ]; then
     fi
 fi
 guest_phase build
+if [ "$scenario" = private-storage-maintenance ]; then
+    # Reduce test compiler/linker memory pressure in the single-job 4-GiB guest.
+    # Reuse these profiles for the following binaries without changing assertions.
+    export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+    guest_phase storage-maintenance-targeted-tests
+    # Both the actual cargo exit and bounded executed-test output must pass.
+    # A stale libtest filter otherwise exits successfully with zero tests.
+    test ! -e /home/vpci/storage-maintenance-tests.status
+    (
+        maintenance_tests_status=0
+        CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/home/vpci/target timeout --signal=TERM --kill-after=15s 1200s \
+            cargo test --locked -p volparossa --bin volparossa storage::peer::replicas::fragments::maintenance \
+            -- --color never || maintenance_tests_status=$?
+        printf '%s\n' "$maintenance_tests_status" >/home/vpci/storage-maintenance-tests.status
+        exit "$maintenance_tests_status"
+    ) | python3 -B tests/integration/private-storage-maintenance-smoke.py owner-test-output
+    test "$(cat /home/vpci/storage-maintenance-tests.status)" = 0
+    CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/home/vpci/target timeout --signal=TERM --kill-after=15s 900s \
+        cargo test --locked -p volparossa-agent --lib maintenance
+    CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/home/vpci/target timeout --signal=TERM --kill-after=15s 600s \
+        cargo test --locked -p volparossa-content --lib private_storage::wire
+    guest_phase build
+fi
 # The 4-GiB guest cannot compile three large Rust crates concurrently. This bounds
 # build resources only; runtime limits and the storage acceptance checks are unchanged.
 export CARGO_BUILD_JOBS=2
@@ -1652,7 +2419,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
 if [ "$scenario" = image-snapshot ]; then
@@ -1669,6 +2436,12 @@ set +e
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --code-bundle /home/vpci/cooperative-code-inputs \
         --code-manifest-sha256 "$code_manifest_sha256"
+elif [ "$browser_filter_manifest_sha256" != none ]; then
+    set -- ./tests/integration/kvm-alpha-topology.sh --browser-filter-bundle /home/vpci/browser-filter.tar \
+        --browser-filter-manifest-sha256 "$browser_filter_manifest_sha256"
+elif [ "$weather_client_manifest_sha256" != none ]; then
+    set -- ./tests/integration/kvm-alpha-topology.sh --weather-client-bundle /home/vpci/weather-client.tar \
+        --weather-client-manifest-sha256 "$weather_client_manifest_sha256"
 else
     set -- env "$@" ./tests/integration/kvm-alpha-topology.sh
 fi
@@ -1704,7 +2477,18 @@ printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
 find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
-if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
+if [ "$scenario" = protected-quote ]; then
+    # Only the fixed closed guest projection is retrieved. The runner creates
+    # its independent VM-cleanup receipt after actual pidfd-confirmed shutdown.
+    quote_export=/home/vpci/protected-quote-export.list
+    : >"$quote_export"
+    if [ -f /home/vpci/alpha-output/protected-quote-route.json ] \
+        && [ ! -L /home/vpci/alpha-output/protected-quote-route.json ]; then
+        [ "$(stat -Lc '%s' /home/vpci/alpha-output/protected-quote-route.json)" -le 262144 ] || exit 69
+        printf '%s\n' protected-quote-route.json >>"$quote_export"
+    fi
+    tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T "$quote_export"
+elif [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     if [ "$scenario" = agent-cooperative-browser-discovered ]; then
         python3 -B tests/integration/agent-cooperative-browser.py --trial discovered-360m \
             export-names >/home/vpci/cooperative-export.list
@@ -1737,7 +2521,7 @@ elif [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments 
         fi
     done >/home/vpci/signal-backup-export.list
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T /home/vpci/signal-backup-export.list
-elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
+elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ]; then
     {
         python3 -B "tests/integration/$scenario-smoke.py" export-names
         printf '%s\n' host-state-before.json host-state-after.json guest-exit-status
@@ -1745,6 +2529,22 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = image-snapsh
         case $retained in */*|'') exit 1 ;; esac
         retained_path=/home/vpci/alpha-output/$retained
         if [ -f "$retained_path" ] && [ ! -L "$retained_path" ]; then
+            if [ "$retained" = storage-consumer-failure-boundary.json ]; then
+                python3 -I -B tests/integration/storage-consumer-failure-boundary.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = storage-consumer-provider-usage.json ]; then
+                python3 -I -B tests/integration/storage-consumer-provider-usage.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = private-storage-fixture-correlation.json ]; then
+                python3 -I -B tests/integration/storage-fixture-correlation-sampler.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
+            if [ "$retained" = private-storage-maintenance-helper-acquire.json ]; then
+                python3 -I -B tests/integration/storage-acquire-diagnostic.py validate-stdin \
+                    <"$retained_path" >/dev/null 2>&1 || continue
+            fi
             [ "$(wc -c <"$retained_path")" -le 1048576 ] || exit 1
             printf '%s\n' "$retained"
         fi
@@ -1763,12 +2563,23 @@ chmod 0700 "$GUEST_DRIVER"
 set -- -no-reboot
 case $scenario in wifi-mesh|wifi-link) set -- ;; esac
 guest_memory_mib=$(guest_memory_for_scenario)
-if [ "$guest_memory_mib" -gt 4096 ]; then
+runner_reserve_mib=1024
+if [ "$scenario" = content-provider ] || [ "$scenario" = weather-decoder-abi ]; then
+    runner_reserve_mib=2048
+fi
+if [ "${weather_client_version:-}" = 6 ]; then
+    # Simultaneous 4-GiB guest and 4-GiB Android emulator, plus 2-GiB owner
+    # reserve. This read-only admission is not a host-memory configuration.
+    runner_reserve_mib=6144
+fi
+if [ "$guest_memory_mib" -gt 4096 ] || [ "$runner_reserve_mib" -ge 2048 ]; then
     # A read-only preflight snapshot, not a host memory reservation. Refuse
-    # before spawning QEMU if the larger model fixture cannot fit plus 1 GiB.
+    # before QEMU unless the guest plus its selected host reserve fits. The
+    # standalone and joined provider proofs require 2 GiB reserve; larger model
+    # fixtures keep their existing 1 GiB reserve. No guest/model limit increases.
     runner_available_kib=$(awk '$1 == "MemAvailable:" && $3 == "kB" {print $2; found++} END {if (found != 1) exit 1}' /proc/meminfo)
     case $runner_available_kib in ''|*[!0-9]*) exit 69 ;; esac
-    if [ "$runner_available_kib" -lt "$(((guest_memory_mib + 1024) * 1024))" ]; then
+    if [ "$runner_available_kib" -lt "$(((guest_memory_mib + runner_reserve_mib) * 1024))" ]; then
         printf '%s\n' 'insufficient runner memory for the selected isolated fixture plus host reserve' >&2
         exit 69
     fi
@@ -1792,6 +2603,7 @@ if [ -n "$host_tools_directory" ]; then
     qemu_vga_device=$qemu_vga_device,romfile=$host_tools_directory/root/usr/share/seabios/vgabios-stdvga.bin
 fi
 { [ "$scenario" != agent-cooperative-code ] && [ "$scenario" != agent-cooperative-code-proposal ]; } || print_plan
+timeout --signal=TERM --kill-after=2s 5s python3 -B "$HERE/qemu-child-lifecycle.py" preflight
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
@@ -1806,6 +2618,9 @@ qemu-system-x86_64 \
     -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny \
     </dev/null >/dev/null 2>"$RUN_DIRECTORY/qemu.stderr" &
 QEMU_PID=$!
+QEMU_STARTED=yes
+QEMU_BIRTH=$(timeout --signal=TERM --kill-after=2s 5s \
+    python3 -B "$HERE/qemu-child-lifecycle.py" birth "$QEMU_PID" "$$")
 
 ssh_bounded() {
     ssh_time_bound=$1
@@ -1854,6 +2669,25 @@ scp_from_bounded() {
 
 scp_from() { scp_from_bounded 600s "$@"; }
 
+scp_decoder_abi_inputs() {
+    # Only the private, already source-verified snapshot is copied recursively;
+    # no arbitrary caller directory reaches scp or executes in the guest.
+    [ "$scenario" = weather-decoder-abi ] || return 64
+    ssh_bounded 15s test ! -e /home/vpci/weather-decoder-inputs
+    ssh_bounded 15s test ! -L /home/vpci/weather-decoder-inputs
+    timeout --signal=TERM --kill-after=10s 600s scp -r \
+        -F /dev/null -i "$SSH_KEY" -P 22223 \
+        -o BatchMode=yes -o ConnectTimeout=5 \
+        -o ClearAllForwardings=yes -o ControlMaster=no -o ForwardAgent=no \
+        -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+        -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no \
+        -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
+        -o StrictHostKeyChecking=yes -o Tunnel=no \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_ABI_DIRECTORY" \
+        vpci@127.0.0.1:/home/vpci/weather-decoder-inputs
+}
+
 retrieve_incomplete_output() {
     # This record remains even when the guest is unreachable. It is never a success report.
     jq -cn --arg revision "$expected_commit" --arg scenario "$scenario" \
@@ -1886,6 +2720,9 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ "$scenario" = weather-decoder-abi ]; then scp_decoder_abi_inputs; fi
+if [ -n "$browser_filter_bundle" ]; then scp_to "$BROWSER_FILTER_ARCHIVE" /home/vpci/browser-filter.tar; fi
+if [ -n "$weather_client_bundle" ]; then scp_to "$WEATHER_CLIENT_ARCHIVE" /home/vpci/weather-client.tar; fi
 if [ -n "$native_runtime_path" ]; then scp_to "$native_runtime_path" /home/vpci/native-runtime.tar.gz; fi
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then scp_to "$CODE_ARCHIVE" /home/vpci/cooperative-code.tar; fi
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
@@ -1897,6 +2734,9 @@ ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
 driver_time_bound=2400s
+# Candidate compilation precedes the unchanged finite-authority peer trial.
+[ "$scenario" != private-storage-maintenance ] || driver_time_bound=7200s
+[ "$scenario" != weather-decoder-abi ] || driver_time_bound=720s
 # Includes source-building the original UI and two extra real peer-backed downloads.
 # Application exchange/lease bounds remain unchanged.
 [ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
@@ -1930,6 +2770,41 @@ driver_time_bound=2400s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
 [ "$scenario" != signal-backup-fragments ] || driver_time_bound=7200s
 case $scenario in
+    content-provider)
+        if [ "$weather_client_version" = 6 ]; then
+            # Own the driver and Android/tunnel children in one bounded process.
+            # No shell-selected command or remote endpoint is given to Android.
+            WEATHER_ANDROID_CONFIG=$RUN_DIRECTORY/android-owner-input.json
+            jq -n --arg core_commit "$expected_commit" --arg weather_commit "$weather_android_commit" \
+                --arg weather_root "$weather_android_source" --arg run_directory "$RUN_DIRECTORY" \
+                --arg output_directory "$output_directory" --arg source_sha256 "$SOURCE_SHA256" \
+                --arg mpquic_sha256 "$MPQUIC_SHA256" --arg package_sha256 "$PACKAGE_SHA256" \
+                --arg weather_archive_sha256 "$WEATHER_CLIENT_ARCHIVE_SHA256" \
+                --arg weather_manifest_sha256 "$WEATHER_CLIENT_MANIFEST_SHA256" \
+                '{schema:6,core_commit:$core_commit,weather_commit:$weather_commit,
+                  weather_root:$weather_root,run_directory:$run_directory,output_directory:$output_directory,
+                  source_sha256:$source_sha256,mpquic_sha256:$mpquic_sha256,package_sha256:$package_sha256,
+                  weather_archive_sha256:$weather_archive_sha256,weather_manifest_sha256:$weather_manifest_sha256}' \
+                >"$WEATHER_ANDROID_CONFIG"
+            # Waiting on an owned background child lets POSIX sh run its TERM
+            # trap immediately instead of deferring it until Python returns.
+            python3 -B "$HERE/weather-android-owner.py" run --config "$WEATHER_ANDROID_CONFIG" &
+            WEATHER_ANDROID_OWNER_PID=$!
+            wait "$WEATHER_ANDROID_OWNER_PID"
+            android_owner_status=$?
+            WEATHER_ANDROID_OWNER_PID=
+            (exit "$android_owner_status")
+        elif [ -n "$weather_client_bundle" ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" weather-client "$WEATHER_CLIENT_ARCHIVE_SHA256" "$WEATHER_CLIENT_MANIFEST_SHA256"
+        elif [ -n "$browser_filter_bundle" ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_FILTER_ARCHIVE_SHA256" "$BROWSER_FILTER_MANIFEST_SHA256"
+        else
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+        fi
+        ;;
     agent-native-coding|agent-native-editor)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
             "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$NATIVE_RUNTIME_SHA256"
@@ -1978,6 +2853,9 @@ if ! scp_from_bounded "$retrieval_bound" /home/vpci/alpha-output.tar.gz "$RUN_DI
     exit "$GUEST_STATUS"
 fi
 tar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-output.tar.gz"
+if [ "$weather_client_version" = 6 ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    python3 -B "$HERE/weather-android-owner.py" join --config "$WEATHER_ANDROID_CONFIG" || GUEST_STATUS=1
+fi
 if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"; then
     printf '%s\n' 'refusing topology output containing private-key material' >&2
     exit 1
@@ -1985,9 +2863,11 @@ fi
 if [ "$scenario" != signal-backup ] && [ "$scenario" != signal-backup-fragments ]; then
     install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
 fi
-ssh_base sudo -n systemctl poweroff >/dev/null 2>&1 || true
-wait "$QEMU_PID" || true
-QEMU_PID=
+ssh_bounded 15s sudo -n systemctl poweroff >/dev/null 2>&1 || true
+if ! stop_qemu_child normal; then
+    [ "$GUEST_STATUS" -ne 0 ] || GUEST_STATUS=1
+    exit "$GUEST_STATUS"
+fi
 printf '%s  %s\n' "$IMAGE_SHA512" "$image_path" | sha512sum --check --strict -
 FINISHED=yes
 exit "$GUEST_STATUS"

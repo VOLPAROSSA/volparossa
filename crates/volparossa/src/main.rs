@@ -5,6 +5,7 @@ mod compute;
 mod content;
 mod control;
 mod doctor;
+mod dps;
 mod policy_bootstrap;
 mod secret;
 mod storage;
@@ -73,6 +74,11 @@ enum CliCommand {
     Compute {
         #[command(subcommand)]
         command: compute::Command,
+    },
+    /// Explicitly acquire and assess one local positioning claim, without sharing it.
+    Dps {
+        #[command(subcommand)]
+        command: dps::Command,
     },
     /// Create a new encrypted permanent Ed25519 identity.
     Init {
@@ -284,6 +290,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Identity { command } => maintain_identity_command(command).await,
         CliCommand::Content { command } => content::run(*command, &cli.control_socket).await,
         CliCommand::Compute { command } => compute::run(command, &cli.control_socket).await,
+        CliCommand::Dps { command } => dps::run(command).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,
@@ -675,6 +682,7 @@ fn print_response(response: ControlResponse) -> Result<()> {
         | Payload::MailboxReady(_)
         | Payload::ContentCustodyReady(_)
         | Payload::ComputeReady(_)
+        | Payload::QuoteReady(_)
         | Payload::ComputeTranscript(_) => {
             anyhow::bail!("unexpected content stream handoff outside an explicit transfer")
         }
@@ -683,6 +691,12 @@ fn print_response(response: ControlResponse) -> Result<()> {
         }
         Payload::ContentCustodyDiscovered(_) => {
             anyhow::bail!("unexpected custody selection outside an explicit retention workflow")
+        }
+        Payload::ContentProviderActivity(_) => {
+            anyhow::bail!("provider activity requires its scoped content command")
+        }
+        Payload::StorageFixtureCorrelation(_) => {
+            anyhow::bail!("fixture correlation requires its private scoped content command")
         }
         Payload::Content(receipt) => println!(
             "{}",
@@ -756,12 +770,17 @@ fn print_response(response: ControlResponse) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&receipt)?);
         }
         Payload::PrivateStorageReady(_)
+        | Payload::PrivateStorageOutcome(_)
+        | Payload::PrivateStorageMaintenanceReady(_)
         | Payload::PrivateStorageGrant(_)
         | Payload::PrivateStorageAdmission(_) => {
             anyhow::bail!("private storage reply requires its scoped storage command")
         }
         Payload::BrowserGatewayGranted(_) => {
             anyhow::bail!("browser capability requires its explicit private output command")
+        }
+        Payload::DpsAssessment(_) => {
+            anyhow::bail!("positioning assessment requires its explicit DPS consumer")
         }
         Payload::Roles(roles) => {
             println!("client: {}", roles.client);

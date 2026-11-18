@@ -1,0 +1,410 @@
+name: Weather Android protected core delivery
+run-name: Exact v6 inputs — installed Android through protected Weather peers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/weather-android-core]
+    paths:
+      - .github/workflows/weather-android-delivery.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: weather-android-delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VOLPAROSSA_WEATHER_SOURCE_SHA: 3b90442a9d5be4db73ccf83cba2028364980c3ca
+
+jobs:
+  joined:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind exact source and inert Android contracts
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
+          test "$GITHUB_WORKFLOW" = 'Weather Android protected core delivery'
+          test "$(id -u)" != 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --short --untracked-files=all)"
+          python3 -B tests/integration/test-weather-android-hosted-wiring.py
+          python3 -B tests/integration/test-weather-android-vm-wiring.py
+          python3 -B tests/integration/test-weather-android-bundle.py
+          python3 -B tests/integration/test-weather-android-delivery.py
+          python3 -B tests/integration/test-weather-android-api.py
+          python3 -B tests/integration/test-weather-android-control.py
+          python3 -B tests/integration/test-weather-android-delivery-shell.py
+          python3 -B tests/integration/test-weather-android-evidence.py
+          python3 -B tests/integration/test-weather-android-owner.py
+          python3 -B tests/integration/test-weather-android-native.py
+          python3 -B tests/integration/test-weather-android-kvm.py
+          python3 -B tests/integration/test-weather-android-inner-diagnostic.py
+          python3 -B tests/integration/test-weather-android-driver-diagnostic.py
+          python3 -B tests/integration/test-weather-android-tunnel.py
+          sh -n tests/integration/run-alpha-topology-vm.sh
+          sh -n tests/integration/weather-android-delivery.sh
+          record=tests/integration/weather-public-android-v6.json
+          jq -e --arg source "$VOLPAROSSA_WEATHER_SOURCE_SHA" '
+            .schema == 1 and .kind == "volparossa-weather-public-android-admission" and
+            .scope == "disposable-joined-android-core-only" and
+            (.sources | keys) == ["weather"] and .sources.weather.commit == $source and
+            (.artifacts | keys) == ["abi", "decoder"] and (.files | length) == 39' "$record"
+          umask 077
+          inputs="$RUNNER_TEMP/weather-android-inputs"
+          output="$GITHUB_WORKSPACE/.cache/weather-android-delivery"
+          test ! -e "$inputs"
+          test ! -e "$output"
+          install -d -m 0700 "$inputs" "$inputs/provenance" "$output"
+          printf 'WEATHER_INPUTS=%s\nWEATHER_OUTPUT=%s\n' "$inputs" "$output" >> "$GITHUB_ENV"
+      - name: Retrieve the exact reviewed Weather source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VOLPAROSSA/volparossa-weather
+          ref: 3b90442a9d5be4db73ccf83cba2028364980c3ca
+          path: .cache/weather-android-source
+          persist-credentials: false
+      - name: Check combined resources before acquiring toolchains
+        run: |
+          set -euo pipefail
+          python3 -B - "$WEATHER_OUTPUT" <<'PY'
+          # BEGIN COMBINED_RESOURCES
+          import os, re, shutil, stat, sys
+          from pathlib import Path
+          output = Path(sys.argv[1])
+          assert output.is_absolute() and output.resolve(strict=True) == output
+          memory = Path('/proc/meminfo').read_text()
+          match = re.search(r'^MemAvailable:\s+([0-9]+) kB$', memory, re.M)
+          assert match and int(match[1]) * 1024 >= (4 + 4 + 2) * 1024**3
+          assert shutil.disk_usage(output).free >= 32 * 1024**3
+          assert stat.S_ISCHR(Path('/dev/kvm').stat().st_mode)
+          socket = output.parent / 'weather-client-kvm.ABCDEF/android-api/core-api.sock'
+          assert len(os.fsencode(socket)) < 104
+          # END COMBINED_RESOURCES
+          PY
+      - name: Retrieve only the admitted decoder and ABI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          record=tests/integration/weather-public-android-v6.json
+          for kind in decoder abi; do
+            repository=$(jq -er --arg kind "$kind" '.artifacts[$kind].repository' "$record")
+            run_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].run_id' "$record")
+            artifact_id=$(jq -er --arg kind "$kind" '.artifacts[$kind].id' "$record")
+            case "$repository" in VOLPAROSSA/volparossa|VOLPAROSSA/volparossa-weather) ;; *) exit 1 ;; esac
+            case "$run_id:$artifact_id" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+            timeout 60s gh api "repos/$repository/actions/runs/$run_id" \
+              --jq '{id,run_attempt,head_sha,status,conclusion}' > "$WEATHER_INPUTS/provenance/$kind-run.json"
+            timeout 60s gh api "repos/$repository/actions/artifacts/$artifact_id" \
+              --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$WEATHER_INPUTS/provenance/$kind-artifact.json"
+            python3 -B - "$record" "$kind" "$WEATHER_INPUTS/provenance" <<'PY'
+          # BEGIN PUBLIC_ARTIFACT_METADATA
+          import json, re, sys
+          from pathlib import Path
+          record, kind, directory = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+          assert kind in {'decoder', 'abi'}
+          pin = json.loads(record.read_text())['artifacts'][kind]
+          run = json.loads((directory / (kind + '-run.json')).read_text())
+          artifact = json.loads((directory / (kind + '-artifact.json')).read_text())
+          assert set(pin) == {'repository', 'run_id', 'commit', 'id', 'name', 'sha256', 'bytes'}
+          assert pin['repository'] in {'VOLPAROSSA/volparossa', 'VOLPAROSSA/volparossa-weather'}
+          assert all(type(pin[key]) is int and pin[key] > 0 for key in ('run_id', 'id', 'bytes'))
+          assert pin['bytes'] <= 256 * 1024**2 and re.fullmatch(r'[0-9a-f]{40}', pin['commit'])
+          assert re.fullmatch(r'[0-9a-f]{64}', pin['sha256'])
+          assert re.fullmatch(r'[a-z0-9-]{1,160}', pin['name'])
+          assert run == dict(id=pin['run_id'], run_attempt=1, head_sha=pin['commit'], status='completed', conclusion='success')
+          assert artifact['id'] == pin['id'] and artifact['name'] == pin['name']
+          assert artifact['size_in_bytes'] == pin['bytes'] and artifact['expired'] is False
+          assert artifact['digest'] == 'sha256:' + pin['sha256']
+          assert artifact['workflow_run']['id'] == pin['run_id']
+          assert artifact['workflow_run']['head_sha'] == pin['commit']
+          # END PUBLIC_ARTIFACT_METADATA
+          PY
+            test ! -e "$WEATHER_INPUTS/$kind.zip"
+            timeout 300s gh api "repos/$repository/actions/artifacts/$artifact_id/zip" > "$WEATHER_INPUTS/$kind.zip"
+            python3 -B - "$record" "$kind" "$WEATHER_INPUTS" <<'PY'
+          # BEGIN VERIFIED_ARTIFACT_EXTRACTION
+          import hashlib, json, os, stat, sys, zipfile
+          from pathlib import Path, PurePosixPath
+          record, kind, root = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+          assert kind in {'decoder', 'abi'}
+          pin = json.loads(record.read_text())['artifacts'][kind]
+          archive, target = root / (kind + '.zip'), root / kind
+          info = archive.lstat()
+          assert archive.resolve(strict=True) == archive and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+          assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600
+          assert info.st_size == pin['bytes'] <= 256 * 1024**2
+          with archive.open('rb') as incoming:
+              assert hashlib.file_digest(incoming, 'sha256').hexdigest() == pin['sha256']
+          assert not target.exists() and not target.is_symlink()
+          with zipfile.ZipFile(archive) as source:
+              rows = source.infolist()
+              assert 0 < len(rows) <= 20000 and len({row.filename for row in rows}) == len(rows)
+              assert sum(row.file_size for row in rows) <= 512 * 1024**2
+              for row in rows:
+                  name = PurePosixPath(row.filename)
+                  assert not name.is_absolute() and '..' not in name.parts and '\\' not in row.filename
+                  assert str(name) == row.filename.rstrip('/') and str(name) != '.'
+                  assert not any(ord(c) < 32 or ord(c) == 127 for c in row.filename)
+                  assert stat.S_IFMT(row.external_attr >> 16) in (0, stat.S_IFDIR if row.is_dir() else stat.S_IFREG)
+                  assert 0 <= row.file_size <= 256 * 1024**2 and not row.flag_bits & 1
+              target.mkdir(mode=0o700)
+              for row in rows:
+                  path = target / row.filename
+                  if row.is_dir(): path.mkdir(mode=0o700, parents=True, exist_ok=True); continue
+                  path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  with source.open(row) as incoming, path.open('xb') as outgoing:
+                      count = 0
+                      while chunk := incoming.read(65536):
+                          count += len(chunk); assert count <= row.file_size
+                          outgoing.write(chunk)
+                      assert count == row.file_size
+                  path.chmod(0o600)
+          # END VERIFIED_ARTIFACT_EXTRACTION
+          PY
+          done
+      - name: Install declared tools only on this disposable hosted runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          timeout 180s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
+          timeout 600s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            apparmor bubblewrap acl git python3 util-linux iproute2 ca-certificates curl unzip xz-utils zip \
+            debianutils mawk openjdk-17-jdk-headless libglu1-mesa libgl1 libpulse0 libnss3 libxkbcommon0 \
+            libxcb-cursor0 libxi6 libxrandr2 libxrender1 libxfixes3 libxcursor1 libasound2t64 libgbm1 libatomic1 \
+            build-essential cmake libevent-dev pkg-config qemu-system-x86 qemu-utils cloud-image-utils openssh-client jq
+          test -c /dev/kvm
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          qemu-system-x86_64 -accel help | grep -Fx kvm
+      - name: Prepare exact native inputs without executing Android tools
+        run: |
+          set -euo pipefail
+          umask 077
+          weather="$GITHUB_WORKSPACE/.cache/weather-android-source"
+          test "$(git -C "$weather" rev-parse HEAD)" = "$VOLPAROSSA_WEATHER_SOURCE_SHA"
+          python3 -B "$weather/scripts/prepare_hosted_flutter.py" --fetch --output "$weather/build/hosted-flutter-sdk"
+          # f6's native inventory authenticates its entire pinned runtime package.
+          # Its unused Firefox files never enter the v6 guest bundle or exports.
+          python3 -B "$weather/scripts/prepare_hosted_runtime.py" --with-npm --fetch --output "$weather/build/hosted-client-runtime"
+          python3 -B "$weather/scripts/prepare_hosted_android.py" --fetch --output "$weather/build/hosted-android-inputs"
+      - name: Capture and verify exact v6 inputs without executing them
+        run: |
+          set -euo pipefail
+          umask 077
+          weather="$GITHUB_WORKSPACE/.cache/weather-android-source"
+          archive="$WEATHER_INPUTS/weather-client-v6.tar"
+          python3 -B tests/integration/weather-client-bundle.py capture-v6 \
+            "$weather" "$weather/build/hosted-client-runtime/node" "$WEATHER_INPUTS/decoder" "$WEATHER_INPUTS/abi" \
+            "$archive" > "$WEATHER_INPUTS/provenance/capture.json"
+          jq -e '.runtime_executed == false and .current_origin_acquisition_proven == false and
+            .native_android_proven == false and .joined_delivery_proven == false' "$WEATHER_INPUTS/provenance/capture.json"
+          manifest=$(jq -er '.manifest_sha256 | select(test("^[0-9a-f]{64}$"))' "$WEATHER_INPUTS/provenance/capture.json")
+          python3 -B tests/integration/weather-client-bundle.py verify-runtime "$archive" "$manifest" \
+            > "$WEATHER_INPUTS/provenance/verify-runtime.json"
+          python3 -B tests/integration/weather-client-bundle.py runtime-version "$archive" "$manifest" \
+            > "$WEATHER_INPUTS/provenance/runtime-version.json"
+          jq -e '.bundle_version == 6 and .runtime_executed == false' "$WEATHER_INPUTS/provenance/runtime-version.json"
+          printf 'WEATHER_ARCHIVE=%s\nWEATHER_MANIFEST=%s\n' "$archive" "$manifest" >> "$GITHUB_ENV"
+      - name: Grant only this disposable runner temporary KVM access
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          umask 077
+          test ! -e "$WEATHER_INPUTS/kvm.acl"
+          getfacl --absolute-names /dev/kvm > "$WEATHER_INPUTS/kvm.acl"
+          group=$(python3 -B - <<'PY'
+          # BEGIN KVM_PRIVATE_GROUP
+          import runpy
+          from pathlib import Path
+          observer = runpy.run_path(str(Path('tests/integration/weather-android-kvm.py').resolve()))
+          try:
+              print(observer['grant_primary_group']())
+          except (OSError, ValueError, TypeError, KeyError):
+              raise SystemExit('KVM scoped group grant unavailable') from None
+          # END KVM_PRIVATE_GROUP
+          PY
+          )
+          # KVM create/destroy uevents let systemd uaccess replace ACL_USER
+          # entries. Its reset preserves ACL_GROUP; never alter membership or
+          # install a persistent udev rule on this disposable runner.
+          printf '%s\n' 'Temporarily grant the existing runner-private primary group KVM access; restore the exact original ACL afterward.'
+          sudo -n setfacl -m "g:$group:rw" /dev/kvm
+      - name: Prepare offline Android APK before any guest publication
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          umask 077
+          weather="$GITHUB_WORKSPACE/.cache/weather-android-source"
+          python3 -B "$weather/scripts/prepare_hosted_android_ci.py" --prepare-protected-core
+          python3 -B tests/integration/weather-android-owner.py preflight --weather-root "$weather" \
+            --core-commit "$GITHUB_SHA" --weather-commit "$VOLPAROSSA_WEATHER_SOURCE_SHA" \
+            --kvm-output "$WEATHER_OUTPUT" \
+            > "$WEATHER_INPUTS/provenance/native-preparation.json"
+      - name: Build the existing exact pinned mqvpn runtime
+        run: |
+          set -euo pipefail
+          native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
+          VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no native/volparossa-mpquic/scripts/build-upstream.sh
+          binary="$GITHUB_WORKSPACE/native/volparossa-mpquic/build/volparossa-mpquic"
+          test -f "$binary"
+          test -x "$binary"
+          test "$("$binary" --api-version)" = 7
+          test "$(stat -Lc '%s' "$binary")" -le 67108864
+          printf 'WEATHER_MPQUIC=%s\n' "$binary" >> "$GITHUB_ENV"
+      - name: Retrieve and verify the existing pinned Debian 13 image
+        run: |
+          set -euo pipefail
+          image="$RUNNER_TEMP/debian-13-genericcloud-amd64-20260826-2582.qcow2"
+          test ! -e "$image"
+          curl --fail --show-error --silent --location --connect-timeout 30 --max-time 1200 \
+            --max-filesize 2147483648 --max-redirs 3 --proto '=https' --proto-redir '=https' \
+            --output "$image" "$(jq -er '.url' tests/helper/debian13-amd64-image-v1.json)"
+          chmod 0600 "$image"
+          printf '%s  %s\n' \
+            184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003 \
+            "$image" | sha512sum --check --strict -
+          printf 'WEATHER_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      - name: Run actual Android-triggered protected delivery
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          # BEGIN FINAL_SOURCE_PREFLIGHT
+          import os, re, subprocess
+          from pathlib import Path
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip() == os.environ['GITHUB_SHA']
+          assert not subprocess.check_output(['git', '-c', 'core.quotePath=true', 'status', '--porcelain=v1',
+              '--untracked-files=normal', '--ignore-submodules=none'])
+          match = re.search(r'^MemAvailable:\s+([0-9]+) kB$', Path('/proc/meminfo').read_text(), re.M)
+          assert match and int(match[1]) * 1024 >= (4 + 4 + 2) * 1024**3
+          # END FINAL_SOURCE_PREFLIGHT
+          PY
+          # Keep normal hosted owner privileges: the pinned native wrapper owns
+          # its scoped AppArmor policy. Its children and SSH/VM remain isolated.
+          "$GITHUB_WORKSPACE/tests/integration/run-alpha-topology-vm.sh" --execute --yes \
+            --scenario content-provider --image "$WEATHER_IMAGE" --mpquic "$WEATHER_MPQUIC" \
+            --weather-client-bundle "$WEATHER_ARCHIVE" --weather-client-manifest-sha256 "$WEATHER_MANIFEST" \
+            --weather-android-source "$GITHUB_WORKSPACE/.cache/weather-android-source" \
+            --output "$WEATHER_OUTPUT" --expected-commit "$GITHUB_SHA"
+      - name: Restore exact original hosted KVM ACL
+        if: always() && env.WEATHER_INPUTS != ''
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          umask 077
+          if test -f "$WEATHER_INPUTS/kvm.acl"; then
+            test ! -L "$WEATHER_INPUTS/kvm.acl"
+            test "$(stat -Lc '%u:%a:%h' "$WEATHER_INPUTS/kvm.acl")" = "$(id -u):600:1"
+            # QEMU/emulator children have already joined. Drain outstanding
+            # destroy-event ACL processing before restoring the original bytes.
+            # Even a settle failure must not skip the restoration attempt.
+            settle_status=0
+            timeout --kill-after=5s 20s sudo -n udevadm settle --timeout=15 || settle_status=$?
+            sudo -n setfacl --restore="$WEATHER_INPUTS/kvm.acl"
+            test ! -e "$WEATHER_INPUTS/kvm-restored.acl"
+            getfacl --absolute-names /dev/kvm > "$WEATHER_INPUTS/kvm-restored.acl"
+            cmp "$WEATHER_INPUTS/kvm.acl" "$WEATHER_INPUTS/kvm-restored.acl"
+            test "$settle_status" -eq 0
+            python3 -B - "$WEATHER_INPUTS" <<'PY'
+          # BEGIN ACL_CLEANUP
+          import hashlib, json, os, re, stat, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          assert root.is_absolute() and root.resolve(strict=True) == root
+          def checked(name):
+              path = root / name
+              with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+                  before = os.fstat(stream.fileno())
+                  assert stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600
+                  assert before.st_uid == os.getuid() and before.st_nlink == 1 and 0 < before.st_size <= 8192
+                  raw = stream.read(8193)
+                  after, named = os.fstat(stream.fileno()), path.lstat()
+                  fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+                  assert len(raw) == before.st_size and all(getattr(before, key) == getattr(after, key) == getattr(named, key) for key in fields)
+                  return raw
+          baseline, restored = checked('kvm.acl'), checked('kvm-restored.acl')
+          assert baseline == restored
+          identity = dict(core_commit=os.environ['GITHUB_SHA'], weather_commit=os.environ['VOLPAROSSA_WEATHER_SOURCE_SHA'],
+              run_id=os.environ['GITHUB_RUN_ID'], run_attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+          assert all(re.fullmatch('[a-f0-9]{40}', identity[key]) for key in ('core_commit', 'weather_commit'))
+          assert all(re.fullmatch('[1-9][0-9]{0,19}', identity[key]) for key in ('run_id', 'run_attempt'))
+          result = dict(schema=6, kind='weather-android-kvm-cleanup', identity=identity,
+              baseline_sha256=hashlib.sha256(baseline).hexdigest(), restored_sha256=hashlib.sha256(restored).hexdigest(),
+              baseline_bytes=len(baseline), restored_bytes=len(restored), original_kvm_acl_restored=True)
+          with os.fdopen(os.open(root / 'kvm-cleanup.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as stream:
+              stream.write((json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n').encode())
+          # END ACL_CLEANUP
+          PY
+          fi
+      - name: Project closed early or late guest-driver failure observations
+        if: always() && env.WEATHER_OUTPUT != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          # Existing retrieved observations only; no VM command, raw log or retry.
+          timeout --signal=TERM --kill-after=1s 10s python3 -B tests/integration/weather-android-driver-diagnostic.py export \
+            --output "$WEATHER_OUTPUT" --core-commit "$GITHUB_SHA" \
+            --weather-commit "$VOLPAROSSA_WEATHER_SOURCE_SHA"
+      - name: Require joined Android observations and completed VM cleanup
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -B tests/integration/content-provider-smoke.py report "$WEATHER_OUTPUT/content-provider-smoke.json" "$GITHUB_SHA"
+          python3 -B tests/integration/weather-android-owner.py accept --output "$WEATHER_OUTPUT" \
+            --core-commit "$GITHUB_SHA" --weather-commit "$VOLPAROSSA_WEATHER_SOURCE_SHA" \
+            --manifest "$WEATHER_MANIFEST" --kvm-cleanup "$WEATHER_INPUTS/kvm-cleanup.json"
+      - name: Upload only closed evidence and pinned-input provenance
+        if: always() && env.WEATHER_OUTPUT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weather-android-delivery-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          # The exact reviewed evidence files live below .cache; never upload
+          # that directory, private siblings, or a wildcard with this enabled.
+          include-hidden-files: true
+          path: |
+            ${{ env.WEATHER_OUTPUT }}/weather-android-delivery-evidence.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-owner-join.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-owner-failure.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-kvm-observation.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-inner-diagnostic.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-driver-diagnostic.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-vm-cleanup.json
+            ${{ env.WEATHER_OUTPUT }}/weather-android-hosted-acceptance.json
+            ${{ env.WEATHER_INPUTS }}/kvm-cleanup.json
+            ${{ env.WEATHER_INPUTS }}/provenance/decoder-run.json
+            ${{ env.WEATHER_INPUTS }}/provenance/decoder-artifact.json
+            ${{ env.WEATHER_INPUTS }}/provenance/abi-run.json
+            ${{ env.WEATHER_INPUTS }}/provenance/abi-artifact.json
+            ${{ env.WEATHER_INPUTS }}/provenance/capture.json
+            ${{ env.WEATHER_INPUTS }}/provenance/verify-runtime.json
+            ${{ env.WEATHER_INPUTS }}/provenance/runtime-version.json
+            ${{ env.WEATHER_INPUTS }}/provenance/native-preparation.json
+      - name: State the precise trial boundary
+        if: always()
+        run: |
+          printf '%s\n' \
+            'Acceptance requires current public acquisition, actual Android-triggered protected cold transfers, two refreshes and resume without another fetch.' \
+            'Original CLI receipts, HTTP response hashes and installed UI observations must join; preparation or component success is not delivery proof.' \
+            'The pinned native build prepares its full runtime inventory; no Firefox asset, synthetic fixture or historical UI proof enters the v6 guest bundle.' \
+            'Guest publication expiry is never renewed. VM destruction, process drain and original hosted KVM ACL restoration must be established.' \
+            'No raw receipts, private configuration, SSH keys, native logs, SDKs, APKs, caches or emulator userdata are exported; no physical-device or production release claim.' \
+            >> "$GITHUB_STEP_SUMMARY"

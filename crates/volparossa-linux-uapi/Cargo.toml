@@ -13,6 +13,9 @@ publish = false
 libc.workspace = true
 nix = { workspace = true, features = ["uio"] }
 socket2.workspace = true
+# Use the exact existing lock version with only net/rt, rather than inheriting
+# the workspace's unrelated fs/process/signal features at this audited boundary.
+tokio = { version = "=1.53.3", default-features = false, features = ["net", "rt"] }
 
 # Deliberately does not inherit the workspace-wide unsafe-code prohibition:
 # this crate is the single audited FFI boundary for Linux getsockopt.

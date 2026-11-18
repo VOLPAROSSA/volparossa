@@ -59,6 +59,21 @@ ID; malformed frames/envelopes receive `id: null`, `event: "error"`,
 - `error`: fixed `code` from `invalid_request`, `handshake_required`, `busy`,
   `no_such_task`, `cancelled`, `execution_failed`, `cleanup_unconfirmed`.
 
+Conversation clients can independently opt into `execution_error_version: 1`
+on `conversation_capabilities`; the reply echoes that field only when requested.
+Absent means the original error vocabulary. Null, duplicate or unknown versions
+are rejected. This negotiation is separate from `generation_policy_version` and
+is captured when each conversation is admitted, not changed by a later handshake.
+Q&A clients remain unchanged.
+
+For opted-in, admitted conversations only, `execution_budget_exceeded` means the
+supervisor deadline or the validated worker deadline elapsed **and cleanup has
+returned successfully**. It is terminal for that attempt, not a temporary network
+failure and not an instruction to retry the same expensive request automatically.
+It does not say whether any useful model output was generated. Cleanup uncertainty
+and explicit cancellation retain precedence; other failures stay `execution_failed`.
+No raw exception, input, partial answer or model diagnostic is included in this error.
+
 There is no task queue, streaming answer, history endpoint or cross-connection
 cancel. There are at most eight connections and one running private task. On
 disconnect/shutdown, cancellation signals the existing sandbox supervisor; it
@@ -67,6 +82,31 @@ retains the execution slot until the backend returns and owned staging is remove
 Unconfirmed cleanup quarantines further admission. Temporary input/output files
 exist only under the owner's private work directory and follow the existing
 private-task cleanup contract; this is **not** a RAM-only or secure-erasure claim.
+
+## Owner-selected native CPU backend
+
+The owner may explicitly supply both `--native-backend-root` and
+`--native-backend-sha256` at service startup. The latter is the SHA-256 of the
+private `backend.json` manifest binding the pinned library and converted model.
+An IPC request cannot supply these paths or authorize executable code. The
+backend directory is mounted read-only inside the existing isolated worker;
+the worker verifies the complete artifact hashes before loading the library.
+
+This candidate supports only `qwen3-4b-instruct-2507-v1` conversations. Its
+conversation capabilities add `inference_backend: "llama_cpp_bf16_v1"` and
+`required_generation_policy: "greedy_v1"`; both fields are absent for the
+unchanged default backend. Clients must negotiate `generation_policy_version: 1`
+and explicitly submit `greedy_v1`. Missing policy is rejected before admission.
+The existing Qwen4B wire validation rejects Q&A capabilities and submission;
+the native backend does not enable a Q&A service. A conversation capability
+response is not evidence that a model has run successfully. The public result
+schema remains unchanged; the core binds
+the worker's native artifact identity and reported precision internally.
+
+This is still same-owner local execution, not confidential execution on peers.
+Conversion, generation and application claims need their own exact-source evidence;
+see the [bounded native coding milestone](../../../../../docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence),
+which does not qualify arbitrary profiles, Firefox integration or private-peer execution.
 
 ## Browser boundary
 

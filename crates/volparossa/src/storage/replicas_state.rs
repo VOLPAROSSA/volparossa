@@ -84,7 +84,7 @@ impl Handoff {
 }
 
 pub(super) struct LockedSet {
-    directory: File,
+    directory: nix::fcntl::Flock<File>,
     pub(super) data: Manifest,
 }
 

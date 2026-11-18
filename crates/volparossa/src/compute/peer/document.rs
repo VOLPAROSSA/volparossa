@@ -689,6 +689,7 @@ async fn tokenize(
         "compute_document_cancelled_before_planning"
     );
     let options = super::super::Options {
+        native_backend: crate::compute::native_cpu::Options::default(),
         mode: Mode::PlanDocument,
         model_profile: input.model_profile,
         runtime_root: args

@@ -1,7 +1,8 @@
 //! One owner-first custody lane, with configured quiet admission and shared byte cooldown.
 
+use std::sync::Arc;
 use tokio::{
-    sync::{Mutex, MutexGuard, watch},
+    sync::{Mutex, MutexGuard, OwnedMutexGuard, watch},
     time::{Instant, sleep_until},
 };
 use volparossa_config::Config;
@@ -20,15 +21,15 @@ pub(super) fn owner_idle(foreground: &Foreground) -> Result<watch::Receiver<u64>
 }
 
 pub(super) struct BackgroundCustody {
-    serial: Mutex<()>,
-    next: Mutex<Instant>,
+    serial: Arc<Mutex<()>>,
+    next: Arc<Mutex<Instant>>,
 }
 
 impl Default for BackgroundCustody {
     fn default() -> Self {
         Self {
-            serial: Mutex::new(()),
-            next: Mutex::new(Instant::now()),
+            serial: Arc::new(Mutex::new(())),
+            next: Arc::new(Mutex::new(Instant::now())),
         }
     }
 }
@@ -40,6 +41,15 @@ pub(super) struct Lease<'a> {
 }
 
 impl BackgroundCustody {
+    pub(super) fn acquire_owned(&self, config: &Config) -> Result<OwnedLease, ContentError> {
+        Ok(OwnedLease {
+            _serial: Arc::clone(&self.serial)
+                .try_lock_owned()
+                .map_err(|_| ContentError::Busy)?,
+            next: Arc::clone(&self.next),
+            budget: IdleBudget::new(config).ok_or(ContentError::Busy)?,
+        })
+    }
     pub(super) fn acquire<'a>(&'a self, config: &Config) -> Result<Lease<'a>, ContentError> {
         let budget = IdleBudget::new(config).ok_or(ContentError::Busy)?;
         let serial = self.serial.try_lock().map_err(|_| ContentError::Busy)?;
@@ -48,6 +58,22 @@ impl BackgroundCustody {
             next: &self.next,
             budget,
         })
+    }
+}
+
+pub(super) struct OwnedLease {
+    _serial: OwnedMutexGuard<()>,
+    next: Arc<Mutex<Instant>>,
+    budget: IdleBudget,
+}
+
+impl OwnedLease {
+    pub(super) async fn admit(&self, bytes: u64) {
+        // One admitted storage exchange at a time; retain the shared cooldown when cancelled.
+        let mut next = self.next.lock().await;
+        sleep_until(*next).await;
+        self.budget.wait_until_quiet().await;
+        *next = Instant::now() + self.budget.cooldown(bytes);
     }
 }
 

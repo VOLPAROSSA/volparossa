@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+mod resolver;
+
+#[cfg(test)]
 mod tests {
     use futures::{
         io::{self, AsyncRead, AsyncWrite, Cursor},
@@ -70,6 +73,27 @@ mod tests {
 
         assert_eq!(encoder.get_label_pointer(63, 64), Some(63));
         assert_eq!(encoder.get_label_pointer(64, 65), None);
+    }
+
+    #[test]
+    fn hickory_decodes_valid_answers_beyond_initial_capacity() {
+        use hickory_proto::{
+            op::{Message, MessageType, Query},
+            rr::{rdata::A, Name, RData, Record, RecordType},
+        };
+
+        let name = Name::from_ascii("example.test.").unwrap();
+        let mut message = Message::new();
+        message.set_message_type(MessageType::Response);
+        message.add_query(Query::query(name.clone(), RecordType::A));
+        for last_octet in 1..=9 {
+            let address = RData::A(A::new(192, 0, 2, last_octet));
+            message.add_answer(Record::from_rdata(name.clone(), 60, address));
+        }
+
+        let decoded = Message::from_vec(&message.to_vec().unwrap()).unwrap();
+        assert_eq!(decoded.queries(), message.queries());
+        assert_eq!(decoded.answers(), message.answers());
     }
 
     #[test]

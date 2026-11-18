@@ -43,6 +43,85 @@ struct Peer {
     pending: Option<usize>,
     state: adaptive::PeerState,
     probing: bool,
+    coverage_only: bool,
+    resource_retired: bool,
+    transport_id: [u8; 32],
+}
+
+enum RetirementMode {
+    Capture,
+    Suppressed,
+}
+
+/// One locally pressure-retired worker's remaining, single-use coverage authority.
+///
+/// This is not a successful transfer receipt. The caller must first join every original
+/// worker, require this worker's clean first-attempt close, and acquire a fresh resource
+/// lease. A failed transport/retry must never use this token: writer accounting cannot
+/// observe extra requests made by a reconnecting transport.
+pub struct ResourceRetired {
+    index: usize,
+    expected_id: [u8; 32],
+    transport_id: [u8; 32],
+    attempted: BTreeSet<ChunkId>,
+    limits: TransferLimits,
+    deadline: Instant,
+}
+
+impl ResourceRetired {
+    /// Index in the original bounded provider batch.
+    pub fn worker_index(&self) -> usize {
+        self.index
+    }
+
+    /// Prepare one serial coverage continuation, never a renewed peer budget.
+    ///
+    /// Verified hits and this provider's previous requests (including explicit misses)
+    /// are excluded. The original absolute deadline and both manifest identities remain
+    /// binding. The returned coordinator cannot issue another retirement token.
+    ///
+    /// # Errors
+    /// Rejects changed authority, expiry/deadline, invalid limits or local cache corruption.
+    pub fn prepare_continuation(
+        self,
+        expected: &VerifiedManifest,
+        transport: &VerifiedManifest,
+        store: &mut ChunkStore,
+    ) -> Result<(ParallelDownload, ChunkWorker), TransferError> {
+        if *expected.manifest_id() != self.expected_id
+            || *transport.manifest_id() != self.transport_id
+        {
+            return Err(TransferError::Protocol);
+        }
+        let mut limits = self.limits;
+        limits.session_timeout = self.deadline.saturating_duration_since(Instant::now());
+        if limits.session_timeout.is_zero() {
+            return Err(TransferError::Timeout);
+        }
+        limits.exchange_timeout = limits.exchange_timeout.min(limits.session_timeout);
+        let (mut download, mut workers) = if self.expected_id == self.transport_id {
+            ParallelDownload::new_adaptive(expected, 1, store, limits, 1)?
+        } else {
+            ParallelDownload::new_adaptive_with_transport_manifests(
+                expected,
+                &[transport],
+                store,
+                limits,
+                1,
+            )?
+        };
+        download.deadline = self.deadline;
+        download.retirement_mode = RetirementMode::Suppressed;
+        for chunk in &mut download.chunks {
+            if self.attempted.contains(chunk.chunk.id()) {
+                chunk.attempted.insert(0);
+            }
+        }
+        let mut worker = workers.pop().ok_or(TransferError::Protocol)?;
+        worker.deadline = self.deadline;
+        worker.session.deadline = self.deadline;
+        Ok((download, worker))
+    }
 }
 
 /// A bounded writer/coordinator; workers never own or reopen the destination cache.
@@ -56,6 +135,8 @@ pub struct ParallelDownload {
     measurement: adaptive::Measurement,
     probe_baseline: Option<u64>,
     growth_blocked: bool,
+    limits: TransferLimits,
+    retirement_mode: RetirementMode,
 }
 
 /// One provider's original transport index for coordinator-assigned chunks; fields are sealed.
@@ -207,6 +288,8 @@ impl ParallelDownload {
                 measurement: adaptive::Measurement::new(),
                 probe_baseline: None,
                 growth_blocked: false,
+                limits,
+                retirement_mode: RetirementMode::Capture,
             },
             workers,
         ))
@@ -239,11 +322,30 @@ impl ParallelDownload {
     /// # Errors
     /// Rejects a mismatched progress slice, local storage failure, expiry or the original deadline.
     pub async fn run_with_allowance(
-        mut self,
+        self,
         store: &mut ChunkStore,
         progress: &mut [TransferProgress],
         allowance: impl Fn() -> usize,
     ) -> Result<(), TransferError> {
+        self.run_with_allowance_retired(store, progress, allowance)
+            .await
+            .map(|_| ())
+    }
+
+    /// As [`Self::run_with_allowance`], retaining explicit local-pressure retirements.
+    ///
+    /// Exhausted, failed and ordinarily dormant workers produce no continuation authority.
+    /// Returned tokens require the caller's independently observed clean first-attempt
+    /// worker closure and serial reacquisition; they never authorize extra concurrency.
+    ///
+    /// # Errors
+    /// Same failures as [`Self::run_with_allowance`].
+    pub async fn run_with_allowance_retired(
+        mut self,
+        store: &mut ChunkStore,
+        progress: &mut [TransferProgress],
+        allowance: impl Fn() -> usize,
+    ) -> Result<Vec<ResourceRetired>, TransferError> {
         if progress.len() != self.peers.len() {
             return Err(TransferError::Protocol);
         }
@@ -281,10 +383,10 @@ impl ParallelDownload {
                     for offset in 0..self.peers.len() {
                         let index = (next_result + offset) % self.peers.len();
                         let peer = &mut self.peers[index];
-                        if peer.pending.is_some() || peer.state == adaptive::PeerState::Finishing {
-                            if let Poll::Ready(response) = peer.results.poll_recv(cx) {
-                                return Poll::Ready((index, response));
-                            }
+                        if (peer.pending.is_some() || peer.state == adaptive::PeerState::Finishing)
+                            && let Poll::Ready(response) = peer.results.poll_recv(cx)
+                        {
+                            return Poll::Ready((index, response));
                         }
                     }
                     Poll::Pending
@@ -300,7 +402,49 @@ impl ParallelDownload {
                 let _ = peer.requests.try_send(Work::Finish);
             }
         }
-        Ok(())
+        Ok(self.resource_retirements())
+    }
+
+    fn resource_retirements(&self) -> Vec<ResourceRetired> {
+        if matches!(self.retirement_mode, RetirementMode::Suppressed) {
+            return Vec::new();
+        }
+        self.peers
+            .iter()
+            .enumerate()
+            .filter(|(index, peer)| {
+                peer.resource_retired
+                    && peer.state == adaptive::PeerState::Finished
+                    && self.eligible(*index)
+            })
+            .filter_map(|(index, peer)| {
+                let attempted = self
+                    .chunks
+                    .iter()
+                    .filter(|chunk| chunk.attempted.contains(&index))
+                    .collect::<Vec<_>>();
+                let bytes = attempted.iter().try_fold(0_u64, |sum, chunk| {
+                    sum.checked_add(u64::from(chunk.chunk.length()))
+                })?;
+                let mut limits = self.limits;
+                limits.max_requests = limits.max_requests.checked_sub(attempted.len())?;
+                limits.max_bytes = limits.max_bytes.checked_sub(bytes)?;
+                if limits.max_requests == 0 || limits.max_bytes == 0 {
+                    return None;
+                }
+                Some(ResourceRetired {
+                    index,
+                    expected_id: *self.manifest.manifest_id(),
+                    transport_id: peer.transport_id,
+                    attempted: attempted
+                        .into_iter()
+                        .map(|chunk| *chunk.chunk.id())
+                        .collect(),
+                    limits,
+                    deadline: self.deadline,
+                })
+            })
+            .collect()
     }
 
     fn assign_ready(&mut self) -> Result<(), TransferError> {
@@ -319,13 +463,25 @@ impl ParallelDownload {
     }
 
     fn assign(&mut self, index: usize) -> Result<(), TransferError> {
-        let peer = &mut self.peers[index];
+        let peer = &self.peers[index];
         if peer.state != adaptive::PeerState::Active || peer.pending.is_some() {
             return Ok(());
         }
         let eligible = |item: &PendingChunk| {
-            !item.complete && item.owner.is_none() && !item.attempted.contains(&index)
+            !item.complete
+                && item.owner.is_none()
+                && !item.attempted.contains(&index)
+                && (!peer.coverage_only
+                    || !self.peers.iter().enumerate().any(|(other, candidate)| {
+                        other != index
+                            && candidate.state == adaptive::PeerState::Active
+                            && !candidate.coverage_only
+                            && !item.attempted.contains(&other)
+                    }))
         };
+        // A failed speed probe keeps its existing, counted lease only to cover gaps.
+        // Let ordinary active peers try first; a slow probe is not evidence that it
+        // lacks later shards. Dormant or closing peers cannot promise live coverage.
         // A failed/missing request is useful evidence for exploration; manifest membership
         // alone never claims that a provider actually stores a chunk. Prefer that unresolved
         // coverage for the probe without reassigning anybody's still-in-flight request.
@@ -339,6 +495,7 @@ impl ParallelDownload {
         let Some(position) = missing.or_else(|| self.chunks.iter().position(eligible)) else {
             return Ok(());
         };
+        let peer = &mut self.peers[index];
         let pending = &mut self.chunks[position];
         match peer.requests.try_send(Work::Chunk(pending.chunk.clone())) {
             Ok(()) => {
@@ -442,6 +599,9 @@ fn peer(
                 adaptive::PeerState::Dormant
             },
             probing: false,
+            coverage_only: false,
+            resource_retired: false,
+            transport_id: *manifest.manifest_id(),
         },
         ChunkWorker {
             manifest: manifest.clone(),

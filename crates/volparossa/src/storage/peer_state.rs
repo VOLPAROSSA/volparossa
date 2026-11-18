@@ -125,7 +125,7 @@ impl Journal {
 }
 
 pub(super) struct LockedJournal {
-    directory: File,
+    directory: nix::fcntl::Flock<File>,
     pub(super) journal: Journal,
 }
 
@@ -173,7 +173,18 @@ impl LockedJournal {
     }
 }
 
-pub(super) fn directory(path: &Path) -> Result<File> {
+pub(super) fn directory(path: &Path) -> Result<nix::fcntl::Flock<File>> {
+    let file = directory_readonly(path)?;
+    // Close-on-exec does not prevent a concurrently forked child retaining the
+    // open file description before exec. Unlock when this owner's scope ends,
+    // rather than waiting for every inherited descriptor to close.
+    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        .map_err(|(_, error)| std::io::Error::from_raw_os_error(error as i32))
+        .context("private archive state is already in use")
+}
+
+/// Pin the owner-private directory for read-only status while its worker holds the write lock.
+pub(super) fn directory_readonly(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -185,8 +196,6 @@ pub(super) fn directory(path: &Path) -> Result<File> {
             && metadata.uid() == rustix::process::geteuid().as_raw(),
         "archive state directory must be owned by this user with mode 0700"
     );
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("private archive state is already in use")?;
     Ok(file)
 }
 
@@ -238,4 +247,77 @@ pub(super) fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
     file.persist_noclobber(path).map_err(|error| error.error)?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod directory_lock_tests {
+    use super::*;
+
+    fn private_directory() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+
+    #[test]
+    fn directory_lock_remains_exclusive_until_owner_scope_ends() {
+        let root = private_directory();
+        let owner = directory(root.path()).unwrap();
+        assert!(directory(root.path()).is_err());
+        assert!(anchored(&owner).is_dir());
+        drop(owner);
+        let replacement = directory(root.path()).unwrap();
+        assert!(directory(root.path()).is_err());
+        drop(replacement);
+        assert!(directory(root.path()).is_ok());
+    }
+
+    #[test]
+    fn directory_lock_drop_releases_shared_description_without_unlocking_successor() {
+        let root = private_directory();
+        let owner = directory(root.path()).unwrap();
+        // A fork before exec inherits the same open file description even
+        // with CLOEXEC. A duplicate deterministically retains that description
+        // without spawning a process or depending on scheduler timing.
+        let inherited = owner.try_clone().unwrap();
+        assert!(
+            rustix::io::fcntl_getfd(&inherited)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        assert!(directory(root.path()).is_err());
+        drop(owner);
+        let replacement = directory(root.path())
+            .expect("ending the owner scope must release its lock even before a child execs");
+        assert!(inherited.metadata().unwrap().is_dir());
+        assert!(directory(root.path()).is_err());
+        drop(inherited);
+        assert!(directory(root.path()).is_err());
+        drop(replacement);
+        assert!(directory(root.path()).is_ok());
+    }
+
+    #[test]
+    fn directory_lock_error_cleanup_releases_shared_description() {
+        let root = private_directory();
+        let mut inherited = None;
+        let result: Result<()> = (|| {
+            let owner = directory(root.path())?;
+            inherited = Some(owner.try_clone()?);
+            anyhow::bail!("injected operation failure after acquiring the guard");
+        })();
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "injected operation failure after acquiring the guard"
+        );
+        assert!(inherited.as_ref().unwrap().metadata().unwrap().is_dir());
+        let replacement = directory(root.path()).expect(
+            "error unwinding must release the owner lock before inherited descriptors close",
+        );
+        assert!(directory(root.path()).is_err());
+        drop(inherited);
+        assert!(directory(root.path()).is_err());
+        drop(replacement);
+        assert!(directory(root.path()).is_ok());
+    }
 }

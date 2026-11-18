@@ -1,0 +1,917 @@
+{
+  "artifacts": {
+    "abi": {
+      "bytes": 22790,
+      "commit": "be2977ac6d1d520caea29c96df759ea2d90c943c",
+      "id": 11732188075,
+      "name": "weather-decoder-debian13-be2977ac6d1d520caea29c96df759ea2d90c943c",
+      "repository": "VOLPAROSSA/volparossa",
+      "run_id": 38216142236,
+      "sha256": "15622809d9aa7c46eb6b80ac76f9a6252966d25478dfeddd4262238846f1b586"
+    },
+    "assets": {
+      "bytes": 147157200,
+      "commit": "397693c40fba9e457e8f51ebe77b4295f3a9d228",
+      "id": 11735448641,
+      "name": "hosted-weather-client-assets-unadmitted-397693c40fba9e457e8f51ebe77b4295f3a9d228",
+      "repository": "VOLPAROSSA/volparossa-weather",
+      "run_id": 38224151028,
+      "sha256": "4b4f65e2f21f4f1cf61f94d60245f57e438e83d5b1716049b72fa21618fcf599"
+    },
+    "decoder": {
+      "bytes": 14057646,
+      "commit": "7d61077aa415de8f46f79384a1dd08f403c4898c",
+      "id": 11731895956,
+      "name": "hosted-decoder-unadmitted-7d61077aa415de8f46f79384a1dd08f403c4898c",
+      "repository": "VOLPAROSSA/volparossa-weather",
+      "run_id": 38214736539,
+      "sha256": "e9a8a6b3530ae5fadf19d4f9bf0271013f8d1fdcd4ac3745723644b5d9372197"
+    },
+    "proof": {
+      "bytes": 125048,
+      "commit": "397693c40fba9e457e8f51ebe77b4295f3a9d228",
+      "id": 11735263794,
+      "name": "hosted-weather-client-proof-397693c40fba9e457e8f51ebe77b4295f3a9d228",
+      "repository": "VOLPAROSSA/volparossa-weather",
+      "run_id": 38224151028,
+      "sha256": "26b9b84b45c22b48cb0e84688d33bd06a65bd0c54885e35c8263a294413918d5"
+    }
+  },
+  "files": {
+    "decoder/grib_ls": {
+      "bytes": 31383992,
+      "sha256": "d99425a1b44fe11b9ff77918310bc1b1a2114957558481bd705851e314a59930"
+    },
+    "decoder/licenses/ecbuild-source/COPYING": {
+      "bytes": 11392,
+      "sha256": "e66e138859d69f0a9f85ff83caa3a7dd4be46871036b3ddb483e97fc92c19120"
+    },
+    "decoder/licenses/ecbuild-source/LICENSE": {
+      "bytes": 10751,
+      "sha256": "b8cd06462fcd1691d120610d7c2a868796809f520c9977b10eace0fc91a9dbf4"
+    },
+    "decoder/licenses/ecbuild-source/NOTICE": {
+      "bytes": 744,
+      "sha256": "e7338a08ea2e75ad7936781fc7fda0cbc18758370bfedabdb6e9a2965df319f5"
+    },
+    "decoder/licenses/eccodes-source/COPYING": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "decoder/licenses/eccodes-source/LICENSE": {
+      "bytes": 11337,
+      "sha256": "c4e6f453639281d2d0f3eaf32140bb4a0d8cbeb01045b73a5f2a6ca3c1fec69d"
+    },
+    "decoder/licenses/eccodes-source/NOTICE": {
+      "bytes": 771,
+      "sha256": "8a73c2ffa4c7b56513d27830fbb22eb30bb73df80612c1395b416570f1637393"
+    },
+    "decoder/licenses/eccodes-source/third_party/expected/COPYING": {
+      "bytes": 7048,
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    "decoder/licenses/libaec-source/LICENSE.txt": {
+      "bytes": 1346,
+      "sha256": "66924e663d6e156dc45fe5aba993f5dcb131a8a5400b5580d956877c2c77c717"
+    },
+    "decoder/probe.grib2": {
+      "bytes": 828,
+      "sha256": "551114e2f896b62e3f6901330876040015ed2b7ae483f5798ddb18a8ae233eec"
+    },
+    "runtime/firefox-copyright": {
+      "bytes": 82470,
+      "sha256": "63be191ddb8275cfa4c9d8fb5195870bb4291f87f8fd3d146c29a6215dbe8b31"
+    },
+    "runtime/node": {
+      "bytes": 125989464,
+      "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"
+    },
+    "runtime/node.LICENSE": {
+      "bytes": 157606,
+      "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/application.ini": {
+      "bytes": 707,
+      "sha256": "2eced73ac4341fdf5c812de487d838f45b18d2fbc4712756875c1d48062f36f4"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/chrome/icons/default/default128.png": {
+      "bytes": 13513,
+      "sha256": "9926bbb47e152c9747c8e7fbe9d7679fbcf221a4aa13400cbf1d2da3210d1b20"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/chrome/icons/default/default16.png": {
+      "bytes": 722,
+      "sha256": "742a5ed5a88075540a018629b6c4ee7f39a6fc89f4d75c2c136e002204ac024b"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/chrome/icons/default/default32.png": {
+      "bytes": 1948,
+      "sha256": "e4e889d71d93c2a171cbd92ca2fba2fca3a04ab61e6fc8a703683cf4e3d83ba1"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/chrome/icons/default/default48.png": {
+      "bytes": 3448,
+      "sha256": "d9df64a49f932e5f7c8e1f5fccc0b998dafb57f9a7ed2ac9a8e4a43bed45eb1a"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/chrome/icons/default/default64.png": {
+      "bytes": 5459,
+      "sha256": "12130ce8511f4a348c25380ba9b70b80b2ff0680e4ee801367bf0dbb5e94c00a"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/defaults/preferences/debugger.js": {
+      "bytes": 3290,
+      "sha256": "40f7c72bd59242782d8f0d98f3ab6d97014d6d59dfbe72862ace38e1304f7b01"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/defaults/preferences/firefox-branding.js": {
+      "bytes": 2322,
+      "sha256": "b3a53316de3e9fa6a7f1ce08a0f848f0a604d5263497ba57290cc02cb2e00968"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/defaults/preferences/firefox.js": {
+      "bytes": 90314,
+      "sha256": "d948e02eaff3b4d6a39c232f4558e2eb0688b1979ca3b623115f579e86f78a8e"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/defaults/preferences/vendor.js": {
+      "bytes": 344,
+      "sha256": "57d5409a1f05316dc80f8a4c5fb1088b38dd2b70b2d71a2ffa9e79cf978fea44"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/browser/omni.ja": {
+      "bytes": 45948402,
+      "sha256": "757f1f47bfbde5603e08cdb7ddc83bd27e9b26695bf843d640df7984842fffd7"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/crashhelper": {
+      "bytes": 1467312,
+      "sha256": "a3ccfdd58df53b4fd01d937c79ecfb8cd0257edf49d8528ae4a18fc91eaec84f"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/crashreporter": {
+      "bytes": 4249088,
+      "sha256": "b927d274a0c47aef263cc83728b030f3ce82e14fb30e595e71cb32ba031b335f"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/defaults/pref/channel-prefs.js": {
+      "bytes": 425,
+      "sha256": "eeef53731fb30d5fc8cdc4ea9dc44bd3e7216f47941471dbb4d75a5fbbacff5d"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/defaults/pref/volparossa-autoconfig.js": {
+      "bytes": 283,
+      "sha256": "fc948619b295475c316c71847eb8c03fc910f5801582c69ab9d9e4d83e5477a0"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/dependentlibs.list": {
+      "bytes": 154,
+      "sha256": "470453152383d787f2ac9ac39accf525244004733a592a87e6f54a7d786a6769"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/firefox-bin": {
+      "bytes": 572240,
+      "sha256": "22bb2d84f2289622e65fbcde266a30952e6ac64d27a2a1af75cea7229f2e6b14"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/firefox-esr": {
+      "bytes": 572240,
+      "sha256": "22bb2d84f2289622e65fbcde266a30952e6ac64d27a2a1af75cea7229f2e6b14"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/fonts/TwemojiMozilla.ttf": {
+      "bytes": 1474284,
+      "sha256": "6d90152ee0d29e82fe2a87793af5aa4b7ad13e6538360889e141e81ed299ee8e"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/glxtest": {
+      "bytes": 20304,
+      "sha256": "718f7f3017b29e5e1f7bcea74f471188e0e66178c3e4b32d723874120526da83"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/gmp-clearkey/0.1/libclearkey.so": {
+      "bytes": 72256,
+      "sha256": "dc8e5c07d014fbba270dc97d18b9d2faa0b41ed815f1429856be648fc45c667a"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/gmp-clearkey/0.1/manifest.json": {
+      "bytes": 225,
+      "sha256": "b7d65e60cccb80ffb2e95b5ae7e355d2c8c37575e886eef4325ca04fa7ba68fc"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libfreeblpriv3.so": {
+      "bytes": 996016,
+      "sha256": "53c7b42fef7da7ea225a6883ae268a5906e9b88a7765091dc3cda650de73ac47"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libgkcodecs.so": {
+      "bytes": 7310496,
+      "sha256": "3f6011382ee154507e477edf907b9cf9f973e78be9f1f96671c5c7bd15fa358b"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/liblgpllibs.so": {
+      "bytes": 155520,
+      "sha256": "40f62fd5062bde9a8254297c9c723ec23e5aa40995336a0da0b16e42e2e5a606"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozavcodec.so": {
+      "bytes": 4134080,
+      "sha256": "88ed90cf5acddd6861eaaf60fb800268bd71d8c4574f3ec3a15fd811f2ae749f"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozavutil.so": {
+      "bytes": 618112,
+      "sha256": "ee1fade09325c5ea770bb53614259c3322c23e1a8399489c1c2632d82541978e"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozgtk.so": {
+      "bytes": 4680,
+      "sha256": "449abc4b040dbc74b7e94e179bbbcecc2a5d2ad971d5562b5be4896f56cb243d"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozsandbox.so": {
+      "bytes": 191208,
+      "sha256": "f2b9eb9265234cc197f0505edf659cc5dec1f62e03b10cdfa02eeaa9f1dfcf70"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozsqlite3.so": {
+      "bytes": 1488816,
+      "sha256": "b769f6ab559664b70e5de08cc13058d0fd1bd8188363ab44ff0270acb58028e7"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libmozwayland.so": {
+      "bytes": 12600,
+      "sha256": "cfec06c9c48cbef640a8c32f512c23fd477e0d526150ff5c7769082c19ae9481"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libnss3.so": {
+      "bytes": 706160,
+      "sha256": "5793aff10683bca3213ef3247e6294012e5fa859d5a86d70ca28d9781ec44b04"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libnssutil3.so": {
+      "bytes": 179848,
+      "sha256": "112385fdcaf89dc96f46195143ef096afe53afe01504e309e76a7bbe999526a5"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libsmime3.so": {
+      "bytes": 166304,
+      "sha256": "1c7afa969211e795e32f6662eaca64fe686bb9b9fd7663cb3e09601c60f1bde4"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libsoftokn3.so": {
+      "bytes": 330104,
+      "sha256": "3449e1a7b8ef1f735c80132b39fe8b14d7e7214f9a4a0533af9b80f8b0952ebd"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libssl3.so": {
+      "bytes": 394336,
+      "sha256": "1508427be75525e199a52105e4a8d52e12b36f759226f0bc9cadb703f25ca9cf"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/libxul.so": {
+      "bytes": 164140120,
+      "sha256": "62cc326204668a2dae453c9e89d9c200e513c9e3ad0772b164091bf1e5333fb4"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/omni.ja": {
+      "bytes": 37698426,
+      "sha256": "c0d453127f9c1310dad39cc3f6971acfe59cdf561fec6918b129ee0c780c6e70"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/pingsender": {
+      "bytes": 577584,
+      "sha256": "f26aad5557e4de6bdb7c94997be97266ec7dbe393effd13eadcc4274fe3331a7"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/platform.ini": {
+      "bytes": 167,
+      "sha256": "a605f51b87d8f245a3fd7828e36decdf3b072eb634a90165543d1664028a5f75"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/vaapitest": {
+      "bytes": 18072,
+      "sha256": "a8da1e82a17d67c8aa59756ff6044282c03bfbd443663e8af72414ab88258d0d"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/volparossa-staging.json": {
+      "bytes": 1069,
+      "sha256": "5bbc043ea6eed84c59b9f9a8efaba27bc5b420ba65ce3d13cd4135431092f8e9"
+    },
+    "volparossa-browser/build/firefox-esr-smoke-v3/volparossa.cfg": {
+      "bytes": 1417,
+      "sha256": "daba7ee38a2c3ff594a4aa06674ca3e9e964d16959efb9b169c62033cc9430bb"
+    },
+    "volparossa-browser/defaults/privacy.json": {
+      "bytes": 987,
+      "sha256": "f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"
+    },
+    "volparossa-browser/scripts/smoke_compute_model.py": {
+      "bytes": 29389,
+      "sha256": "70b8a944ba6322d46690eafa74247526ac3fc13e92ae9870717e8ed7c63f5c1b"
+    },
+    "volparossa-browser/scripts/smoke_privacy.py": {
+      "bytes": 15932,
+      "sha256": "dd8bdc5b73071eb13d3cd80d305266c654be07ec6bdd74cb4c456b26147f9104"
+    },
+    "volparossa-browser/scripts/stage_firefox.py": {
+      "bytes": 9281,
+      "sha256": "5d54e0e35662fae6b19d5f497d68469b0757fe754601c3e016f6fda773375203"
+    },
+    "volparossa-weather/LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "volparossa-weather/build/drizzli-volparossa/LICENSE": {
+      "bytes": 34522,
+      "sha256": "20b067f86de375aae6db0f283ab2e65de24d537733b89bd58432c101259d84cf"
+    },
+    "volparossa-weather/build/drizzli-volparossa/LICENSE.VOLPAROSSA": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/0.DTAAYVi7.css": {
+      "bytes": 93832,
+      "sha256": "e59f14e2a6589d05a257727649cfc851c800148c536ef14ef5867c43605facb6"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/18.B3aGh3mi.css": {
+      "bytes": 364,
+      "sha256": "22103a8e9fc0f0a599c12348610c5034bc708d8877ccb284667c52febdcf21e8"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/ModelSelector.CV-KWLNP.css": {
+      "bytes": 289,
+      "sha256": "77781424ad291ef2757fa6622f6989e009af29438d4463c36d053f51d5996ecf"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/WeekSkeleton.BOGJ6wpy.css": {
+      "bytes": 7534,
+      "sha256": "b4002663fa87a7932ede7336ef18378c6894736997a33970cc518d97622a67cf"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/date.Et9h7a5_.css": {
+      "bytes": 1450,
+      "sha256": "f5b7cd94417eeb3fccb0620924c61abd547d857f215961c1dd510f7bc0a3b5ab"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/prose-page.tUvj-5tC.css": {
+      "bytes": 799,
+      "sha256": "dd811d5e9a7a186d37eccabcb17fd90049ca406e596d9ff1316e76b4e6f184d8"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/assets/variables.B8nBj7Uf.css": {
+      "bytes": 2578,
+      "sha256": "ea1e44554aade4c2d0dd249aa1c37ac1cc4ea44952427ceb9a652954dd30b6be"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/3g46gPHA.js": {
+      "bytes": 20542,
+      "sha256": "79f059738252698433f26122e2e1363490ad89dd6abecc7d0e278b45ef48c085"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/3r_anXgm.js": {
+      "bytes": 22,
+      "sha256": "248732015f0d43b4531103491dcf643e4cb4990a916af2b766cc3420970c682e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/B61A3RRl.js": {
+      "bytes": 281,
+      "sha256": "f46f53241c8055c1905cdf0c902643eadff2dd12b384c81afee017abbe381452"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BAZpavwY.js": {
+      "bytes": 1738,
+      "sha256": "cd939acd7aa2771db6c11f8da9ec3bdd6f3e6479d3fe5253348deeaf00427040"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BKwbTIIR.js": {
+      "bytes": 29450,
+      "sha256": "55dad619fd128eda7675857f1bfa9a0b316395bcbb93794fa4731e88ab6fe0dd"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BLYEX90X.js": {
+      "bytes": 5236,
+      "sha256": "3206a31680da508af5e30639b04daaa5dd93ca8b4e49ccc91624fc21ac89c3c4"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BMQIha0G.js": {
+      "bytes": 62462,
+      "sha256": "05429bcb9c2c3ad37f31319675ece89de203661ff8c426ba731ae0fc3962de3c"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BRh-FxpL.js": {
+      "bytes": 15715,
+      "sha256": "5972f9d458526ec22b0ab368598aaf8582541fb7ef7893370d5b95d48a208323"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BZ2CCGtv.js": {
+      "bytes": 282,
+      "sha256": "3bfc846d9c78ef8bbee592926722bd6dfb16e961cae238fc142601aa71f89b61"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BZN3M7lq.js": {
+      "bytes": 1700,
+      "sha256": "b72bf7362332ca5f458e3359b7984918a764964fca38e823ef1c8828a928b0c3"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Bd8d3YsN.js": {
+      "bytes": 39789,
+      "sha256": "5587d6f06846179710301254128bee26b4233d11af52a63d3480892c9f9089f6"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Bjy-W4x2.js": {
+      "bytes": 1365,
+      "sha256": "f07424758318dd6b5f32b0fe8de9d2ffb8d97a17c841758626d18ba0faa0456a"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Bo9lX3OS.js": {
+      "bytes": 60841,
+      "sha256": "0da30b7a389f08f302c7b3c02d6363a88e63893b52fc734a9af1acc7129f7b74"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BoJ0fdvO.js": {
+      "bytes": 874,
+      "sha256": "17fc5f261dbb560fee097a627bdedbf3d9f44e9e4f0c5f734ebf8eff3cdd9a40"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Bpot8Vy_.js": {
+      "bytes": 1670,
+      "sha256": "f009082d30c305c8c23eb5717ac4a5d6cc92bd58ba0dcba1dbeeb2626dca2fea"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Bwb-fV3d.js": {
+      "bytes": 4790,
+      "sha256": "765b61296ca5354a449a041c82aaf747a2651f509b11f94f8998f67beed3f9be"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/BzabLJY-.js": {
+      "bytes": 39,
+      "sha256": "fa69b37a88563766709a7a3628acebad10c3f8940aec9da869245c696f9a0ac8"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/C-SLrbik.js": {
+      "bytes": 59618,
+      "sha256": "bf1fea60d3d99ce72559eea0c7dedce9abb25567f9fdfe60c369cdcdb76b1c5e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/C1IMDBU6.js": {
+      "bytes": 6820,
+      "sha256": "9919d9c20c28199bc499fae84c16271a96b5f5ec9a6e876efd4c90aef4b10caa"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/C2fgzcsH.js": {
+      "bytes": 2262,
+      "sha256": "ffcdf9b4b86e5096b20ef1339e405e65e5f6d2b4cf338ab483c903a80e570f7a"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/C7STrsbM.js": {
+      "bytes": 1019,
+      "sha256": "5b78d88ec4496ecd3af129e03570c3b56cd58e5ea6ee2de1e30d363790a0736c"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CTmbLWPv.js": {
+      "bytes": 3246,
+      "sha256": "2facf3779b780ba3f6603501115779cdbcdbeec6aa25a5dd8a2453b9fd6ec98e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CW2BNSXx.js": {
+      "bytes": 92144,
+      "sha256": "60de5b6b46f573b34d9318bf4470d3da2501713a8c820255669535ec960492d2"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CWOxTaOy.js": {
+      "bytes": 29220,
+      "sha256": "747b9a57cfc608e4d5861a0fa3c27b84761c8365e4d7f0a62407b2995dc5022e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CXaglZUX.js": {
+      "bytes": 43462,
+      "sha256": "1c9d1ce5e991a2378c1c3ad68def5543392d3c67de35793535f31ec7504dd61e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CavoSg5Z.js": {
+      "bytes": 304,
+      "sha256": "3ce86b53c30b80c98a1afb874ff9679718e4161fd87d6139d798bed3731de2bf"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CcyQl55z.js": {
+      "bytes": 3827,
+      "sha256": "203dc0c9de5643ea654f71991d5da83763275530673b621b1adf79985cd6ad90"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Cf20m9DQ.js": {
+      "bytes": 286,
+      "sha256": "c28303836daf64d4be2437fc0ee0056ac181d89643186fed1f12953ce5498ac0"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CxuPxOn4.js": {
+      "bytes": 1032,
+      "sha256": "807aff4e154b995d653354e7a5410d58d17d802f0fbf34632110f1e349b81f8b"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/CzUX7T-1.js": {
+      "bytes": 244,
+      "sha256": "78f6bc513498f686d8a98e8eba27a96cf01d795681fca2b198e6f3a50470bce9"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/D-XeBb1l.js": {
+      "bytes": 42176,
+      "sha256": "68ecc4e6bf1c0db3fece118dc44103d6819ac97280a4d6b0a882ebba7d401dea"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/D2pM6_Y7.js": {
+      "bytes": 386,
+      "sha256": "7c9e28bb0c8c5d45ed38592670cb431a676c29aa291248c4cb92530a75c345ca"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/D6OEY5qu.js": {
+      "bytes": 576,
+      "sha256": "79795edd28354c4f21ece9669af5714d9fad0ece82d8d5910141f421298512aa"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/D7ttWb17.js": {
+      "bytes": 3712,
+      "sha256": "77a56f2d99d3deee66c1a78d6ba68c387ebfe3f4c0b621128bf69d9d7ceeaae1"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/DIunQhJ5.js": {
+      "bytes": 3955,
+      "sha256": "29907e5f5dfa4719b42c50616e572eab51c7be6534b3c5a1a543c7bbd7597dee"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/DK27EMQo.js": {
+      "bytes": 22,
+      "sha256": "1350b06e3bc1353f9de0c9ae44e5a345fa5111ffaa6ed87b5a5936a628a2d818"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/DS1fBo69.js": {
+      "bytes": 608,
+      "sha256": "d56e3461077597eba6f2d67a898f68216365801f22805d21148a7652ee456579"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Doo58tzq.js": {
+      "bytes": 7420,
+      "sha256": "1fc486dcb99eba8e8ffd4f475960eb8ce1002c855806c69e4d02ea800e99ae44"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/DrS05xh9.js": {
+      "bytes": 3244,
+      "sha256": "4c1327587f14b3e9bac46d2ce4d19142e78548ab2ea37b79b02a3993797adf39"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/Dt-HX3Vu.js": {
+      "bytes": 623,
+      "sha256": "cd102f4624d1ce57fa912465241bae95fa50d9ec5a19c57e0e3114aacf9a087e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/I7o1wNhy.js": {
+      "bytes": 300,
+      "sha256": "d692980793bda54e83cdf8cb98d1c2281a3ea0f36cea0ecaa52fe08cb4361a72"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/JpefaLiI.js": {
+      "bytes": 854,
+      "sha256": "642da7f0e6c5b3ce97e245382a086c9f1ca9eda25b1aa5c9ff79b977a569e5b3"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/V6IJmp9E.js": {
+      "bytes": 1519,
+      "sha256": "957a90da436c342e2daef45e1e49d90b109012b6e66794049741a46e6e587064"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/_eM9L-qT.js": {
+      "bytes": 19508,
+      "sha256": "222976820f89cae443fdce9b2c37d998dfe9a1e895b0ac197e58943baf9e2b48"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/ePG-AWev.js": {
+      "bytes": 7416,
+      "sha256": "8dba0eea9ea44ff8f0638e48fdfb38e8ddb81e66389af644a991b87d4c300dae"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/epmleYoC.js": {
+      "bytes": 27190,
+      "sha256": "bcee23306b2df8fa141bc3dd70d2b0520210d54ef74517eb26f5301065a55973"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/i7XFecFv.js": {
+      "bytes": 273,
+      "sha256": "63ef6e08e780f9019b8331720c5b03390963f6e8a4771480253b17d5516eba1f"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/tgEvhr6D.js": {
+      "bytes": 7535,
+      "sha256": "a437b548fc1646aabb656b9ed2adbb75bc9a6587867f8a045410c12608dcc0ab"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/chunks/xihTtKlq.js": {
+      "bytes": 65,
+      "sha256": "0214edcff77242079f540507a53803aa22d857b6ad673e60e39748b6c7aa08c1"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/entry/app.Dv0wUIwH.js": {
+      "bytes": 8886,
+      "sha256": "86adcf7b8bf8617a9bcf21494beac61448b45cfa3e8375f8d943b2b0f6957bca"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/entry/start.C3ptujt-.js": {
+      "bytes": 82,
+      "sha256": "18bd21eb5206311aecc2e9390c433190c0c915e122aac5a08ed134024c7e523a"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/0.D1PCcvwN.js": {
+      "bytes": 105504,
+      "sha256": "e9709808483f32195d620cdd729d5e04041942c95c6af9b94641dfbf2857aba1"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/1.D5-L0h5v.js": {
+      "bytes": 358,
+      "sha256": "7fb4c9c64b007167d6d2cf6a5c59417cf972f85e16d39056053108223b58c800"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/10.DVosOdew.js": {
+      "bytes": 472,
+      "sha256": "3804c4a7a1f056139df2779060375c84879101c7e854a3e94bf13a3b900d4563"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/11.6LAj-i80.js": {
+      "bytes": 38098,
+      "sha256": "38926f2171816321f895e4108c5d6e1ac5069583f602834a2b8eb6d044a94a0a"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/12.BVe2gVok.js": {
+      "bytes": 475,
+      "sha256": "441ab1f8507116a9bd7fa1da4d5a7a94db8d6dd3f539ce7bef101ed2dd4f6462"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/13.CGC3XFcA.js": {
+      "bytes": 20409,
+      "sha256": "29db37ff1136ad3dcb6f83f98ccd0b70f26b909d1d9700d34862b5ed1dfc4927"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/14.CSCcNZvl.js": {
+      "bytes": 3610,
+      "sha256": "c74f639a24d57e008f5fa22dc168dc7a062f1bc252f82d5bc9d962de45fd8367"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/15.BgbZN81D.js": {
+      "bytes": 473,
+      "sha256": "b1c4e3025493f387e27b42fbad355b41b55a72549e942fe7f7d0a86d127e48b9"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/16.COhSys5y.js": {
+      "bytes": 16589,
+      "sha256": "ab68a4c9d547abd2dc0acc4b5fc222c6741f6fcdb881636cc4a5353fe83bce9f"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/17.DSD4wHE1.js": {
+      "bytes": 26767,
+      "sha256": "547be5bd2e46a15d44d1184334d700b213e166eacef18f5d1c3c5cc1fd40c7e4"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/18.GtUai5MX.js": {
+      "bytes": 53073,
+      "sha256": "d88b22217a2d9329d2737899ee4a2e300bab5bff50407a2fc251e104bebf2674"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/2.B8Ww7r44.js": {
+      "bytes": 2174,
+      "sha256": "3f3ac98571201511b7240d5f305128d546dd614736bc3e477ae223d96c96ad5a"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/3.imslxIjY.js": {
+      "bytes": 339,
+      "sha256": "b80362cf4d0bf36acfa3ee4887b053e3224ca48d687cc3373e489e6bbc0de285"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/4.CFaaz2vb.js": {
+      "bytes": 5950,
+      "sha256": "39716f2b4d598e6f21af966947d696ce33d6ae255f5eee7ce26755ba30d6f6d6"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/5.DaDQa0OA.js": {
+      "bytes": 5426,
+      "sha256": "17a3e251764c7519d7e9b63350d31b265be9f5dcf1b6d3a1bbc87db8b8b15d5b"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/6.CKp_N2f1.js": {
+      "bytes": 21209,
+      "sha256": "16f10afbeb5bcb59eba83a271b1f440b90692f016cf264fe3c6b82a3c8e57a72"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/7.imslxIjY.js": {
+      "bytes": 339,
+      "sha256": "b80362cf4d0bf36acfa3ee4887b053e3224ca48d687cc3373e489e6bbc0de285"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/8.42JzZzyq.js": {
+      "bytes": 471,
+      "sha256": "7cfc2fc91780c47b39148f12d38382b24bf5bc9920d83a36c8a16e211c95747e"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/immutable/nodes/9.DlPKim5U.js": {
+      "bytes": 7966,
+      "sha256": "7e1809a9ef53eaf2849c8c95c4b513134adc447d4a4d1a7a626f1172294febc0"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_app/version.json": {
+      "bytes": 54,
+      "sha256": "2c0cc88ecd8923672749361be76efb816897aa2b818e126591bfb25317747b56"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/_headers": {
+      "bytes": 1055,
+      "sha256": "feb288d980678238834292d59e6f25ef88d54b095827e96c0e0d7354d7e30c02"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/app.webmanifest": {
+      "bytes": 854,
+      "sha256": "c0c1ba64b6493f06f21ffe8a976d31222bb88d4097ee1f35dc287219371406d5"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/en/weather/week/index.html": {
+      "bytes": 26695,
+      "sha256": "492fb7bd170f8b473288f0167466b2492a6c0e3fb943a097a2ab50953f84d43d"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/favicon.svg": {
+      "bytes": 1793,
+      "sha256": "b00a3171cb1a704c4920003f42f74fc193aab5fa9c81ea039cb6865181a4f91b"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/icons/icon-180.png": {
+      "bytes": 8780,
+      "sha256": "973aa21f418ad3c6887240267945abce01f5557cf349e6d7f7c8fa9b94a0f9ca"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/icons/icon-192.png": {
+      "bytes": 9064,
+      "sha256": "77a67fef536e98a9a2a394a279b5b10a9b772f14af5855e1c27a3d6c82dfa9dd"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/icons/icon-512.png": {
+      "bytes": 25387,
+      "sha256": "732021ba7a0937cdf22c92942083e2417c6fad9ebd01eaf26608f101974e1bcb"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/icons/icon-maskable-512.png": {
+      "bytes": 20342,
+      "sha256": "7e53547875e16da174b68fde7b39e32f232fc1f2aa1187b581b3b4faa17c0d0f"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/index.html": {
+      "bytes": 4488,
+      "sha256": "0f0d3a395c9d5ceda32877b5ad7b6237040feb211ee432801c09cd2a826e63e4"
+    },
+    "volparossa-weather/build/drizzli-volparossa/build/robots.txt": {
+      "bytes": 63,
+      "sha256": "b033243267bcbdab84cb01e940811d6d77a894d78f0470faaf0eb43f8e4efcc9"
+    },
+    "volparossa-weather/build/drizzli-volparossa/package-lock.json": {
+      "bytes": 163856,
+      "sha256": "9b04f44d254fff82180b32716353c2e7b4e444de7da26cd3fad7eb92512f3454"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa-mode.ts": {
+      "bytes": 208,
+      "sha256": "17da5a4618ff49d81e1ceab1058a5eafdca285f31febe1cce9d9a454cfc2c40c"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/air-quality-provider.mjs": {
+      "bytes": 1940,
+      "sha256": "3ef3c7b3a731e2d41d6c60dc240ec1d0bda0f925c8bf9b814d6f9d7bd09f6fb9"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/air-quality.mjs": {
+      "bytes": 9022,
+      "sha256": "c69432ead935a81d3ae28a5259201f98a8845eaef96019121ab9bf3c8f7fced7"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/client.d.mts": {
+      "bytes": 1493,
+      "sha256": "f655a6c3721c394fd3e167ad27bd4251a114684973d1f718b4037230cc1d956b"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/client.mjs": {
+      "bytes": 5534,
+      "sha256": "21c252e6932f5e548dbf030e5836180c074dd21d3d00505906a8bbd2c66e1fbd"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/forecast.mjs": {
+      "bytes": 13170,
+      "sha256": "5a3d71b0c1735e5a7716a1d126fe39c5595232d07ef54f876b8838bc5ccd14e4"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/lib/services/volparossa/provider.mjs": {
+      "bytes": 3479,
+      "sha256": "d2dcf5b3817b148721632c74684ce83770bb670feb18872aec5a71157542b7ee"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/routes/weather/week/VolparossaAirQuality.svelte": {
+      "bytes": 2564,
+      "sha256": "c22280f5a0e0611851b6392fc18d9bdbba1c7d5f2dda3fdd08d9f71e8e3f695d"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/routes/weather/week/VolparossaForecast.svelte": {
+      "bytes": 3584,
+      "sha256": "e1e165841edef9fb6d41d3e635969add013c2f04cd226d4992b6d51b77ab5ed2"
+    },
+    "volparossa-weather/build/drizzli-volparossa/src/routes/weather/week/VolparossaWeek.svelte": {
+      "bytes": 5761,
+      "sha256": "3281b20442ed5f35c83fb2a882f70f988826def39c331a20dd5453599debba35"
+    },
+    "volparossa-weather/build/drizzli-volparossa/volparossa-build-plugins/m-function-matcher.LICENSE": {
+      "bytes": 1069,
+      "sha256": "5f3b025ba92b2e3aec1cf74725dbaad5d5d4aaf24b52ce6479f21eb37c8cf9ae"
+    },
+    "volparossa-weather/build/drizzli-volparossa/volparossa-build-plugins/message-format.LICENSE": {
+      "bytes": 1069,
+      "sha256": "5f3b025ba92b2e3aec1cf74725dbaad5d5d4aaf24b52ce6479f21eb37c8cf9ae"
+    },
+    "volparossa-weather/integrations/drizzli/browser-fixture.mjs": {
+      "bytes": 8404,
+      "sha256": "96bc35143645c1ed0c879ca30d5eade87e2df78bed6d42306615fd24c2b79202"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-browser-proof.json": {
+      "bytes": 6404,
+      "sha256": "2dd5f4ed905e11d966e376ada263f30e00066c5f3fb3a2b845188f8a9b8f9211"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/baseline.json": {
+      "bytes": 829,
+      "sha256": "80b8a4c962bf9f38f0153fb64273960a4721cd0ca69832e32a95ece5baa653e0"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/build.json": {
+      "bytes": 5384,
+      "sha256": "b04ef7155ea9ccbf88cb7c063c313734ead06ff8b92492281cc7d492d548e774"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/cleanup.json": {
+      "bytes": 204,
+      "sha256": "0bba5eec4889fd3ecc32b280b23f20338f448e949c71c3377dd16842d6380e52"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi.json": {
+      "bytes": 2279,
+      "sha256": "0712bb183f490bf17068bb87b1017a591966cc1c96771ca5ff085a8fbed640d2"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi/decode-first.log": {
+      "bytes": 269,
+      "sha256": "769c46ff19c8985759a280c4abbc669a6e79b5018800239ead554e55d53585f7"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi/decode-last.log": {
+      "bytes": 273,
+      "sha256": "fc2fac05c4976dff2e9b135666bded45595bd4568cccb4fd2737d3f9679f58d2"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi/elf.log": {
+      "bytes": 11515,
+      "sha256": "c84fb3519c4e3ef1f3f0a991da86c8ab7c33dd3af2e1b548cfb93dea90d66c99"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi/sandbox.log": {
+      "bytes": 73,
+      "sha256": "923942205c3c961ec30f9d1a22aeff13ab41cc2b2a2d4a9ddffbac89be105b5f"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-abi/version.log": {
+      "bytes": 25,
+      "sha256": "9a44b8f4c22b2b88686807288404b8b042bcfe6c63c294002b5df9b7e75a1e03"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/decoder-build.json": {
+      "bytes": 26940,
+      "sha256": "ad40c6c7228984356de6e65480a850ccbcc48a690bfa8af370f860b354ad9d64"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/packages.txt": {
+      "bytes": 638,
+      "sha256": "bd925b1ce3d4f12edc468ea551d82e9796274884ea7072f92a35721506b1bfc3"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/preflight-acquire.json": {
+      "bytes": 444,
+      "sha256": "e4ade57605e5ee7aa47e2ba4b46c760fcbda5407fd2c11d72515b035408c2490"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/preflight-browser.json": {
+      "bytes": 443,
+      "sha256": "144dd8934a77b67be4659778e1189633530024377862f84d4fc5e8380ab755d7"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/preflight-compile.json": {
+      "bytes": 443,
+      "sha256": "0674e6458cb5a5137560e6d049f607052ae12ef9dd558f9914439d6e360ea782"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/result.json": {
+      "bytes": 635,
+      "sha256": "ff0379ff35236fc0a2f89f45a5b79f01435bc15175370a2e96bfc16619ca6e9b"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/runtime-provenance.json": {
+      "bytes": 568457,
+      "sha256": "a225218f68e46f7ed6237926bbfbe2c3e605be8d8fd0c445311af5861a01b567"
+    },
+    "volparossa-weather/integrations/drizzli/hosted-proof/steps.json": {
+      "bytes": 6101,
+      "sha256": "16968b948a05a024bb09bb6b0e9fa2a9ce4e1b0daa4b9ef8be5835b3c7b1729b"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/lib/services/volparossa-mode.ts": {
+      "bytes": 208,
+      "sha256": "17da5a4618ff49d81e1ceab1058a5eafdca285f31febe1cce9d9a454cfc2c40c"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/lib/services/volparossa/client.d.mts": {
+      "bytes": 1493,
+      "sha256": "f655a6c3721c394fd3e167ad27bd4251a114684973d1f718b4037230cc1d956b"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/lib/services/volparossa/client.mjs": {
+      "bytes": 5534,
+      "sha256": "21c252e6932f5e548dbf030e5836180c074dd21d3d00505906a8bbd2c66e1fbd"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/routes/weather/week/VolparossaAirQuality.svelte": {
+      "bytes": 2564,
+      "sha256": "c22280f5a0e0611851b6392fc18d9bdbba1c7d5f2dda3fdd08d9f71e8e3f695d"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/routes/weather/week/VolparossaForecast.svelte": {
+      "bytes": 3584,
+      "sha256": "e1e165841edef9fb6d41d3e635969add013c2f04cd226d4992b6d51b77ab5ed2"
+    },
+    "volparossa-weather/integrations/drizzli/overlay/src/routes/weather/week/VolparossaWeek.svelte": {
+      "bytes": 5761,
+      "sha256": "3281b20442ed5f35c83fb2a882f70f988826def39c331a20dd5453599debba35"
+    },
+    "volparossa-weather/integrations/drizzli/prepare-core-browser.mjs": {
+      "bytes": 10773,
+      "sha256": "620d7a4581f6210a881e38d84162d3720a8d150b7982da64a5d664f1bc640533"
+    },
+    "volparossa-weather/integrations/drizzli/smoke_browser.py": {
+      "bytes": 41148,
+      "sha256": "4c6c0ab2c0a7dcee0947e4cc7defbe4f4c905f3ac3391c08e1d24981f9d5473e"
+    },
+    "volparossa-weather/integrations/drizzli/smoke_core_browser.py": {
+      "bytes": 43492,
+      "sha256": "fe0ef120d3372112d4a0d27400a774e2f7d6fa68fb3053dbfc1148282d657b36"
+    },
+    "volparossa-weather/integrations/drizzli/upstream.json": {
+      "bytes": 4366,
+      "sha256": "c336f3ac90542f731525ef6cd976be311c76f7c1208bd202308af7ead6d17767"
+    },
+    "volparossa-weather/integrations/drizzli/upstream.patch": {
+      "bytes": 11414,
+      "sha256": "44fa73a806b9361b066d8f277a7be8fc8ecc46092e53a720fc26dfb42ebd40db"
+    },
+    "volparossa-weather/scripts/air-quality.mjs": {
+      "bytes": 3312,
+      "sha256": "b5a9c64e5dc9faa8920aa0f4bc728c79446ee5a73516f498654cc68d632450e3"
+    },
+    "volparossa-weather/scripts/build_eccodes.py": {
+      "bytes": 11634,
+      "sha256": "5bcb6d58b34e5b45647feae836bfd086ff0adce0e30487430f5c50941f579827"
+    },
+    "volparossa-weather/scripts/forecast.mjs": {
+      "bytes": 4364,
+      "sha256": "9f3cc2726464dfbe1c8b717d24f7173c9f9056ea5eac4547be5ce53a4e8fcb3d"
+    },
+    "volparossa-weather/scripts/prepare_hosted_decoder.py": {
+      "bytes": 25078,
+      "sha256": "1c9b10e294189ffc0fd5a2064c4e436f691aa4e50cd0eea258e7976740ac17e4"
+    },
+    "volparossa-weather/scripts/prepare_hosted_runtime.py": {
+      "bytes": 27567,
+      "sha256": "8d753ed7c60ddd392eeb878621543b91d8a0fd63aff5cc9b59de9da07a410bc9"
+    },
+    "volparossa-weather/scripts/serve-provider.mjs": {
+      "bytes": 2244,
+      "sha256": "7f84d1e495cc6a6635d77b071cbafa5664f2782ef4bb390d181430031bf71e8d"
+    },
+    "volparossa-weather/src/air-quality-core.mjs": {
+      "bytes": 255,
+      "sha256": "1fba6eb570eb186fa3fefd2c06ebad8d426983e442cfea7ceab1fb2a6f048db2"
+    },
+    "volparossa-weather/src/air-quality-provider.mjs": {
+      "bytes": 1940,
+      "sha256": "3ef3c7b3a731e2d41d6c60dc240ec1d0bda0f925c8bf9b814d6f9d7bd09f6fb9"
+    },
+    "volparossa-weather/src/air-quality.mjs": {
+      "bytes": 9022,
+      "sha256": "c69432ead935a81d3ae28a5259201f98a8845eaef96019121ab9bf3c8f7fced7"
+    },
+    "volparossa-weather/src/core-cache.mjs": {
+      "bytes": 9928,
+      "sha256": "af048838bb0c374cf47dde1a142bf0043de31378c90b787af0bb8ae52bc4c034"
+    },
+    "volparossa-weather/src/ecmwf.mjs": {
+      "bytes": 18956,
+      "sha256": "749afbabc00457047d46adf57cd9c7cfdfda858b011a41c5e3e27cd5e4ebb132"
+    },
+    "volparossa-weather/src/forecast.mjs": {
+      "bytes": 13170,
+      "sha256": "5a3d71b0c1735e5a7716a1d126fe39c5595232d07ef54f876b8838bc5ccd14e4"
+    },
+    "volparossa-weather/src/noaa-gefs.mjs": {
+      "bytes": 18016,
+      "sha256": "a5ac4875157744115b4b53e933bdb50db182d385c27b3e7bd062e59c0e2ba093"
+    },
+    "volparossa-weather/src/provider-core.mjs": {
+      "bytes": 1275,
+      "sha256": "436659c9f0a8dced1c9fd07e23156911e8062631f3134edd96afa6bcd3df2eb2"
+    },
+    "volparossa-weather/src/provider-http.mjs": {
+      "bytes": 17673,
+      "sha256": "f578071cb83ec1a7535fd30c8409b2c386f46805b0fb0873ba53ceaa01b6ff5a"
+    },
+    "volparossa-weather/src/provider.mjs": {
+      "bytes": 3479,
+      "sha256": "d2dcf5b3817b148721632c74684ce83770bb670feb18872aec5a71157542b7ee"
+    },
+    "volparossa-weather/tests/air-quality-fixtures.mjs": {
+      "bytes": 1236,
+      "sha256": "60e5c23e5437dd2e01f7bf784ae98906f3812ae3d3e81c5bc3a6f7ad3f8719ed"
+    },
+    "volparossa-weather/tests/fixtures.mjs": {
+      "bytes": 2937,
+      "sha256": "e2c5275a6c3b5bf3181007145722b61263ec3edcb83637caf7615d0fbdb2389a"
+    },
+    "volparossa-weather/third_party/eccodes-sources.json": {
+      "bytes": 2087,
+      "sha256": "f136020562a6ff0d2a83b948189c31f839afb8a00ea87565469f38640fb0dc86"
+    },
+    "volparossa-weather/third_party/hosted-runtime-inputs.json": {
+      "bytes": 2451,
+      "sha256": "8d122cd42bc2e3eca7c040ae5e847dc5b14e91ac7f30b508fc25beb5f5e860aa"
+    },
+    "volparossa-weather/third_party/hosted-runtime-npm.json": {
+      "bytes": 838,
+      "sha256": "5c6ade420006e9754dfb27c81b76846ee82fca17e67f03b4849b7310215e133b"
+    },
+    "volparossa-weather/third_party/noaa-gefs.json": {
+      "bytes": 1518,
+      "sha256": "21f6e8e94fb9c5abb54c868515f04443dedac34b433cea58a136a32cb335c5e9"
+    }
+  },
+  "kind": "volparossa-weather-public-drizzli-admission",
+  "schema": 1,
+  "scope": "disposable-joined-weather-only",
+  "sources": {
+    "browser": {
+      "commit": "08bac388a0abfd06426bebe8f6fabd0157d2e709"
+    },
+    "weather": {
+      "commit": "3c8d708040fffac61d0535e961acc8ca9c3337ba"
+    }
+  }
+}

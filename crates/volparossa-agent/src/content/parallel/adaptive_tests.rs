@@ -1,5 +1,7 @@
 //! Actual v1 selector/chunk streams through the production assignment/lease driver gate.
 
+mod continuation;
+
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
@@ -27,6 +29,10 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_disjoint(false)
+}
+
+fn fixture_with_disjoint(disjoint: bool) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let limits = CacheLimits {
         max_bytes: 12 * CHUNK_BYTES as u64,
@@ -59,10 +65,13 @@ fn fixture() -> Fixture {
     .unwrap();
     let manifest = envelope.verify(&signer.verifying_key(), now()).unwrap();
     let mut registries = Vec::new();
-    for provider in 0..4 {
+    for provider in 0..if disjoint { 3 } else { 4 } {
         let root = directory.path().join(format!("provider-{provider}"));
         let mut store = ChunkStore::create(&root, limits).unwrap();
-        for chunk in manifest.chunks() {
+        for (index, chunk) in manifest.chunks().iter().enumerate() {
+            if disjoint && index % 3 != provider {
+                continue;
+            }
             store
                 .put_verified(*chunk.id(), &source.get(chunk.id()).unwrap().unwrap())
                 .unwrap();
@@ -86,12 +95,19 @@ fn fixture() -> Fixture {
 
 #[tokio::test]
 async fn adaptive_workers_open_three_real_provider_streams_with_resource_leases_and_exact_hash() {
-    tokio::time::timeout(Duration::from_secs(15), actual_streams())
+    tokio::time::timeout(Duration::from_secs(15), actual_streams(false))
         .await
         .expect("all driver and writer owners finish within one deadline");
 }
 
-async fn actual_streams() {
+#[tokio::test]
+async fn adaptive_workers_keep_one_stream_under_pressure_with_measured_admission() {
+    tokio::time::timeout(Duration::from_secs(15), actual_streams(true))
+        .await
+        .expect("pressure preserves bounded foreground progress");
+}
+
+async fn actual_streams(pressured: bool) {
     let Fixture {
         _directory,
         manifest,
@@ -100,7 +116,9 @@ async fn actual_streams() {
         bytes,
     } = fixture();
     // Three stream allowances come from explicit memory/FD headroom, not a product count cap.
-    let budget = WorkerBudget::for_test(3 * 32 * 8 * 1024 * 1024, 3 * 4 * 8, false);
+    let shared_budget = WorkerBudget::for_test(3 * 32 * 8 * 1024 * 1024, 3 * 4 * 8, pressured);
+    let budget = shared_budget.for_test_batch();
+    let expected_peak = if pressured { 1 } else { 3 };
     let active = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
     let opened = AtomicUsize::new(0);
@@ -157,9 +175,9 @@ async fn actual_streams() {
     .await
     .unwrap();
     assert!(!timed_out);
-    assert_eq!(peak.load(Ordering::SeqCst), 3);
-    assert!(opened.load(Ordering::SeqCst) >= 3);
-    assert!(progress.iter().filter(|item| item.bytes > 0).count() >= 3);
+    assert_eq!(peak.load(Ordering::SeqCst), expected_peak);
+    assert!(opened.load(Ordering::SeqCst) >= expected_peak);
+    assert!(progress.iter().filter(|item| item.bytes > 0).count() >= expected_peak);
     assert_eq!(
         progress.iter().map(|item| item.bytes).sum::<u64>(),
         bytes.len() as u64
@@ -170,10 +188,20 @@ async fn actual_streams() {
             .iter()
             .filter(|item| item.elapsed.is_some())
             .count()
-            >= 3
+            >= expected_peak
     );
     assert_eq!(active.load(Ordering::SeqCst), 0);
-    assert_eq!(budget.available_workers(), 3);
+    budget.finish(true);
+    let diagnosis = budget.snapshot_for_test().unwrap();
+    assert_eq!(diagnosis["initial_allowance"], expected_peak);
+    assert_eq!(diagnosis["min_allowance"], expected_peak);
+    assert_eq!(diagnosis["max_allowance"], expected_peak);
+    assert_eq!(diagnosis["peak_leases"], expected_peak);
+    assert_eq!(diagnosis["active_leases"], 0);
+    assert_eq!(diagnosis["admitted_leases"], opened.load(Ordering::SeqCst));
+    assert_eq!(diagnosis["denied_leases"], 0);
+    assert_eq!(diagnosis["outcome"], "returned");
+    assert_eq!(shared_budget.available_workers(), expected_peak);
     let mut output = Vec::new();
     reassemble(&manifest, &mut [&mut cache], now(), &mut output).unwrap();
     assert_eq!(output, bytes);
@@ -221,4 +249,67 @@ async fn adaptive_worker_lease_race_and_dormant_completion_never_open_a_stream()
             .all(|item| !item.attempted && item.elapsed.is_none())
     );
     assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn adaptive_worker_interruption_releases_observed_leases_before_batch_summary() {
+    let Fixture {
+        _directory,
+        manifest,
+        mut cache,
+        ..
+    } = fixture();
+    let shared_budget = WorkerBudget::for_test(3 * 32 * 8 * 1024 * 1024, 3 * 4 * 8, false);
+    let budget = shared_budget.for_test_batch();
+    let active = AtomicUsize::new(0);
+    let started = tokio::sync::Notify::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (download, workers) = ParallelDownload::new_adaptive(
+        &manifest,
+        3,
+        &mut cache,
+        TransferLimits::default(),
+        budget.available_workers(),
+    )
+    .unwrap();
+    let tasks = workers
+        .into_iter()
+        .map(|worker| {
+            drivers::assigned(
+                worker,
+                deadline,
+                &active,
+                || budget.try_acquire(),
+                |worker| async {
+                    started.notify_one();
+                    let result = std::future::pending::<Result<bool, ContentError>>().await;
+                    drop(worker);
+                    result
+                },
+            )
+        })
+        .collect();
+    let mut transfer = Box::pin(receive_workers(
+        download,
+        &mut cache,
+        tasks,
+        || budget.allowance(active.load(Ordering::Acquire)),
+        deadline,
+    ));
+    tokio::select! {
+        biased;
+        _ = &mut transfer => panic!("workers should still be pending"),
+        () = started.notified() => {}
+    }
+    assert!(active.load(Ordering::Acquire) > 0);
+    assert!(shared_budget.available_workers() < 3);
+    // Dropping the caller's future cancels all owned drivers without a detached task.
+    drop(transfer);
+    assert_eq!(active.load(Ordering::Acquire), 0);
+    assert_eq!(shared_budget.available_workers(), 3);
+    let diagnosis = budget.snapshot_for_test().unwrap();
+    assert_eq!(diagnosis["outcome"], "interrupted");
+    assert_eq!(diagnosis["active_leases"], 0);
+    assert!(diagnosis["peak_leases"].as_u64().unwrap() > 0);
+    assert_eq!(diagnosis["denied_leases"], 0);
 }

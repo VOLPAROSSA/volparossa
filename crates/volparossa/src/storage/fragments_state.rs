@@ -88,7 +88,7 @@ struct SignedManifest {
 }
 
 pub(super) struct LockedFragments {
-    pub(super) directory: File,
+    pub(super) directory: nix::fcntl::Flock<File>,
     pub(super) data: Manifest,
     pub(super) root_sha256: [u8; 32],
     pub(super) placements: Vec<Placement>,

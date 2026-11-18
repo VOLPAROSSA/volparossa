@@ -2,22 +2,39 @@
 
 # Project VOLPAROSSA
 
-**DICN — Decentralized Intelligent Cooperative Network**
+**Useful digital tools, built on resources we share.**
 
-A participant-operated network for **protected connections, shared content, private storage
-and cooperative AI**. Instead of treating these as separate services, VOLPAROSSA is building
-one reusable core that applications can share.
+Keeping in touch, looking after your files and getting help from AI often means relying on
+separate services—or running their backends yourself. VOLPAROSSA is building a shared,
+participant-operated foundation for open-source applications: **connectivity, reusable content,
+private storage and cooperative computation**, with one core coordinating the work.
 
-The ambition goes beyond a VPN: people contribute the connectivity, storage and computation
-they can spare, and benefit from the network they build together. The device owner's activity
-comes first.
+The goal is practical choice: familiar applications supported by infrastructure people can
+inspect, contribute to and help improve. A modest device should be an entry point to shared
+capabilities. Making that useful, dependable and safe is the engineering work ahead.
 
-[Explore the layers](#four-layers-one-network) ·
+One concrete result: [installed Overmorrow Android retrieved real forecasts through peers](https://github.com/VOLPAROSSA/volparossa/actions/runs/38717988016)
+in an emulator, then refreshed from cache. The broader network and application family remain
+in development; there is no supported end-user release.
+
+[**See what works**](#development-status) ·
+[**Build an integration**](#developing-volparossa) ·
+[**Support the shared work**](docs/community/SUPPORTING.md)
+
+The architecture is a **DICN — Decentralized Intelligent Cooperative Network**.
+
+[Explore the layers](#five-layers-in-one-network) ·
 [Applications](#one-core-multiple-applications) ·
 [7 Virtues](#governed-by-7-virtues) ·
 [Development status](#development-status) ·
 [Documentation](docs/README.md) ·
-[Contribute](CONTRIBUTING.md)
+[FAQ](docs/FAQ.md) ·
+[Community](docs/community/OVERVIEW.md) ·
+[Support](docs/community/SUPPORTING.md) ·
+[Contribute](CONTRIBUTING.md) ·
+[Code of Conduct](https://github.com/VOLPAROSSA/.github/blob/main/CODE_OF_CONDUCT.md) ·
+[Accessibility](https://github.com/VOLPAROSSA/.github/blob/main/ACCESSIBILITY.md) ·
+[Discussions](https://github.com/VOLPAROSSA/volparossa/discussions)
 
 > **Development preview · Initial core target: Debian 13 amd64 · GPL-3.0-only**
 >
@@ -28,13 +45,22 @@ comes first.
 
 ## Why a DICN
 
-- **Decentralized:** participants run the same node software. Discovery contacts are
-  replaceable peers, not central authorities.
-- **Intelligent:** the aim is for agents across participating devices to divide tasks,
-  combine their results and learn together. Measured outcomes guide improvements to
-  shared models and to the way agents coordinate their work.
-- **Cooperative:** participants give as well as take, according to available capabilities.
-  Shared resources must respect foreground activity and resource budgets.
+- **Give applications a shared foundation.** A messaging app, a photo library and a coding
+  assistant need different features, but can reuse connectivity, storage and task coordination.
+  The aim is to let an improvement to a shared service benefit several integrations instead
+  of rebuilding the same infrastructure for each one.
+- **Make more possible from a modest device.** Shared models and suitable work on other
+  participants' devices could extend what one device can do. Useful quality, latency and
+  resource cost still need measurement; confidential execution of private tasks on peers
+  remains unfinished.
+- **Make control inspectable.** Open code, scoped application permissions and explicit
+  relay/exit boundaries give contributors concrete behavior to examine and challenge.
+  Replaceable discovery contacts are introductions, not central authorities. These choices
+  do not create an unconditional privacy or availability guarantee.
+- **Share responsibilities as well as benefits.** Joining is voluntary. Production consumers
+  contribute nonzero relay capacity, plus exit service when they have an independent Internet
+  uplink. Resource budgets must give the owner's activity priority. Sponsorship is separate
+  from these contribution duties.
 
 One compatible background core should serve several applications without duplicating the
 network. Closing a frontend should not end the node's accepted responsibilities. Application
@@ -43,20 +69,47 @@ access and explicitly chosen system-wide operation remain separate permissions.
 
 ## Development status
 
-**Demonstrated in scoped development trials:**
+**Selected development milestones.** Working milestones exist across all five
+layers, but they do not yet form a complete, supported service. The distinction matters
+especially for private data and applications that depend on several layers at once.
 
-- Protected WireGuard routes carrying real MPTCP, UDP/MASQUE and Multipath QUIC traffic;
-  later trials also carry data on three parallel paths.
-- Verified peer-content retrieval, selected HTTPS sharing, DNS-cache sharing and public
-  publication, including retrieval while an original publisher is offline.
-- Private fragment storage and provider-loss recovery, including native Signal backup
-  export/import, encrypted Image snapshots and OpenCloud file recovery.
-- Actual adapter training and reuse, public tasks on peer workers, and selected
-  model-review and signed policy-enforcement flows.
+| Area | Demonstrated in scoped trials | Important remaining boundary |
+| --- | --- | --- |
+| Network and cache | Protected WireGuard routes carrying genuine MPTCP, UDP/MASQUE and Multipath QUIC traffic, including three-path trials; verified peer retrieval, selected HTTPS/DNS sharing and publication while the original publisher is offline. | This is not automatic caching of arbitrary HTTPS traffic or proof on every device and network. |
+| Weather applications | Real weather, precipitation and particulate forecasts displayed and refreshed in Drizz.li and Overmorrow web clients; on-demand retrieval, refresh and background/resume in installed Overmorrow Android in an emulator. | Web trials obtain the first products before opening the UI. Expiry with real products, physical phones and iOS remain open. |
+| Private storage | Fragment storage and provider-loss recovery; separate application trials include native Signal backup export/import, encrypted Image snapshots and OpenCloud file recovery. | The joined Image/Cloud publication, maintenance, repeated restore and deletion lifecycle is not yet accepted. Automatic reciprocal accounting and safe capacity reduction remain unfinished. |
+| Compute and Code | Actual adapter training and reuse, public tasks on peer workers, selected model-review flows and an OpenCode model-driven read/edit/test task. | A successful bounded task is not general coding reliability. Confidential execution of private tasks on other people's devices remains unfinished. |
+| Transactions | Signed TEST-unit transfers across four validators, conflicting-spend rejection, partitions, rejoining and replay without a second debit. | Fixed membership and fictitious assets; not live payments, external settlement or a Bank-to-distributed-ledger integration. |
 
-**Still in development:** complete application integrations, protected execution of private
-tasks on other people's devices, dependable AI reasoning, automatic reciprocal storage
-maintenance, the complete immune system and authorized automatic software updates.
+[Citizen](https://github.com/VOLPAROSSA/volparossa-citizen) separately provides an executable
+referendum-procedure simulation with fictional identities, not verified real-person voting
+or recognized public authority. The [application guide](docs/applications/APPLICATIONS.md)
+explains the scope of all ten integrations.
+
+The [OpenCode trial](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/38824828727)
+completed its coding task in about **37 minutes**. The Code integration and native core
+backend are now on their respective `main` branches. The trial remains bound to its
+original pinned core revision; the newly integrated core has passed source checks,
+not a repeat model trial. It demonstrates a local model-driven workflow, not competitive
+performance, general coding reliability or confidential execution on other people's devices.
+
+### Current integration work
+
+The next shared dependencies are **private-storage maintenance with Image/Cloud** and
+**protected peer computation**, while preserving the demonstrated coding workflow.
+Joined storage publication, repair, repeated restore and deletion remain open.
+Public model trials do not establish confidential hardware or authorize private tasks.
+The [current implementation status](docs/IMPLEMENTATION_STATUS.md) owns the latest
+recorded results and blockers; [original failures](docs/archive/README.md) remain
+preserved with their source revisions. The
+[organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md)
+coordinates retained branches and integration work across repositories.
+
+Complete applications, dependable shared reasoning, the full immune system and authorized
+automatic software updates also remain in development. The
+[execution plan](docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
+tracks the current blockers and next usable milestones without treating feature branches
+as released functionality.
 
 These results belong to their recorded revisions and test conditions. The original
 [A01–A15 transport acceptance run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
@@ -65,7 +118,9 @@ is a historical checkpoint, not certification of every later change.
 failed trials and remaining work together. An open feature branch is not automatically
 part of `main`.
 
-## Four layers, one network
+<a id="four-layers-one-network"></a>
+
+## Five layers in one network
 
 The layers serve different purposes. **Public caching, private storage and message delivery
 are not interchangeable**, and private data is not automatically training material.
@@ -76,9 +131,10 @@ are not interchangeable**, and private data is not automatically training materi
 | Cache | Reuse authorized content instead of repeatedly fetching the same bytes. |
 | Storage | Retain encrypted private files with recovery copies and reciprocal capacity. |
 | Compute | Share suitable work, models and learning across participating devices. |
+| Transaction | Authorize and record transfers, distinguish settlement states and support accountable corrections. |
 
-A fifth **Transaction-layer is being researched**, separately from these services.
-It is not yet an operational payment or banking facility.
+The **Transaction-layer currently operates only with fictitious test value**. It is separate
+from reciprocal network participation and is not an operational payment or banking service.
 
 <a id="one-network-many-paths"></a>
 
@@ -112,6 +168,15 @@ flowchart LR
     class C,R1,R2,R3,RN peer;
     class E,D endpoint;
 ```
+
+The diagram starts with your node in the client role: Path 1 reaches Peer A over local
+Wi-Fi, Path 2 reaches Peer B over the existing Internet, and Path 3 reaches Peer C over
+local Ethernet. These different relays each connect over WireGuard to the same selected
+exit peer. The dotted route shows additional local or Internet paths through further
+relays and WireGuard links to that same exit, when useful and supported. The exit's
+independent uplink reaches the allowed Internet destination. Each normal path remains
+client → exactly one relay → exit → destination, with payloads encrypted from client
+to exit; local links do not permit a direct client-to-exit dataplane.
 
 The diagram shows **several parallel routes**. Within each route, one WireGuard link
 connects your node to its relay, and a second connects that relay to the selected exit.
@@ -228,9 +293,17 @@ compute, communication costs and the owner's activity. Suitable cache content ca
 training, but missing authorized sources must remain fetchable: cache availability must
 not decide which knowledge counts.
 
+The agreed scope includes image and audio understanding, speech recognition and generation,
+and natural spoken interaction through the same shared compute service. Agents should be
+able to use permitted Internet sources for tasks, research, learning and maintenance, within
+access rights and resource budgets. These are development goals, not completed capabilities.
+
 Real development milestones include local adapter training, signed exchange and reuse,
-public peer tasks and selected model-review/recovery loops. **Successful execution is not
-the same as sound reasoning**; current small models still make factual errors.
+public peer tasks and selected model-review/recovery loops. A bounded OpenCode task now
+also demonstrates real model-driven reading, editing and testing through the core's local
+CPU backend. **Successful execution is not the same as sound reasoning**; current small
+models still make factual errors, and this coding result is not evidence of distributed
+private computation.
 
 Private network tasks also need protection against the executing device's operator—not
 just encrypted transport. That required capability is unfinished. Current public-peer
@@ -238,26 +311,37 @@ experiments use explicitly authorized public data; local private inference is a 
 not completion of private network collaboration. Private prompts, files and results must
 not silently enter shared models or public caches.
 
-The longer-term scope includes maintaining the project's repositories and distributing
-authorized client updates, with independent review and controlled installation rights.
-These are not powers automatically granted to model output.
+The scope also includes maintaining the project's repositories and automatically distributing
+and installing authorized client updates. Independent review, release verification, staged
+rollout and recovery remain required. Model output does not grant publication or installation
+authority.
 
 [Training, peer tasks and model profiles](docs/services/DECENTRALIZED_AGENTS.md) ·
 [Software maintenance and updates](docs/services/REPOSITORY_MAINTENANCE.md)
 
 ## Transaction-layer: Ownership, payments and settlement
 
-The new [VOLPAROSSA Bank](https://github.com/VOLPAROSSA/volparossa-bank) research
-application proposes participant-owned portfolios weighted by nonnegative
-`ROIC × FCF-yield`, internal payments and connections to existing financial systems.
+[VOLPAROSSA Bank](https://github.com/VOLPAROSSA/volparossa-bank) proposes
+participant-owned portfolios, internal payments and connections to existing financial
+systems. Portfolio weights use `ROIC × FCF-yield`, with both inputs nonnegative.
 Reusable authorization, reservations, settlement status and dispute handling
 belong in the core; investment methodology and presentation belong in Bank.
 
-Only isolated arithmetic and transaction-state research are being developed.
-There is no live bank, trading service or financial gateway. The immune system
-should help detect abuse without exposing everyone's finances, but cannot
-guarantee lawful transactions or recover money after every external transfer.
-Financial participation remains separate from contributing network resources.
+Implementation now includes durable signed TEST-unit reservations, transfers and cancellation,
+with safe retries after restart. Bank connects recoverable payment intents to this owner-local
+API. A separate core trial runs the Rust transaction application with four CometBFT validators:
+conflicting spends are rejected and supply is conserved. A 3–1 split permits majority progress;
+a 2–2 split halts new commits. Replay after a committed transfer does not debit twice.
+
+That trial uses fixed membership and fictitious assets, not private financial processing,
+independently verified client finality or a working Bank-to-distributed-ledger integration.
+External settlement, decentralized price discovery and authorized financial recovery remain
+unfinished. There is no live bank, securities trading service or financial gateway.
+
+The immune system should help detect abuse without exposing everyone's finances. Corrections
+must preserve the original record and have explicit authority; recovery cannot be guaranteed
+after assets leave the system's control. Financial participation remains separate from
+contributing network resources.
 
 [Transaction-layer design and limits](docs/services/TRANSACTION_LAYER.md)
 
@@ -273,11 +357,13 @@ and compute coordination belongs in the core.
 | [Chat](https://github.com/VOLPAROSSA/volparossa-chat) | Signal | Encrypted messages, calls and private backups. |
 | [Mail](https://github.com/VOLPAROSSA/volparossa-mail) | Thunderbird + Stalwart | Existing accounts, decentralized delivery and self-hosting. |
 | [Code](https://github.com/VOLPAROSSA/volparossa-code) | OpenCode | Coding agents using core-managed models and collaboration. |
+| [Studio](https://github.com/VOLPAROSSA/volparossa-studio) | Silex | Visual website editing, portable export, explicit publication and shared hosting/AI. |
 | [Image](https://github.com/VOLPAROSSA/volparossa-image) | Immich | Private photo/video libraries and recoverable state. |
 | [Map](https://github.com/VOLPAROSSA/volparossa-map) | Organic Maps | Offline maps, shared distribution and traffic information. |
-| [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct public model data | Shared weather processing and measured forecast improvement. |
+| [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct ECMWF/NOAA data; Drizz.li + Overmorrow clients | Shared forecasts, client delivery and measured forecast improvement. |
 | [Cloud](https://github.com/VOLPAROSSA/volparossa-cloud) | OpenCloud | Private files, synchronization and server-independent access. |
-| [Bank](https://github.com/VOLPAROSSA/volparossa-bank) | Financial protocol research | Participant-owned portfolios, payments and auditable corrections; no real-money service. |
+| [Bank](https://github.com/VOLPAROSSA/volparossa-bank) | Core Transaction-layer | Participant-owned portfolios, payments and auditable corrections; fictitious-value implementation first. |
+| [Citizen](https://github.com/VOLPAROSSA/volparossa-citizen) | Participation and voting research | Proposals and referenda alongside existing institutions; synthetic procedure simulation first. |
 
 [Application scope and current boundaries](docs/applications/APPLICATIONS.md)
 
@@ -320,7 +406,7 @@ it or define a person's moral worth.
 
 Agents should examine one another's work, compare evidence, detect conflicting judgments
 and help correct or quarantine problematic artifacts. This extends across **network, cache,
-storage, compute and software maintenance**.
+storage, compute, transactions, application integrations and software maintenance**.
 
 The same principles guide agent behavior and the intended automatic whitelist/blacklist
 decisions. Decisions need a defined subject, authority and scope; disagreement alone is
@@ -334,6 +420,7 @@ flowchart TB
     D --> C["Cache<br/>eligible public content"]
     D --> S["Storage<br/>private custody and abuse controls"]
     D --> A["Compute<br/>accepted models and agent work"]
+    D --> T["Transactions<br/>authorized review and correction"]
 ```
 
 *Intended cross-layer oversight, not a claim that this entire loop is complete.*
@@ -351,6 +438,14 @@ neither absolute safety nor immunity from legal risk.
 
 Start with the [documentation guide](docs/README.md). The initial core target is
 **Debian 13 Trixie, amd64**, with systemd, kernel WireGuard, kernel MPTCP and nftables.
+
+- **Explore first:** the [FAQ](docs/FAQ.md) answers questions about participation,
+  privacy, shared AI and storage.
+- **Integrate an application:** read the [shared-service lifecycle](docs/architecture/APPLICATION_LIFECYCLE.md)
+  and [application boundaries](docs/applications/APPLICATIONS.md).
+- **Build or verify a milestone:** follow [Contributing](CONTRIBUTING.md), the
+  [operations guide](docs/development/OPERATIONS.md) and the
+  [source-bound evidence ledger](docs/IMPLEMENTATION_STATUS.md).
 
 Read-only prerequisite and dependency-plan checks:
 
@@ -377,6 +472,13 @@ Want to help? Improve a guide, reproduce a bounded example, report a bug with it
 or propose a usable feature slice. Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 Report sensitive vulnerabilities through [SECURITY.md](SECURITY.md), not a public issue.
 
+For **application developers**, the opportunity is a reusable service boundary to integrate
+with. For **researchers**, it is a set of explicit privacy, discovery and recovery assumptions
+to test against recorded results. For **prospective supporters**, the next shared Storage
+and protected-compute work can advance several applications; the
+[support guide](docs/community/SUPPORTING.md) explains the priorities without promising
+finished services or delivery dates. GitHub Sponsors remains pending.
+
 ## Boundaries and license
 
 VOLPAROSSA is not an unrestricted proxy or an anonymity guarantee. A global observer may
@@ -384,9 +486,11 @@ correlate low-latency traffic; colluding peers and local root remain important t
 More nodes do not automatically guarantee more speed, better AI or continuous availability.
 [Threat model](docs/privacy/THREAT_MODEL.md) · [Privacy](docs/privacy/PRIVACY.md) · [FAQ](docs/FAQ.md)
 
-The core is headless. There is no payment system, token or blockchain. Public-content
+The core is headless. Network participation requires no payment, token or blockchain;
+the separate Transaction-layer experiments do not change that rule. Public-content
 replication is distinct from transport-level packet duplication; the v1 transports do not
-add cover traffic, artificial delay or FEC.
+add cover traffic, artificial delay or FEC. The separate Storage-layer may adopt recovery
+codes under its common redundancy policy when their benefits are demonstrated.
 
 Original code is **GPL-3.0-only**. Third-party components retain their licenses and notices:
 [LICENSE](LICENSE) · [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

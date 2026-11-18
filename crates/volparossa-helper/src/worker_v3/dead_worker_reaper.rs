@@ -341,6 +341,7 @@ fn cleanup_response(
         result: InternalWorkerResult::Ok as i32,
         request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
         activation_failure: None,
+        acquire_failure: None,
         outcome: Some(internal_worker_response::Outcome::Destroyed(
             ContextDestroyed {},
         )),

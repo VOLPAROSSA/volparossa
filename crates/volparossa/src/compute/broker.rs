@@ -605,6 +605,7 @@ impl Broker {
         dataset.sync_all()?;
         drop(dataset);
         let options = Options {
+            native_backend: super::native_cpu::Options::default(),
             mode: if self.options.code_proposal_v6 {
                 Mode::PublicCodeProposal
             } else {

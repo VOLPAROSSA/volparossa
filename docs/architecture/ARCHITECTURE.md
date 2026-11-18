@@ -10,6 +10,33 @@ The original v1 sequence A01--A15 passed together on unchanged `482e33d0` in the
 Debian 13 topology. Later direct-link/sharing changes and the content extension require their
 own evidence; the earlier pass is not a claim that the current candidate is complete.
 
+## Where the architecture lives in the code
+
+The five product layers are responsibilities, not five daemons or five matching
+crates. The core repository contains their shared implementation; application
+repositories own frontend integration. In particular, the `volparossa-core` crate
+holds shared identifiers and value types, not the whole background core.
+
+| Responsibility | Main source entry points | Boundary |
+| --- | --- | --- |
+| User commands and application requests | [`volparossa`](../../crates/volparossa/src/main.rs), [`volparossa-local-control`](../../crates/volparossa-local-control/src/lib.rs) | Bounded versioned local requests; application access does not grant administrative or helper authority. |
+| Shared lifecycle and coordination | [`volparossa-agent`](../../crates/volparossa-agent/src/lib.rs) | Unprivileged orchestration; coordinates shared services and resource ownership. |
+| Discovery and route establishment | [`volparossa-discovery`](../../crates/volparossa-discovery/), [`volparossa-selection`](../../crates/volparossa-selection/), [`volparossa-reservation`](../../crates/volparossa-reservation/), agent [`route_setup`](../../crates/volparossa-agent/src/route_setup.rs) | Peer claims require verification; route selection and authorization precede activation. |
+| Privileged networking | [`volparossa-routing`](../../crates/volparossa-routing/), [`volparossa-helper`](../../crates/volparossa-helper/src/lib.rs), [`volparossa-helper-entry`](../../crates/volparossa-helper-entry/) | Typed allowlisted operations, scoped ownership and confirmed cleanup. |
+| Data transport | [`volparossa-tcp-proxy`](../../crates/volparossa-tcp-proxy/), [`volparossa-mptcp`](../../crates/volparossa-mptcp/), [`volparossa-udp`](../../crates/volparossa-udp/), [`volparossa-quic`](../../crates/volparossa-quic/), [`native/volparossa-mpquic`](../../native/volparossa-mpquic/) | Transport mechanisms preserve the relay, exit, policy and multipath contracts below. |
+| Cache, publication and private storage | [`volparossa-content`](../../crates/volparossa-content/src/lib.rs), agent [`content`](../../crates/volparossa-agent/src/content.rs), CLI [`storage`](../../crates/volparossa/src/storage.rs) | Public objects, encrypted private fragments and message custody retain separate authority and lifecycles even where they share a crate. |
+| Compute | Agent [`content/compute`](../../crates/volparossa-agent/src/content/compute.rs), local [`compute`](../../crates/volparossa-local-control/src/compute.rs), [`workers/volparossa-ml`](../../workers/volparossa-ml/) | Task coordination and worker execution remain separate; worker/model output grants no host or publication authority. |
+| Transactions | [`volparossa-transaction`](../../crates/volparossa-transaction/), [`volparossa-transaction-abci`](../../crates/volparossa-transaction-abci/) | TEST-unit accounting and consensus integration; independent of network participation and real-asset settlement. |
+| DPS | Local [`dps`](../../crates/volparossa-local-control/src/dps.rs), agent [`control`](../../crates/volparossa-agent/src/control.rs), [`volparossa-dps-ffi`](../../crates/volparossa-dps-ffi/) | Permission-scoped shared service; the current quality boundary does not establish real sensors or positioning. |
+| Policy, identity and persistent peer state | [`volparossa-policy`](../../crates/volparossa-policy/), [`volparossa-identity`](../../crates/volparossa-identity/), [`volparossa-peerstore`](../../crates/volparossa-peerstore/) | Policy trust, permanent identity and observed peer state have distinct authority. |
+
+This map locates existing source, not acceptance status. Use the
+[implementation index](../IMPLEMENTATION_STATUS.md) for verified behavior and
+the [application guide](../applications/APPLICATIONS.md) for consumer boundaries.
+Extend an existing shared service before introducing another scheduler, storage
+ledger or daemon; a code reorganization must preserve wire compatibility and
+the same ownership, permission and cleanup contracts.
+
 ## Reciprocal peer participation (revised 2026-09-05)
 
 All network nodes run the same software. A production node consuming client service must also
@@ -62,6 +89,26 @@ can be application-scoped or explicitly system-wide; cooperative-cache scope is 
 separately and never makes private HTTPS content public. Per-app authority and aggregate
 resource accounting must be implemented rather than exposing the whole administrative socket
 to every frontend. Existing service files alone do not prove that integration is complete.
+
+[DPS](../services/DPS.md) is a permission-scoped, versioned core service over the same
+five layers, not a sixth layer or a condition of participation. The [DPS goal section](../development/GOAL.md#dps)
+defines sensor, integrity and application requirements; the service contract specifies
+measurement provenance, uncertainty and private processing. Receiving help, contributing,
+retaining history and training remain separately authorized.
+
+## Studio and shared hosting
+
+The integrated [Studio/hosting scope](../development/GOAL.md#studio)
+uses the same five layers and existing signed content/site/name/custody interfaces.
+[Studio's design and audit](../services/STUDIO_HOSTING.md) separates editor and AI
+tool rights from publication identity, retention responsibilities and visitor access.
+Silex provides visual editing and portable export; Core owns hosting and shared AI.
+Private drafts and dynamic application state use authorized Storage/Compute, never
+automatic public caching or training. Static replication does not establish domain
+ownership, HTTPS, dynamic execution or guaranteed availability. Complete static
+publication is followed by useful dynamic functionality with separate verification.
+This application UI does not add a GUI to the network daemon or weaken relay/exit
+privacy, participation, resource or release-authorization requirements.
 
 ## Trust and process boundaries
 

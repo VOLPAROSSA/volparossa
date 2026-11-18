@@ -774,6 +774,7 @@ mod tests {
                         request_id: request.request_id,
                         result: ControlResult::Ok.into(),
                         diagnostic_code: "COMPUTE_DISCOVERED".into(),
+                        private_storage_remote_detail: None,
                         payload: Some(Payload::ComputeDiscovered(found)),
                     },
                 )

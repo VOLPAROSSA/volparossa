@@ -30,7 +30,9 @@ def selected_topology_argv(scenario):
             raise AssertionError("guest output redirection changed")
         selector = selector.replace(original, "/dev/null")
     script = "\n".join(("set -eu", 'scenario=$1', "expected_commit=" + "a" * 40,
-                        "code_manifest_sha256=" + "b" * 64, "exec 3>&1",
+                        "code_manifest_sha256=" + "b" * 64,
+                        "browser_filter_manifest_sha256=none", "weather_client_manifest_sha256=none",
+                        "exec 3>&1",
                         "guest_phase() { :; }", "sudo() { printf '%s\\0' \"$@\" >&3; }", selector))
     result = subprocess.run(["sh", "-c", script, "test", scenario], capture_output=True, timeout=5, check=True)
     if not result.stdout.endswith(b"\0"):
@@ -45,6 +47,13 @@ def common_topology_args(scenario):
 
 
 class CooperativeCodeVm(unittest.TestCase):
+    def test_guest_selector_preserves_default_path_without_optional_bundles(self):
+        for scenario in ("alpha", "content-provider"):
+            with self.subTest(scenario=scenario):
+                self.assertEqual(selected_topology_argv(scenario),
+                    ["-n", "--", "env", "./tests/integration/kvm-alpha-topology.sh",
+                     *common_topology_args(scenario)])
+
     def test_guest_selector_preserves_exact_code_and_browser_commands(self):
         self.assertEqual(selected_topology_argv("agent-cooperative-code"),
             ["-n", "--", "./tests/integration/kvm-alpha-topology.sh",

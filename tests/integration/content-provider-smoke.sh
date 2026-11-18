@@ -82,7 +82,11 @@ content_provider_control_underlay() {
 
 content_provider_start_control_observer() {
     provider_control_prefix=$1
-    case $provider_control_prefix in content-provider-*) ;; *) return 1 ;; esac
+    case $provider_control_prefix in
+        protected-quote-control-privacy) [ "${protected_quote:-no}" = yes ] || return 1 ;;
+        content-provider-*|weather-client-delivery-control|weather-products-delivery-weather-control|weather-products-delivery-air-quality-control|weather-android-delivery-control) ;;
+        *) return 1 ;;
+    esac
     [ -z "$PROVIDER_CONTROL_PID" ] || return 1
     ip netns exec "$provider_control_ns" python3 "$WORK/bin/privacy-observer.py" \
         content-control "$WORK/$provider_control_prefix.json" \
@@ -96,6 +100,11 @@ content_provider_start_control_observer() {
 # A fresh adaptive phase may select a different broker. Its links and route evidence must
 # not overwrite the two-link phase; all changes remain inside the owned disposable nodes.
 content_provider_adaptive_control_underlay() {
+    adaptive_route_prefix=${2:-content-provider-adaptive-control}
+    case $adaptive_route_prefix in
+        content-provider-adaptive-control|private-storage-maintenance-current-control) ;;
+        *) return 1 ;;
+    esac
     provider_control_peer=$1
     provider_control_node=$(jq -er --arg peer "$provider_control_peer" \
         'to_entries[] | select(.value == $peer) | .key' "$WORK/a01-expected-peers.json") || return 1
@@ -108,20 +117,35 @@ content_provider_adaptive_control_underlay() {
     for adaptive_node in relay3 relay4 relay5; do
         content_provider_node "$adaptive_node" || return 1
         adaptive_segment=$((83 + adaptive_slot))
-        link_nodes "$provider_control_ns" "ac$adaptive_slot" "10.241.$adaptive_segment.1/30" \
-            "$provider_ns" "ap$adaptive_slot" "10.241.$adaptive_segment.2/30" || return 1
+        if [ "$adaptive_route_prefix" = private-storage-maintenance-current-control ]; then
+            # Rebinding must never expose a live, temporarily unfiltered link.
+            # Both ends start down inside the already-owned namespaces.
+            ip -n "$provider_control_ns" link add "ac$adaptive_slot" type veth \
+                peer name "ap$adaptive_slot" netns "$provider_ns" || return 1
+            ip -n "$provider_control_ns" address add "10.241.$adaptive_segment.1/30" \
+                dev "ac$adaptive_slot" || return 1
+            ip -n "$provider_ns" address add "10.241.$adaptive_segment.2/30" \
+                dev "ap$adaptive_slot" || return 1
+        else
+            link_nodes "$provider_control_ns" "ac$adaptive_slot" "10.241.$adaptive_segment.1/30" \
+                "$provider_ns" "ap$adaptive_slot" "10.241.$adaptive_segment.2/30" || return 1
+        fi
         content_provider_filter_link "$provider_control_ns" "adaptive_$adaptive_slot" "ac$adaptive_slot" \
             "$provider_control_ip" "$provider_ip" || return 1
         content_provider_filter_link "$provider_ns" "adaptive_$adaptive_slot" "ap$adaptive_slot" \
             "$provider_ip" "$provider_control_ip" || return 1
+        if [ "$adaptive_route_prefix" = private-storage-maintenance-current-control ]; then
+            ip -n "$provider_control_ns" link set "ac$adaptive_slot" up || return 1
+            ip -n "$provider_ns" link set "ap$adaptive_slot" up || return 1
+        fi
         ip -n "$provider_control_ns" route replace "$provider_ip/32" \
             via "10.241.$adaptive_segment.2" dev "ac$adaptive_slot" src "$provider_control_ip" || return 1
         ip -n "$provider_ns" route replace "$provider_control_ip/32" \
             via "10.241.$adaptive_segment.1" dev "ap$adaptive_slot" src "$provider_ip" || return 1
         ip -n "$provider_control_ns" -j route get "$provider_ip" \
-            >"$WORK/content-provider-adaptive-control-$adaptive_node-out.json" || return 1
+            >"$WORK/$adaptive_route_prefix-$adaptive_node-out.json" || return 1
         ip -n "$provider_ns" -j route get "$provider_control_ip" \
-            >"$WORK/content-provider-adaptive-control-$adaptive_node-back.json" || return 1
+            >"$WORK/$adaptive_route_prefix-$adaptive_node-back.json" || return 1
         provider_control_ips=$provider_control_ips,$provider_ip
         adaptive_slot=$((adaptive_slot + 1))
     done
@@ -129,7 +153,7 @@ content_provider_adaptive_control_underlay() {
 
 content_provider_adaptive_start_control_observer() {
     provider_control_prefix=$1
-    case $provider_control_prefix in content-provider-adaptive-*) ;; *) return 1 ;; esac
+    case $provider_control_prefix in content-provider-adaptive-*|content-provider-pressure-control-privacy) ;; *) return 1 ;; esac
     [ -z "$PROVIDER_CONTROL_PID" ] || return 1
     ip netns exec "$provider_control_ns" python3 "$WORK/bin/privacy-observer.py" \
         content-control "$WORK/$provider_control_prefix.json" \
@@ -159,6 +183,11 @@ content_provider_cancellation_run() {
 }
 
 content_provider_run() {
+    PHASE=content-provider-inventory
+    # Service activation alone does not mean the primary Exit advertisement has
+    # arrived. Query only Client inventory; keep all route checks/retries intact.
+    python3 -I -B "$WORK/bin/content-provider-readiness.py" "$WORK" \
+        >"$WORK/content-provider-readiness.json" || fail CONTENT_PROVIDER_INVENTORY_UNAVAILABLE
     PHASE=content-provider-selection
     benchmark_select_route content-provider mptcp || fail CONTENT_PROVIDER_MPTCP_SELECTION_UNAVAILABLE
     benchmark_bind_slots "$WORK/content-provider-selection.json" || fail CONTENT_PROVIDER_SELECTION_INVALID
@@ -319,6 +348,7 @@ content_provider_run() {
         fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
     fi
     content_provider_adaptive_run
+    content_provider_late_recovery_run
     content_provider_cancellation_run
     python3 -B "$source_directory/tests/integration/content-provider-smoke.py" \
         evidence "$WORK" "$WORK/content-provider-evidence.json" || fail CONTENT_PROVIDER_EVIDENCE_INVALID
@@ -332,6 +362,23 @@ content_provider_finalize_report() {
     # large native plus HTTPS capture bundle in a single operating-system argument.
     for provider_artifact in "$WORK"/content-provider-*.json "$WORK"/content-provider-*.txt \
         "$WORK"/content-provider-*.log "$WORK"/content-provider-*.out "$WORK"/content-provider-*.err; do
+        case $(basename -- "$provider_artifact") in
+            content-provider-pressure-*)
+                case $(basename -- "$provider_artifact") in
+                    content-provider-pressure-worker-budget.json|content-provider-pressure-continuation.json|content-provider-pressure-resource-ready.json|\
+                    content-provider-pressure-evidence.json|content-provider-pressure-ready.json|content-provider-pressure-controller.json|\
+                    content-provider-pressure-cleanup.json|content-provider-pressure-object.json|content-provider-pressure-fetch.json|\
+                    content-provider-pressure-selection.json|content-provider-pressure-live-selection.json|\
+                    content-provider-pressure-status-before.json|content-provider-pressure-status-after.json|\
+                    content-provider-pressure-qdisc-before.json|content-provider-pressure-qdisc-limited.json|content-provider-pressure-qdisc-after.json|\
+                    content-provider-pressure-qdisc-profile.json|content-provider-pressure-control-privacy.json|\
+                    content-provider-pressure-privacy-client.json|content-provider-pressure-privacy-relay[012].json|content-provider-pressure-privacy-exit.json|\
+                    content-provider-pressure-relay[345]-reset.json|content-provider-pressure-relay[345]-serve.json|\
+                    content-provider-pressure-relay[345]-status.json|content-provider-pressure-relay[345]-stop.json) ;;
+                    *) continue ;;
+                esac
+                ;;
+        esac
         [ ! -f "$provider_artifact" ] || [ -L "$provider_artifact" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$provider_artifact" \
                 "$output_directory/$(basename -- "$provider_artifact")"
@@ -347,21 +394,27 @@ content_provider_finalize_report() {
         --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
       $evidence_input[0] as $evidence | $host_input[0] as $host |
-      {schema_version:1,report_kind:"volparossa-native-content-providers",
+      {schema_version:4,report_kind:"volparossa-native-content-providers",
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and
          $evidence.ordinary_publication.success == true and $evidence.site_publication.success == true and
-         $evidence.adaptive_workers.success == true and $evidence.requester_cancellation.success == true and $complete and
+         $evidence.filter_snapshot.success == true and
+         $evidence.adaptive_workers.success == true and $evidence.pressure.success == true and
+         $evidence.late_provider_recovery.success == true and
+         $evidence.requester_cancellation.success == true and $complete and
          $remaining == 0 and $host.unchanged == true),transfer:$evidence,
        runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host | del(.acceptance_id)),
-       scope:"explicit native publication and cooperative-origin HTTPS for the same object, normal named static-site HTTP assets, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges; named requester cancellation and agent shutdown during pending bootstrap",
+       scope:"explicit native publication and cooperative-origin HTTPS for the same object, normal named static-site HTTP assets, exact public filter export and networkless cache reuse, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges; three-provider admission under real bounded CPU pressure and single-worker continuation; separate late complementary-provider native recovery; named requester cancellation and agent shutdown during pending bootstrap",
        general_nat_reachability_claimed:false,full_c02_claimed:false,
        explicit_origin_authenticated_https:($evidence.https.success == true),
        normal_user_publication:($evidence.ordinary_publication.success == true),
        native_name_retrieval:($evidence.named_publication.success == true),
        native_static_site:($evidence.site_publication.success == true),
+       public_filter_snapshot:($evidence.filter_snapshot.success == true),
        adaptive_provider_workers:($evidence.adaptive_workers.success == true),
+       pressure:($evidence.pressure.success == true),
+       late_provider_recovery:($evidence.late_provider_recovery.success == true),
        requester_cancellation:($evidence.requester_cancellation.success == true),
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \

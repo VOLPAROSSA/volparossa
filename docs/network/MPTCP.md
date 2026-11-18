@@ -47,5 +47,7 @@ enough. The disposable topology must prove:
 - captures show no direct client-exit dataplane and no relay-visible Internet destination;
 - cleanup removes endpoints, interfaces, routes, rules, and namespaces without host changes.
 
-Until acceptance checks A02–A04 pass, the MPTCP dataplane remains incomplete regardless of unit-test
-coverage. See [TESTING.md](../development/TESTING.md).
+Acceptance checks A02–A04 bind these requirements to one exact build; unit coverage
+or another source's passing run is insufficient. The [status index](../IMPLEMENTATION_STATUS.md)
+records accepted source-bound results and remaining extensions; [TESTING.md](../development/TESTING.md)
+defines the disposable acceptance procedure.

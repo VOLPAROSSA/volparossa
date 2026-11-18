@@ -18,7 +18,62 @@ pub(crate) struct ResourceHeadroom {
     pub(crate) pressured: bool,
 }
 
+/// Closed observations, not raw PSI text, device/process identities or policy overrides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PressureState {
+    BelowThreshold,
+    AtOrAboveThreshold,
+    /// Missing, unreadable and malformed PSI all retain the existing pressured policy.
+    #[default]
+    Unavailable,
+}
+
+impl PressureState {
+    fn from_average(value: Option<f64>, threshold: f64) -> Self {
+        match value {
+            Some(value) if value >= threshold => Self::AtOrAboveThreshold,
+            Some(_) => Self::BelowThreshold,
+            None => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PressureObservation {
+    pub(crate) cpu: PressureState,
+    pub(crate) memory: PressureState,
+    pub(crate) io: PressureState,
+}
+
+impl PressureObservation {
+    fn sample(mut observe: impl FnMut(&str) -> Option<f64>) -> Self {
+        // Observe each bounded source once, even when an earlier one is pressured,
+        // so diagnostics and the admission decision describe the same sample.
+        Self {
+            cpu: PressureState::from_average(observe("cpu"), 20.0),
+            memory: PressureState::from_average(observe("memory"), 1.0),
+            io: PressureState::from_average(observe("io"), 10.0),
+        }
+    }
+
+    pub(crate) fn pressured(self) -> bool {
+        [self.cpu, self.memory, self.io]
+            .into_iter()
+            .any(|state| state != PressureState::BelowThreshold)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ObservedHeadroom {
+    pub(crate) headroom: ResourceHeadroom,
+    pub(crate) pressure: PressureObservation,
+}
+
 pub(crate) fn capture() -> Option<ResourceHeadroom> {
+    capture_with_pressure().map(|observation| observation.headroom)
+}
+
+pub(crate) fn capture_with_pressure() -> Option<ObservedHeadroom> {
     let memory = available_memory(&system_text(Path::new("/proc/meminfo"))?)?;
     let memory = cgroup_headroom(memory)?;
     let limit = descriptor_limit(&system_text(Path::new("/proc/self/limits"))?)?;
@@ -28,14 +83,14 @@ pub(crate) fn capture() -> Option<ResourceHeadroom> {
             entry.ok()?;
             count.checked_add(1)
         })?;
-    // Missing telemetry selects the caller's pressured policy, never a claim of an idle host.
-    let pressured = pressure("cpu").is_none_or(|value| value >= 20.0)
-        || pressure("memory").is_none_or(|value| value >= 1.0)
-        || pressure("io").is_none_or(|value| value >= 10.0);
-    Some(ResourceHeadroom {
-        memory_bytes: memory,
-        available_fds: limit.saturating_sub(open),
-        pressured,
+    let pressure = PressureObservation::sample(pressure);
+    Some(ObservedHeadroom {
+        headroom: ResourceHeadroom {
+            memory_bytes: memory,
+            available_fds: limit.saturating_sub(open),
+            pressured: pressure.pressured(),
+        },
+        pressure,
     })
 }
 
@@ -104,15 +159,15 @@ fn cgroup_headroom(mut memory: u64) -> Option<u64> {
     let mut path = root.join(relative);
     loop {
         // A limit on a parent slice applies even when the service's own limit is "max".
-        if let Some(limit) = system_text(&path.join("memory.max")) {
-            if limit.trim() != "max" {
-                let limit = limit.trim().parse::<u64>().ok()?;
-                let used = system_text(&path.join("memory.current"))?
-                    .trim()
-                    .parse::<u64>()
-                    .ok()?;
-                memory = memory.min(limit.saturating_sub(used));
-            }
+        if let Some(limit) = system_text(&path.join("memory.max"))
+            && limit.trim() != "max"
+        {
+            let limit = limit.trim().parse::<u64>().ok()?;
+            let used = system_text(&path.join("memory.current"))?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            memory = memory.min(limit.saturating_sub(used));
         }
         if path == root {
             break;
@@ -150,5 +205,115 @@ mod tests {
         );
         assert_eq!(pressure_average("some avg10=NaN\n"), None);
         assert_eq!(pressure_average("full avg10=0.00\n"), None);
+    }
+
+    #[test]
+    fn pressure_observations_preserve_thresholds_and_all_causes_from_one_sample() {
+        use PressureState::{AtOrAboveThreshold as High, BelowThreshold as Low, Unavailable};
+
+        let mut sampled = Vec::new();
+        let pressure = PressureObservation::sample(|kind| {
+            sampled.push(kind.to_owned());
+            Some(match kind {
+                "cpu" => 20.0,
+                "memory" => 1.0,
+                "io" => 10.0,
+                _ => panic!("only the three fixed PSI sources may be sampled"),
+            })
+        });
+        assert_eq!(sampled, ["cpu", "memory", "io"]);
+        assert_eq!(
+            pressure,
+            PressureObservation {
+                cpu: High,
+                memory: High,
+                io: High
+            }
+        );
+        assert!(pressure.pressured());
+
+        for cpu in [Some(0.0), Some(19.999), Some(20.0), Some(100.0), None] {
+            for memory in [Some(0.0), Some(0.999), Some(1.0), Some(100.0), None] {
+                for io in [Some(0.0), Some(9.999), Some(10.0), Some(100.0), None] {
+                    let pressure = PressureObservation::sample(|kind| match kind {
+                        "cpu" => cpu,
+                        "memory" => memory,
+                        "io" => io,
+                        _ => unreachable!(),
+                    });
+                    let expected = cpu.is_none_or(|value| value >= 20.0)
+                        || memory.is_none_or(|value| value >= 1.0)
+                        || io.is_none_or(|value| value >= 10.0);
+                    assert_eq!(pressure.pressured(), expected);
+                    for (value, threshold, state) in [
+                        (cpu, 20.0, pressure.cpu),
+                        (memory, 1.0, pressure.memory),
+                        (io, 10.0, pressure.io),
+                    ] {
+                        assert_eq!(
+                            state,
+                            match value {
+                                None => Unavailable,
+                                Some(value) if value >= threshold => High,
+                                Some(_) => Low,
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_psi_is_unavailable_not_an_idle_sample() {
+        use PressureState::{AtOrAboveThreshold as High, BelowThreshold as Low, Unavailable};
+
+        assert_eq!(
+            PressureObservation::default(),
+            PressureObservation {
+                cpu: Unavailable,
+                memory: Unavailable,
+                io: Unavailable,
+            }
+        );
+        assert!(PressureObservation::default().pressured());
+        for invalid in [
+            "",
+            "full avg10=0.00\n",
+            "some avg60=0.00\n",
+            "some avg10=NaN\n",
+            "some avg10=inf\n",
+            "some avg10=-0.01\n",
+            "some avg10=100.01\n",
+            "some avg10=invalid\n",
+        ] {
+            let pressure = PressureObservation::sample(|kind| {
+                pressure_average(match kind {
+                    "cpu" => invalid,
+                    "memory" => "some avg10=0.00\n",
+                    "io" => "some avg10=10.00\n",
+                    _ => unreachable!(),
+                })
+            });
+            assert_eq!(
+                pressure,
+                PressureObservation {
+                    cpu: Unavailable,
+                    memory: Low,
+                    io: High
+                }
+            );
+            assert!(pressure.pressured());
+        }
+        let idle = PressureObservation::sample(|_| pressure_average("some avg10=0.00\n"));
+        assert_eq!(
+            idle,
+            PressureObservation {
+                cpu: Low,
+                memory: Low,
+                io: Low
+            }
+        );
+        assert!(!idle.pressured());
     }
 }

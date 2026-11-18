@@ -85,8 +85,8 @@ verify_vendor() {
         *) fail "invalid embedded lock policy for $crate_directory" ;;
     esac
 
-    git -C "$extracted" apply --recount --check "$repository_root/$patch"
-    git -C "$extracted" apply --recount "$repository_root/$patch"
+    GIT_CEILING_DIRECTORIES="$audit_tmp" git -C "$extracted" apply --recount --check "$repository_root/$patch"
+    GIT_CEILING_DIRECTORIES="$audit_tmp" git -C "$extracted" apply --recount "$repository_root/$patch"
 
     vendor="$repository_root/third_party/rust/vendor/$crate_directory"
     [ -d "$vendor" ] || fail "vendored dependency is missing: $vendor"
@@ -95,13 +95,13 @@ verify_vendor() {
     fi
 
     diff -qr "$extracted" "$vendor" >/dev/null ||
-        fail "$crate_directory differs from its verified crates.io archive plus reviewed patch"
+        fail "$crate_directory differs from its authenticated upstream archive plus reviewed patch"
 
     actual_tree_sha256=$(tree_sha256 "$vendor")
     [ "$actual_tree_sha256" = "$vendor_tree_sha256" ] ||
         fail "tree SHA-256 mismatch for $crate_directory"
 
-    pass "$crate_directory is exactly its reviewed crates.io reconstruction"
+    pass "$crate_directory is exactly its reviewed upstream reconstruction"
 }
 
 find_advisory_database() {
@@ -189,12 +189,39 @@ check_single_registry_package() {
 audit_tmp=$(mktemp -d "${TMPDIR:-/tmp}/volparossa-rustsec.XXXXXX")
 
 verify_vendor \
+    third_party/rust/sources/ctutils-0.4.4.crate \
+    12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865 \
+    third_party/rust/patches/ctutils-0.4.4-rust1.85.patch \
+    1e6bf3aac8e37c897e88a59fe5f60aaa6c3d7090f6c2a2d629015a20d5967ac6 \
+    ctutils-0.4.4 \
+    4c18cd159e5013b4ed127137ca157dc8fb6fd2f3239ab9b90602765d41273635
+python3 -B scripts/check-ctutils-scope.py
+
+verify_vendor \
+    third_party/rust/sources/sev-8.0.0-a966d06.tar.gz \
+    6fa9d33543b5ea51b153d2fbe01111eba821f4dc92a7949d83056b2d947eb2b5 \
+    third_party/rust/patches/sev-8.0.0-p384-0.14.patch \
+    2ce121d7fb50f2d31a3da3eaa4ebf260e6a588a4c2749693fd155d975a58b0cf \
+    sev-8.0.0 \
+    e7304e86be5ac39fc9ac4ecafcac9e1153e9d342ed666ced89516c35e0bea22c
+python3 -B scripts/check-sev-p384-scope.py
+
+verify_vendor \
     third_party/rust/sources/hickory-proto-0.25.2.crate \
     f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502 \
     third_party/rust/patches/hickory-proto-0.25.2-rustsec.patch \
-    bd1d5df1a13574d5c8b546e1a53dfde04d524353a646c8235786d7724215828a \
+    151a1d425a6fc3a056753f740e35ab9a67e769255f07d756f8e2c697576a9b77 \
     hickory-proto-0.25.2 \
-    65d70d1559f2209a76b3ca68357c86bd94c9046e0b5dd22b0b3458ad418b1786
+    5e1fcb2158ae0cc83334ac2a1e11fa60ebcadd1e59e224521aff288b61e4a516
+
+verify_vendor \
+    third_party/rust/sources/hickory-resolver-0.25.2.crate \
+    dc62a9a99b0bfb44d2ab95a7208ac952d31060efc16241c87eaf36406fecf87a \
+    third_party/rust/patches/hickory-resolver-0.25.2-dnssec.patch \
+    2e070665e78337e620dfb3f8c15ff09a938ad3fa711e240798732de4c204f1b2 \
+    hickory-resolver-0.25.2 \
+    cce65437d685b2911c283c4f739fbe08017ae1cd4b80a5895cba3f99110c9b3e \
+    omit
 
 verify_vendor \
     third_party/rust/sources/time-0.3.41.crate \
@@ -220,6 +247,12 @@ check_sha256 \
     dc470946f0a127507a9e577a20da1eb19eae0abc383b2be1f786f6427944f06c \
     third_party/rust/vendor/hickory-proto-0.25.2/LICENSE-MIT
 check_sha256 \
+    6b9522191b8cb7126b2d214edd7f782d2ccd83c467e9c03b8af9e0bf903b49b4 \
+    third_party/rust/vendor/hickory-resolver-0.25.2/LICENSE-APACHE
+check_sha256 \
+    dc470946f0a127507a9e577a20da1eb19eae0abc383b2be1f786f6427944f06c \
+    third_party/rust/vendor/hickory-resolver-0.25.2/LICENSE-MIT
+check_sha256 \
     0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594 \
     third_party/rust/vendor/time-0.3.41/LICENSE-Apache
 check_sha256 \
@@ -234,32 +267,44 @@ check_sha256 \
 check_sha256 \
     ec353d4fecf7963b4c054384557e5dbc3c7a717997eb4a3815b315721a6aa75a \
     third_party/rust/licenses/yamux-0.13.10/LICENSE-MIT
+check_sha256 \
+    91585c36e4fb9ab4ca0d3dfac5d66d3c0c62cc51f640a0e1196542daf2267eae \
+    third_party/rust/vendor/ctutils-0.4.4/LICENSE-MIT
+check_sha256 \
+    cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30 \
+    third_party/rust/vendor/ctutils-0.4.4/LICENSE-APACHE
 pass 'upstream Apache-2.0 and MIT license files are unchanged'
 
 check_sha256 \
-    bee77a5a6fa12bdd6fcc4fcee18f831e4f11e7c392583c4cffb13b884d50fd37 \
+    0a7ee00f815244d31dc06b7d707c67d5c5ea044f5c0490a774735931c228d13c \
     third_party/rust/backport-regressions/Cargo.toml
 check_sha256 \
     aabd2af12e26033cb8de9b63841b54574718406e4479b47e41bc0d92fc6f14e0 \
     third_party/rust/backport-regressions/.cargo/config.toml
 check_sha256 \
-    796ae0f160c8d95aa6e395dc56f266273e47928b097c318bdc0dfa499b8dadfd \
+    2ad370a5800712ebd689802776b6450ccd83de62728c6d8cee63f19e0a8f0e86 \
     third_party/rust/backport-regressions/src/lib.rs
 check_sha256 \
-    08e7bcd46d2e3f7411e8f4e855c70027f627be6061f63ab459c43f41a687c5cc \
+    c41ab6922715e7a2e9772b9b70c64024f6629dcdc6280b763eaefc3eb52c809f \
+    third_party/rust/backport-regressions/src/resolver.rs
+check_sha256 \
+    965c606acf0c93d9a9d6b8415b3ae503185e8b3ec7eecf3d6251c9047cd14659 \
     third_party/rust/backport-regressions/Cargo.lock
-pass 'isolated dependency-security regression harness and rustc-1.85 lock are unchanged'
+pass 'isolated dependency-security regression harness and Rust-1.85-targeted lock match reviewed hashes'
 
 if [ "$mode" = vendor_only ]; then
     exit 0
 fi
+
+python3 -B "$repository_root/scripts/cargo-source-policy.py" check ||
+    fail 'canonical public Cargo source policy is required before Cargo regressions'
 
 CARGO_TARGET_DIR="$audit_tmp/backport-target" \
     cargo test \
         --manifest-path third_party/rust/backport-regressions/Cargo.toml \
         --locked \
         --offline
-pass 'all five dependency-security regressions passed, including Yamux fail-closed and wrapper-policy handling'
+pass 'dependency-security regressions passed, including resolver validation, CNAME scope and Yamux policy'
 
 command -v jq >/dev/null 2>&1 ||
     fail 'jq is required to verify exact locked package provenance'
@@ -272,6 +317,36 @@ cargo metadata \
     --locked \
     --offline \
     --format-version 1 >"$fuzz_metadata"
+
+# No global advisory waiver: authenticate this exact public-verification scope
+# before creating the root-only deny policy or allowing the root audit exception.
+root_deny_config="$audit_tmp/root-deny.toml"
+python3 -B scripts/test-public-rsa-scope.py
+python3 -B scripts/check-public-rsa-scope.py \
+    "$root_metadata" "$fuzz_metadata" "$root_deny_config"
+
+for graph in "$root_metadata" "$fuzz_metadata"; do
+    check_single_path_package \
+        "$graph" \
+        ctutils \
+        0.4.5 \
+        "$repository_root/third_party/rust/vendor/ctutils-0.4.5/Cargo.toml"
+    check_single_path_package \
+        "$graph" \
+        hickory-resolver \
+        0.25.2 \
+        "$repository_root/third_party/rust/vendor/hickory-resolver-0.25.2/Cargo.toml"
+    # GHSA-6f2x-v7q7-m7m5 fixes recursive resolution, which is a separate
+    # crate in 0.25. The pinned stub is tested independently; its scope must
+    # not silently expand to the recursor or the restructured 0.26 graph.
+    jq -e '[.packages[] | select(.name == "hickory-recursor" or
+        .name == "hickory-net" or .name == "hickory-server")] | length == 0' \
+        "$graph" >/dev/null || fail 'reviewed Hickory stub-only graph scope changed'
+done
+pass 'root and fuzz graphs use only the reviewed resolver backport and contain no Hickory recursor'
+
+# RUSTSEC-2026-0387 stays fatal. Require the fixed source graph; no exception.
+python3 -B scripts/check-sev-p384-scope.py "$root_metadata" "$fuzz_metadata"
 
 check_single_path_package \
     "$root_metadata" \
@@ -286,6 +361,27 @@ check_single_path_package \
     "$repository_root/third_party/rust/vendor/libp2p-yamux-0.47.0/Cargo.toml"
 check_single_registry_package "$fuzz_metadata" yamux 0.13.10
 pass 'root and fuzz graphs contain one reviewed Yamux wrapper and only fixed yamux 0.13.10'
+
+check_single_registry_package "$root_metadata" yaml_serde 0.10.7
+check_single_registry_package "$root_metadata" libyaml-rs 0.3.0
+jq -e '[.packages[] | select(.name == "serde_yaml" or .name == "unsafe-libyaml")] | length == 0' \
+    "$root_metadata" >/dev/null || fail 'the root graph still contains the unmaintained YAML stack'
+pass 'root configuration uses only the pinned maintained YAML Organization packages'
+
+check_single_registry_package "$root_metadata" zbus 6.1.0
+check_single_registry_package "$root_metadata" zbus_macros 6.1.0
+check_single_registry_package "$root_metadata" zbus_utils 6.0.0
+check_single_registry_package "$root_metadata" zcheapstr 1.0.0
+check_single_registry_package "$root_metadata" zruntime 0.2.0
+jq -e '
+    ([.packages[] | select(.name == "zbus_names" or .name == "zvariant" or
+        .name == "zvariant_derive" or .name == "zvariant_utils")] | length == 0) and
+    ([.resolve.nodes[] | select(.id | contains("zbus@6.1.0")) | .features] ==
+        [["comms", "proxy", "tokio"]]) and
+    ([.resolve.nodes[] | select(.id | contains("zruntime@0.2.0")) | .features] ==
+        [["broadcast", "event", "lock", "unblock"]])
+' "$root_metadata" >/dev/null || fail 'maintained D-Bus graph or Tokio-only runtime scope changed'
+pass 'maintained D-Bus graph has only the reviewed client proxy and Tokio runtime features'
 
 hickory_features="$audit_tmp/hickory-features.txt"
 time_features="$audit_tmp/time-features.txt"
@@ -345,29 +441,18 @@ printf 'INFO  offline RustSec database commit: %s\n' "$advisory_commit"
 # Cargo-deny derives its database path from the canonical RustSec URL and has no
 # arbitrary local database flag. Point an isolated Cargo home at the already
 # selected checkout so cargo-deny and cargo-audit scan the exact same commit.
-source_cargo_home=${CARGO_HOME:-${HOME:?HOME is required to locate Cargo data}/.cargo}
 deny_cargo_home="$audit_tmp/cargo-home"
-mkdir -p "$deny_cargo_home/advisory-dbs"
+python3 -B "$repository_root/scripts/cargo-source-policy.py" deny-home "$deny_cargo_home" ||
+    fail 'canonical public Cargo origin is required before the isolated scan home'
+mkdir "$deny_cargo_home/advisory-dbs"
 ln -s "$advisory_database" \
     "$deny_cargo_home/advisory-dbs/advisory-db-3157b0e258782691"
-for cargo_entry in registry git config config.toml; do
-    [ ! -e "$source_cargo_home/$cargo_entry" ] ||
-        ln -s "$source_cargo_home/$cargo_entry" "$deny_cargo_home/$cargo_entry"
-done
 
 CARGO_HOME="$deny_cargo_home" cargo deny --version >/dev/null 2>&1 ||
     fail 'cargo-deny >= 0.18.6 is required for CVSS 4.0-capable dependency checks'
 deny_version=$(CARGO_HOME="$deny_cargo_home" cargo deny --version | awk '{print $2}')
 check_deny_version "$deny_version" ||
     fail "cargo-deny $deny_version cannot parse the current CVSS 4.0 advisories; require >= 0.18.6"
-
-CARGO_HOME="$deny_cargo_home" cargo deny --locked --offline check
-CARGO_HOME="$deny_cargo_home" cargo deny \
-    --manifest-path fuzz/Cargo.toml \
-    --locked \
-    --offline \
-    check
-pass 'cargo-deny checked root and fuzz advisories, licenses, bans, and sources without fetching'
 
 audit_command=${CARGO_AUDIT:-cargo-audit}
 case "$audit_command" in
@@ -380,18 +465,48 @@ audit_version=$("$audit_command" --version | awk '{print $2}')
 check_audit_version "$audit_version" ||
     fail "cargo-audit $audit_version cannot parse the current CVSS 4.0 advisories; require >= 0.22.1"
 
-"$audit_command" audit \
+# All source, vendor, graph, database and tool preconditions above remain fatal.
+# At the scan stage only, collect every result while keeping any failure fatal.
+scan_status=0
+run_scan() {
+    scan_label=$1
+    shift
+    if "$@"; then
+        pass "$scan_label"
+    else
+        scan_exit=$?
+        printf 'FAIL  %s (exit %s)\n' "$scan_label" "$scan_exit" >&2
+        if [ "$scan_status" -eq 0 ]; then
+            scan_status=$scan_exit
+        fi
+    fi
+}
+
+run_scan 'root cargo-deny: advisories, licenses, bans and sources' \
+    env CARGO_HOME="$deny_cargo_home" cargo deny \
+    --locked --offline check --config "$root_deny_config"
+run_scan 'fuzz cargo-deny: advisories, licenses, bans and sources' \
+    env CARGO_HOME="$deny_cargo_home" cargo deny \
+    --manifest-path fuzz/Cargo.toml --locked --offline check
+run_scan 'root cargo-audit: guarded root-only exceptions' \
+    "$audit_command" audit \
     --db "$advisory_database" \
     --no-fetch \
     --file Cargo.lock \
+    --ignore RUSTSEC-2023-0071 \
     --ignore RUSTSEC-2026-0009 \
     --ignore RUSTSEC-2026-0118 \
     --ignore RUSTSEC-2026-0119
-"$audit_command" audit \
+run_scan 'fuzz cargo-audit: locally patched version matches only' \
+    "$audit_command" audit \
     --db "$advisory_database" \
     --no-fetch \
     --file fuzz/Cargo.lock \
     --ignore RUSTSEC-2026-0009 \
     --ignore RUSTSEC-2026-0118 \
     --ignore RUSTSEC-2026-0119
-pass 'cargo-audit found no unremediated root or fuzz vulnerability; three version matches are locally patched'
+if [ "$scan_status" -ne 0 ]; then
+    printf '%s\n' 'FAIL  dependency scans completed with findings or scanner errors; see all four results above' >&2
+    exit "$scan_status"
+fi
+pass 'all four offline dependency scans passed; existing guarded exceptions unchanged'

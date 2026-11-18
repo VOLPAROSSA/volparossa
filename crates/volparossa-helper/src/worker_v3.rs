@@ -62,9 +62,9 @@ use volparossa_mptcp::{
 use crate::{
     deadline::HardDeadline,
     internal_protocol::{
-        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
-        ActivateClientIngress, ActivateLeases, ActivatedClientIngress, ActivatedLease,
-        ActivatedLeases, ActivationFailureClass, ActivationFailureDiagnostic,
+        AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireFailureDiagnostic,
+        AcquireTransportSocket, ActivateClientIngress, ActivateLeases, ActivatedClientIngress,
+        ActivatedLease, ActivatedLeases, ActivationFailureClass, ActivationFailureDiagnostic,
         ActivationFailurePhase, AddMptcpEndpoint, ClientIngressDestroyed, ClientIngressInitialised,
         ContextDestroyed, ContextInitialised, DestroyClientIngress, DestroyContext,
         INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressReplySocketReady,
@@ -91,10 +91,11 @@ use crate::{
     },
     worker_sandbox::validate_post_exec_descriptor_allowlist,
     worker_transport::{
-        CommittedSocketLease, CredentialedWorkerExecution, ExpectedUnixCredentials,
-        WorkerTransportError, create_client_ingress_reply_socket, create_client_ingress_socket,
-        create_transport_socket, enable_passcred_receiver, private_credential_worker_channel,
-        receive_credential_record, receive_credential_record_with_deadline,
+        AcquireTransportFailure, CommittedSocketLease, CredentialedWorkerExecution,
+        ExpectedUnixCredentials, WorkerTransportError, create_client_ingress_reply_socket,
+        create_client_ingress_socket, create_transport_socket_diagnosed, enable_passcred_receiver,
+        private_credential_worker_channel, receive_credential_record,
+        receive_credential_record_with_deadline,
         receive_credential_worker_destroy_response_reconciling_initialise_with_deadline,
         receive_credential_worker_request, receive_credential_worker_response_with_deadline,
         send_credential_record, send_credential_record_with_deadline,
@@ -3088,15 +3089,14 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             | WorkerLeaseLifecycle::Committed(ownerships)
             | WorkerLeaseLifecycle::CleanupRequired(ownerships) => ownerships,
         };
-        if let Some(cleanup) = self.staged_resources.as_deref() {
-            if adopted.len() != cleanup.len()
+        if let Some(cleanup) = self.staged_resources.as_deref()
+            && (adopted.len() != cleanup.len()
                 || adopted
                     .iter()
                     .zip(cleanup)
-                    .any(|(ownership, cleanup)| ownership.resource != *cleanup)
-            {
-                return WorkerDestroyOutcome::Invalid;
-            }
+                    .any(|(ownership, cleanup)| ownership.resource != *cleanup))
+        {
+            return WorkerDestroyOutcome::Invalid;
         }
         let Some(lifecycle) = self.lease.take() else {
             std::process::abort();
@@ -3827,33 +3827,46 @@ type ChildTransportOutcome = (
     Option<OwnedFd>,
 );
 
+type ChildAcquireOutcome = (
+    InternalWorkerResult,
+    Option<internal_worker_response::Outcome>,
+    Option<OwnedFd>,
+    Option<AcquireFailureDiagnostic>,
+);
+
+fn child_acquire_failure(failure: &AcquireTransportFailure) -> ChildAcquireOutcome {
+    match failure.error {
+        WorkerTransportError::Invalid | WorkerTransportError::Protocol => {
+            (InternalWorkerResult::Invalid, None, None, None)
+        }
+        WorkerTransportError::Timeout
+        | WorkerTransportError::Io(_)
+        | WorkerTransportError::Sandbox(_) => {
+            (InternalWorkerResult::Kernel, None, None, failure.diagnostic)
+        }
+    }
+}
+
 fn acquire_transport_child_context(
     context: Option<&WorkerContext<NamespaceKernel>>,
     acquire: &AcquireTransportSocket,
     bound_context: ContextId,
     deadline: HardDeadline,
-) -> Result<ChildTransportOutcome, WorkerV3Error> {
+) -> Result<ChildAcquireOutcome, WorkerV3Error> {
     ensure_worker_deadline(deadline)?;
     let route_context_id = context_id(&acquire.route_context_id)?;
     let Some(context) = context.filter(|context| {
         context.route_context_id == route_context_id && route_context_id == bound_context
     }) else {
-        return Ok((InternalWorkerResult::NotFound, None, None));
+        return Ok((InternalWorkerResult::NotFound, None, None, None));
     };
     let lease = match context.transport_lease(acquire) {
         Ok(lease) => lease,
-        Err(result) => return Ok((result, None, None)),
+        Err(result) => return Ok((result, None, None, None)),
     };
-    let descriptor = match create_transport_socket(lease, acquire) {
+    let descriptor = match create_transport_socket_diagnosed(lease, acquire) {
         Ok(descriptor) => descriptor,
-        Err(WorkerTransportError::Invalid | WorkerTransportError::Protocol) => {
-            return Ok((InternalWorkerResult::Invalid, None, None));
-        }
-        Err(
-            WorkerTransportError::Timeout
-            | WorkerTransportError::Io(_)
-            | WorkerTransportError::Sandbox(_),
-        ) => return Ok((InternalWorkerResult::Kernel, None, None)),
+        Err(failure) => return Ok(child_acquire_failure(&failure)),
     };
     if ensure_worker_deadline(deadline).is_err() {
         drop(descriptor);
@@ -3871,6 +3884,7 @@ fn acquire_transport_child_context(
             },
         )),
         Some(descriptor),
+        None,
     ))
 }
 
@@ -4105,6 +4119,7 @@ fn child_loop(
     loop {
         let (request, deadline) = receive_deadline_bound_worker_request(channel, expected_parent)?;
         let operation = request.operation.as_ref().ok_or(WorkerV3Error::Invalid)?;
+        let mut acquire_failure = None;
         let (result, outcome, exit, descriptor) = match operation {
             internal_worker_request::Operation::PathExtension(value) => {
                 let (result, outcome, exit) = match context.as_mut() {
@@ -4163,12 +4178,13 @@ fn child_loop(
                 (result, outcome, exit, None)
             }
             internal_worker_request::Operation::AcquireTransportSocket(acquire) => {
-                let (result, outcome, descriptor) = acquire_transport_child_context(
+                let (result, outcome, descriptor, diagnostic) = acquire_transport_child_context(
                     context.as_ref(),
                     acquire,
                     bound_context,
                     deadline,
                 )?;
+                acquire_failure = diagnostic;
                 (result, outcome, false, descriptor)
             }
             internal_worker_request::Operation::AddMptcpEndpoint(operation) => {
@@ -4246,6 +4262,11 @@ fn child_loop(
             }
         };
         let mut response = correlated_response(&request, result, outcome)?;
+        if acquire_failure.is_some() {
+            response.acquire_failure = acquire_failure;
+            validate_response_for_request(&request, &response)
+                .map_err(|_| WorkerV3Error::Invalid)?;
+        }
         if matches!(
             operation,
             internal_worker_request::Operation::ActivateLeases(_)
@@ -4311,6 +4332,7 @@ fn correlated_response(
         result: result as i32,
         request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
         activation_failure: None,
+        acquire_failure: None,
         outcome,
     };
     validate_response_for_request(request, &response).map_err(|_| WorkerV3Error::Invalid)?;
@@ -6015,7 +6037,7 @@ struct StoredDurableWorkerPrepareTerminal {
 }
 
 struct DurableFunctionalPrepareFailure {
-    error: WorkerV3Error,
+    error: Box<WorkerV3Error>,
     selector: DurablePrepareTerminalSelector,
 }
 
@@ -7707,10 +7729,10 @@ impl WorkerRegistry {
             .collect::<Vec<_>>();
         let mut detached = Vec::with_capacity(expired.len());
         for (context_id, generation) in expired {
-            if self.quarantine(context_id, generation).is_ok() {
-                if let Ok(Some(worker)) = self.detach_quarantined(context_id, generation) {
-                    detached.push(worker);
-                }
+            if self.quarantine(context_id, generation).is_ok()
+                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation)
+            {
+                detached.push(worker);
             }
         }
         detached
@@ -7825,10 +7847,10 @@ impl WorkerRegistry {
             .collect::<Vec<_>>();
         let mut detached = Vec::with_capacity(identities.len());
         for (context_id, generation) in identities {
-            if self.quarantine(context_id, generation).is_ok() {
-                if let Ok(Some(worker)) = self.detach_quarantined(context_id, generation) {
-                    detached.push(worker);
-                }
+            if self.quarantine(context_id, generation).is_ok()
+                && let Ok(Some(worker)) = self.detach_quarantined(context_id, generation)
+            {
+                detached.push(worker);
             }
         }
         detached
@@ -8979,10 +9001,10 @@ impl WorkerSupervisor {
             .mark_ambiguous(token)
             .ok()
             .flatten();
-        if let Some(worker) = detached {
-            if !self.retire(worker).await {
-                return Err(WorkerV3Error::Ambiguous);
-            }
+        if let Some(worker) = detached
+            && !self.retire(worker).await
+        {
+            return Err(WorkerV3Error::Ambiguous);
         }
         Err(if deadline_elapsed {
             WorkerV3Error::Deadline
@@ -9008,10 +9030,10 @@ impl WorkerSupervisor {
             }
             FinishOutcome::Rejected { error, detached } => {
                 drop(execution);
-                if let Some(worker) = detached {
-                    if !self.retire(worker).await {
-                        return Err(WorkerV3Error::Ambiguous);
-                    }
+                if let Some(worker) = detached
+                    && !self.retire(worker).await
+                {
+                    return Err(WorkerV3Error::Ambiguous);
                 }
                 Err(error)
             }
@@ -9136,10 +9158,10 @@ impl WorkerSupervisor {
             .detach_quarantined(context_id, generation)
             .ok()
             .flatten();
-        if let Some(worker) = detached {
-            if !self.retire(worker).await {
-                return Err(WorkerV3Error::Ambiguous);
-            }
+        if let Some(worker) = detached
+            && !self.retire(worker).await
+        {
+            return Err(WorkerV3Error::Ambiguous);
         }
         Err(error)
     }
@@ -9996,12 +10018,12 @@ impl WorkerCoordinator {
         handle: &DurableOwnershipPrepareHandle,
         proof: ExactNeverDispatchedPrepareProof,
         deadline: HardDeadline,
-    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+    ) -> Result<(), (WorkerV3Error, Box<DurableWorkerPrepareOutcome>)> {
         match handle.retire_never_dispatched_until(proof, deadline) {
             DurableNeverDispatchedOutcome::Absent => Ok(()),
             DurableNeverDispatchedOutcome::Retained { error, proof } => Err((
                 durable_ownership_worker_error(error),
-                DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, proof },
+                Box::new(DurableWorkerPrepareOutcome::NeverDispatchedRetained { error, proof }),
             )),
         }
     }
@@ -10012,7 +10034,7 @@ impl WorkerCoordinator {
         handoff: DurableWorkerPrepareHandoff,
         custody_error: Option<DurableOwnershipError>,
         deadline: HardDeadline,
-    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+    ) -> Result<(), (WorkerV3Error, Box<DurableWorkerPrepareOutcome>)> {
         let DurableWorkerPrepareHandoff { registered, source } = handoff;
         let DurableRegisteredStartingWorker { key, worker } = registered;
         match self.settle_never_dispatched_worker_until(key, worker, Some(source), deadline) {
@@ -10039,7 +10061,7 @@ impl WorkerCoordinator {
                     }
                     None => DurableWorkerPrepareOutcome::HandoffWorkerRetained { error, handoff },
                 };
-                Err((returned_error, retained))
+                Err((returned_error, Box::new(retained)))
             }
         }
     }
@@ -10053,7 +10075,7 @@ impl WorkerCoordinator {
         handle: &DurableOwnershipPrepareHandle,
         outcome: DurableWorkerPrepareOutcome,
         deadline: HardDeadline,
-    ) -> Result<(), (WorkerV3Error, DurableWorkerPrepareOutcome)> {
+    ) -> Result<(), (WorkerV3Error, Box<DurableWorkerPrepareOutcome>)> {
         match outcome {
             DurableWorkerPrepareOutcome::CustodyPublication(publication) => {
                 drop(publication);
@@ -10066,19 +10088,19 @@ impl WorkerCoordinator {
                 if error == DurableOwnershipError::Ambiguous {
                     return Err((
                         WorkerV3Error::Ambiguous,
-                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                        Box::new(DurableWorkerPrepareOutcome::RegistrationRetained {
                             error,
                             registration,
-                        },
+                        }),
                     ));
                 }
                 if let Err(error) = ensure_worker_deadline(deadline) {
                     return Err((
                         error,
-                        DurableWorkerPrepareOutcome::RegistrationRetained {
+                        Box::new(DurableWorkerPrepareOutcome::RegistrationRetained {
                             error: DurableOwnershipError::DeadlineElapsed,
                             registration,
-                        },
+                        }),
                     ));
                 }
                 // Every non-ambiguous retained registration result is pre-mutation or a
@@ -10098,7 +10120,11 @@ impl WorkerCoordinator {
                 if matches!(error, WorkerV3Error::Ambiguous) {
                     return Err((
                         WorkerV3Error::Ambiguous,
-                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                            error,
+                            key,
+                            worker,
+                        }),
                     ));
                 }
                 match self.settle_never_dispatched_worker_until(key, worker, None, deadline) {
@@ -10109,7 +10135,11 @@ impl WorkerCoordinator {
                         error, key, worker, ..
                     } => Err((
                         worker_error_class(&error),
-                        DurableWorkerPrepareOutcome::WorkerAdmissionRetained { error, key, worker },
+                        Box::new(DurableWorkerPrepareOutcome::WorkerAdmissionRetained {
+                            error,
+                            key,
+                            worker,
+                        }),
                     )),
                 }
             }
@@ -10130,10 +10160,10 @@ impl WorkerCoordinator {
                         }
                         Err((
                             worker_error_class(&error),
-                            DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
+                            Box::new(DurableWorkerPrepareOutcome::RegisteredWorkerRetained {
                                 error,
                                 registered: DurableRegisteredStartingWorker { key, worker },
-                            },
+                            }),
                         ))
                     }
                 }
@@ -10145,7 +10175,10 @@ impl WorkerCoordinator {
                 if error == DurableOwnershipError::Ambiguous {
                     return Err((
                         WorkerV3Error::Ambiguous,
-                        DurableWorkerPrepareOutcome::CustodyFenceRetained { error, handoff },
+                        Box::new(DurableWorkerPrepareOutcome::CustodyFenceRetained {
+                            error,
+                            handoff,
+                        }),
                     ));
                 }
                 self.settle_retained_handoff_worker_until(handle, handoff, Some(error), deadline)
@@ -10578,10 +10611,7 @@ impl WorkerCoordinator {
             DurableWorkerPrepareTerminal::Handoff(outcome) => self
                 .settle_durable_handoff_outcome_until(handle, *outcome, deadline)
                 .map_err(|(error, outcome)| {
-                    (
-                        error,
-                        DurableWorkerPrepareTerminal::Handoff(Box::new(outcome)),
-                    )
+                    (error, DurableWorkerPrepareTerminal::Handoff(outcome))
                 }),
             terminal => {
                 let Some(expected_ownership) = selector.identity.ownership else {
@@ -10702,7 +10732,7 @@ impl WorkerCoordinator {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .restore_exact_durable_prepare_terminal(&selector, terminal);
                 return Err(DurableFunctionalPrepareFailure {
-                    error: WorkerV3Error::Conflict,
+                    error: Box::new(WorkerV3Error::Conflict),
                     selector,
                 });
             }
@@ -10718,7 +10748,10 @@ impl WorkerCoordinator {
                         &selector,
                         DurableWorkerPrepareTerminal::CustodyPublication(Box::new(retained)),
                     );
-                return Err(DurableFunctionalPrepareFailure { error, selector });
+                return Err(DurableFunctionalPrepareFailure {
+                    error: Box::new(error),
+                    selector,
+                });
             }
         };
         match self.open_durable_functional_worker_until(may_own, deadline) {
@@ -10736,13 +10769,10 @@ impl WorkerCoordinator {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .restore_exact_durable_prepare_terminal(
                         &selector,
-                        DurableWorkerPrepareTerminal::DispatchOpen {
-                            error,
-                            may_own: Box::new(may_own),
-                        },
+                        DurableWorkerPrepareTerminal::DispatchOpen { error, may_own },
                     );
                 Err(DurableFunctionalPrepareFailure {
-                    error: returned_error,
+                    error: Box::new(returned_error),
                     selector,
                 })
             }
@@ -10797,7 +10827,10 @@ impl WorkerCoordinator {
                         Box::new(retained),
                     ));
                 selector_ready(selector);
-                return Err(DurableFunctionalPrepareFailure { error, selector });
+                return Err(DurableFunctionalPrepareFailure {
+                    error: Box::new(error),
+                    selector,
+                });
             }
         };
 
@@ -10827,7 +10860,7 @@ impl WorkerCoordinator {
                         },
                     );
                 return Err(DurableFunctionalPrepareFailure {
-                    error: returned_error,
+                    error: Box::new(returned_error),
                     selector,
                 });
             }
@@ -10841,9 +10874,10 @@ impl WorkerCoordinator {
         &self,
         mut may_own: DurableWorkerMayOwnPrepare,
         deadline: HardDeadline,
-    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, DurableWorkerMayOwnPrepare)> {
+    ) -> Result<DurableFunctionalWorkerOwnership, (WorkerV3Error, Box<DurableWorkerMayOwnPrepare>)>
+    {
         let Ok(prepare) = may_own.durable.prepare_leases_v3() else {
-            return Err((WorkerV3Error::Conflict, may_own));
+            return Err((WorkerV3Error::Conflict, Box::new(may_own)));
         };
         if may_own.durable.context_id() != may_own.worker.coordinates.context_id
             || may_own.source.pending.coordinates != may_own.worker.coordinates
@@ -10852,27 +10886,27 @@ impl WorkerCoordinator {
             || prepare.leases.is_empty()
             || may_own.attestation.removal_baseline().is_none()
         {
-            return Err((WorkerV3Error::Conflict, may_own));
+            return Err((WorkerV3Error::Conflict, Box::new(may_own)));
         }
         if let Err(error) = self.revalidate_durable_recovery_identity_until(
             &may_own.worker,
             &may_own.source,
             deadline,
         ) {
-            return Err((error, may_own));
+            return Err((error, Box::new(may_own)));
         }
         let Some(fence) = may_own.worker.handoff_fence.as_ref() else {
-            return Err((WorkerV3Error::Stale, may_own));
+            return Err((WorkerV3Error::Stale, Box::new(may_own)));
         };
         let mut registry = match lock_worker_registry_until(&self.registry, deadline) {
             Ok(registry) => registry,
-            Err(error) => return Err((error, may_own)),
+            Err(error) => return Err((error, Box::new(may_own))),
         };
         if let Err(error) =
             registry.open_durable_handoff_dispatch(may_own.worker.coordinates, fence, deadline)
         {
             drop(registry);
-            return Err((error, may_own));
+            return Err((error, Box::new(may_own)));
         }
         drop(registry);
         may_own.worker.dispatch_registration = WorkerDispatchRegistration::Open;
@@ -11628,13 +11662,12 @@ impl WorkerCoordinator {
             ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
             return retained_worker_generation(error, ownership);
         }
-        if let Some(reservation) = detached.reservation.as_ref() {
-            if registry.exact_lifecycle_reservation_present(reservation)
-                && registry.abandon_generation_ref(reservation).is_err()
-            {
-                ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
-                return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
-            }
+        if let Some(reservation) = detached.reservation.as_ref()
+            && registry.exact_lifecycle_reservation_present(reservation)
+            && registry.abandon_generation_ref(reservation).is_err()
+        {
+            ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
+            return retained_worker_generation(WorkerV3Error::Ambiguous, ownership);
         }
         if let Err(error) = registry.purge_or_confirm_generation_absent(ownership.coordinates) {
             ownership.placement = Some(WorkerGenerationPlacement::ReapedPendingPurge(detached));
@@ -12698,6 +12731,79 @@ mod tests {
 
     const CHILD_FIXTURE_ENVIRONMENT: &str = "VOLPAROSSA_TEST_WORKER_V3_CHILD";
     const CLEARED_ENVIRONMENT_SENTINEL: &str = "VOLPAROSSA_TEST_MUST_BE_CLEARED";
+
+    #[test]
+    fn acquire_diagnostic_preserves_child_result_without_fd_or_outcome() {
+        use crate::internal_protocol::{AcquireFailureClass, AcquireFailureOperation};
+
+        let diagnostic = AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::Poll as i32,
+            class: AcquireFailureClass::TimedOut as i32,
+            errno: None,
+        };
+        for (error, expected, detail) in [
+            (
+                WorkerTransportError::Invalid,
+                InternalWorkerResult::Invalid,
+                None,
+            ),
+            (
+                WorkerTransportError::Protocol,
+                InternalWorkerResult::Invalid,
+                None,
+            ),
+            (
+                WorkerTransportError::Timeout,
+                InternalWorkerResult::Kernel,
+                Some(diagnostic),
+            ),
+            (
+                WorkerTransportError::Io(io::Error::other("private-error-canary")),
+                InternalWorkerResult::Kernel,
+                Some(diagnostic),
+            ),
+            (
+                WorkerTransportError::Sandbox(crate::worker_sandbox::WorkerSandboxError::Invalid),
+                InternalWorkerResult::Kernel,
+                Some(diagnostic),
+            ),
+        ] {
+            let (result, outcome, descriptor, observed) =
+                child_acquire_failure(&AcquireTransportFailure {
+                    error,
+                    diagnostic: Some(diagnostic),
+                });
+            assert_eq!(result, expected);
+            assert!(outcome.is_none());
+            assert!(descriptor.is_none());
+            assert_eq!(observed, detail);
+        }
+        let (result, _, _, detail) = child_acquire_failure(&AcquireTransportFailure::from(
+            WorkerTransportError::Timeout,
+        ));
+        assert_eq!(result, InternalWorkerResult::Kernel);
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn acquire_diagnostic_missing_context_keeps_not_found_without_detail() {
+        let acquire = AcquireTransportSocket {
+            route_context_id: vec![1; 16],
+            path_id: 1,
+            role: InternalEndpointRole::Client as i32,
+            descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
+            expected_local: None,
+            expected_remote: None,
+        };
+        let deadline = HardDeadline::after(Duration::from_secs(1)).expect("original deadline");
+        let (result, outcome, descriptor, diagnostic) =
+            acquire_transport_child_context(None, &acquire, [1; 16], deadline)
+                .expect("missing context is a definite result");
+        assert_eq!(result, InternalWorkerResult::NotFound);
+        assert!(outcome.is_none());
+        assert!(descriptor.is_none());
+        assert!(diagnostic.is_none());
+    }
 
     fn current_credentials() -> ExpectedUnixCredentials {
         ExpectedUnixCredentials::new(process::id(), geteuid().as_raw(), getegid().as_raw())
@@ -14803,7 +14909,7 @@ mod tests {
             .expect("production child Acquire end");
         let acquire = &source[acquire_start..acquire_end];
         assert!(acquire.contains("context.transport_lease(acquire)"));
-        assert!(acquire.contains("create_transport_socket(lease, acquire)"));
+        assert!(acquire.contains("create_transport_socket_diagnosed(lease, acquire)"));
         assert!(acquire.contains("Some(descriptor)"));
 
         let loop_start = source

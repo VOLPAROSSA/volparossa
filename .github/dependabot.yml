@@ -1,0 +1,43 @@
+# Propose related compatible updates together; every group still needs review.
+# Major upgrades remain individual; existing security-update policies stay separate.
+
+version: 2
+
+updates:
+  # Rust: de hoofdworkspace en het afzonderlijke fuzz-testproject.
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      rust-compatible:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      rust-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # Actions die worden gebruikt in .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      actions-compatible:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

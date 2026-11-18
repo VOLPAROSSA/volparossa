@@ -250,6 +250,7 @@ async fn execute_stage(
         .context("peer_comparison_source_expired")?
         .min(u64::from(args.max_seconds));
     let options = super::super::Options {
+        native_backend: crate::compute::native_cpu::Options::default(),
         model_profile: super::super::ModelProfile::default(),
         mode: super::super::Mode::Infer,
         runtime_root: args.runtime_root.clone(),

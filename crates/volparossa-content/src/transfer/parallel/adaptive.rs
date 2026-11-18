@@ -62,6 +62,7 @@ impl ParallelDownload {
                 break;
             }
             if self.peers[index].state == PeerState::Active && self.peers[index].pending.is_none() {
+                self.peers[index].resource_retired = true;
                 self.finish_peer(index);
                 active -= 1;
             }
@@ -108,7 +109,10 @@ impl ParallelDownload {
     fn finish_probe(&mut self, index: usize, beneficial: bool) {
         self.peers[index].probing = false;
         if !beneficial {
-            self.finish_peer(index);
+            // Throughput says nothing about possession of untested complementary shards.
+            // Stop speculative credits, but retain bounded gap coverage until exhausted
+            // or resource pressure requires closure. This lease still counts at full width.
+            self.peers[index].coverage_only = true;
             self.growth_blocked = true;
         }
         self.probe_baseline = None;
@@ -125,7 +129,7 @@ impl ParallelDownload {
             .count()
     }
 
-    fn eligible(&self, index: usize) -> bool {
+    pub(super) fn eligible(&self, index: usize) -> bool {
         self.chunks
             .iter()
             .any(|chunk| !chunk.complete && !chunk.attempted.contains(&index))
@@ -164,17 +168,18 @@ impl ParallelDownload {
             .peers
             .iter()
             .position(|peer| peer.state == PeerState::Active && peer.probing);
-        if let Some(probe) = probe {
-            if self.measured_batch() && self.peers[probe].pending.is_none() {
-                // A shared bottleneck can redistribute rates without adding total capacity.
-                // Require an observed aggregate gain; an incomplete batch cannot justify
-                // opening yet another stream. Genuine missing-chunk coverage is separate.
-                let rate = self.measurement.rate();
-                let gain = self.probe_baseline.is_some_and(|baseline| {
-                    baseline > 0 && u128::from(rate) * 10 >= u128::from(baseline) * 11
-                });
-                self.finish_probe(probe, gain);
-            }
+        if let Some(probe) = probe
+            && self.measured_batch()
+            && self.peers[probe].pending.is_none()
+        {
+            // A shared bottleneck can redistribute rates without adding total capacity.
+            // Require an observed aggregate gain; an incomplete batch cannot justify
+            // opening yet another stream. Genuine missing-chunk coverage is separate.
+            let rate = self.measurement.rate();
+            let gain = self.probe_baseline.is_some_and(|baseline| {
+                baseline > 0 && u128::from(rate) * 10 >= u128::from(baseline) * 11
+            });
+            self.finish_probe(probe, gain);
         }
     }
 }

@@ -16,7 +16,7 @@ const MAX_CATALOGS: usize = 16;
 const MAX_REGISTRY_BYTES: usize = 3 * 1024 * 1024;
 const MAX_RECEIPT_BYTES: usize = 32 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Registry {
     version: u32,
@@ -24,6 +24,31 @@ pub(super) struct Registry {
     cursor: usize,
     feeds: Vec<Feed>,
     slots: Vec<Slot>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename = "Registry")]
+struct RegistryWire {
+    version: u32,
+    static_count: usize,
+    cursor: usize,
+    feeds: Vec<Feed>,
+    slots: Vec<Slot>,
+}
+
+impl<'de> Deserialize<'de> for Registry {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let wire = RegistryWire::deserialize(deserializer)?;
+        Ok(Self {
+            version: wire.version,
+            static_count: wire.static_count,
+            cursor: wire.cursor,
+            feeds: wire.feeds,
+            slots: wire.slots,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

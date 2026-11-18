@@ -2,6 +2,7 @@
 
 pub(super) mod diagnostic;
 mod lifetime;
+pub(super) mod native_session;
 
 use std::{
     collections::BTreeSet, fmt, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
@@ -27,6 +28,19 @@ pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OBSERVED_PROCESSES: usize = 64;
 const MAX_OBSERVED_THREADS: usize = 128;
+
+/// The owner's fixed execution budget elapsed. Cleanup must still complete before
+/// this can become a terminal, non-retryable response to an opted-in local client.
+#[derive(Debug)]
+pub(super) struct ExecutionDeadline;
+
+impl fmt::Display for ExecutionDeadline {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("compute_deadline")
+    }
+}
+
+impl std::error::Error for ExecutionDeadline {}
 
 /// A fixed error reply from the exact local worker, exposed only after its cleanup succeeds.
 /// This is local execution evidence, not an independently portable or network-wide verdict.
@@ -158,7 +172,7 @@ pub(super) async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut budget = Budget::new();
     let controls = options.spare_capacity.then(Controls::default);
-    let progress = diagnostic::Progress::default();
+    let progress = diagnostic::Progress::with_generation(request.private_generation_diagnostics);
     let result = async {
         if let Some(lifetimes) = private_lifetimes.as_mut() {
             lifetimes.as_mut().map_err(|_| anyhow::anyhow!("compute_private_process_observation"))?
@@ -195,7 +209,7 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 biased;
-                () = &mut deadline => break Err(anyhow::anyhow!("compute_deadline")),
+                () = &mut deadline => break Err(ExecutionDeadline.into()),
                 changed = owner_idle.changed() => {
                     if changed.is_err() || !*owner_idle.borrow() {
                         break Err(anyhow::anyhow!("compute_owner_busy"));
@@ -326,11 +340,11 @@ async fn reap_failed_child(
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
-    if mode.is_private() {
-        if let Err(error) = &reaped {
-            diagnostic::failure("reap", error);
-            return Err(super::private_task::CleanupUnconfirmed.into());
-        }
+    if mode.is_private()
+        && let Err(error) = &reaped
+    {
+        diagnostic::failure("reap", error);
+        return Err(super::private_task::CleanupUnconfirmed.into());
     }
     reaped?;
     Ok(())
@@ -388,6 +402,15 @@ fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
 }
 
 fn check_model_backend(value: &Value, request: &WorkerRequest) -> Result<()> {
+    request.native_backend.check_report(value)?;
+    if request.native_backend.enabled() {
+        ensure!(
+            request.model_profile == super::ModelProfile::Qwen4bInstruct2507
+                && request.mode == Mode::PrivateConversation,
+            "compute_native_backend_scope"
+        );
+        return Ok(());
+    }
     if matches!(
         request.model_profile,
         super::ModelProfile::Smol1700
@@ -419,6 +442,10 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     if value.get("status").and_then(Value::as_str) == Some("error") {
         return Err(worker_failure(value, &request.id, status));
     }
+    check_successful_result(value, request)
+}
+
+fn check_successful_result(value: &Value, request: &WorkerRequest) -> Result<()> {
     ensure!(
         value.get("status").and_then(Value::as_str) == Some("ok"),
         "compute_backend_failed"
@@ -790,7 +817,8 @@ async fn collect_stdout_tracked(
                 progress.observe(&value)?;
             } else {
                 ensure!(
-                    value.get("private_execution").is_none(),
+                    value.get("private_execution").is_none()
+                        && value.get("private_generation").is_none(),
                     "compute_private_progress"
                 );
             }
@@ -891,10 +919,95 @@ impl StartupClass {
     }
 }
 
+// Inspected bubblewrap v0.12.0 (2a76602a8c71f36c1527cf9fc3417d9149822e0c),
+// Debian 0.12.0-1~deb13u1; full source/archive provenance: THIRD_PARTY_LICENSES.md.
+// A matching first diagnostic prefix identifies a source family, never its
+// runtime cause, errno, timing, or an authenticated emitter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BubblewrapStage {
+    NamespaceSetup,
+    RootSetup,
+    SourceSetup,
+    DestinationSetup,
+    BindMount,
+}
+
+impl BubblewrapStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NamespaceSetup => "bubblewrap_namespace_setup",
+            Self::RootSetup => "bubblewrap_root_setup",
+            Self::SourceSetup => "bubblewrap_source_setup",
+            Self::DestinationSetup => "bubblewrap_destination_setup",
+            Self::BindMount => "bubblewrap_bind_mount",
+        }
+    }
+}
+
+fn public_bubblewrap_stage(prefix: &[u8]) -> Option<BubblewrapStage> {
+    if startup_class(prefix) != StartupClass::Bubblewrap {
+        return None;
+    }
+    let families: &[(BubblewrapStage, &[&[u8]])] = &[
+        (
+            BubblewrapStage::NamespaceSetup,
+            &[b"bwrap: No permissions to create a new namespace,"],
+        ),
+        (
+            BubblewrapStage::RootSetup,
+            &[
+                b"bwrap: Failed to make / slave: ",
+                b"bwrap: Failed to mount tmpfs: ",
+                b"bwrap: chdir base_path: ",
+                b"bwrap: Creating newroot failed: ",
+                b"bwrap: setting up newroot bind: ",
+                b"bwrap: Creating oldroot failed: ",
+                b"bwrap: pivot_root: ",
+                b"bwrap: pivot_root(/newroot): ",
+                b"bwrap: mounting proc: ",
+                b"bwrap: Failed to make old root rprivate: ",
+            ],
+        ),
+        (
+            BubblewrapStage::SourceSetup,
+            &[
+                b"bwrap: Can't find source path ",
+                b"bwrap: Can't open source ",
+                b"bwrap: Can't get type of source ",
+            ],
+        ),
+        (
+            BubblewrapStage::DestinationSetup,
+            &[
+                b"bwrap: Can't mkdir parents for ",
+                b"bwrap: Can't create file ",
+                b"bwrap: Can't get type of dest ",
+                b"bwrap: Can't mount on symlink destination ",
+                b"bwrap: Destination is not a directory ",
+                b"bwrap: Destination is not a file ",
+            ],
+        ),
+        (
+            BubblewrapStage::BindMount,
+            &[
+                b"bwrap: Can't bind mount ",
+                b"bwrap: Can't remount readonly on ",
+            ],
+        ),
+    ];
+    families.iter().find_map(|(stage, prefixes)| {
+        prefixes
+            .iter()
+            .any(|candidate| prefix.starts_with(candidate))
+            .then_some(*stage)
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 struct StartupDiagnostics {
     class: StartupClass,
     bytes: usize,
+    public_bubblewrap_stage: Option<BubblewrapStage>,
 }
 
 #[derive(Debug)]
@@ -980,6 +1093,7 @@ async fn drain_stderr(mut stream: impl AsyncRead + Unpin) -> Result<StartupDiagn
             return Ok(StartupDiagnostics {
                 class: startup_class(&prefix),
                 bytes: total,
+                public_bubblewrap_stage: public_bubblewrap_stage(&prefix),
             });
         }
         total += length;
@@ -1161,6 +1275,7 @@ mod tests {
         }
         let options = Options {
             mode: Mode::AggregateAdapter,
+            native_backend: super::super::native_cpu::Options::default(),
             model_profile: crate::compute::ModelProfile::default(),
             runtime_root: root.path().join("unused-runtime"),
             model_root: root.path().join("unused-model"),
@@ -1194,6 +1309,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let options = Options {
             mode: Mode::PlanTasks,
+            native_backend: super::super::native_cpu::Options::default(),
             model_profile: crate::compute::ModelProfile::default(),
             runtime_root: directory.path().join("unused-runtime"),
             model_root: directory.path().join("unused-model"),
@@ -1239,6 +1355,7 @@ mod tests {
         // Inert result-contract inputs, not model execution or answer-quality evidence.
         for mode in [Mode::Infer, Mode::Train] {
             let request = WorkerRequest {
+                native_backend: super::super::native_cpu::Request::default(),
                 version: 1,
                 id: "abc".into(),
                 mode,
@@ -1251,6 +1368,7 @@ mod tests {
                 threads: 1,
                 max_seconds: 60,
                 owner_control: false,
+                private_generation_diagnostics: false,
             };
             let mut reply = serde_json::json!({"status":"ok","mode":mode,"device":"cpu",
                 "updates_completed":u8::from(mode==Mode::Train),"base_weights_unchanged":true,
@@ -1275,6 +1393,7 @@ mod tests {
     fn larger_profile_requires_actual_precision_and_distinguishes_tokenizer_only_work() {
         // Inert protocol evidence only; this does not instantiate a model.
         let mut request = WorkerRequest {
+            native_backend: super::super::native_cpu::Request::default(),
             version: 1,
             id: "abc".into(),
             mode: Mode::Infer,
@@ -1287,6 +1406,7 @@ mod tests {
             threads: 2,
             max_seconds: 600,
             owner_control: false,
+            private_generation_diagnostics: false,
         };
         let mut reply = serde_json::json!({"status":"ok","mode":"infer","device":"cpu",
             "updates_completed":0,"outputs":[{"sample_index":0,"text":"Inert response",
@@ -1529,6 +1649,95 @@ mod tests {
         assert!(drain_stderr(too_large.as_slice()).await.is_err());
     }
 
+    #[test]
+    fn public_bubblewrap_stage_matches_source_prefix_families_only() {
+        for (prefix, stage) in [
+            (
+                "bwrap: No permissions to create a new namespace,",
+                BubblewrapStage::NamespaceSetup,
+            ),
+            ("bwrap: Failed to mount tmpfs: ", BubblewrapStage::RootSetup),
+            ("bwrap: pivot_root: ", BubblewrapStage::RootSetup),
+            (
+                "bwrap: Can't find source path ",
+                BubblewrapStage::SourceSetup,
+            ),
+            ("bwrap: Can't open source ", BubblewrapStage::SourceSetup),
+            (
+                "bwrap: Can't get type of source ",
+                BubblewrapStage::SourceSetup,
+            ),
+            (
+                "bwrap: Can't mkdir parents for ",
+                BubblewrapStage::DestinationSetup,
+            ),
+            (
+                "bwrap: Can't mount on symlink destination ",
+                BubblewrapStage::DestinationSetup,
+            ),
+            ("bwrap: Can't bind mount ", BubblewrapStage::BindMount),
+            (
+                "bwrap: Can't remount readonly on ",
+                BubblewrapStage::BindMount,
+            ),
+        ] {
+            let raw = format!("{prefix}PRIVATE_CANARY /private/input: private errno text");
+            assert_eq!(startup_class(raw.as_bytes()), StartupClass::Bubblewrap);
+            assert_eq!(public_bubblewrap_stage(raw.as_bytes()), Some(stage));
+            assert_eq!(
+                public_bubblewrap_stage(&prefix.as_bytes()[..prefix.len() - 1]),
+                None
+            );
+        }
+        for raw in [
+            b"bwrap: unknown PRIVATE_CANARY".as_slice(),
+            b"not bwrap: Can't open source ",
+            b"bwrap: Can't open sourcewise ",
+            b"bwrap: warning\nbwrap: Can't open source ",
+            b"bwrap: \xff",
+            b"bwrap: Creating new namespace failed",
+            b"bwrap: Can't mount proc on ",
+        ] {
+            assert_eq!(public_bubblewrap_stage(raw), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn public_bubblewrap_stage_uses_existing_fragmented_prefix_without_changing_default_failure()
+     {
+        use tokio::io::AsyncWriteExt as _;
+
+        let raw = [
+            b"bwrap: Can't open source PRIVATE_CANARY /private/input: ".as_slice(),
+            &[b'x'; 2048],
+        ]
+        .concat();
+        let bytes = raw.len();
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let writing = tokio::spawn(async move {
+            for byte in raw {
+                writer.write_all(&[byte]).await.unwrap();
+            }
+        });
+        let diagnostics = drain_stderr(reader).await.unwrap();
+        writing.await.unwrap();
+        assert_eq!(diagnostics.class, StartupClass::Bubblewrap);
+        assert_eq!(diagnostics.bytes, bytes);
+        assert_eq!(
+            diagnostics.public_bubblewrap_stage,
+            Some(BubblewrapStage::SourceSetup)
+        );
+        assert!(!format!("{diagnostics:?}").contains("PRIVATE_CANARY"));
+        let error = required_result(None, ExitStatus::from_raw(256), diagnostics).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "compute_result_missing exit_code=1 signal=0 stderr_class=bubblewrap stderr_bytes={bytes}"
+            )
+        );
+        assert!(!format!("{error:?}").contains("PRIVATE_CANARY"));
+    }
+
     #[tokio::test]
     async fn clean_missing_result_retains_exit_diagnostics_but_malformed_output_still_fails_fast() {
         assert!(
@@ -1543,6 +1752,7 @@ mod tests {
             StartupDiagnostics {
                 class: StartupClass::None,
                 bytes: 0,
+                public_bubblewrap_stage: None,
             },
         )
         .unwrap_err()

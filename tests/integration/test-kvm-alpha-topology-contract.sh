@@ -16,6 +16,8 @@ RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
 # Pure decisions and preview wiring only: never run a runner network probe here.
 python3 -B "$HERE/test-qemu-outer-uplink.py"
+python3 -B "$HERE/test-protected-quote-route.py"
+python3 -B "$HERE/test-protected-quote-route-wiring.py"
 
 # This pressure fixture requires actual nonshared mounts; PrivateMounts alone
 # intentionally keeps systemd's inbound/slave propagation. Other fixtures do not.
@@ -509,13 +511,14 @@ assert guest.count("agent_autonomous_aggregation=no") == 2
 timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
-# Both main-line Signal scenarios retain their existing 150-minute window.
+# Both Signal scenarios retain their 150-minute window alongside maintenance.
 # Compare the whole closed expression: the former single-clause regex did not
 # understand main's parenthesized Signal alternatives and dropped their bound.
 assert timeout_line == (
     "timeout-minutes: ${{ inputs.scenario == 'agent-native-coding' && 240 || "
     "inputs.scenario == 'agent-autonomous-aggregation' && 180 || "
-    "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments') "
+    "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
+    "|| inputs.scenario == 'private-storage-maintenance') "
     "&& 150 || 120 }}")
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
@@ -1252,6 +1255,7 @@ python3 -B "$HERE/test-wifi-link-smoke.py"
 sh -n "$HERE/uplink-link-smoke.sh"
 python3 -B "$HERE/test-uplink-link-smoke.py"
 python3 -B "$HERE/test-alpha-vm-diagnostics.py"
+python3 -B "$HERE/test-qemu-child-lifecycle.py"
 sh -n "$HERE/content-network-smoke.sh"
 grep -F 'content_network_run' "$GUEST" >/dev/null
 grep -F -- '-p volparossa-content --example content-acceptance-fixture' "$HOST" >/dev/null
@@ -1267,6 +1271,7 @@ sh -n "$HERE/content-provider-https-smoke.sh"
 grep -F 'content_provider_run' "$GUEST" >/dev/null
 grep -F 'Require actual native provider discovery and protected fetch' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-content-provider-smoke.py"
+python3 -B "$HERE/test-content-cancellation-smoke.py"
 python3 -B "$HERE/test-content-provider-https-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'
 
@@ -1304,8 +1309,34 @@ import sys
 host = Path(sys.argv[1]).read_text()
 driver = host.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
 parser = driver.split('scenario=$5\n', 1)[1].split('\ncd /home/vpci\n', 1)[0]
-outer = host.rsplit('case $scenario in\n    agent-native-coding|agent-native-editor)\n', 1)[1]
-outer = 'case $scenario in\n    agent-native-coding|agent-native-editor)\n' + outer.split('\nesac\n', 1)[0] + '\nesac\n'
+guest_end = '\nGUEST_DRIVER_SCRIPT\n'
+dispatch_end = '\nesac\nGUEST_STATUS=$?\nset -e\n'
+
+def outer_dispatch(source):
+    # Bind the host call outside the heredoc, independently of case-arm ordering.
+    # Never fall back to the similar argument parser embedded in the guest script.
+    assert source.count(guest_end) == 1, 'guest-driver boundary must be unique'
+    assert source.count(dispatch_end) == 1, 'host dispatch boundary must be unique'
+    tail = source.split(guest_end, 1)[1]
+    assert dispatch_end in tail, 'host dispatch must follow the guest heredoc'
+    before = tail.split(dispatch_end, 1)[0]
+    start = '\ncase $scenario in\n'
+    assert before.count(start) == 1, 'host dispatch case must be unambiguous'
+    return 'case $scenario in\n' + before.split(start, 1)[1] + '\nesac\n'
+
+outer = outer_dispatch(host)
+for invalid_source in (
+    host.replace(guest_end, '', 1),
+    host + guest_end,
+    host + dispatch_end,
+    host.replace(dispatch_end, '', 1).replace(guest_end, dispatch_end + guest_end, 1),
+):
+    try:
+        outer_dispatch(invalid_source)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError('ambiguous or embedded dispatch must not be selected')
 base = ['expected', 'source', 'mpquic', 'package']
 for scenario, extra, hashes in (
     ('agent-native-coding', ['native'], ['native', 'none', 'none']),

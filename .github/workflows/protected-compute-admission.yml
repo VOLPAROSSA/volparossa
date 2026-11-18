@@ -1,0 +1,148 @@
+name: Protected compute core evidence
+run-name: Core public Milan local policy CRL and fresh session binding only
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/protected-compute-admission, feature/protected-compute-endorsement, feature/protected-compute-cert-profile, feature/protected-compute-collateral, feature/protected-compute-local-policy, feature/protected-compute-guest, feature/protected-compute-quote-exchange]
+    paths:
+      - .github/workflows/protected-compute-admission.yml
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - crates/volparossa-content/Cargo.toml
+      - crates/volparossa-content/src/provider/compute.rs
+      - crates/volparossa-content/src/provider/compute/attestation*
+      - crates/volparossa-content/src/provider/compute/attestation/**
+      - crates/volparossa-content/src/provider/compute/guest*
+      - crates/volparossa-content/src/provider/compute/guest/**
+      - crates/volparossa-content/src/provider/compute/quote*
+      - crates/volparossa-content/src/provider/compute/quote/**
+      - crates/volparossa-content/src/provider/compute/protocol.rs
+      - crates/volparossa-content/src/provider.rs
+      - crates/volparossa-agent/src/content.rs
+      - crates/volparossa-agent/src/content/quote*.rs
+      - crates/volparossa-agent/src/control.rs
+      - crates/volparossa-local-control/src/lib.rs
+      - crates/volparossa-local-control/src/quote.rs
+      - crates/volparossa/src/compute.rs
+      - crates/volparossa/src/compute/quote.rs
+      - crates/volparossa/src/main.rs
+      - scripts/check-public-rsa-scope.py
+      - crates/volparossa-content/tests/fixtures/snp/**
+      - tests/integration/protected-compute-admission.py
+      - tests/integration/test-protected-compute-admission.py
+      - tests/integration/protected-compute-guest.py
+      - tests/integration/test-protected-compute-guest.py
+      - tests/integration/protected-compute-quote.py
+      - tests/integration/test-protected-compute-quote.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-compute-admission-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  public-core-tests:
+    if: github.ref == 'refs/heads/feature/protected-compute-admission' || github.ref == 'refs/heads/feature/protected-compute-endorsement' || github.ref == 'refs/heads/feature/protected-compute-cert-profile' || github.ref == 'refs/heads/feature/protected-compute-collateral' || github.ref == 'refs/heads/feature/protected-compute-local-policy' || github.ref == 'refs/heads/feature/protected-compute-guest' || github.ref == 'refs/heads/feature/protected-compute-quote-exchange'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check inert committed-lock and historical replay contracts
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          python3 -B tests/integration/test-protected-compute-admission.py
+          python3 -B tests/integration/test-protected-compute-guest.py
+          python3 -B tests/integration/test-protected-compute-quote.py
+      - name: Install declared compiler only on disposable runner
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          python3 -B tests/integration/protected-compute-admission.py prepare
+      - name: Fetch committed dependencies locked without changing source or Cargo.lock
+        run: python3 -B tests/integration/protected-compute-admission.py fetch
+      - name: Validate actual offline resolved verifier features
+        run: python3 -B tests/integration/protected-compute-admission.py metadata
+      - name: Execute exactly fifty-two core evidence tests offline
+        run: python3 -B tests/integration/protected-compute-admission.py test
+      - name: Check targeted core module and test compilation with Clippy
+        run: python3 -B tests/integration/protected-compute-admission.py clippy
+      - name: Record original stages without promoting preparation to cryptographic success
+        if: always()
+        run: python3 -B tests/integration/protected-compute-admission.py receipt
+      - name: Exercise guest software lifecycle without confidential hardware
+        if: success() && (github.ref == 'refs/heads/feature/protected-compute-guest' || github.ref == 'refs/heads/feature/protected-compute-quote-exchange')
+        run: python3 -B tests/integration/protected-compute-guest.py test
+      - name: Record guest software evidence separately from firmware acceptance
+        if: always() && (github.ref == 'refs/heads/feature/protected-compute-guest' || github.ref == 'refs/heads/feature/protected-compute-quote-exchange')
+        run: python3 -B tests/integration/protected-compute-guest.py receipt
+      - name: Exercise authorized quote software exchange without confidential hardware
+        if: success() && github.ref == 'refs/heads/feature/protected-compute-quote-exchange'
+        run: python3 -B tests/integration/protected-compute-quote.py test
+      - name: Record quote software evidence without hardware or private-task claims
+        if: always() && github.ref == 'refs/heads/feature/protected-compute-quote-exchange'
+        run: python3 -B tests/integration/protected-compute-quote.py receipt
+      - name: Retain only bounded public source lock and test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protected-compute-core-evidence-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/source.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/original-Cargo.lock
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/effective-Cargo.lock
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/Cargo.lock.diff
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/resolution.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/resolved-metadata.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/tests.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/clippy.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/report.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/rustc.txt
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/cargo.txt
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/resolve.log
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/metadata.log
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/tests.log
+            ${{ runner.temp }}/volparossa-protected-compute-admission/evidence/clippy.log
+      - name: Retain bounded guest software evidence
+        if: always() && (github.ref == 'refs/heads/feature/protected-compute-guest' || github.ref == 'refs/heads/feature/protected-compute-quote-exchange')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protected-compute-guest-software-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/volparossa-protected-compute-admission/guest-evidence/tests.log
+            ${{ runner.temp }}/volparossa-protected-compute-admission/guest-evidence/tests.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/guest-evidence/report.json
+      - name: Retain bounded quote software evidence
+        if: always() && github.ref == 'refs/heads/feature/protected-compute-quote-exchange'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protected-compute-quote-software-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/volparossa-protected-compute-admission/quote-evidence/tests.log
+            ${{ runner.temp }}/volparossa-protected-compute-admission/quote-evidence/tests.json
+            ${{ runner.temp }}/volparossa-protected-compute-admission/quote-evidence/report.json

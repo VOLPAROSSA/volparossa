@@ -18,11 +18,13 @@ hpke.workspace = true
 http.workspace = true
 prost.workspace = true
 rand_chacha_10.workspace = true
+rsa.workspace = true
 rustix.workspace = true
 rusqlite.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sev.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tempfile.workspace = true
@@ -30,11 +32,15 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 url.workspace = true
+x509-cert.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+libp2p-identity.workspace = true
 rand_core.workspace = true
 rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
 
 [lints]
 workspace = true

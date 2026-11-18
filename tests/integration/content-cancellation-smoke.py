@@ -20,6 +20,9 @@ HELPER = "volparossa-alpha-helper@client.service"
 AGENT = "volparossa-alpha-agent@client.service"
 NAME = "disposable-native-network-publication"
 LIMIT = 262144
+COOLDOWN_MS = 30000
+COOLDOWN_DEADLINE_MS = 35000
+COOLDOWN_SCOPE = "fixture-idle-preselection-cooldown-not-route-readiness"
 
 
 def require(ok, message):
@@ -55,19 +58,19 @@ def identity(pid):
     return dict(pid=pid, start_ticks=int(fields[19])), fields[0]
 
 
-def properties(unit):
+def properties(unit, timeout=5):
     result = subprocess.run(["systemctl", "show", unit, "--property=MainPID,InvocationID,ActiveState"],
-                            capture_output=True, timeout=5, check=True)
+                            capture_output=True, timeout=timeout, check=True)
     value = dict(line.split("=", 1) for line in result.stdout.decode().splitlines())
     require(value["ActiveState"] == "active" and int(value["MainPID"]) > 1
             and re.fullmatch(r"[0-9a-f]{32}", value["InvocationID"]), "unit not active")
     return value
 
 
-def owned_helper(record):
+def owned_helper(record, timeout=5):
     current, state = identity(record["process"]["pid"])
     require(current == record["process"], "helper PID was replaced")
-    unit = properties(HELPER)
+    unit = properties(HELPER, timeout)
     require(int(unit["MainPID"]) == current["pid"]
             and unit["InvocationID"] == record["invocation_id"], "helper unit was replaced")
     namespace = os.stat(f"/proc/{current['pid']}/ns/net")
@@ -76,6 +79,90 @@ def owned_helper(record):
                 Path(f"/proc/{current['pid']}/cgroup").read_text().splitlines()],
             "helper no longer belongs to the exact disposable namespace/unit")
     return state
+
+
+def cooldown_record():
+    return dict(schema_version=1, scope=COOLDOWN_SCOPE, required_ms=COOLDOWN_MS,
+                deadline_ms=COOLDOWN_DEADLINE_MS, elapsed_monotonic_ms=0,
+                elapsed_wall_ms=0, total_monotonic_ms=0, before_confirmed=False, after_confirmed=False,
+                outcome="not-confirmed")
+
+
+def validate_cooldown(record):
+    require(type(record) is dict and set(record) == set(cooldown_record()),
+            "wrong fixture cooldown fields")
+    require(type(record["schema_version"]) is int and record["schema_version"] == 1
+            and record["scope"] == COOLDOWN_SCOPE
+            and type(record["required_ms"]) is int and record["required_ms"] == COOLDOWN_MS
+            and type(record["deadline_ms"]) is int and record["deadline_ms"] == COOLDOWN_DEADLINE_MS
+            and type(record["elapsed_monotonic_ms"]) is int
+            and 0 <= record["elapsed_monotonic_ms"] < 2 ** 63
+            and type(record["total_monotonic_ms"]) is int
+            and record["elapsed_monotonic_ms"] <= record["total_monotonic_ms"] < 2 ** 63
+            and type(record["elapsed_wall_ms"]) is int
+            and -(2 ** 63) < record["elapsed_wall_ms"] < 2 ** 63
+            and type(record["before_confirmed"]) is bool
+            and type(record["after_confirmed"]) is bool
+            and type(record["outcome"]) is str
+            and record["outcome"] in {"not-confirmed", "elapsed", "deadline", "clock-invalid"},
+            "invalid fixture cooldown receipt")
+    if record["outcome"] == "elapsed":
+        require(record["before_confirmed"] and record["after_confirmed"]
+                and COOLDOWN_MS <= record["elapsed_monotonic_ms"] < COOLDOWN_DEADLINE_MS
+                and record["total_monotonic_ms"] < COOLDOWN_DEADLINE_MS
+                and record["elapsed_wall_ms"] >= COOLDOWN_MS,
+                "fixture cooldown was not confirmed on both clocks")
+    return record
+
+
+def await_fixture_cooldown(record, confirm, *, monotonic_ns=None, wall_ns=None, sleep=None):
+    """Fixture-only separation from an earlier bootstrap; never grants route admission.
+
+    Successful production preselection cools for 30 seconds on both clocks, even
+    after Disconnect reports idle. Do not spend the separate eight-second pending
+    bootstrap assertion inside that earlier cooldown. No product timer is changed.
+    `confirm` rechecks the original services and disconnected state without mutation.
+    """
+    monotonic_ns = monotonic_ns or time.monotonic_ns
+    wall_ns = wall_ns or time.time_ns
+    sleep = sleep or time.sleep
+    started, wall_started = monotonic_ns(), wall_ns()
+    absolute_started = started
+    deadline = started + COOLDOWN_DEADLINE_MS * 1000000
+    previous, previous_wall = started, wall_started
+
+    def observe():
+        nonlocal previous, previous_wall
+        current, wall_current = monotonic_ns(), wall_ns()
+        record["elapsed_monotonic_ms"] = (current - started) // 1000000
+        record["elapsed_wall_ms"] = (wall_current - wall_started) // 1000000
+        record["total_monotonic_ms"] = (current - absolute_started) // 1000000
+        if current < previous or wall_current < previous_wall:
+            record["outcome"] = "clock-invalid"
+            raise ValueError("fixture cooldown clock moved backwards")
+        previous, previous_wall = current, wall_current
+        if current >= deadline:
+            record["outcome"] = "deadline"
+            raise ValueError("fixture cooldown prerequisite exceeded deadline")
+        return (deadline - current) / 1000000000
+
+    # Each subprocess called by confirm receives a fresh remaining-time bound.
+    confirm(observe)
+    observe()
+    # Start the full cooldown only after the idle/service snapshot is confirmed.
+    # Confirmation itself still spends the original absolute 35-second budget.
+    started, wall_started = previous, previous_wall
+    record["before_confirmed"] = True
+    while True:
+        remaining = observe()
+        if min(record["elapsed_monotonic_ms"], record["elapsed_wall_ms"]) >= COOLDOWN_MS:
+            break
+        sleep(min(0.1, remaining))
+    confirm(observe)
+    observe()
+    record["after_confirmed"] = True
+    record["outcome"] = "elapsed"
+    validate_cooldown(record)
 
 
 def resume(work):
@@ -94,8 +181,16 @@ def resume(work):
         os.close(descriptor)
 
 
-def validate(value, publication, named):
-    require(value["schema_version"] == 1 and value["success"] is True
+def validate(value, publication, named, *, historical=False):
+    require(type(value.get("schema_version")) is int
+            and value["schema_version"] == (1 if historical else 2),
+            "wrong current or historical cancellation schema")
+    if historical:
+        require("cooldown_prerequisite" not in value, "historical cancellation cannot claim later prerequisite")
+    else:
+        require(validate_cooldown(value.get("cooldown_prerequisite"))["outcome"] == "elapsed",
+                "missing confirmed fixture cooldown prerequisite")
+    require(value["success"] is True
             and value["scope"] == "named-pre-ready-cancellation-and-pending-bootstrap-shutdown"
             and value["fresh_cache_initially_absent"] is True and value["fresh_cache_created"] is True
             and value["cancelled_output_absent"] is True, "missing real pre-ready cancellation")
@@ -200,17 +295,33 @@ def run(work, binary, uid, gid, control_gid):
             "client did not start idle")
     descriptor = os.pidfd_open(helper_process["pid"])
     children, opened, probe = [], [], None
-    evidence = dict(schema_version=1, success=False,
+    evidence = dict(schema_version=2, success=False,
                     scope="named-pre-ready-cancellation-and-pending-bootstrap-shutdown",
                     helper=helper, agent=dict(unit=AGENT, process=agent_process,
                                              invocation_id=agent_unit["InvocationID"]),
                     fresh_cache_initially_absent=True, initial_status=initial_status, initial_paths=initial_paths)
+
+    def confirm_idle(remaining):
+        require(owned_helper(helper, timeout=min(5, remaining())) not in {"T", "t", "Z", "X"},
+                "original helper is not running before cancellation fixture")
+        require(properties(AGENT, timeout=min(5, remaining())) == agent_unit
+                and identity(agent_process["pid"])[0] == agent_process,
+                "original agent changed before cancellation fixture")
+        label = "cooldown-after" if evidence["cooldown_prerequisite"]["before_confirmed"] else "cooldown-before"
+        status = command(f"{label}-status", ["status"], timeout=min(3, remaining()))
+        paths = command(f"{label}-paths", ["paths"], timeout=min(3, remaining()))
+        require(status["status"] == paths["status"] == 0
+                and "connected: false" in status["stdout"].splitlines()
+                and "active contexts: 0" in status["stdout"].splitlines() and paths["stdout"] == "",
+                "client changed from idle during fixture cooldown")
 
     def interrupted(_signal, _frame):
         raise InterruptedError("disposable cancellation fixture interrupted")
 
     previous_term = signal.signal(signal.SIGTERM, interrupted)
     try:
+        evidence["cooldown_prerequisite"] = cooldown_record()
+        await_fixture_cooldown(evidence["cooldown_prerequisite"], confirm_idle)
         # Persist exact recovery identity before SIGSTOP, even if the parent is interrupted.
         write(work / f"{PREFIX}-pause.json", helper)
         owned_helper(helper)
@@ -338,7 +449,11 @@ def sample():
                   sha256="c" * 64, bytes=99, peer_bytes=0, providers_used=0, origin_body_bytes=0,
                   origin_range_requests=0, provider_peer_ids=[], control_relay_peer_id="",
                   local_delivery=True, ownership_changed=False)
-    value = dict(schema_version=1, success=True, scope="named-pre-ready-cancellation-and-pending-bootstrap-shutdown",
+    cooldown = cooldown_record()
+    cooldown.update(elapsed_monotonic_ms=30001, elapsed_wall_ms=30001, total_monotonic_ms=30001,
+                    before_confirmed=True, after_confirmed=True, outcome="elapsed")
+    value = dict(schema_version=2, success=True, scope="named-pre-ready-cancellation-and-pending-bootstrap-shutdown",
+                 cooldown_prerequisite=cooldown,
                  fresh_cache_initially_absent=True, fresh_cache_created=True, cancelled_output_absent=True,
                  initial_status=dict(status=0, stdout="connected: false\nactive contexts: 0\n"),
                  initial_paths=dict(status=0, stdout=""),

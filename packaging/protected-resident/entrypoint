@@ -1,0 +1,14 @@
+#!/bin/sh
+# Deliberately no resident/model invocation in this first public boot prerequisite.
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C
+[ "$#" -eq 0 ]
+[ "$(id -u)" = 0 ]
+[ -d /opt/volparossa/runtime ] && [ ! -L /opt/volparossa/runtime ]
+[ "$(stat -c '%u:%g:%a' /opt/volparossa/runtime)" = 985:985:700 ]
+[ -f /opt/volparossa/runtime/.volparossa-compute.lock ]
+[ ! -L /opt/volparossa/runtime/.volparossa-compute.lock ]
+[ "$(stat -c '%u:%g:%a' /opt/volparossa/runtime/.volparossa-compute.lock)" = 985:985:600 ]
+# The runtime ownership stays unchanged. A later authorized worker needs a narrow
+# tmpfs file bind for its lease, not a writable or broadly readable runtime tree.
+printf 'VP_PROTECTED_ENTRYPOINT_V1\n'

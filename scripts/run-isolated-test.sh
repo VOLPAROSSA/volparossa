@@ -8,9 +8,56 @@ fail() {
     exit 1
 }
 
+test_dps_gpsd=no
+if [ "${1:-}" = --dps-gpsd-command ]; then
+    [ "$#" -eq 4 ] || fail 'DPS GPSD backend requires core binary, evidence directory and build receipt'
+    [ "${GITHUB_ACTIONS:-false}:${RUNNER_ENVIRONMENT:-}:${RUNNER_OS:-}:${RUNNER_ARCH:-}" = true:github-hosted:Linux:X64 ] ||
+        fail 'DPS GPSD backend requires the disposable hosted Linux X64 runner'
+    [ "${VOLPAROSSA_TEST_ALLOW_SUDO_NETNS:-0}" = 1 ] || fail 'DPS GPSD backend requires explicit namespace authorization'
+    case "${GITHUB_SHA:-}" in ''|*[!0-9a-f]*) fail 'DPS GPSD backend requires an exact source revision' ;; esac
+    if [ "${#GITHUB_SHA}" -ne 40 ] || [ "$GITHUB_SHA" != "${GITHUB_WORKFLOW_SHA:-}" ]; then
+        fail 'DPS GPSD source and workflow revisions differ'
+    fi
+    test_dps_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+    test_dps_core=$2
+    test_dps_evidence=$3
+    test_dps_receipt=$4
+    [ "$test_dps_core" = "$test_dps_root/target/debug/volparossa" ] || fail 'DPS GPSD backend requires the fixed workspace binary'
+    if [ ! -f "$test_dps_core" ] || [ ! -x "$test_dps_core" ] || [ -L "$test_dps_core" ]; then
+        fail 'DPS GPSD binary must be a regular executable'
+    fi
+    case "${RUNNER_TEMP:-}" in /?*) ;; *) fail 'DPS GPSD backend requires an absolute temporary root' ;; esac
+    case "$test_dps_evidence" in "$RUNNER_TEMP"/dps-gpsd-*) ;; *) fail 'DPS GPSD evidence must be in its private runner temporary root' ;; esac
+    test_dps_name=${test_dps_evidence#"$RUNNER_TEMP"/}
+    case "$test_dps_name" in *[!a-zA-Z0-9_-]*|dps-gpsd-) fail 'DPS GPSD evidence directory name is invalid' ;; esac
+    if [ ! -d "$test_dps_evidence" ] || [ -L "$test_dps_evidence" ]; then
+        fail 'DPS GPSD evidence directory must be regular'
+    fi
+    [ "$test_dps_receipt" = "$test_dps_evidence/build-receipt.json" ] || fail 'DPS GPSD backend requires its fixed build receipt'
+    if [ ! -f "$test_dps_receipt" ] || [ -L "$test_dps_receipt" ]; then
+        fail 'DPS GPSD receipt must be a regular file'
+    fi
+    test_dps_script=$test_dps_root/tests/dps/gpsd/prove.py
+    if [ ! -f "$test_dps_script" ] || [ -L "$test_dps_script" ]; then
+        fail 'DPS GPSD backend requires its fixed proof script'
+    fi
+    test_dps_parent_ipc=$(/usr/bin/readlink /proc/self/ns/ipc)
+    test_dps_parent_pid=$(/usr/bin/readlink /proc/self/ns/pid)
+    test_dps_gpsd=yes
+    set -- --command /usr/bin/python3 dps_gpsd VOLPAROSSA_DPS_GPSD_PARENT_NETNS loopback \
+        -B "$test_dps_script" --core-bin "$test_dps_core" --evidence-dir "$test_dps_evidence" \
+        --build-receipt "$test_dps_receipt" --parent-ipc "$test_dps_parent_ipc" --parent-pid "$test_dps_parent_pid"
+fi
+
 test_mode=exact
-if [ "${1:-}" = --command ]; then test_mode='command'; shift; fi
-[ "$#" -ge 4 ] || fail 'expected [--command] EXECUTABLE LABEL PARENT_NETNS_MARKER none|loopback [COMMAND_ARGS...]'
+test_backend=auto
+if [ "${1:-}" = --studio-nonroot-command ]; then
+    test_mode='command'
+    test_backend=studio-nonroot
+    shift
+elif [ "${1:-}" = --command ]; then test_mode='command'; shift; fi
+if [ "$test_dps_gpsd" = yes ]; then test_backend=dps-gpsd; fi
+[ "$#" -ge 4 ] || fail 'expected [--command] EXECUTABLE LABEL PARENT_NETNS_MARKER none|loopback|content-egress [COMMAND_ARGS...]'
 test_executable=$1
 test_name=$2
 test_marker=$3
@@ -30,13 +77,51 @@ if [ ! -f "$test_executable" ] || [ ! -x "$test_executable" ]; then fail 'test e
 case "$test_name" in ''|*[!a-zA-Z0-9_:]*) fail 'invalid exact test name' ;; esac
 case "$test_marker" in
     VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS|VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS|VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS|VOLPAROSSA_RECONTRIBUTE_PARENT_NETNS) ;;
+    VOLPAROSSA_DPS_GPSD_PARENT_NETNS)
+        [ "$test_backend" = dps-gpsd ] || fail 'DPS GPSD marker requires its IPC-isolated backend' ;;
     *) fail 'unsupported namespace marker' ;;
 esac
-case "$test_network" in none|loopback) ;; *) fail 'unsupported disposable network setup' ;; esac
+case "$test_network" in
+    none|loopback) ;;
+    content-egress)
+        case "$test_mode:$test_marker:$test_name" in
+            command:VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS:content::tls::tests::kernel_close::repeated_egress::three_signed_reserves_use_reusable_production_egress_and_fragmented_hello) ;;
+            *) fail 'content-egress is restricted to its exact production-egress regression' ;;
+        esac ;;
+    *) fail 'unsupported disposable network setup' ;;
+esac
+if [ "$test_backend" = studio-nonroot ]; then
+    # Fixed opt-in for sandboxed Chrome: a mapped UID 0 is deliberately avoided.
+    # Default exact/command callers retain the existing userns-first behavior.
+    [ "$test_name:$test_marker:$test_network" = studio_export:VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS:loopback ] ||
+        fail 'Studio nonroot backend requires its fixed command label, marker and loopback'
+    [ "$test_executable" = /usr/bin/python3 ] || fail 'Studio nonroot backend requires system Python'
+    if [ "$#" -ne 2 ] || [ "$1" != -B ]; then
+        fail 'Studio nonroot backend requires its exact Python arguments'
+    fi
+    case "${RUNNER_TEMP:-}" in /?*) ;; *) fail 'Studio nonroot backend requires absolute runner temporary root' ;; esac
+    case "$2" in
+        "$RUNNER_TEMP"/studio-export-*/fixture/runtime.py) ;;
+        *) fail 'Studio nonroot backend requires its temporary runtime script' ;;
+    esac
+    test_studio_directory=${2#"$RUNNER_TEMP"/}
+    test_studio_directory=${test_studio_directory%/fixture/runtime.py}
+    case "$test_studio_directory" in
+        *[!a-zA-Z0-9_-]*|studio-export-) fail 'Studio nonroot temporary directory is invalid' ;;
+    esac
+    if [ ! -f "$2" ] || [ -L "$2" ]; then
+        fail 'Studio nonroot runtime script must be a regular file'
+    fi
+    if [ "${GITHUB_ACTIONS:-false}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+        fail 'Studio nonroot backend requires the disposable hosted runner'
+    fi
+    [ "${VOLPAROSSA_TEST_ALLOW_SUDO_NETNS:-0}" = 1 ] ||
+        fail 'Studio nonroot backend requires explicit sudo namespace authorization'
+fi
 for test_tool in /usr/bin/unshare /usr/bin/setpriv /usr/bin/readlink /usr/bin/id /usr/bin/env /usr/bin/timeout /bin/sh; do
     [ -x "$test_tool" ] || fail "required tool is unavailable: $test_tool"
 done
-if [ "$test_network" = loopback ]; then
+if [ "$test_network" != none ]; then
     if [ ! -x /usr/bin/ip ] && [ ! -x /usr/sbin/ip ]; then fail 'iproute2 is required for disposable loopback setup'; fi
 fi
 test_parent=$(/usr/bin/readlink /proc/self/ns/net)
@@ -95,9 +180,15 @@ verify=$8
 group_mode=$9
 shift 9
 [ "$(/usr/bin/readlink /proc/self/ns/net)" != "$parent_net" ] || exit 120
-if [ "$network" = loopback ]; then
+if [ "$network" != none ]; then
     if [ -x /usr/bin/ip ]; then /usr/bin/ip link set dev lo up
     else /usr/sbin/ip link set dev lo up; fi
+fi
+if [ "$network" = content-egress ]; then
+    # One fixed synthetic provider address, only in this newly checked namespace.
+    # No veth, default route, host mutation or production egress exception.
+    if [ -x /usr/bin/ip ]; then /usr/bin/ip address add 93.184.216.34/32 dev lo
+    else /usr/sbin/ip address add 93.184.216.34/32 dev lo; fi
 fi
 expected_groups=
 case "$group_mode" in
@@ -119,10 +210,31 @@ exec /usr/bin/setpriv --reuid="$target_uid" --regid="$target_gid" "$group_option
     "$marker" "$executable" "$expected_groups" "$@"
 '
 
-printf 'isolated-test: new disposable user/network/PID namespaces; loopback=%s; preserve kernel-restricted mapped groups, clear capabilities; %s %s\n' \
-    "$test_network" "$test_mode" "$test_name"
+if [ "$test_backend" = dps-gpsd ]; then
+    printf 'isolated-test: explicit DPS GPSD network/IPC/PID namespaces; original UID/GID, no capabilities, no new privileges\n'
+elif [ "$test_backend" = studio-nonroot ]; then
+    printf 'isolated-test: explicit Studio nonroot backend; disposable loopback/network/PID namespaces; original UID/GID, no capabilities, no new privileges\n'
+else
+    printf 'isolated-test: new disposable user/network/PID namespaces; loopback=%s; preserve kernel-restricted mapped groups, clear capabilities; %s %s\n' \
+        "$test_network" "$test_mode" "$test_name"
+fi
+if [ "$test_network" = content-egress ]; then
+    printf 'isolated-test: add only synthetic 93.184.216.34/32 to disposable lo before dropping privileges; no external interface or default route\n'
+fi
+# Only the explicit GPSD fixture needs IPC isolation for upstream NTP SHM tests.
+# All original backends retain their namespace flags and 120-second bound.
+if [ "$test_backend" = dps-gpsd ]; then
+    [ "$test_uid" -ne 0 ] || fail 'DPS GPSD backend requires an original non-root test user'
+    [ -x /usr/bin/sudo ] || fail 'DPS GPSD backend requires the explicit namespace creator'
+    exec /usr/bin/timeout --kill-after=5s 600s /usr/bin/sudo -n -- \
+        /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=Linux RUNNER_ARCH=X64 \
+        "RUNNER_TEMP=$RUNNER_TEMP" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+        /usr/bin/unshare --net --ipc --pid --mount --mount-proc --fork --kill-child=KILL -- \
+        /bin/sh -c "$test_trampoline" isolated-test "$test_uid" "$test_gid" "$test_parent" \
+        "$test_marker" "$test_network" "$test_executable" "$test_name" "$test_verify" clear "$@"
+fi
 # Probe only namespace creation, never the actual test: a test failure cannot cause a rerun.
-if /usr/bin/timeout --kill-after=1s 5s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- /usr/bin/true; then
+if [ "$test_backend" = auto ] && /usr/bin/timeout --kill-after=1s 5s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- /usr/bin/true; then
     exec /usr/bin/timeout --kill-after=5s 120s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- \
         /bin/sh -c "$test_trampoline" isolated-test 0 0 "$test_parent" "$test_marker" \
         "$test_network" "$test_executable" "$test_name" "$test_verify" keep "$@"

@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "kind": "protected-compute-verifier-pins",
+  "upstream": {
+    "repository": "virtee/sev",
+    "url": "https://github.com/virtee/sev",
+    "commit": "a966d06d9bf0e68afe2733e7bfbf278fd7fd65b5",
+    "tree": "636379a232b75ad3c0f2a079acc1788dc13a920f"
+  },
+  "toolchain": {
+    "rust": "1.85.0"
+  },
+  "default_features": false,
+  "features": [
+    "snp",
+    "crypto_nossl"
+  ],
+  "test_target": "certs",
+  "test_filter": "snp::",
+  "expected_tests": [
+    "snp::milan_chain",
+    "snp::milan_chain_invalid",
+    "snp::milan_report",
+    "snp::milan_report_invalid"
+  ],
+  "lock_correction": {
+    "path": "Cargo.lock",
+    "package": "num-bigint-dig",
+    "version": "0.8.6",
+    "old_dependency": "rand 0.8.5",
+    "new_dependency": "rand 0.8.8",
+    "occurrences": 1,
+    "upstream": {
+      "bytes": 66223,
+      "sha256": "fe1511ef932c1a54d0cd70ac470b41de8357ab2efca9ed6b3a4ea22c3b7d3bd0"
+    },
+    "effective": {
+      "bytes": 66223,
+      "sha256": "7b7dbf853cecf44a8d2a6b51283012b446db97600f4e19af36a1c642b8bfa7cb"
+    }
+  },
+  "files": {
+    "Cargo.lock": {
+      "bytes": 66223,
+      "sha256": "fe1511ef932c1a54d0cd70ac470b41de8357ab2efca9ed6b3a4ea22c3b7d3bd0"
+    },
+    "Cargo.toml": {
+      "bytes": 2320,
+      "sha256": "5b0abef832d2a1571bebc942c6ee200166d6f25dee4310e1d50caba450c7917e"
+    },
+    "LICENSE": {
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "src/certs/snp/builtin/milan/ark.pem": {
+      "bytes": 2277,
+      "sha256": "8c109952166431ffad8cb9a3d54f3d20ffbbb58164f0d54be3457bf0ece9e0d8"
+    },
+    "src/certs/snp/builtin/milan/ask.pem": {
+      "bytes": 2325,
+      "sha256": "8da3a65af1cb7cb90a21fac78431a2431a9ee7811f48c36569c53fb80ad31fee"
+    },
+    "src/certs/snp/builtin/milan/mod.rs": {
+      "bytes": 808,
+      "sha256": "d37ddcdd756e5d31ba526cf6801390c688d2c55ac8689503e74140fdef9b4749"
+    },
+    "tests/certs.rs": {
+      "bytes": 4064,
+      "sha256": "897c4ea776e867018dd66a2b7ace02c9afabc1c0794b268b83771e664e2c1f78"
+    },
+    "tests/certs_data/report_milan.hex": {
+      "bytes": 2368,
+      "sha256": "3d956e9104969a038031a6b63dd6c4b60000619d37702065994f7da76f88ae7d"
+    },
+    "tests/certs_data/vcek_milan.der": {
+      "bytes": 1360,
+      "sha256": "3bbfb6ee259f75a95d13168cfdf2e034181bb93c7c016825731cbe8ea16c95e1"
+    }
+  },
+  "scope": {
+    "public_fixtures_only": true,
+    "hardware_executed": false,
+    "private_task_release": false
+  }
+}

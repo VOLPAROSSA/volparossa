@@ -1,6 +1,6 @@
 # Cooperative browser: real public peer execution
 
-Status: implemented candidate; the latest discovered-360M KVM attempt starts four
+Recorded source-bound candidate: the last trial documented below starts four
 workers and retains all four terminal receipts with normal task cleanup confirmed.
 Its answer is still incomplete; child ending subtypes were not exported. The joined
 browser result, synthesis and cancellation proof remain incomplete. Local fixture
@@ -104,212 +104,19 @@ the gate rather than silently substituting a fake service or local-only inferenc
 The discovered scenario uses the same checker with the explicit leading selector
 `--trial discovered-360m`; cross-contract evidence is rejected.
 
-## First live attempt and bounded driver correction
+## Recorded trial outcomes
 
-[Run 36728657126](https://github.com/VOLPAROSSA/volparossa/actions/runs/36728657126)
-on core `7c82fc76ab9a2b4256dfd95f428199a0884bd705` and browser
-`3c7894168ce6c1f28e96ce5b95bc99928e6c4304` **fails**.
-The original 18-file artifact ZIP has SHA-256
-`9820ccb3e63490d8675d2a12bbf8c516e2a34b6f0dd99fa2127e78b616bfbdae`.
-Gecko reaches the panel driver, but its closed diagnostic records only
-`panel-cleanup / SCRIPT_FAILED`: a `finally` status update hid the preceding failure
-phase. No WireGuard data or provider application payload was observed in this phase;
-there is no combined answer, peer execution or cancellation proof.
+These are source-bound historical checkpoints, not new runs on the current source:
 
-Source inspection identifies a deterministic fresh-marker defect. The driver calls
-`nsIFile.isSymlink()` before creating `pre-consent.json`, whereas the pinned
-[Gecko implementation](https://hg.mozilla.org/releases/mozilla-esr140/file/d864999404b3032f682d74ccc60d1ce38c9ce609/xpcom/io/nsLocalFileUnix.cpp)
-returns an error when `lstat` finds no such file. The correction in browser `326ce0f2`
-creates new markers atomically with `PR_CREATE_FILE | PR_EXCL`, still rejecting existing
-files and dangling symlinks; only the existing private status file may be replaced. It records failure
-before `finally` so cleanup cannot overwrite the original phase. Focused pure helper
-checks cover these semantics; they do not convert the failed run into a pass.
+| Trial | Recorded outcome |
+| --- | --- |
+| Fixed-135M `37037361187`, Core `c0362ba5` | Eleven terminal receipts and cleanup; ten leaves reach token limit, no synthesis. Failed answer/display/cancellation acceptance. |
+| Discovered-360M `37042900209`, Core `e04860bc` | One EOS and one token-limited leaf, no synthesis or live cancellation proof; cleanup passes. |
+| Retained recovery `37052601519`, Core `abb30f34` | Four workers, two terminal receipts; unconfirmed child exchanges and insufficient event-window coverage. Failed normal task cleanup, despite later forced fixture cleanup. |
+| Later discovered trial `37058432693`, Core `b76b8a24` | Four terminal receipts and normal task cleanup; incomplete answer, no synthesis, child generation-ending subtype unavailable. Failed panel proof. |
 
-That original attempt nevertheless reports complete cleanup with zero owned objects
-remaining and all four private-job cleanup checks true. The original before/after
-host-state files are byte-identical, SHA-256
-`2ab5456d7d3aea708e6564b060e41d7476b66fb1a4908c0f1e6d83516edfb474`.
-Acceptance still requires a new source-bound run with the real peer result, original
-receipts, cancellation and cleanup checks intact.
-
-## Retained-handle reconciliation and flow capacity
-
-[Run `36746682885`](https://github.com/VOLPAROSSA/volparossa/actions/runs/36746682885)
-on core `3f47bbef16bc78ebf45e5c6e98102e08e6463bb9` records six original handles but
-only four terminal receipts. The implemented reconciliation polls both missing handles;
-both exchanges remain unconfirmed, without reaching its deadline. Neither document nor
-answer execution is complete. The terminal-receipt gate correctly quarantines admission.
-Cleanup is complete, zero owned objects remain, and host snapshots are identical.
-
-Independent source inspection identifies a real route-lifetime accounting bug: the helper
-retained issued MPTCP flow capabilities after sockets closed, exhausting its 64-flow bound.
-The new terminal operation closes the exact descriptor-bound socket and obtains a worker
-ownership-release ACK before reclaiming its ledger slot. It does not increase the live
-flow limit, reuse handles, resubmit compute jobs, extend leases or fabricate terminal
-receipts. Tests of the ledger are not proof of more than 64 real overlay transfers; that
-requires the next executable trial. The older artifact lacks enough stage evidence to
-attribute its failed exchanges conclusively to this defect.
-
-The next fixture additionally retains bounded counts of existing fixed compute-RPC stage
-codes. It reads at most the 1,000-record agent ring, reports whether it covers the explicit
-phase baseline, and exports only the allowlisted failure counts. Raw event records,
-session/path identifiers, model inputs, replies and service logs are not exported. A
-missing, invalid or incomplete observation cannot become a success claim. Seven focused
-fixture checks pass, including baseline filtering and rejection of private/unknown data.
-
-## Completed receipts, incomplete joined result
-
-[Run `37021201299`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37021201299)
-on `610866b8770b63719ec1f4b4ce6abb6a83a596ef` retains eleven original handles and eleven
-terminal receipts: document execution and local/remote cleanup are confirmed, without
-reconciliation. Its event ring covers the phase baseline with zero allowlisted RPC
-failures. The original artifact ZIP SHA-256 is
-`f4396c04deba99d81eac3e4d7d5769bd4ece01e31e6f235fe3d5088061c281f4`.
-
-The run nevertheless **fails**. Answer completion is false; Gecko reports
-`first-task / cleanup_unconfirmed`, and the observer exits with status 1. The original
-artifact has neither the observer's failure reason nor a retained wire reply. Its
-ordering therefore cannot establish whether browser termination caused unfinished
-work, or another failure caused the connection to close. The browser contract accepts
-an incomplete answer with confirmed cleanup; those fields alone do not explain the
-observed error. No completed display, synthesis/cancellation proof or improved model
-quality is claimed. Fixture cleanup succeeds with zero owned objects; before/after
-host snapshots both hash to
-`ec97a4e9bcf30dc3013bf5ba98d0abc1ed3ea1772107a3f99733e9ff976f081c`.
-
-The following [run `37024673305`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37024673305)
-on `0f05c6ad` preserves the observer's failure position: `completion_check`, with
-the browserdriver already stopped and eleven workers observed. It rules out an
-earlier observer scanning failure as the cause of this attempt's browser shutdown.
-The original ZIP SHA-256 is
-`f23308d804e324b679d50d27922a9eefabac1191a04f91f56e122e2d02324940`.
-
-Core `9b984ad8` fixes a reproduced guard-lifetime defect in `Active::start`:
-disjoint async capture retained only the boolean cleanup field and dropped the
-actual admission guard before backend execution. Explicit whole-guard ownership
-now extends through the backend result. Two real lifecycle tests fail before the
-fix and pass after it; all seven public-service checks pass. Aborting without
-confirmed cleanup still quarantines admission. This does not turn either original
-failed run into success or resolve its separate incomplete-answer condition.
-
-The source-bound [run `37037361187`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37037361187)
-on `c0362ba5` remains **failed** with an exact cause: ten leaf answers reached the
-135M token limit and one reached EOS. All eleven original worker receipts and
-cleanup are confirmed; no leaf wire truncation, empty answer or unknown ending
-was observed. No synthesis was started. Browser display/cancellation acceptance
-remains unproved. Guest cleanup leaves zero owned objects and equal network
-snapshots. Original ZIP SHA-256:
-`7b17bde4d55293951c4baaacc8632e545a13c235171ae5959ec034cb5d9d7484`.
-These completed partial jobs cannot be repaired by increasing observation time
-or relabelling them complete. A separate discovered-360M trial will use the already
-supported larger profile; it will not replace this historical 135M result.
-
-The discovered-360M [run `37042900209`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37042900209)
-on `e04860bc` also **fails**: two original workers and terminal receipts, one EOS
-answer and one token-limited answer, no synthesis and no live cancellation proof.
-Cleanup leaves zero owned objects and equal guest network snapshots. Original ZIP
-SHA-256: `2502bab058dc8a917040f1f7b7b0d8d6686e163d190a7f88bbe52a711fb99bf6`.
-The bounded source-refinement implementation follows that failure; it cannot change
-the historical result. Tokenizer-only preflight of both possible original ranges
-finds child prompts of 599/532 and 120/118 tokens respectively, within the unchanged
-1024-token profile. This establishes input fit, not successful model recovery.
-
-The next exact-source [run `37048803131`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37048803131)
-on `b6f054b4` fails before compute: `agent-jobs-source` reports `JOBS_ROUTE_UNAVAILABLE`
-after successful pinned model provisioning. No brokers, model receipts, refinement or
-synthesis started. The artifact does not retain the underlying route refusal or path-query
-reason; it does not establish a model/refinement failure. Cleanup leaves zero objects
-and identical before/after network-state hashes. Original artifact SHA-256:
-`5fc3a6b48cfe250e61f891da18283f4164fd32d76ffb39aeae6a3202880097c8`.
-The fixture now retains the existing closed route-stage/reason/count diagnostic in both
-cooperative Browser and Code exports, without raw stderr, identities, paths or input data.
-Selection, retries, deadlines and acceptance requirements are unchanged. Fifteen route
-contract tests, eighteen Browser tests, eight Code tests and targeted shell lint pass;
-these checks do not prove that a real route or complete answer is now available.
-
-## Discovery failures during retained-job recovery
-
-[Run `37052601519`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37052601519)
-on `abb30f3495d3690b8e3a3ab238f44c170f7eb876` remains **failed**. Initial protected
-route setup completes (`SELECTED` / `CONNECTED`). The observer sees four actual workers,
-but the retained task contains four handles and only two terminal receipts. Of the two
-original leaf answers, one reaches EOS and one reaches its token limit. No completed
-refinement result, synthesis, displayed answer or live cancellation proof is retained.
-
-Reconciliation attempts both outstanding handles but records a `peer_rpc` error at
-`poll` with `exchange_unconfirmed`. The bounded event window retains 48
-`COMPUTE_RPC_DISCOVERY_FAILED` events; it does not cover the original phase baseline.
-That source version did not export the underlying discovery reason. These records
-therefore do not identify expiry, connection invalidation, missing targets or provider
-withdrawal as the particular cause. They also do not establish the quality or completion
-of the unjoined child outputs. The browser reports `first-task / cleanup_unconfirmed`;
-the observer ends at `completion_check` without its specific invariant reason retained.
-
-The workflow acceptance step correctly fails first on the nonzero topology exit status;
-the report checker is not reached. Final fixture teardown succeeds with zero owned
-objects and all private-job cleanup checks true. This later forced cleanup does not
-substitute for the missing signed terminal receipts or confirmed normal task cleanup.
-The original records remain unchanged:
-
-- Artifact ZIP SHA-256: `fce562e1f8642dacf87f65d0a9b05378168d0923dec547722dafa95b39fc0461`.
-- Job log SHA-256: `41cbb9c004739f3d1b6d15767451294bc4e02886cd2582913e8605d29163ebbe`.
-- Closed diagnostic SHA-256: `916a7fe1121f1403ae1424700f133dba640c970bb427016f276430bc56e8d45e`.
-- Both host-state snapshots SHA-256: `c5053b9c0181fbefc2f08bed05e7e5a27942320807eaeafaedfa3d7f89168fa0`.
-
-The next source candidate additionally exports allowlisted counts of the existing
-`CONTENT_DISCOVERY_*` / `CONTENT_EXACT_*` failure reasons and, separately, provider
-registration/withdrawal/expiry events. The 1,000-record ring bound, phase baseline and
-coverage flag remain unchanged. Counts describe events, not distinct failed exchanges;
-one exchange can emit several codes. The sampled ring is the client agent's, not an
-inventory of the provider agents' logs. An absent event is not evidence that a provider
-remained registered. No event payload, identity, endpoint, session/path identifier,
-prompt or answer is exported. Nineteen focused Browser fixture checks pass, including
-distinct expiry/connection/target diagnostics and refusal of unknown/private data.
-These synthetic exporter checks do not fix or reclassify the original failed run.
-
-An independently reproduced service-lifecycle fault is now fixed: a temporary `Busy`
-or `Timeout` during advertisement renewal no longer permanently destroys the bound
-listener and its compute registration. Renewal retries on the existing 60-second
-clock; expired/withdrawn advertisements gain no additional authority, and clients
-retain their TTL, identity and policy checks. Invalid authority, invalidation, an
-unavailable service and a closed discovery channel still terminate the listener.
-Only the fixed CONTENT-key Kademlia publication failure is reclassified as temporary,
-after withdrawing its advertisement. Closed retry/recovery/failure events distinguish
-this lifecycle from successful job execution.
-
-Two asynchronous regression tests exercise actual local TCP/TLS and signed compute
-framing across both temporary and four fatal outcomes; their backend explicitly
-refuses inference. Five existing relay/policy lifecycle tests, formatter and strict
-agent-library/test Clippy also pass on this source. This proves listener ownership
-and recovery, not model execution or the cause of the earlier 48 discovery errors.
-The discovered-peer end-to-end trial remains required.
-
-## Joined cleanup, still incomplete answers
-
-[Run `37058432693`](https://github.com/VOLPAROSSA/volparossa/actions/runs/37058432693)
-on `b76b8a2497a428b96b7379af9939de2c87dcf698` remains **failed** at
-`agent-cooperative-browser-panel / COOPERATIVE_BROWSER_PEER_PROOF_FAILED`.
-Four actual workers are observed and all four retained handles have terminal receipts.
-Execution and normal local/peer cleanup are confirmed; no reconciliation was needed.
-The original two leaf answers remain one EOS and one token-limited answer. The answer
-is incomplete and no synthesis is retained. This source did not export refinement-child
-completion or generation metadata: their particular incomplete subtype is unknown.
-Four terminal receipts are not proof of four EOS answers or successful refinement.
-
-The sampled client event ring contains 1,000 records and zero matching RPC/discovery
-failure events, but does not cover its phase baseline. It cannot prove the entire run
-had no such failures, or reclassify the earlier `abb30f34` failure. Guest exit status is
-1. All four private-job cleanup checks pass; final teardown leaves zero owned objects.
-Guest-root network-state snapshots outside the owned namespaces are byte-identical.
-These are guest observations, not a new physical-host-state claim. Original records:
-
-- Artifact ZIP SHA-256: `06f4789bc13aaa9d6f824797ca6fe90b729a81c4acde5c0ea2d2dd617bf883ac` (20 files).
-- Job log SHA-256: `14dfe6dd264f58010489bd87c9110cc87ade78defb4ad8520aca1aeaece76f67`.
-- Both guest network snapshots SHA-256: `1b5add81e352354d72d59b47634e1b0be169c58147152a40d614c3ba46f22806`.
-
-The shared Browser/Code closed diagnostic now includes retained refinement reasons,
-per-child completion flags and available generation-ending counts. It exports neither
-text nor source ranges, identifiers, manifests, endpoints or private paths. Legacy
-children without generation metadata remain explicitly absent; unknown values never
-become success. Diagnostic flags are observations, not replacement authority for the
-separate signed-receipt, exact-frontier and real-synthesis acceptance checks.
+The [complete original trial records](archive/implementation-notes-20261026.txt)
+retain earlier failures, source fixes, receipts, artifact/log digests and diagnostic
+limits. An empty sampled event ring cannot prove that the whole run had no failures;
+forced teardown cannot replace terminal receipts or confirmed normal task cleanup.
+For later integration evidence and next work, use [implementation status](IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence).

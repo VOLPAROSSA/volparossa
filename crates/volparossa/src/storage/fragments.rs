@@ -2,6 +2,8 @@
 
 #[path = "fragments_drain.rs"]
 mod drain;
+#[path = "fragments_maintenance.rs"]
+mod maintenance;
 #[path = "fragments_transfer.rs"]
 mod operations;
 #[path = "fragments_placement.rs"]
@@ -50,6 +52,11 @@ pub(crate) enum Command {
     Drain(Box<Drain>),
     /// Repair selected provider copies without letting unconfirmed retirement block other fragments.
     Repair(Box<Drain>),
+    /// Owner-private worker coordinated exclusively by the running core's background turns.
+    Maintenance {
+        #[command(subcommand)]
+        command: Box<maintenance::Command>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -148,6 +155,7 @@ pub(crate) struct Drain {
 
 pub(in crate::storage) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
+        Command::Maintenance { command } => return maintenance::run(*command, socket).await,
         Command::Create(args) => create(&args)?,
         Command::Status { state } => LockedFragments::open(&state)?.report("status")?,
         Command::Deposit(args) => {

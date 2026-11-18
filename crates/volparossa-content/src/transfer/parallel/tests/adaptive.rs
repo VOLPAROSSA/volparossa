@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+mod retirement;
 mod stream;
 
 use super::{
@@ -23,6 +24,20 @@ enum Case {
     NoResources,
     Many,
     Pressure,
+    PressureComplementary,
+    RetiredCoverage,
+    RetiredDuplicate,
+    PressureCoverage,
+}
+
+impl Case {
+    fn allowance(self) -> usize {
+        match self {
+            Self::NoResources => 0,
+            Self::Serial | Self::Many => 1,
+            _ => 3,
+        }
+    }
 }
 
 struct Fixture {
@@ -90,7 +105,7 @@ fn fixture(case: Case) -> Fixture {
         for (position, chunk) in manifest.chunks().iter().take(9).enumerate() {
             let owns = match case {
                 Case::Failed => index > 0,
-                Case::Pressure => true,
+                Case::Pressure | Case::RetiredDuplicate => true,
                 Case::Many => index == 9,
                 _ => position % 3 == index,
             };
@@ -250,6 +265,96 @@ async fn adaptive_original_indexes_use_three_providers_and_preserve_progress_und
     }
 }
 
+#[tokio::test]
+async fn slow_probe_retirement_must_not_discard_later_complementary_chunks() {
+    tokio::time::timeout(Duration::from_secs(10), transfer(Case::RetiredCoverage))
+        .await
+        .expect("bounded complementary coverage after an unsuccessful rate probe");
+}
+
+#[tokio::test]
+async fn unsuccessful_probe_gets_no_speculative_credits_when_other_peers_cover_the_object() {
+    tokio::time::timeout(Duration::from_secs(10), transfer(Case::RetiredDuplicate))
+        .await
+        .expect("bounded transfer without unnecessary probe payload");
+}
+
+#[tokio::test]
+async fn hard_pressure_preserves_partial_progress_but_does_not_claim_full_object_success() {
+    tokio::time::timeout(Duration::from_secs(10), transfer(Case::PressureCoverage))
+        .await
+        .expect("hard resource pressure takes precedence over complementary coverage");
+}
+
+#[tokio::test]
+async fn dynamic_pressure_preserves_disjoint_provider_coverage_with_serial_continuation() {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        transfer(Case::PressureComplementary),
+    )
+    .await
+    .expect("bounded disjoint coverage after three streams drain to one");
+}
+
+fn reject_speed_probe(download: &mut ParallelDownload) {
+    // Fix only the performance history, not any content/transport response:
+    // a third admitted probe did not improve the preceding aggregate rate.
+    // Its untested complementary shards still need the actual v1 streams.
+    // No wall-clock race decides whether this branch is exercised.
+    download.peers[2].state = super::super::adaptive::PeerState::Active;
+    download.peers[2].probing = true;
+    download.probe_baseline = Some(u64::MAX);
+    for index in 0..3 {
+        download.record_sample(index, 1, false);
+    }
+    assert!(download.growth_blocked);
+    assert!(download.peers[2].coverage_only);
+    assert!(!download.peers[2].probing);
+}
+
+#[test]
+fn coverage_only_peer_waits_for_alternative_misses_and_never_duplicates_an_assignment() {
+    let Fixture {
+        _directory,
+        manifest,
+        mut output,
+        ..
+    } = fixture(Case::Complementary);
+    let (mut download, mut workers) =
+        ParallelDownload::new_adaptive(&manifest, 3, &mut output, TransferLimits::default(), 3)
+            .unwrap();
+    reject_speed_probe(&mut download);
+    download.assign_ready().unwrap();
+    assert_eq!(download.peers[0].pending, Some(0));
+    assert_eq!(download.peers[1].pending, Some(1));
+    assert_eq!(download.peers[2].pending, None);
+    assert!(workers[2].requests.try_recv().is_err());
+    let mut progress = vec![TransferProgress::default(); 3];
+    // A completed miss releases a chunk, but the other ordinary peer still gets
+    // its own attempt first. Remove only the consumed queue credit each time.
+    for index in [0, 1, 1] {
+        workers[index].requests.try_recv().unwrap();
+        download
+            .accept(index, Some(Ok(None)), &mut output, &mut progress)
+            .unwrap();
+        download.assign_ready().unwrap();
+    }
+    assert_eq!(download.peers[2].pending, Some(0));
+    assert_eq!(download.chunks[0].owner, Some(2));
+    assert_eq!(
+        download.chunks[0]
+            .attempted
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    workers[2].requests.try_recv().unwrap();
+    download.assign_ready().unwrap();
+    assert!(workers[2].requests.try_recv().is_err());
+    assert_eq!(download.peers[2].pending, Some(0));
+}
+
 async fn transfer(case: Case) {
     let Fixture {
         _directory,
@@ -259,17 +364,13 @@ async fn transfer(case: Case) {
         mut output,
         bytes,
     } = fixture(case);
-    let allowance = match case {
-        Case::NoResources => 0,
-        Case::Serial | Case::Many => 1,
-        _ => 3,
-    };
+    let allowance = case.allowance();
     let limits = TransferLimits {
         session_timeout: Duration::from_secs(8),
         ..TransferLimits::default()
     };
     let refs: Vec<_> = transports.iter().collect();
-    let (download, workers) = ParallelDownload::new_adaptive_with_transport_manifests(
+    let (mut download, workers) = ParallelDownload::new_adaptive_with_transport_manifests(
         &manifest,
         &refs,
         &mut output,
@@ -285,10 +386,31 @@ async fn transfer(case: Case) {
             .count()
             <= 2
     );
+    if matches!(case, Case::RetiredCoverage | Case::RetiredDuplicate) {
+        reject_speed_probe(&mut download);
+    }
+    if matches!(case, Case::PressureCoverage) {
+        reject_speed_probe(&mut download);
+        // Pressure also closes a coverage-only peer; it cannot bypass a hard
+        // allowance just because it might own the only remaining fragments.
+        download.adjust_width(1);
+    }
     let counters = Counters::default();
-    counters.allowance.store(allowance, Ordering::SeqCst);
+    counters.allowance.store(
+        if matches!(case, Case::PressureCoverage) {
+            1
+        } else {
+            allowance
+        },
+        Ordering::SeqCst,
+    );
     let mut drivers = Vec::new();
-    for (index, (worker, provider)) in workers.into_iter().zip(providers).enumerate() {
+    let providers = providers.into_iter().map(Arc::new).collect::<Vec<_>>();
+    for (index, (worker, provider)) in workers
+        .into_iter()
+        .zip(providers.iter().cloned())
+        .enumerate()
+    {
         drivers.push(tokio::spawn(drive(
             worker,
             provider,
@@ -299,8 +421,8 @@ async fn transfer(case: Case) {
         )));
     }
     let mut progress = vec![TransferProgress::default(); transports.len()];
-    download
-        .run_with_allowance(&mut output, &mut progress, || {
+    let retired = download
+        .run_with_allowance_retired(&mut output, &mut progress, || {
             counters.allowance.load(Ordering::SeqCst)
         })
         .await
@@ -309,9 +431,61 @@ async fn transfer(case: Case) {
     for driver in drivers {
         sent += driver.await.unwrap().bytes;
     }
+    if matches!(case, Case::PressureComplementary) {
+        assert!(!retired.is_empty());
+        assert!(progress.iter().map(|part| part.chunks).sum::<usize>() < 9);
+        sent += retirement::continue_streams(
+            retired,
+            &manifest,
+            &transports,
+            &providers,
+            &mut output,
+            &mut progress,
+            &counters,
+        )
+        .await;
+        assert!(counters.opened.load(Ordering::SeqCst) <= 6);
+    }
+    check_result(
+        case,
+        &counters,
+        &progress,
+        sent,
+        &manifest,
+        &mut output,
+        &bytes,
+    );
+}
+
+fn check_result(
+    case: Case,
+    counters: &Counters,
+    progress: &[TransferProgress],
+    sent: u64,
+    manifest: &VerifiedManifest,
+    output: &mut ChunkStore,
+    bytes: &[u8],
+) {
     assert_eq!(counters.active.load(Ordering::SeqCst), 0);
     assert_eq!(sent, progress.iter().map(|p| p.bytes).sum::<u64>());
-    if matches!(case, Case::Pressure) {
+    if matches!(case, Case::RetiredDuplicate) {
+        assert_eq!(progress[2], TransferProgress::default());
+        assert_eq!(counters.opened.load(Ordering::SeqCst), 2);
+    }
+    if matches!(case, Case::PressureCoverage) {
+        assert_eq!(counters.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.maximum.load(Ordering::SeqCst), 1);
+        assert_eq!(progress.iter().map(|p| p.chunks).sum::<usize>(), 3);
+        assert_eq!(sent, 3 * CHUNK_BYTES as u64);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = reassemble(manifest, &mut [output], now, &mut Vec::new());
+        assert!(matches!(result, Err(crate::Error::MissingChunk(_))));
+        return;
+    }
+    if matches!(case, Case::Pressure | Case::PressureComplementary) {
         assert_eq!(counters.maximum.load(Ordering::SeqCst), 3);
         assert_eq!(counters.allowance.load(Ordering::SeqCst), 1);
         assert!(
@@ -326,7 +500,7 @@ async fn transfer(case: Case) {
     } else {
         check_progress(
             case,
-            &progress,
+            progress,
             sent,
             counters.maximum.load(Ordering::SeqCst),
         );
@@ -335,14 +509,14 @@ async fn transfer(case: Case) {
             .unwrap()
             .as_secs();
         let mut reconstructed = Vec::new();
-        reassemble(&manifest, &mut [&mut output], now, &mut reconstructed).unwrap();
+        reassemble(manifest, &mut [output], now, &mut reconstructed).unwrap();
         assert_eq!(reconstructed, bytes);
     }
 }
 
 async fn drive(
     mut worker: ChunkWorker,
-    provider: PublicationRegistry,
+    provider: Arc<PublicationRegistry>,
     counters: Counters,
     limits: TransferLimits,
     case: Case,
@@ -360,7 +534,7 @@ async fn drive(
     counters.maximum.fetch_max(running, Ordering::SeqCst);
     counters.opened.fetch_add(1, Ordering::SeqCst);
     let (client, mut server) = tokio::io::duplex(1024);
-    if matches!(case, Case::Pressure) && running == 3 {
+    if matches!(case, Case::Pressure | Case::PressureComplementary) && running == 3 {
         counters.allowance.store(1, Ordering::SeqCst);
     }
     let mut client = stream::MeasuredStream {
