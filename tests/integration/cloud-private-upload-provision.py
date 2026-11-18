@@ -14,7 +14,7 @@ FILES = BASE["FILES"] | frozenset(("src/owner-uploads.mjs", "scripts/upload_lock
 
 def configured():
     state = BASE["load_pins"].__globals__
-    state.update(PINS=PIN_PATH, REVISION="998bf2d46ba51ba904500e4f223d5f7d200092dc", FILES=FILES)
+    state.update(PINS=PIN_PATH, REVISION="178592a3881d49f839f7716a154f7ef446ecbda5", FILES=FILES)
     BASE["load_pins"]()
     return state
 

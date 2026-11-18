@@ -252,7 +252,7 @@ class UploadContracts(unittest.TestCase):
         pins = state["load_pins"]()
         legacy = json.loads((HERE / "cloud-private-upload-pins.json").read_text())
         self.assertEqual(legacy["revision"], "ffdcfaa15cdd2a029dae545904b0a58603da4e17")
-        self.assertEqual(pins["revision"], "998bf2d46ba51ba904500e4f223d5f7d200092dc")
+        self.assertEqual(pins["revision"], "178592a3881d49f839f7716a154f7ef446ecbda5")
         self.assertEqual(set(pins["files"]), set(legacy["files"]) | {
             "src/storage-maintenance.mjs", "src/storage-upload-maintenance.mjs"})
         self.assertEqual(pins["runtime"], legacy["runtime"])

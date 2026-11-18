@@ -1,7 +1,7 @@
 {
   "version": 1,
   "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
-  "revision": "998bf2d46ba51ba904500e4f223d5f7d200092dc",
+  "revision": "178592a3881d49f839f7716a154f7ef446ecbda5",
   "files": {
     "LICENSE": {
       "bytes": 35149,
@@ -32,12 +32,12 @@
       "sha256": "686095dce1cdaa17ea00a69b37d08b28ea846303c86821b1fcb528aded7f75cc"
     },
     "scripts/private_catalog.py": {
-      "bytes": 5246,
-      "sha256": "a1442c43b16ac0cc57395def7e2b3b6afec29c420fe02ba4c9ed6805813284e8"
+      "bytes": 5370,
+      "sha256": "a1a27b71a488b462cad9f509d9328d9994e23ea2869d6cc5e9239410cc065fd5"
     },
     "scripts/private_file.py": {
-      "bytes": 13484,
-      "sha256": "54c5ef6eca0c297d59fd3cb11f060f823268a95d067a0c0c652a9329d0d7c7b2"
+      "bytes": 13621,
+      "sha256": "b310596862a4265e010f80e774db36888ea154ffbd59114719b8e31abca36338"
     },
     "scripts/recovery-web-assets.mjs": {
       "bytes": 5098,
