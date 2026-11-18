@@ -133,6 +133,49 @@ def validate_cache(snapshot, chunks):
                     for name in ("journal_sha256", "index_sha256")), "invalid owned fixture cache snapshot")
 
 
+def validate_restart_memberships(layout, stopped, restarted):
+    memberships = layout["restart_memberships"]
+    cap = SHARED["CAPTURE"]
+    require(set(memberships) == {"relay4", "relay5"}, "missing original mDNS namespace observations")
+    for node, observation in memberships.items():
+        require(observation == stopped[node]["restart_membership"]
+                and observation["pid_before"] == restarted[node]["pid_before"]
+                and observation["network_namespace_identity"] == restarted[node]["network_namespace_identity"]
+                and observation["group"] == "224.0.0.251" and 1 <= observation["robustness"] <= 7
+                and 0 < observation["observed_ns"] <= observation["stop_started_ns"] <= observation["stop_completed_ns"],
+                "mDNS observation is not bound to the original stopped service or its network namespace")
+        for iface, row in observation["interfaces"].items():
+            source = row["source"]
+            label = node + "." + ("public" if iface == "underlay" else iface)
+            require(iface in SHARED["PHYSICAL_INTERFACES"][node] and 1 <= row["interval_ms"] <= 10000
+                    and source in cap["MDNS_INTERFACE_ADDRESSES"].get((node, iface), ())
+                    and cap["FIXTURE_ADDRESS_LABELS"].get(source) == label, "mDNS observation used another source link")
+
+
+def validate_repair_leaves(capture, layout, node):
+    cap = SHARED["CAPTURE"]
+    labels = {label: address for address, label in cap["FIXTURE_ADDRESS_LABELS"].items()}
+    total = 0
+    for key, row in capture["repair_mdns_leaves"].items():
+        header = row["header"]
+        iface, label = header["interface"], header["source"]
+        require(key == iface + "/" + label and iface in capture["interfaces"] and label in labels,
+                "mDNS leave sample has no matching physical capture link")
+        address = labels[label]
+        require(header == dict(interface=iface, source=label, destination="igmpv3.multicast",
+                ip_version=4, protocol=2, igmp=dict(parse="complete", type=34, bytes=16, checksum_valid=True,
+                ttl=1, router_alert_only=True, record_count=1, records=[dict(type=3, auxiliary_words=0,
+                source_count=0, group="mdns.multicast")])) and row["first_ns"] <= row["last_ns"]
+                and all(cap["witnessed_repair_leave"](layout, node, iface, address, row[field])
+                        for field in ("first_ns", "last_ns")), "unwitnessed, late or unrelated mDNS leave")
+        owner = label.partition(".")[0]
+        require(0 < row["packets"] <= layout["restart_memberships"][owner]["robustness"],
+                "mDNS leaves exceeded the observed kernel retransmission budget")
+        total += row["packets"]
+    require(total == capture["repair_mdns_leave_packets"] <= capture["mdns_membership_packets"]
+            <= capture["control_packets"], "missing or unaccounted mDNS leave observations")
+
+
 def validate_uptake(phase, peers):
     layout, route, captures = phase["layout"], phase["route"], phase["captures"]
     SHARED["CAPTURE"]["validate_layout"](layout)
@@ -143,6 +186,7 @@ def validate_uptake(phase, peers):
     for role, capture in captures.items():
         node = "relay4" if role == "receiver" else "relay5" if role == "provider" else role
         SHARED["validate_capture"](capture, layout, node)
+        validate_repair_leaves(capture, layout, node)
     for relay in RELAYS:
         counts = (captures[relay]["client_leg_wireguard_data_datagrams"],
                   captures[relay]["exit_leg_wireguard_data_datagrams"],
@@ -193,6 +237,7 @@ def validate_evidence(evidence):
             and status["publications"] == status["replica_publications"] == 1
             and status["replica_chunks"] == 3 and status["replica_bytes"] == 3 * CHUNK,
             "repaired publication is not actually registered")
+    validate_restart_memberships(evidence["uptake"]["layout"], evidence["stopped"], evidence["restarted"])
     validate_uptake(evidence["uptake"], peers)
     SHARED["validate_phase"](evidence["final"], "reserve-fetch", peers, 3 * CHUNK)
     require(evidence["uptake"]["route"]["route_context_id"] != evidence["final"]["route"]["route_context_id"],

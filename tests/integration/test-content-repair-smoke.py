@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+import socket
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,7 @@ def fixture():
         if role in ("exit", "provider"):
             capture.update(provider_request_packets=50, provider_response_packets=500,
                            provider_response_payload_bytes=2 * CHUNK + 4096)
+        capture.update(repair_mdns_leaves={}, repair_mdns_leave_packets=0)
         captures[role] = capture
     uptake["captures"] = captures
     final = copy.deepcopy(existing["phases"]["reserve-fetch"])
@@ -102,6 +104,13 @@ def fixture():
         restarted[node] = dict(unit=stopped[node]["unit"], pid_before=100 + index, pid_after=200 + index,
             active_state="active", executable_verified=True, original_cache_identity_preserved=True,
             cache_identity=stopped[node]["cache_identity"], network_namespace_identity=f"3:{81 + index}")
+    uptake["layout"]["restart_memberships"] = {node: dict(pid_before=entry["pid_before"],
+        network_namespace_identity=entry["network_namespace_identity"], observed_ns=100, stop_started_ns=200,
+        stop_completed_ns=300, group="224.0.0.251", robustness=2,
+        interfaces={"underlay": dict(source=CAPTURE["PUBLIC"][node], interval_ms=1000)})
+        for node, entry in restarted.items()}
+    for node, entry in uptake["layout"]["restart_memberships"].items():
+        stopped[node]["restart_membership"] = copy.deepcopy(entry)
     return dict(success=True, expected_peers=peers, offline_site=site_fixture(existing, restarted["relay5"]["pid_after"]),
         publication=dict(report_kind="volparossa-public-repair-seed", bytes=3 * CHUNK, chunks=3,
             object_sha256=CHECK["SHA"], holder_chunks=3, receiver_chunks=1, receiver_bytes=CHUNK,
@@ -165,6 +174,10 @@ class RepairEvidence(unittest.TestCase):
             (("caches", "repaired_receiver", "journal_sha256"), "d" * 64),
             (("uptake", "captures", "relay1", "client_leg_wireguard_data_datagrams"), 1),
             (("uptake", "captures", "receiver", "relay1_client_leg_wireguard_data_datagrams"), 1),
+            (("uptake", "layout", "restart_memberships", "relay4", "pid_before"), 201),
+            (("uptake", "layout", "restart_memberships", "relay4", "observed_ns"), 400),
+            (("uptake", "layout", "restart_memberships", "relay5", "interfaces", "underlay", "source"), "49.165.5.1"),
+            (("uptake", "captures", "provider", "repair_mdns_leave_packets"), 3),
             (("uptake", "captures", "exit", "relay1_exit_leg_wireguard_data_datagrams"), 1),
             (("uptake", "captures", "provider", "provider_response_payload_bytes"), CHUNK),
             (("uptake", "captures", "relay0", "packet_socket_drops"), 1),
@@ -189,6 +202,55 @@ class RepairEvidence(unittest.TestCase):
             del invalid[phase]["captures"][role]
             with self.subTest(missing=(phase, role)), self.assertRaises(ValueError):
                 CHECK["validate_evidence"](invalid)
+
+    def test_membership_snapshot_uses_kernel_groups_and_matching_live_interface_index(self):
+        helper = runpy.run_path(str(HERE / "content-repair-memberships.py"))
+        word = int.from_bytes(socket.inet_aton("224.0.0.251"), sys.byteorder)
+        table = (f"Idx Device : Count Querier Group Users Timer Reporter\n3 ar0 : 1 V3\n"
+                 f"    {word:08X} 1 0:00000000 0\n4 ar1 : 1 V3\n    {word:08X} 0 0:00000000 0\n")
+        self.assertEqual(helper["joined_interfaces"](table), {"ar0": 3})
+        with self.assertRaises(ValueError):
+            helper["joined_interfaces"](table.replace("4 ar1 : 1 V3", "invalid interface"))
+        function = helper["snapshot"]
+        link = dict(ifindex=3, ifname="ar0", addr_info=[dict(family="inet", local="10.241.90.1")])
+        def kernel_value(path, **_kwargs):
+            return {"igmp": table, "igmp_qrv": "2", "igmpv3_unsolicited_report_interval": "1000"}[path.name]
+
+        with mock.patch.dict(function.__globals__, namespace_identity=lambda _pid: "3:81"), \
+                mock.patch.object(Path, "read_text", side_effect=kernel_value, autospec=True), \
+                mock.patch.object(subprocess, "run") as run:
+            def snapshot():
+                run.return_value.stdout = json.dumps([link]).encode("ascii")
+                return function("relay4", 100, "3:81")["interfaces"]
+
+            self.assertEqual(snapshot(), {"ar0": dict(source="10.241.90.1", interval_ms=1000)})
+            link["ifindex"] = 4
+            self.assertEqual(snapshot(), {})
+            link["ifindex"] = 3
+            link["addr_info"][0]["local"] = "10.241.90.2"
+            with self.assertRaises(ValueError):
+                snapshot()
+            with self.assertRaises(ValueError):
+                function("relay4", 100, "3:82")
+
+    def test_live_leave_counts_retain_exact_validated_header_link_and_interval(self):
+        evidence = fixture()
+        layout = evidence["uptake"]["layout"]
+        capture = evidence["uptake"]["captures"]["receiver"]
+        sample = dict(header=dict(interface="underlay", source="relay4.public",
+            destination="igmpv3.multicast", ip_version=4, protocol=2,
+            igmp=dict(parse="complete", type=34, bytes=16, checksum_valid=True, ttl=1, router_alert_only=True,
+                record_count=1, records=[dict(type=3, auxiliary_words=0, source_count=0, group="mdns.multicast")])),
+            first_ns=200, last_ns=300, packets=1)
+        capture.update(repair_mdns_leave_packets=1, repair_mdns_leaves={"underlay/relay4.public": sample},
+                       mdns_membership_packets=2, control_packets=3)
+        CHECK["validate_repair_leaves"](capture, layout, "relay4")
+        for key, replacement in (("last_ns", 3_000_000_000), ("first_ns", 199), ("packets", 3),
+                                 ("header", dict(sample["header"], interface="ar0"))):
+            invalid = copy.deepcopy(capture)
+            invalid["repair_mdns_leaves"]["underlay/relay4.public"][key] = replacement
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                CHECK["validate_repair_leaves"](invalid, layout, "relay4")
 
     def test_site_requires_same_manifest_independent_retention_physical_path_and_ordinary_http(self):
         valid = fixture()

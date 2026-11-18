@@ -62,7 +62,16 @@ content_repair_stop_node() {
     repair_before_pid=$(systemctl show --property=MainPID --value "$repair_stop_unit") || return 1
     case $repair_before_pid in ''|0|*[!0-9]*) return 1 ;; esac
     repair_cache_identity=$(stat -Lc '%d:%i' "$WORK/state-$repair_stop_node/repair-cache") || return 1
+    repair_memberships=null
+    if [ "$repair_stop_label" = "stopped-$repair_stop_node" ]; then
+        repair_namespace=$(stat -Lc '%d:%i' "/run/netns/$repair_stop_ns") || return 1
+        repair_memberships=$(ip netns exec "$repair_stop_ns" python3 -B "$WORK/bin/content-repair-memberships.py" \
+            "$repair_stop_node" "$repair_before_pid" "$repair_namespace") || return 1
+        [ "$(systemctl show --property=MainPID --value "$repair_stop_unit")" = "$repair_before_pid" ] || return 1
+    fi
+    repair_stop_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     systemctl stop "$repair_stop_unit" || return 1
+    repair_stop_completed=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     repair_stop_deadline=$(($(date +%s) + 30))
     while [ "$(unit_load_state "$repair_stop_unit")" != not-found ]; do
         [ "$(date +%s)" -lt "$repair_stop_deadline" ] || return 1
@@ -73,9 +82,11 @@ content_repair_stop_node() {
         >"$WORK/content-repair-$repair_stop_label-listeners.txt" || return 1
     [ ! -s "$WORK/content-repair-$repair_stop_label-listeners.txt" ] || return 1
     jq -cn --arg unit "$repair_stop_unit" --argjson before "$repair_before_pid" \
-        --arg cache "$repair_cache_identity" '
+        --arg cache "$repair_cache_identity" --argjson membership "$repair_memberships" \
+        --argjson started "$repair_stop_started" --argjson completed "$repair_stop_completed" '
       {unit:$unit,pid_before:$before,main_pid:0,active_state:"inactive",unit_collected:true,
-       listener_absent:true,cache_identity:$cache}' >"$WORK/content-repair-$repair_stop_label.json"
+       listener_absent:true,cache_identity:$cache} + (if $membership == null then {} else
+         {restart_membership:($membership + {stop_started_ns:$started,stop_completed_ns:$completed})} end)' >"$WORK/content-repair-$repair_stop_label.json"
 }
 
 content_repair_launch_node() {
@@ -247,10 +258,13 @@ content_repair_site_view() {
 
 content_repair_capture() {
     [ -z "${CONTENT_REPAIR_CAPTURE_PIDS:-}" ] || return 1
-    jq -cn '{phase:"repair-uptake",client:{node:"relay4",ip:"49.165.5.1"},
+    jq -cen --slurpfile receiver "$WORK/content-repair-stopped-relay4.json" \
+        --slurpfile holder "$WORK/content-repair-stopped-relay5.json" '
+       {phase:"repair-uptake",client:{node:"relay4",ip:"49.165.5.1"},
+       restart_memberships:{relay4:$receiver[0].restart_membership,relay5:$holder[0].restart_membership},
        relays:{relay0:"42.158.0.1",relay1:"44.160.1.1",relay2:"45.161.2.1"},
        exit:{node:"exit",ip:"46.162.3.1"},provider:{node:"relay5",ip:"50.166.6.1"}}' \
-        >"$WORK/content-repair-uptake-layout.json"
+        >"$WORK/content-repair-uptake-layout.json" || return 1
     for repair_capture_role in receiver relay0 relay1 relay2 exit provider; do
         case $repair_capture_role in
             receiver) repair_capture_node=relay4; repair_capture_ns=$R4 ;;
@@ -399,6 +413,7 @@ content_repair_run() {
         [ "$(date +%s)" -lt "$repair_exit_deadline" ] || fail CONTENT_REPAIR_PROTECTED_FLOW_INCOMPLETE
         sleep 0.1
     done
+    PHASE=content-repair-evidence
     python3 -B "$source_directory/tests/integration/content-repair-smoke.py" evidence "$WORK" \
         "$WORK/content-repair-evidence.json" || fail CONTENT_REPAIR_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
