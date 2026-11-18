@@ -403,6 +403,8 @@ Houd een beknopt, actueel uitvoeringsplan bij met de eerstvolgende aantoonbare m
 
 ## Organisatiebrede verbetering en publieke groei
 
+Houd de oplossingen elegant en efficiënt en onderbouw verbeteringen.
+
 Verbeter efficiëntie en kwaliteit in alle VOLPAROSSA-repositories naast de functionele
 ontwikkeling. Pak gemeten gedeelde knelpunten aan met samenhangende, omkeerbare
 verbeteringen in ontwikkeling, runtimegebruik en onderhoudbaarheid. Behoud werking,
