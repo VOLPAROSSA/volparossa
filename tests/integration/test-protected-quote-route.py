@@ -51,19 +51,20 @@ def fixture():
         unexpected_provider_application_packets=0, unexpected_provider_control_packets=0,
         content_control_pairs={f"cp{i}": [ips["relay2"], ips[node]] for i, node in enumerate(nodes)},
         content_control_packets=dict(cp0=dict(inbound=2, outbound=2), cp1=dict(inbound=0, outbound=0)))
-    gates = {name: dict(exit_status=1, stdout_empty=name != "device_unavailable",
-        signed_exchange_failures_before=0, signed_exchange_failures_after=0 if name == "device_unavailable" else 1)
-        for name in ("wrong", "device_unavailable", "repeat")}
+    gates = {name.replace("-", "_"): dict(exit_status=1, stdout_empty=bool(failures),
+        profile="key-confirmation-v1" if name == "confirmation-unavailable" else "legacy",
+        signed_exchange_failures_before=0, signed_exchange_failures_after=failures)
+        for name, failures in M["CASE_FAILURES"].items()}
     gates.update(grant=dict(max_seconds=600, max_attempts=1, wrong_key_distinct=True, requester_key_bound=True),
-        device=dict(provider_mount_checked=True, fixed_device_absent=True), detach_wrong=True, detach_valid=True,
+        device=dict(provider_mount_checked=True, fixed_device_absent=True), detach_wrong=True, detach_valid=True, detach_confirmation=True,
         provider_stopped=True, client_disconnected=True)
     return dict(source_revision=SHA, layout=dict(provider_nodes=nodes, quote_provider=nodes[0],
         control_relay_peer_id=peers["relay2"], provider_key="11" * 32, requester_key="22" * 32, wrong_requester_key="33" * 32),
         gates=gates, inputs=copy.deepcopy(M["INPUTS"]), cases={name: dict(exit_status=1,
-            stdout=copy.deepcopy(M["REFUSAL"]) if name == "device-unavailable" else None)
-            for name in ("wrong", "device-unavailable", "repeat")},
+            stdout=copy.deepcopy(M["REFUSAL"]) if not failures else None)
+            for name, failures in M["CASE_FAILURES"].items()},
         operations={name: dict(serving=name != "stop", publications=0)
-            for name in ("attach-wrong", "attach-valid", "detach-wrong", "detach-valid", "stop")},
+            for name in M["OPERATIONS"]},
         expected_peers=peers, selected_route=copy.deepcopy(route), live_route=copy.deepcopy(route),
         privacy=privacy, control_privacy=control, control_before=peers["relay2"], control_after=peers["relay2"],
         scope=copy.deepcopy(M["SCOPE"]))
@@ -108,8 +109,22 @@ class NegativeQuoteRoute(unittest.TestCase):
         with self.assertRaises(ValueError):
             M["validate_evidence"](value, SHA)
 
+    def test_opt_in_refusal_requires_the_selected_profile_and_closed_result(self):
+        value = fixture()
+        value["gates"]["confirmation_unavailable"]["profile"] = "legacy"
+        with self.assertRaises(ValueError):
+            M["validate_evidence"](value, SHA)
+        value = fixture()
+        value["cases"]["confirmation-unavailable"]["stdout"]["worker_admission"] = True
+        with self.assertRaises(ValueError):
+            M["validate_evidence"](value, SHA)
+        value = fixture()
+        del value["operations"]["attach-confirmation"]
+        with self.assertRaises(ValueError):
+            M["validate_evidence"](value, SHA)
+
     def test_timeout_signal_success_or_bool_is_not_expected_cli_failure(self):
-        for case in ("wrong", "device-unavailable", "repeat"):
+        for case in M["CASE_FAILURES"]:
             for status in (0, True, 124, 137, -9):
                 with self.subTest(case=case, status=status):
                     value = fixture()
@@ -135,7 +150,7 @@ class NegativeQuoteRoute(unittest.TestCase):
             value["gates"][parent][key] = replacement
             with self.subTest(parent=parent, key=key), self.assertRaises(ValueError):
                 M["validate_evidence"](value, SHA)
-        for name in ("detach_wrong", "detach_valid", "provider_stopped", "client_disconnected"):
+        for name in ("detach_wrong", "detach_valid", "detach_confirmation", "provider_stopped", "client_disconnected"):
             value = fixture()
             value["gates"][name] = False
             with self.subTest(name=name), self.assertRaises(ValueError):
