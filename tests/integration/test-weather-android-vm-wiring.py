@@ -36,6 +36,12 @@ def source():
     return RUNNER.read_text()
 
 
+def guest_dispatch():
+    # Exercise the actual dispatch block, independent of which scenario is listed first.
+    prefix = source().split("\nGUEST_STATUS=$?", 1)[0]
+    return "case $scenario in\n" + prefix.rsplit("\ncase $scenario in\n", 1)[1]
+
+
 def shell(script, *args):
     return subprocess.run(["/bin/sh", "-c", script, "inert-wiring", *map(str, args)],
         capture_output=True, timeout=10)
@@ -138,8 +144,7 @@ test() { printf 'test'; printf ' <%s>' "$@"; printf '\\n'; }
                 f"<tests/integration/weather-android-tunnel.py> <{fixed}>"])
 
     def test_real_dispatch_writes_exact_private_config_and_retains_legacy_driver(self):
-        fragment = "case $scenario in\n    content-provider)\n" + source().split(
-            "case $scenario in\n    content-provider)\n", 1)[1].split("\nGUEST_STATUS=$?", 1)[0]
+        fragment = guest_dispatch()
         with tempfile.TemporaryDirectory(prefix="android-vm-wiring-", dir=HERE) as temporary:
             root = Path(temporary).resolve()
             for version in range(1, 7):
@@ -424,8 +429,7 @@ exit 143
                         process.communicate(timeout=5)
 
     def test_shell_only_term_reaches_owner_before_guest_and_private_state_cleanup(self):
-        fragment = "case $scenario in\n    content-provider)\n" + source().split(
-            "case $scenario in\n    content-provider)\n", 1)[1].split("\nGUEST_STATUS=$?", 1)[0]
+        fragment = guest_dispatch()
         owner = '''import json, os, signal
 from pathlib import Path
 root = Path(os.environ['fixture_parent'])
