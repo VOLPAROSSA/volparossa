@@ -106,6 +106,16 @@ class SiteProof(unittest.TestCase):
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](changed)
 
+    def test_receipts_cannot_rebind_chunk_count_away_from_the_signed_byte_length(self):
+        evidence = fixture()
+        evidence["input"]["chunks"] = 8
+        evidence["publish"]["chunks"] = 8
+        for app in (evidence["application"], evidence["cache_only"]["application"]):
+            for key in ("ready", "final"):
+                app[key]["chunks"] = 8
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](evidence)
+
     def test_cache_only_requires_same_authority_no_route_or_discovery_and_zero_provider_payload(self):
         evidence = fixture()
         CHECK["validate_evidence"](evidence)

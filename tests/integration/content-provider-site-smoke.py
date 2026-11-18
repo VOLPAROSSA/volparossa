@@ -23,6 +23,7 @@ HTTPS = runpy.run_path(str(HERE / "content-provider-https-smoke.py"))
 read, require, ROLES = COMMON["read"], COMMON["require"], COMMON["ROLES"]
 NAME = "disposable-native-static-site"
 CONTENT_TYPE = "application/vnd.volparossa.site.v1"
+CHUNK_BYTES = 262144
 CANDIDATES = HTTPS["CANDIDATES"]
 # Canonical ordinary `content site pack` over the four exact assets below.
 BUNDLE_BYTES = 2097628
@@ -368,12 +369,13 @@ def validate_application(evidence, app, manifests, cache_only):
             and (not provider_ids if cache_only else
                  1 <= len(provider_ids) <= len(allowed_ids) and set(provider_ids) <= allowed_ids),
             "site sources are empty, repeated, unauthorized or nonlocal in cache-only mode")
+    chunks = (expected["bundle_bytes"] + CHUNK_BYTES - 1) // CHUNK_BYTES
     for receipt, operation in ((ready, "native_site_ready"), (final, "native_site_closed")):
         require(receipt["operation"] == operation and receipt["publisher_key"] == expected["publisher_key"]
                 and receipt["name"] == expected["name"] and receipt["revision"] == 1 and receipt["assets"] == len(expected["assets"])
                 and receipt["bytes"] == expected["bundle_bytes"]
                 and receipt["peer_bytes"] == (0 if cache_only else expected["bundle_bytes"])
-                and receipt["chunks"] == publication["chunks"] == expected.get("chunks", 9)
+                and receipt["chunks"] == publication["chunks"] == chunks
                 and receipt["sha256"] == expected["bundle_sha256"] and receipt["manifest_id"] in manifests
                 and receipt["providers_used"] == len(provider_ids)
                 and set(receipt["provider_peer_ids"]) == set(provider_ids)
