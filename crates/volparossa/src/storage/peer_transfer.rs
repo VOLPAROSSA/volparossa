@@ -23,8 +23,8 @@ use volparossa_content::{
     },
 };
 use volparossa_local_control::{
-    ContentReceipt, PrivateStorageRemoteRequest, control_request::Operation,
-    control_response::Payload,
+    ContentReceipt, PrivateStorageRemoteRequest, PrivateStorageTlsFailure,
+    control_request::Operation, control_response::Payload,
 };
 
 use super::{
@@ -32,6 +32,8 @@ use super::{
     diagnostics::{Boundary, Operation as DiagnosticOperation, Stage},
     state::{self, Journal, LockedJournal},
 };
+
+const REMOTE_TIMEOUT_SECONDS: u64 = 600;
 
 tokio::task_local! {
     static MAINTENANCE_TURN: Vec<u8>;
@@ -123,6 +125,7 @@ pub(super) async fn deposit_retained(
         if initial == ReceiptState::Committed {
             return Ok(());
         }
+        let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
         let mut offset = retained.journal.last_stored_bytes;
         ensure!(
             offset <= length && (offset == length || offset % CHUNK_BYTES as u64 == 0),
@@ -149,7 +152,16 @@ pub(super) async fn deposit_retained(
                 .journal
                 .target()
                 .context(Boundary::new(operation, Stage::JournalOpen))?;
-            let reply = remote(socket, grant, signer, target, operation, &chunk[..count]).await?;
+            let reply = exchange_before_ready(
+                socket,
+                grant,
+                signer,
+                target,
+                operation,
+                &chunk[..count],
+                &mut retry_available,
+            )
+            .await?;
             boundary.stage = Stage::ReceiptValidation;
             let result = reply.receipt.result();
             ensure!(
@@ -266,13 +278,15 @@ pub(super) async fn restore_retained(
 ) -> Result<()> {
     state::new_output(destination)?;
     let target = known_target(&retained.journal)?;
-    let reply = remote(
+    let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
+    let reply = exchange_before_ready(
         socket,
         grant,
         signer,
         target,
         StorageOperation::Progress,
         &[],
+        &mut retry_available,
     )
     .await?;
     ensure!(
@@ -292,13 +306,14 @@ pub(super) async fn restore_retained(
     let mut offset = 0;
     while offset < retained.journal.ciphertext_bytes {
         let length = (retained.journal.ciphertext_bytes - offset).min(range_bytes());
-        let reply = remote(
+        let reply = exchange_before_ready(
             socket,
             grant,
             signer,
             retained.journal.target()?,
             StorageOperation::ReadRange { offset, length },
             &[],
+            &mut retry_available,
         )
         .await?;
         ensure!(
@@ -321,6 +336,46 @@ pub(super) async fn restore_retained(
         .context("cannot expose verified restore without overwriting an existing file")?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+// A foreground deposit or restore can reopen one TLS handshake per copy. At
+// AgentReady the owner has sent neither the signed operation nor any payload.
+// Both attempts use the same grant, operation, bytes and exchange deadline.
+async fn exchange_before_ready(
+    socket: &Path,
+    grant: &VerifiedStorageGrant,
+    signer: &SigningKey,
+    target: StorageTarget,
+    operation: StorageOperation,
+    payload: &[u8],
+    retry_available: &mut bool,
+) -> Result<StorageTransfer> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
+    let first = remote(socket, grant, signer, target, operation, payload).await;
+    let Err(error) = first else { return first };
+    let handshake_timeout = error
+        .downcast_ref::<crate::control::AgentRejected>()
+        .and_then(|rejected| rejected.private_storage_remote_detail)
+        .is_some_and(|detail| {
+            detail.tls_failure == Some(PrivateStorageTlsFailure::HandshakeDeadline as i32)
+        });
+    let before_ready = error
+        .downcast_ref::<Boundary>()
+        .is_some_and(|boundary| matches!(boundary.stage, Stage::AgentReady));
+    if !*retry_available
+        || !before_ready
+        || !handshake_timeout
+        || tokio::time::Instant::now() >= deadline
+    {
+        return Err(error);
+    }
+    *retry_available = false;
+    tokio::time::timeout_at(
+        deadline,
+        remote(socket, grant, signer, target, operation, payload),
+    )
+    .await
+    .context(Boundary::new(operation, Stage::Deadline))?
 }
 
 async fn observe_or_reserve(
@@ -419,7 +474,7 @@ pub(super) async fn remote(
     let mut stage = Stage::Authorization;
     let mut outcome_request_id = None;
     let result: Result<Result<StorageTransfer>> =
-        tokio::time::timeout(Duration::from_secs(600), async {
+        tokio::time::timeout(Duration::from_secs(REMOTE_TIMEOUT_SECONDS), async {
             grant.current(super::super::now()?)?;
             ensure!(
                 grant.owner_key() == &signer.verifying_key()
