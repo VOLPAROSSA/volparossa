@@ -29,7 +29,7 @@ fn command(root: &Path, args: &[&str]) -> Command {
     command
 }
 
-fn success(output: Output) -> Value {
+fn success(output: &Output) -> Value {
     assert!(
         output.status.success(),
         "{}",
@@ -44,7 +44,7 @@ fn pack(root: &Path, directory: &str, destination: &str, html: &[u8]) -> String 
     fs::write(source.join("index.html"), html).unwrap();
     fs::write(source.join("style.css"), b"h1 { color: teal }").unwrap();
     let report = success(
-        command(
+        &command(
             root,
             &[
                 "site",
@@ -105,7 +105,7 @@ fn publish(
     if revision != "1" {
         cli.arg("--reuse-cache");
     }
-    let report = success(cli.output().unwrap());
+    let report = success(&cli.output().unwrap());
     assert_eq!(report["operation"], "offline_content_publish");
     assert_eq!(report["network_publication"], false);
     assert_eq!(report["publisher_key_hex"], key);
@@ -174,7 +174,7 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
     let missing_head = restore("3.pb", &candidate).output().unwrap();
     assert!(!missing_head.status.success());
     let activated = success(
-        restore("3.pb", &candidate)
+        &restore("3.pb", &candidate)
             .arg("--initialize-from-reviewed-current")
             .output()
             .unwrap(),
@@ -188,13 +188,17 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
     assert_eq!(activated["bundle_sha256"], first_sha);
     assert_eq!(activated["network_publication"], false);
 
-    let repeated = success(restore("3.pb", &candidate).output().unwrap());
+    let repeated = success(&restore("3.pb", &candidate).output().unwrap());
     assert_eq!(repeated["state"], "already_current");
     assert_eq!(repeated["manifest_id"], candidate);
     let conflict = restore("other-3.pb", &competing).output().unwrap();
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("retained site revision differs"));
 
+    assert_restored_site(root, &key, &candidate, first_html);
+}
+
+fn assert_restored_site(root: &Path, key: &[u8; 32], candidate: &str, first_html: &[u8]) {
     // Read the retained name record independently, so assembly cannot silently use an
     // unrelated signed manifest passed by the test or an older cached website.
     let now = SystemTime::now()
@@ -210,12 +214,12 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
         },
     )
     .unwrap();
-    let head = cache.name_revision_floor(&key, SITE).unwrap().unwrap();
+    let head = cache.name_revision_floor(key, SITE).unwrap().unwrap();
     assert_eq!(head.revision(), 3);
     assert_eq!(hex::encode(head.manifest_id()), candidate);
     assert!(!head.conflicted());
     let retained = cache
-        .cached_named_manifest(&key, SITE, 3, now)
+        .cached_named_manifest(key, SITE, 3, now)
         .unwrap()
         .unwrap();
     assert_eq!(retained.encode(), fs::read(root.join("3.pb")).unwrap());
@@ -223,14 +227,14 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
     drop(cache);
 
     let assembled = success(
-        command(
+        &command(
             root,
             &[
                 "assemble",
                 "--manifest",
                 "retained.pb",
                 "--publisher-key",
-                &key_hex,
+                &hex::encode(key),
                 "--cache",
                 "owner-cache",
                 "--output",

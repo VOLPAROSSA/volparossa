@@ -271,7 +271,8 @@ impl Write for SiteLayoutVerifier {
         let header = 4_usize.saturating_sub(self.prefix.len()).min(bytes.len());
         self.prefix.extend_from_slice(&bytes[..header]);
         if let Some(length) = self.prefix.first_chunk::<4>() {
-            let size = u32::from_be_bytes(*length) as usize;
+            let size = usize::try_from(u32::from_be_bytes(*length))
+                .map_err(|_| io::ErrorKind::InvalidData)?;
             // Invalid lengths are retained in the header for the canonical decoder.
             if size <= MAX_SITE_INDEX_BYTES {
                 let remaining = (4 + size) - self.prefix.len();

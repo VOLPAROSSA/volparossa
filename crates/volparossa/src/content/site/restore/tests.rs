@@ -78,7 +78,8 @@ impl Fixture {
     fn new(retain_source: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path().join("owned");
-        let mut owned = ChunkStore::create(&cache, limits().cache_limits().unwrap()).unwrap();
+        let mut release_store =
+            ChunkStore::create(&cache, limits().cache_limits().unwrap()).unwrap();
         let mut signing_cache = ChunkStore::create(
             &directory.path().join("signing-cache"),
             limits().cache_limits().unwrap(),
@@ -89,15 +90,15 @@ impl Fixture {
         let source = site(b"<h1>First edition</h1>");
         let current = site(b"<h1>Revised edition</h1>");
         let original = publish_site(&mut signing_cache, &owner, 1, &source);
-        let current_envelope = publish_site(&mut owned, &owner, 2, &current);
+        let current_envelope = publish_site(&mut release_store, &owner, 2, &current);
         let candidate = publish_site(&mut signing_cache, &owner, 3, &source);
         if retain_source {
-            owned.put(&source).unwrap();
-            owned
+            release_store.put(&source).unwrap();
+            release_store
                 .remember_named_manifest(&original, &publisher_key, NOW)
                 .unwrap();
         }
-        owned
+        release_store
             .remember_named_manifest(&current_envelope, &publisher_key, NOW)
             .unwrap();
 
