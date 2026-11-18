@@ -3353,11 +3353,70 @@ class TerminalCheckpoint(Inert):
         namespace=dict(R.__dict__,report=report,scopes=[scope],build_scope=None,
             pending={1:object()} if pending else {},workload_complete=complete,
             work=Path('/synthetic'),parent_identity=None,payload_identity=None,deadline=200,
-            remove_payload=mock.Mock(side_effect=remove),evidence=Path('/synthetic/evidence'),write_new=mock.Mock())
-        exec(compiled,namespace)
-        namespace['write_new'].assert_called_once()
+            remove_payload=mock.Mock(side_effect=remove))
+        with tempfile.TemporaryDirectory() as tmp:
+            namespace['evidence'] = Path(tmp)
+            exec(compiled,namespace)
+            self.assertEqual(list(Path(tmp).iterdir()), [Path(tmp) / 'result.json'])
+            self.assertEqual((Path(tmp) / 'result.json').read_bytes(), R.encoded(report))
         self.assertNotIn(b'PRIVATE_',R.encoded(report))
         return report
+
+    def publication_at(self, boundary):
+        # Use the actual file, link and signal mask. Hooks choose the instant at
+        # which this process receives a real signal, without starting a worker.
+        report = dict(state='failed', phase='corruption_negative', model_execution=False,
+                      host_configuration_checkpoint_accepted=False)
+        original_encode, original_pending, original_link = R.encoded, signal.sigpending, os.link
+        R.CANCELLED = False
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'result.json'
+            if boundary == 'existing':
+                path.write_bytes(b'original receipt')
+            def encode(value):
+                if boundary == 'encoding' and value['state'] == 'passed':
+                    self.assertFalse(path.exists())
+                    signal.raise_signal(signal.SIGTERM)
+                return original_encode(value)
+            def pending():
+                if boundary == 'pending':
+                    self.assertFalse(path.exists())
+                    signal.raise_signal(signal.SIGTERM)
+                return original_pending()
+            def link(source, destination):
+                if boundary == 'after_choice':
+                    self.assertFalse(path.exists())
+                    signal.raise_signal(signal.SIGTERM)
+                    self.assertFalse(R.CANCELLED, 'late signal must still be blocked')
+                original_link(source, destination)
+                if boundary == 'after_choice':
+                    self.assertEqual(path.read_bytes(), Path(source).read_bytes())
+            previous_handler = signal.signal(signal.SIGTERM, lambda *_: setattr(R, 'CANCELLED', True))
+            previous_mask = signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+            try:
+                with mock.patch.object(R, 'encoded', side_effect=encode), \
+                        mock.patch.object(R.signal, 'sigpending', side_effect=pending), \
+                        mock.patch.object(R.os, 'link', side_effect=link):
+                    if boundary == 'existing':
+                        with self.assertRaises(FileExistsError):
+                            R.write_result(path, report, True, 200)
+                        self.assertEqual(path.read_bytes(), b'original receipt')
+                        self.assertEqual(report['state'], 'failed')
+                    else:
+                        R.write_result(path, report, True, 200)
+                        self.assertTrue(R.CANCELLED)
+                        self.assertEqual(path.read_bytes(), original_encode(report))
+                        if boundary == 'after_choice':
+                            self.assertEqual(report['state'], 'passed')
+                        else:
+                            self.assertEqual(report['failure'], 'controller_cancelled')
+                            self.assertEqual(report['state'], 'failed')
+                            self.assertFalse(report['model_execution'])
+                self.assertEqual(list(Path(tmp).iterdir()), [path])
+                self.assertNotIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                signal.signal(signal.SIGTERM, previous_handler)
 
     def test_success_waits_for_cleanup_preserves_reference_only_raw_false(self):
         for raw_equal in (False,True):
@@ -3366,6 +3425,10 @@ class TerminalCheckpoint(Inert):
             self.assertTrue(result['model_execution'] and result['host_configuration_checkpoint_accepted'])
             self.assertTrue(result['vm_cleanup_confirmed'] and result['tool_cleanup_confirmed'] and result['scratch_removed'])
             self.assertEqual(result['host_observed_routes_dns_unchanged'],raw_equal)
+
+        for boundary in ('encoding', 'pending', 'after_choice', 'existing'):
+            with self.subTest(receipt_boundary=boundary):
+                self.publication_at(boundary)
 
     def test_incomplete_workload_corruption_source_or_cleanup_never_accepts(self):
         for kwargs in (dict(complete=False),dict(eligible=False),dict(primary='source_changed',complete=False),
