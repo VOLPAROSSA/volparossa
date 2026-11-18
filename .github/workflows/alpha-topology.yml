@@ -55,6 +55,7 @@ on:
           - agent-native-coding
           - agent-private-browser
           - browser-network
+          - browser-native-capacity
           - agent-reasoning
           - agent-artifact
           - agent-train-cycle
@@ -100,10 +101,36 @@ env:
   VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario || 'datapath' }}
 
 jobs:
+  native-browser-capacity:
+    name: Measure Gecko workspace and unprivileged KVM
+    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'browser-native-capacity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Measure the native builder prerequisites
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          df -B1 --output=source,size,avail,target "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          for tools in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache; do
+            if test -d "$tools"; then du -sxB1 "$tools"; fi
+          done
+          test -c /dev/kvm
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          kvm_gid=$(stat -Lc '%g' /dev/kvm)
+          test "$kvm_gid" -gt 0
+          test "$(getent group "$kvm_gid" | cut -d: -f1)" = kvm
+          sudo -n -- /usr/bin/setpriv --reuid "$(id -u)" --regid "$kvm_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs --reset-env \
+            /usr/bin/python3 -B tests/integration/browser-native-capacity.py "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+
   alpha-topology:
     name: ${{ inputs.scenario == 'transaction-abci' && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'browser-native-capacity') ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'feature/alpha-vertical-runtime')
     runs-on: ubuntu-24.04
