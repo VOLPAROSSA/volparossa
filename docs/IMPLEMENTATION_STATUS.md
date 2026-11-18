@@ -110,6 +110,20 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   isolated contribution test lacked the hosted namespace setup.
   [Passing paired selection tests](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400389278)
   · [Initial namespace setup failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44399182634)
+  A twelve-node Debian 13 trial on `060fcaa3` deployed an owner-restored,
+  four-asset static site through the normal CLI. After a different revision
+  2, the owner activated revision 3 for the bytes of revision 1. The
+  publisher contributed the reviewed envelope without the signing key. An
+  independent holder retained nine chunks. With the publisher offline, a
+  fresh reader required the exact revision 3 manifest and received all
+  2,097,628 bytes from that holder. The origin supplied zero bytes. All
+  four HTTP assets and a 4,096-byte range passed. Cleanup left zero owned
+  objects and the guest network-state digests matched. This generated-site
+  trial exercised the HTTP viewer; the Silex and Firefox trial above used
+  the original edited publication. The restored manifest ID is
+  `df594173123ef0b495526c64b957ed9d1a1c118e8c5b1bef675fcd3f3a321b89`.
+  [Restored-site deployment trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835)
+  · [Retained archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835/artifacts/14473208812)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -283,7 +297,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
 | Storage / Image / Cloud | Image and Cloud published eight copies each. The direct Cloud UI upload and cold downloads passed. The separate maintenance scenario reached Image repair. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
-| Studio | Silex saved-project export, signing, independent retention and publisher-offline rendering in Firefox passed in one run. Owner-local restoration to a new signed revision passed. Deployment of the restored revision, dynamic execution and shared AI remain open. |
+| Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
 | Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |

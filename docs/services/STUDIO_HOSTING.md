@@ -65,8 +65,13 @@ owner-local restore activated the original bytes as a new signed revision.
 [Editor-to-browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
 · [Owner restore trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
 
+In a generated-site deployment trial, an independent holder served all four
+files of the restored revision to a fresh HTTP reader that required its exact
+manifest ID. The publisher was offline throughout retrieval.
+[Restored revision on an independent holder](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835)
+
 Remaining work includes a production editor publication adapter, domain and TLS
-integration, deployment and withdrawal of authorized revisions, and sustained
+integration, multi-holder rollout and withdrawal of revisions, and sustained
 availability as holders leave. Replica health, capacity fairness, protected
 shared AI and dynamic execution with durable private state also remain open.
 
