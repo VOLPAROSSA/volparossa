@@ -143,7 +143,7 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
         notice_name=$(basename -- "$notice_path")
         normalized_notice_name=$(printf '%s' "$notice_name" | tr '[:lower:]' '[:upper:]')
         case "$normalized_notice_name" in
-            LICENSE|LICENSE-*|LICENSE.*|COPYING|COPYING-*|COPYING.*|NOTICE|NOTICE-*|NOTICE.*)
+            LICENSE|LICENSE-*|LICENSE.*|LICENSE_A2|LICENSE_A2LLVM|LICENSE_CC0|COPYING|COPYING-*|COPYING.*|NOTICE|NOTICE-*|NOTICE.*)
                 install -m 0644 "$notice_path" "$crate_destination/$notice_name"
                 copied=1
                 ;;

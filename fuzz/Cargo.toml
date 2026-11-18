@@ -14,7 +14,8 @@ cargo-fuzz = true
 # reviewed path patches below.
 hickory-proto = { version = "=0.25.2", default-features = false }
 time = { version = "=0.3.41", default-features = false }
-multibase = { version = "=0.9.3", default-features = false }
+# multibase 0.9.3 brings base45 3.2.0, which omits a distributable license notice.
+multibase = { version = "=0.9.2", default-features = false }
 
 ed25519-dalek = "2.1.1"
 libfuzzer-sys = "0.4"
