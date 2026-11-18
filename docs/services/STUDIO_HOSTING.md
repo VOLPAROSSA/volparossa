@@ -23,6 +23,19 @@ the particular failing Core/browser substage follows. The
 and [preserved PR343 diff](../archive/integration-evidence-pr343-20261023.patch.txt)
 retain source bindings, diagnostics and remaining gates.
 
+To contribute an existing signed export, select its original file and the
+publisher key from the owner's review. This uses the normal local agent and
+requires an authorized public contribution.
+
+```sh
+volparossa content contribute --manifest manifest.bin --publisher-key "$PUBLISHER_KEY" --input site.vps
+```
+
+Core checks the signature, expiry, chunk hashes and whole-file digest before
+handoff. It stages the chunks under the selected cache limits in a temporary
+owner-only directory. The owner can also supply an existing verified source
+cache with `--cache`.
+
 | Existing Core facility | Reuse and evidence boundary |
 | --- | --- |
 | Signed chunks/manifests, explicit `content publish`, contribution handoff | Existing identity, original expiry, bounded object/cache and explicit public-content authority. A local signed object is not a published website. |

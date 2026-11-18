@@ -450,9 +450,12 @@ pub(crate) struct Contribute {
     /// Independently trusted publisher, not adopted from the supplied manifest.
     #[arg(long, value_parser = parse_publisher_key)]
     publisher_key: VerifyingKey,
-    /// Existing complete cache owned by your account. No cache is implicitly created.
+    /// Existing complete cache owned by your account.
+    #[arg(long, required_unless_present = "input", conflicts_with = "input")]
+    cache: Option<PathBuf>,
+    /// Original public file to verify against the signed manifest before contribution.
     #[arg(long)]
-    cache: PathBuf,
+    input: Option<PathBuf>,
     /// Coordinator's immutable publication binding, checked on the same decoded envelope
     /// handed to the agent. The ordinary CLI explicitly trusts its supplied manifest/key.
     #[arg(skip)]
@@ -471,7 +474,8 @@ impl Contribute {
         Self {
             manifest,
             publisher_key,
-            cache,
+            cache: Some(cache),
+            input: None,
             expected_manifest_id: None,
             limits,
         }
@@ -736,7 +740,7 @@ pub(crate) async fn publish_command(args: &Publish, socket: &Path) -> Result<ser
     let mut published = publish(args)?;
     if args.contribute {
         let receipt = handoff::contribute(
-            &published.signed, &published.verified, &args.cache, args.limits.cache_limits()?, socket,
+            &published.signed, &published.verified, handoff::Source::Cache(&args.cache), args.limits.cache_limits()?, socket,
         )
         .await
         .context("network contribution was not confirmed; local publication retained in the requested manifest and cache; no permissions or ownership were changed")?;
@@ -756,7 +760,7 @@ pub(crate) async fn contribute_existing(
     args: &Contribute,
     socket: &Path,
 ) -> Result<serde_json::Value> {
-    let bytes = verified_manifest_bytes(&args.manifest, &args.publisher_key)?;
+    let bytes = read_manifest_bytes(&args.manifest)?;
     let signed = SignedManifest::decode(&bytes)?;
     let verified = signed.verify(&args.publisher_key, now_seconds()?)?;
     if args
@@ -765,12 +769,15 @@ pub(crate) async fn contribute_existing(
     {
         bail!("content contribution differs from the pinned manifest identity");
     }
-    // The existing handoff refuses private-message manifests, verifies all original
-    // bytes in the owned cache, and confirms durable serving before success.
+    let source = match (args.cache.as_deref(), args.input.as_deref()) {
+        (Some(cache), None) => handoff::Source::Cache(cache),
+        (None, Some(input)) => handoff::Source::File(input),
+        _ => bail!("select exactly one source with --cache or --input"),
+    };
     let receipt = handoff::contribute(
-        &signed, &verified, &args.cache, args.limits.cache_limits()?, socket,
-    ).await.context("existing public contribution was not confirmed; original manifest and owned cache retained for retry")?;
-    Ok(serde_json::json!({
+        &signed, &verified, source, args.limits.cache_limits()?, socket,
+    ).await.context("existing public contribution was not confirmed; original manifest and source retained for retry")?;
+    let mut report = serde_json::json!({
         "operation":"content_contribute","network_publication":true,
         "manifest":args.manifest,"manifest_id":hex::encode(verified.manifest_id()),
         "publisher_key_hex":hex::encode(verified.publisher()),"cache":args.cache,
@@ -781,7 +788,11 @@ pub(crate) async fn contribute_existing(
         "serving":receipt.serving,"publications":receipt.publications,
         "original_signature_reused":true,"private_keys_transferred":false,
         "ownership_changed":false,"origin_authenticated":false
-    }))
+    });
+    if let Some(input) = &args.input {
+        report["input"] = serde_json::json!(input);
+    }
+    Ok(report)
 }
 
 fn publish(args: &Publish) -> Result<Published> {
@@ -1823,6 +1834,28 @@ mod contribution_tests {
             "owned-cache",
         ];
         assert!(crate::Cli::try_parse_from(base).is_err());
+        let input = [
+            "volparossa",
+            "content",
+            "contribute",
+            "--manifest",
+            "original.pb",
+            "--publisher-key",
+            &key,
+        ];
+        assert!(crate::Cli::try_parse_from(input).is_err());
+        assert!(
+            crate::Cli::try_parse_from(input.into_iter().chain(["--input", "site.vps"])).is_ok()
+        );
+        assert!(
+            crate::Cli::try_parse_from(input.into_iter().chain([
+                "--input",
+                "site.vps",
+                "--cache",
+                "owned-cache"
+            ]))
+            .is_err()
+        );
         let parsed =
             crate::Cli::try_parse_from(base.into_iter().chain(["--publisher-key", &key])).unwrap();
         let crate::CliCommand::Content { command } = parsed.command else {
@@ -1904,7 +1937,8 @@ mod contribution_tests {
     async fn retry_scenario() {
         let root = tempfile::tempdir().unwrap();
         let publisher_identity = SigningKey::from_bytes(&[43; 32]);
-        let bytes = b"Explicit public retry fixture; no signing key file exists.";
+        let mut bytes = vec![b'a'; volparossa_content::CHUNK_BYTES + 1];
+        *bytes.last_mut().unwrap() = b'b';
         let mut cache = ChunkStore::create(
             &root.path().join("source"),
             limits().cache_limits().unwrap(),
@@ -1943,16 +1977,34 @@ mod contribution_tests {
         )
         .expect_manifest_id(*manifest.manifest_id());
         drop(publisher_identity);
+        let input = root.path().join("signed-site.vps");
+        fs::write(&input, &bytes).unwrap();
+        let file_args = Contribute {
+            manifest: args.manifest.clone(),
+            publisher_key: args.publisher_key,
+            cache: None,
+            input: Some(input.clone()),
+            expected_manifest_id: args.expected_manifest_id,
+            limits: limits(),
+        };
         // Actual bounded local RPC and chunk transfer, with simulated final service
         // receipts. This is not a provider advertisement or overlay-network proof.
-        for (index, serving) in [false, true, true].into_iter().enumerate() {
+        for (index, (source, serving)) in [
+            (&args, false),
+            (&args, true),
+            (&file_args, false),
+            (&file_args, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let socket = root.path().join(format!("control-{index}.sock"));
             let listener = UnixListener::bind(&socket).unwrap();
             let target = root.path().join(format!("destination-{index}"));
             let ((), result) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 tokio::join!(
                     accept_contribution(listener, &original, &manifest, target, serving),
-                    contribute_existing(&args, &socket)
+                    contribute_existing(source, &socket)
                 )
             })
             .await
@@ -1970,10 +2022,21 @@ mod contribution_tests {
             assert_eq!(fs::read(&args.manifest).unwrap(), original);
         }
         let missing = root.path().join("no-control.sock");
+        bytes[0] ^= 1;
+        fs::write(&input, &bytes).unwrap();
+        let error = contribute_existing(&file_args, &missing).await.unwrap_err();
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<volparossa_content::Error>()
+                .is_some_and(|error| matches!(error, volparossa_content::Error::Integrity(_)))
+        }));
+        fs::write(&input, b"short").unwrap();
+        let error = contribute_existing(&file_args, &missing).await.unwrap_err();
+        assert!(format!("{error:#}").contains("file length differs"));
         let wrong = Contribute::existing(
             args.manifest.clone(),
             SigningKey::from_bytes(&[44; 32]).verifying_key(),
-            args.cache.clone(),
+            root.path().join("source"),
             limits(),
         );
         assert!(contribute_existing(&wrong, &missing).await.is_err());
@@ -1984,11 +2047,11 @@ mod contribution_tests {
             limits(),
         );
         assert!(contribute_existing(&absent, &missing).await.is_err());
-        assert!(!absent.cache.exists());
+        assert!(!root.path().join("absent-cache").exists());
         let different = Contribute::existing(
             args.manifest.clone(),
             args.publisher_key,
-            args.cache.clone(),
+            root.path().join("source"),
             limits(),
         )
         .expect_manifest_id([0; 32]);
