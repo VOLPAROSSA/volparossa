@@ -52,6 +52,10 @@ FAILURE_CODES = {'phase_deadline', 'authority_expired', 'authority_changed', 're
     'cipher_identity', 'cipher_receipt', 'snapshot_crypto', 'publish_operation', 'enrollment_policy', 'enrollment',
     'fragment_geometry', 'catalog_creation', 'configuration', 'input_changed', 'private_file', 'private_directory',
     'application_failed'}
+IMAGE_EXERCISE_STAGES = {'image_owner_start', 'image_repair', 'image_foreground_restore', 'image_decrypt', 'image_joined'}
+IMAGE_EXERCISE_CODES = {'ENOENT', 'EACCES', 'ELOOP', 'core_spawn_failed', 'enrollment_changed',
+    'foreground_cleanup_unconfirmed', 'maintenance_cleanup_unconfirmed', 'local_input_changed',
+    'local_input_unavailable', 'local_verification_failed', 'invalid_maintenance_report', 'operation_in_progress'}
 CATALOG_FAILURE_CODES = {'catalog_materialization_failed', 'catalog_restore_validation',
     'catalog_metadata_validation', 'catalog_selection_validation', 'catalog_plaintext_validation',
     'catalog_file_version_changed', 'catalog_receipt_validation', 'catalog_crypto_timeout',
@@ -491,7 +495,9 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
                     and value['code'] in ('core_close_failed', 'phase_deadline'), 'publish_lifecycle')
             expected_version = 13 if catalog_restore else lifecycle_profile + 2
         keys(value, fields)
-        require((lifecycle or (value['stage'] in STAGES and value['code'] in FAILURE_CODES))
+        image_exercise = phase == 'exercise' and value['stage'] in IMAGE_EXERCISE_STAGES
+        require((lifecycle or (value['stage'] in STAGES and value['code'] in FAILURE_CODES)
+            or (image_exercise and value['code'] in FAILURE_CODES | IMAGE_EXERCISE_CODES))
             and value['cleanup_confirmed'] is False, 'failure_report')
     else:
         keys(value, ('version', 'kind', 'phase', 'passed', 'provision_sha256', 'image', 'cloud', 'scope'))
