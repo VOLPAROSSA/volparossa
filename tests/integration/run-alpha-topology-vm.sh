@@ -19,11 +19,11 @@ host_tools_directory=
 output_directory=
 expected_commit=
 scenario=alpha
-cloud_owner_resume=no
 code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
+cloud_owner_resume=no
 weather_client_bundle=
 weather_client_manifest_sha256=
 weather_android_source=
@@ -51,9 +51,9 @@ usage() {
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
-        '       cloud-private-upload optionally accepts --cloud-owner-resume to exercise an interrupted real upload.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
+        '       cloud-private-upload optionally accepts --cloud-owner-resume to exercise an interrupted real upload.' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
         '       weather-decoder-abi requires --decoder-abi-inputs DIRECTORY (source-admitted exact public files; no --mpquic).' \
         '       Native-editor, cooperative-code, content-provider and weather-decoder-abi accept --host-tools-directory PATH (verified workspace-only QEMU).'
@@ -526,7 +526,6 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
-        --cloud-owner-resume) cloud_owner_resume=yes ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
@@ -538,6 +537,7 @@ while [ "$#" -gt 0 ]; do
             code_bundle=$2
             shift
             ;;
+        --cloud-owner-resume) cloud_owner_resume=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -1966,6 +1966,7 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+cloud_owner_resume=no
 code_archive_sha256=none
 code_manifest_sha256=none
 browser_filter_archive_sha256=none
@@ -1973,15 +1974,7 @@ browser_filter_manifest_sha256=none
 weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
 # Native and cooperative bundles share positions only in disjoint scenarios.
-cloud_owner_resume=no
 case $scenario in
-    cloud-private-upload)
-        case $# in
-            5) ;;
-            6) [ "$6" = retained-owner ] || exit 64; cloud_owner_resume=yes ;;
-            *) exit 64 ;;
-        esac
-        ;;
     agent-native-coding|agent-native-editor)
         [ "$#" -eq 6 ] || exit 64
         native_runtime_sha256=${6:-none}
@@ -2006,6 +1999,13 @@ case $scenario in
         else
             [ "$#" -eq 5 ] || exit 64
         fi
+        ;;
+    cloud-private-upload)
+        case $# in
+            5) ;;
+            6) [ "$6" = retained-owner ] || exit 64; cloud_owner_resume=yes ;;
+            *) exit 64 ;;
+        esac
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
