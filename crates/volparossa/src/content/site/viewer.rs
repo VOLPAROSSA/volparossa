@@ -132,16 +132,18 @@ async fn run_prepared(
 }
 
 async fn prepare(args: &Open, socket: &Path, parent: &Path) -> Result<Site> {
-    let download =
-        named_download::prepare(&args.fetch_args(parent.join("site.bundle")), socket, parent)
-            .await?;
-    if download.manifest().metadata().content_type != SITE_CONTENT_TYPE {
-        bail!("named publication is not a native static-site bundle");
-    }
+    let download = named_download::prepare_bounded_refresh(
+        &args.fetch_args(parent.join("site.bundle")),
+        socket,
+        parent,
+        &named_download::Requirement {
+            content_type: SITE_CONTENT_TYPE,
+            maximum_bytes: MAX_OBJECT_BYTES,
+            manifest_id: args.expected_manifest_id,
+        },
+    )
+    .await?;
     let length = download.manifest().length();
-    if length > MAX_OBJECT_BYTES {
-        bail!("site exceeds native object limit");
-    }
     let mut file = tokio::fs::File::from_std(download.as_file().try_clone()?);
     let mut bytes = Vec::new();
     timeout_at(download.authority_deadline(), async {
