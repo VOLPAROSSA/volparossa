@@ -112,7 +112,7 @@ the checksums recorded by crates.io and the pre-patch `Cargo.lock`.
 
 | Patch | SHA-256 | Resulting vendor-tree SHA-256 |
 |---|---|---|
-| `patches/hickory-proto-0.25.2-rustsec.patch` | `bd1d5df1a13574d5c8b546e1a53dfde04d524353a646c8235786d7724215828a` | `65d70d1559f2209a76b3ca68357c86bd94c9046e0b5dd22b0b3458ad418b1786` |
+| `patches/hickory-proto-0.25.2-rustsec.patch` | `151a1d425a6fc3a056753f740e35ab9a67e769255f07d756f8e2c697576a9b77` | `5e1fcb2158ae0cc83334ac2a1e11fa60ebcadd1e59e224521aff288b61e4a516` |
 | `patches/hickory-resolver-0.25.2-dnssec.patch` | `2e070665e78337e620dfb3f8c15ff09a938ad3fa711e240798732de4c204f1b2` | `cce65437d685b2911c283c4f739fbe08017ae1cd4b80a5895cba3f99110c9b3e` |
 | `patches/time-0.3.41-rustsec.patch` | `bc4ad8b199c3284c59b1aa259d5ec907d43f7cb898083a8d5ab99a71cc7a5c8a` | `722fc9e265043f6d683a365596063ad3b192a7d4dce542f9aa56bee65ccfdd7b` |
 | `patches/libp2p-yamux-0.47.0-single-backend.patch` | `1a845f6cfaa57c993b54f654dc8e9294a450de8c46be323618481a7cc750740d` | `a7a9977042b6d9f602e98d67dc8409c485b5e588f79f8567b9b5b6ec9587e4fb` |
@@ -128,6 +128,11 @@ find . -type f -print0 |
 
 The Hickory proto patch:
 
+- starts query and record vectors with capacity for at most eight entries,
+  then grows them as records are decoded. This ports the
+  [upstream fix](https://github.com/hickory-dns/hickory-dns/commit/280c0e5c4e3002d73ba0762835ef82272d1d33a6)
+  for RUSTSEC-2026-0491. The 0.25 message decoder delegates question parsing
+  to the same reader. An ordinary nine-answer response covers vector growth;
 - caps the linear `BinEncoder` name-compression candidate set at the upstream
   limit of 64 and tests that a 65th candidate is not retained, remediating
   RUSTSEC-2026-0119;

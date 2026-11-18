@@ -644,7 +644,7 @@ impl Message {
 
     /// Attempts to read the specified number of `Query`s
     pub fn read_queries(decoder: &mut BinDecoder<'_>, count: usize) -> ProtoResult<Vec<Query>> {
-        let mut queries = Vec::with_capacity(count);
+        let mut queries = Vec::with_capacity(count.min(8));
         for _ in 0..count {
             queries.push(Query::read(decoder)?);
         }
@@ -662,7 +662,7 @@ impl Message {
         count: usize,
         is_additional: bool,
     ) -> ProtoResult<(Vec<Record>, Option<Edns>, Vec<Record>)> {
-        let mut records: Vec<Record> = Vec::with_capacity(count);
+        let mut records: Vec<Record> = Vec::with_capacity(count.min(8));
         let mut edns: Option<Edns> = None;
         let mut sigs: Vec<Record> = Vec::with_capacity(if is_additional { 1 } else { 0 });
 
@@ -1046,10 +1046,7 @@ impl<'r> BinDecodable<'r> for Message {
 
         // get the questions
         let count = header.query_count() as usize;
-        let mut queries = Vec::with_capacity(count);
-        for _ in 0..count {
-            queries.push(Query::read(decoder)?);
-        }
+        let queries = Self::read_queries(decoder, count)?;
 
         // get all counts before header moves
         let answer_count = header.answer_count() as usize;
