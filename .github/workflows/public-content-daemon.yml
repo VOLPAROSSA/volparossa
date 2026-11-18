@@ -1,0 +1,169 @@
+name: Public content normal daemon recovery
+run-name: Exact public CLI publication and normal daemon cache recovery
+
+on:
+  push:
+    branches: [test/public-content-daemon-recovery-20261028]
+    paths:
+      - .github/workflows/public-content-daemon.yml
+      - scripts/check-public-content-daemon-source.py
+      - scripts/test-cargo-source-policy.py
+      - crates/volparossa-agent/tests/public_content_daemon.rs
+      - crates/volparossa-agent/tests/public_content_daemon/**
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed 40-character source commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-content-daemon-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  actual-public-consumer:
+    if: github.repository == 'VOLPAROSSA/volparossa'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the exact public consumer source and original production code
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS:$RUNNER_ENVIRONMENT:$RUNNER_OS:$RUNNER_ARCH" = true:github-hosted:Linux:X64
+          test "$(id -u)" != 0
+          test "$GITHUB_REF" = refs/heads/test/public-content-daemon-recovery-20261028
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          umask 077
+          output="$RUNNER_TEMP/public-content-daemon-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$output"
+          printf 'PUBLIC_CONTENT_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
+          python3 -B scripts/check-public-content-daemon-source.py > "$output/source.json"
+          python3 -B scripts/test-cargo-source-policy.py
+          sh -n scripts/run-isolated-test.sh
+
+      - name: Install authenticated compiler with fixed public Cargo sources
+        run: |
+          set -euo pipefail
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
+          install -m 0600 "$RUNNER_TEMP/cargo-source-policy.json" "$PUBLIC_CONTENT_OUTPUT/cargo-source-policy.json"
+          rustc --version --verbose > "$PUBLIC_CONTENT_OUTPUT/rust.txt"
+          cargo --version --verbose >> "$PUBLIC_CONTENT_OUTPUT/rust.txt"
+          cargo fetch --locked
+
+      - name: Build the actual production CLI and daemon and compile the consumer proof
+        run: |
+          set -euo pipefail
+          cargo build --locked --offline -p volparossa --bin volparossa
+          cargo build --locked --offline -p volparossa-agent --bin volparossa-agent
+          cargo test --locked --offline -p volparossa-agent --test public_content_daemon \
+            2>&1 | tee "$PUBLIC_CONTENT_OUTPUT/controls.log"
+          python3 -B - <<'PY'
+          import os, pathlib, re
+          with (pathlib.Path(os.environ['PUBLIC_CONTENT_OUTPUT']) / 'controls.log').open('rb') as stream:
+              raw = stream.read(4 * 1024 * 1024 + 1)
+          assert len(raw) <= 4 * 1024 * 1024
+          log = raw.decode('utf-8', errors='strict')
+          names = re.findall(r'^test (\S+) \.\.\. ok$', log, re.M)
+          assert len(names) == len(set(names)) == 10
+          assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 1 ignored;', log, re.M) == ['10']
+          PY
+          cargo clippy --locked --offline -p volparossa-agent --test public_content_daemon -- -D warnings
+          rustfmt --edition 2024 --config skip_children=true --check \
+            crates/volparossa-agent/tests/public_content_daemon.rs \
+            crates/volparossa-agent/tests/public_content_daemon/*.rs
+          sha256sum target/debug/volparossa target/debug/volparossa-agent > "$PUBLIC_CONTENT_OUTPUT/binaries.sha256"
+          git diff --exit-code HEAD
+
+      - name: Run the real public consumer and process recovery in a disposable network
+        env:
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+          VOLPAROSSA_REQUIRE_PUBLIC_CONTENT_DAEMON_PROOF: '1'
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 180s cargo test --locked --offline -p volparossa-agent \
+            --test public_content_daemon \
+            public_content_daemon_import_crash_reopen_export_and_joined_cleanup \
+            -- --ignored --exact --nocapture 2>&1 | tee "$PUBLIC_CONTENT_OUTPUT/actual.log"
+          python3 -B - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['PUBLIC_CONTENT_OUTPUT'])
+          with (root / 'actual.log').open('rb') as stream:
+              raw = stream.read(4 * 1024 * 1024 + 1)
+          assert len(raw) <= 4 * 1024 * 1024
+          log = raw.decode('utf-8', errors='strict')
+          lines = re.findall(r'^PUBLIC_CONTENT_DAEMON_HOST_PROOF (.+)$', log, re.M)
+          assert len(lines) == 1
+          def pairs(items):
+              value = {}
+              for key, item in items:
+                  assert key not in value
+                  value[key] = item
+              return value
+          report = json.loads(lines[0], object_pairs_hook=pairs)
+          assert set(report) == {'version', 'status', 'success', 'before_captured', 'after_captured',
+              'routes_unchanged', 'dns_unchanged', 'firewall_unchanged', 'sysctls_unchanged',
+              'parent_namespace_unchanged', 'child_stage', 'cleanup', 'counts',
+              'public_synthetic_only', 'overlay_storage_proven', 'named_site_open_proven',
+              'power_loss_recovery_proven'}
+          assert type(report['version']) is int and report['version'] == 1
+          assert report['status'] == 'passed' and report['child_stage'] == 'complete'
+          assert report['cleanup'] == 'normal_joined_socket_and_fixture_removed'
+          for key in ('success', 'before_captured', 'after_captured', 'routes_unchanged',
+                      'dns_unchanged', 'firewall_unchanged', 'sysctls_unchanged',
+                      'parent_namespace_unchanged', 'public_synthetic_only'):
+              assert report[key] is True
+          for key in ('overlay_storage_proven', 'named_site_open_proven', 'power_loss_recovery_proven'):
+              assert report[key] is False
+          expected = dict(cli_started=8, cli_joined=8, daemon_started=2, crash_joined=1,
+              graceful_joined=1, failure_joined=0, cli_rejections=4, agent_rejections=1,
+              verified_bytes=262281, verified_chunks=2)
+          assert set(report['counts']) == set(expected)
+          assert all(type(report['counts'][key]) is int and report['counts'][key] == value
+                     for key, value in expected.items())
+          assert re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored;', log, re.M) == ['1']
+          with (root / 'actual-receipt.json').open('x') as stream:
+              json.dump(report, stream, sort_keys=True)
+              stream.write('\n')
+          PY
+          git diff --exit-code HEAD
+
+      - name: Retain exact-source public consumer diagnostics including failure
+        if: always() && env.PUBLIC_CONTENT_OUTPUT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: public-content-daemon-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ env.PUBLIC_CONTENT_OUTPUT }}/*.json
+            ${{ env.PUBLIC_CONTENT_OUTPUT }}/*.txt
+            ${{ env.PUBLIC_CONTENT_OUTPUT }}/*.sha256
+            ${{ env.PUBLIC_CONTENT_OUTPUT }}/*.log

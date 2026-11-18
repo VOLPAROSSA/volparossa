@@ -1,21 +1,20 @@
 //! Explicit static-site bundles reuse native signatures, names and protected chunk retrieval.
 
+mod preparation;
+mod preview;
+mod source;
 mod viewer;
 
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
-use rustix::fs::{Dir, Mode, OFlags, open, openat};
-use volparossa_content::{
-    MAX_OBJECT_BYTES,
-    site::{SITE_CONTENT_TYPE, SiteAsset, SiteBundle},
-};
+use rustix::fs::{Mode, OFlags, open};
+use volparossa_content::site::{SITE_CONTENT_TYPE, SiteBundle};
 
 use super::{FetchName, Limits, ensure_new_output, output_parent};
 
@@ -23,8 +22,12 @@ use super::{FetchName, Limits, ensure_new_output, output_parent};
 pub(crate) enum Command {
     /// Pack regular static files; dotfiles and dot-directories are excluded, symlinks rejected.
     Pack(Pack),
+    /// Check whether the active local contribution service can deliver this exact signed site.
+    Confirm(Confirm),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
     Open(Box<Open>),
+    /// Preview exact reviewed local bytes against an independently selected original signed manifest.
+    Preview(Box<preview::Preview>),
 }
 
 #[derive(Debug, Args)]
@@ -35,6 +38,19 @@ pub(crate) struct Pack {
     /// New private bundle file; publish it with the reported native content type.
     #[arg(long)]
     output: PathBuf,
+    /// Return a bounded review inventory for these exact bytes; grants no publication authority.
+    #[arg(long)]
+    review_receipt: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Confirm {
+    /// Original signed manifest retained by the publisher.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Independently trusted public key of the named publisher.
+    #[arg(long, value_parser = super::parse_publisher_key)]
+    publisher_key: VerifyingKey,
 }
 
 #[derive(Debug, Args)]
@@ -86,8 +102,32 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     match command {
         Command::Pack(args) => println!("{}", pack(&args)?),
         Command::Open(args) => viewer::run(*args, socket).await?,
+        Command::Preview(args) => preview::run(*args).await?,
+        Command::Confirm(args) => println!("{}", confirm(&args, socket).await?),
     }
     Ok(())
+}
+
+async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json::Value> {
+    let bytes = super::read_manifest_bytes(&args.manifest)?;
+    let manifest = volparossa_content::SignedManifest::decode(&bytes)?
+        .verify(&args.publisher_key, super::now_seconds()?)?;
+    if manifest.metadata().content_type != SITE_CONTENT_TYPE || manifest.length() == 0 {
+        bail!("expected a signed native site publication");
+    }
+    super::named_download::confirm_local(&args.publisher_key, &manifest, SITE_CONTENT_TYPE, socket)
+        .await?;
+    Ok(serde_json::json!({
+        "operation": "native_site_confirm",
+        "local_registry_read_verified": true,
+        "publisher_key": hex::encode(manifest.publisher()),
+        "name": manifest.metadata().name,
+        "revision": manifest.metadata().revision,
+        "manifest_id": hex::encode(manifest.manifest_id()),
+        "bytes": manifest.length(),
+        "chunks": manifest.chunks().len(),
+        "expires_unix_seconds": manifest.validity().expires,
+    }))
 }
 
 fn pack(args: &Pack) -> Result<serde_json::Value> {
@@ -97,86 +137,28 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
-    let mut assets = Vec::new();
-    collect(&root, "", 0, &mut 0, &mut 0, &mut assets)?;
+    let assets = source::collect(&root)?;
     let count = assets.len();
-    let bytes = SiteBundle::encode(assets)?;
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.output))?;
-    temporary.write_all(&bytes)?;
+    let (bytes, receipt) = if args.review_receipt {
+        let (bytes, receipt) = preparation::write_to(assets, temporary.as_file_mut())?;
+        (bytes, Some(receipt))
+    } else {
+        (SiteBundle::write_to(assets, temporary.as_file_mut())?, None)
+    };
     temporary.as_file().sync_all()?;
     temporary
         .persist_noclobber(&args.output)
         .map_err(|error| error.error)?;
     File::open(output_parent(&args.output))?.sync_all()?;
+    if let Some(receipt) = receipt {
+        return Ok(receipt);
+    }
     Ok(serde_json::json!({
-        "operation":"site_pack", "assets":count, "bytes":bytes.len(),
+        "operation":"site_pack", "assets":count, "bytes":bytes,
         "content_type":SITE_CONTENT_TYPE, "output":args.output,
         "network_published":false, "hidden_entries_excluded":true, "symlinks_followed":false,
     }))
-}
-
-fn collect(
-    directory: &File,
-    prefix: &str,
-    depth: usize,
-    entries: &mut usize,
-    total: &mut u64,
-    assets: &mut Vec<SiteAsset>,
-) -> Result<()> {
-    if depth > 16 {
-        bail!("site directory nesting exceeds 16 levels");
-    }
-    let mut listing = Dir::read_from(directory)?;
-    while let Some(entry) = listing.read() {
-        let entry = entry?;
-        let name = entry
-            .file_name()
-            .to_str()
-            .context("site asset name must be UTF-8")?;
-        if matches!(name, "." | "..") {
-            continue;
-        }
-        *entries += 1;
-        if *entries > 4096 {
-            bail!("site directory entry bound exceeded");
-        }
-        if name.starts_with('.') {
-            continue;
-        }
-        let file = File::from(openat(
-            directory,
-            entry.file_name(),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?);
-        let metadata = file.metadata()?;
-        let path = format!("{prefix}/{name}");
-        if metadata.is_dir() {
-            collect(&file, &path, depth + 1, entries, total, assets)?;
-            continue;
-        }
-        if !metadata.is_file() || assets.len() == 256 {
-            bail!("site requires at most 256 regular assets");
-        }
-        let remaining = MAX_OBJECT_BYTES
-            .checked_sub(*total)
-            .context("site payload exceeds object limit")?;
-        if metadata.len() > remaining {
-            bail!("site asset exceeds remaining object limit");
-        }
-        let mut bytes = Vec::new();
-        file.take(remaining + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > remaining {
-            bail!("site changed beyond remaining object limit");
-        }
-        *total += bytes.len() as u64;
-        assets.push(SiteAsset {
-            content_type: media_type(&path).into(),
-            path,
-            bytes,
-        });
-    }
-    Ok(())
 }
 
 fn media_type(path: &str) -> &'static str {
@@ -272,6 +254,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         let report = pack(&args).unwrap();
         assert_eq!(report["assets"], 3);
@@ -306,6 +289,7 @@ mod tests {
         let args = Pack {
             directory,
             output: root.path().join("site.vps"),
+            review_receipt: false,
         };
         assert!(pack(&args).is_err());
         assert!(!args.output.exists());
@@ -320,7 +304,8 @@ mod tests {
         assert!(
             pack(&Pack {
                 directory: root.path().join("linked-root"),
-                output: args.output
+                output: args.output,
+                review_receipt: false,
             })
             .is_err()
         );

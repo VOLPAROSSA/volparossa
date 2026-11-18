@@ -1,6 +1,11 @@
 //! Publisher-local name resolution is not HTTPS authority or a globally latest version proof.
 
-use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
+use std::{
+    io::{self, Write},
+    os::unix::fs::PermissionsExt as _,
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result, bail};
 use tokio::time::{Instant, timeout, timeout_at};
@@ -33,8 +38,8 @@ pub(super) async fn run(args: &FetchName, socket: &Path) -> Result<()> {
 }
 
 /// Created only after publisher/name validation, complete bytes and correlated final receipt.
-pub(super) struct VerifiedNamedDownload {
-    temporary: tempfile::NamedTempFile,
+pub(super) struct VerifiedNamedDownload<T = tempfile::NamedTempFile> {
+    temporary: T,
     signed_manifest: SignedManifest,
     manifest: VerifiedManifest,
     receipt: ContentReceipt,
@@ -44,12 +49,14 @@ pub(super) struct VerifiedNamedDownload {
 }
 
 impl VerifiedNamedDownload {
-    pub(super) fn signed_manifest(&self) -> &SignedManifest {
-        &self.signed_manifest
-    }
-
     pub(super) fn as_file(&self) -> &std::fs::File {
         self.temporary.as_file()
+    }
+}
+
+impl<T> VerifiedNamedDownload<T> {
+    pub(super) fn signed_manifest(&self) -> &SignedManifest {
+        &self.signed_manifest
     }
 
     pub(super) fn manifest(&self) -> &VerifiedManifest {
@@ -187,7 +194,7 @@ async fn download(
         &request_id,
         ready,
         &query,
-        private_parent,
+        || file_target(private_parent),
         requirement,
     )
     .await
@@ -203,6 +210,47 @@ pub(super) async fn prepare_local(
     private_parent: &Path,
     requirement: &Requirement,
 ) -> Result<VerifiedNamedDownload> {
+    read_local(publisher, name, min_revision, socket, requirement, || {
+        file_target(private_parent)
+    })
+    .await
+}
+
+/// Check the exact signed object through the active local provider without retaining a copy.
+pub(super) async fn confirm_local(
+    publisher: &ed25519_dalek::VerifyingKey,
+    expected: &VerifiedManifest,
+    content_type: &'static str,
+    socket: &Path,
+) -> Result<()> {
+    let requirement = Requirement {
+        content_type,
+        maximum_bytes: expected.length(),
+        manifest_id: Some(*expected.manifest_id()),
+    };
+    let download = read_local(
+        publisher,
+        &expected.metadata().name,
+        expected.metadata().revision,
+        socket,
+        &requirement,
+        || Ok(io::sink()),
+    )
+    .await?;
+    if download.receipt.network_publication || download.receipt.origin_authority_body_bytes != 0 {
+        bail!("local registry confirmation reported publication or origin activity");
+    }
+    download.check_live()
+}
+
+async fn read_local<T: DeliveryTarget>(
+    publisher: &ed25519_dalek::VerifyingKey,
+    name: &str,
+    min_revision: u64,
+    socket: &Path,
+    requirement: &Requirement,
+    target: impl FnOnce() -> Result<T>,
+) -> Result<VerifiedNamedDownload<T>> {
     timeout(Duration::from_secs(30), async {
         let query = NameQuery::new(publisher.to_bytes(), name, min_revision)?;
         let (stream, request_id, response) = crate::control::begin_request(
@@ -230,7 +278,7 @@ pub(super) async fn prepare_local(
             &request_id,
             ready,
             &query,
-            private_parent,
+            target,
             Some(requirement),
         )
         .await
@@ -239,14 +287,39 @@ pub(super) async fn prepare_local(
     .context("local named registry deadline exceeded")?
 }
 
-async fn receive(
+// Defer opening the output until the signed metadata passes every consumer requirement.
+fn file_target(parent: &Path) -> Result<tempfile::NamedTempFile> {
+    let temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(temporary)
+}
+
+trait DeliveryTarget: Write {
+    fn finish(&self) -> io::Result<()>;
+}
+
+impl DeliveryTarget for tempfile::NamedTempFile {
+    fn finish(&self) -> io::Result<()> {
+        self.as_file().sync_all()
+    }
+}
+
+impl DeliveryTarget for io::Sink {
+    fn finish(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn receive<T: DeliveryTarget>(
     mut stream: tokio::net::UnixStream,
     request_id: &[u8],
     ready: NamedContentTransferReady,
     query: &NameQuery,
-    private_parent: &Path,
+    target: impl FnOnce() -> Result<T>,
     requirement: Option<&Requirement>,
-) -> Result<VerifiedNamedDownload> {
+) -> Result<VerifiedNamedDownload<T>> {
     let cache_only = ready.cache_only;
     let signed_manifest = SignedManifest::decode(&ready.manifest)?;
     let manifest = query.verify_candidate(&signed_manifest, now_seconds()?)?;
@@ -261,15 +334,12 @@ async fn receive(
         .context("named publication expired before local delivery")?;
     let authority_deadline = authority_observed_at + Duration::from_secs(remaining);
     let deadline = authority_deadline.min(authority_observed_at + Duration::from_secs(30));
-    let mut temporary = tempfile::NamedTempFile::new_in(private_parent)?;
-    temporary
-        .as_file()
-        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let mut temporary = target()?;
     let (progress, final_response) = timeout_at(deadline, async {
         let progress = pull_to_writer(
             &mut stream,
             &manifest,
-            temporary.as_file_mut(),
+            &mut temporary,
             TransferLimits {
                 exchange_timeout: Duration::from_secs(5),
                 session_timeout: Duration::from_secs(30),
@@ -302,7 +372,7 @@ async fn receive(
         authority_deadline,
         cache_only,
     };
-    download.as_file().sync_all()?;
+    download.temporary.finish()?;
     if Instant::now() >= deadline {
         bail!("publication expired before local output publication");
     }

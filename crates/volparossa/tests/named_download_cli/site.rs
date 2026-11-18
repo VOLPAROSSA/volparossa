@@ -14,6 +14,8 @@ use super::{Fault, Fixture, NAME, directory_names, isolated_network};
 
 #[path = "browser.rs"]
 mod browser;
+#[path = "confirm.rs"]
+mod confirm;
 
 #[test]
 fn site_cli_delivers_signed_html_assets_ranges_and_cleans_up() {
