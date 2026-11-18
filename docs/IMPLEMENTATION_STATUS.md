@@ -47,6 +47,13 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   browser verified the signed local preview, the four assets and the security
   headers. The receipt confirms process, listener and private-state cleanup.
   [Signed recovery trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368339229)
+- **Core site tools** now stream assets to the output bundle and recheck their
+  identity at read time. The CLI packed the maximum 256 assets with a process
+  limit of 64 file descriptors. Its `content site confirm` command verified
+  exact bytes and the final local-service receipt for an already signed site
+  and rejected mismatched, interrupted and withdrawn responses. The combined
+  Studio branch passed workspace tests, formatting and strict Clippy.
+  [Core quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367875308)
 - **Cloud** exercised owner uploads, restart and private catalog recovery using
   HTTP, OpenPGP and the pinned OpenCloud SDK. GnuPG sockets now work beneath
   long owner-directory paths. On `d105f983`, 111 Node and 13 Python tests
@@ -54,6 +61,14 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   suites used a fixture for the peer Storage interface.
   [Main-derived change](https://github.com/VOLPAROSSA/volparossa-cloud/commit/d105f983555a6c15b2859e651e1e075647dcf2c6)
   · [Cumulative upload source](https://github.com/VOLPAROSSA/volparossa-cloud/commit/998bf2d46ba51ba904500e4f223d5f7d200092dc)
+  The first paired VM trial ended during baseline import before the browser
+  upload. A separate local reproduction found that encryption could complete
+  and the helper would then fail while returning to an inaccessible inherited
+  working directory. Both CLI helpers now enter a validated owner directory.
+  All 139 SDK-backed Node tests and 14 Python tests passed locally on
+  `178592a3`.
+  [Initial VM failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/44368961729)
+  · [Corrected Cloud source](https://github.com/VOLPAROSSA/volparossa-cloud/commit/178592a3881d49f839f7716a154f7ef446ecbda5)
 - **Weather** compares IFS and AIFS 2 m temperature forecasts against supplied
   public station observations on matched runs, grids and observation times.
   The CLI reports signed and absolute error, coverage and exclusions. Its
