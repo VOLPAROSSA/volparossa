@@ -705,11 +705,16 @@ fn absolute_path(path: &Path) -> Result<String> {
 }
 
 fn verified_manifest_bytes(path: &Path, publisher: &VerifyingKey) -> Result<Vec<u8>> {
+    let bytes = read_manifest_bytes(path)?;
+    SignedManifest::decode(&bytes)?.verify(publisher, now_seconds()?)?;
+    Ok(bytes)
+}
+
+fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     open_regular(path, MAX_MANIFEST_BYTES as u64)?
         .take(MAX_MANIFEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    SignedManifest::decode(&bytes)?.verify(publisher, now_seconds()?)?;
     Ok(bytes)
 }
 

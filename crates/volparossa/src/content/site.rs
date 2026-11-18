@@ -23,6 +23,8 @@ use super::{FetchName, Limits, ensure_new_output, output_parent};
 pub(crate) enum Command {
     /// Pack regular static files; dotfiles and dot-directories are excluded, symlinks rejected.
     Pack(Pack),
+    /// Check whether the active local contribution service can deliver this exact signed site.
+    Confirm(Confirm),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
     Open(Box<Open>),
 }
@@ -35,6 +37,16 @@ pub(crate) struct Pack {
     /// New private bundle file; publish it with the reported native content type.
     #[arg(long)]
     output: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Confirm {
+    /// Original signed manifest retained by the publisher.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Independently trusted public key of the named publisher.
+    #[arg(long, value_parser = super::parse_publisher_key)]
+    publisher_key: VerifyingKey,
 }
 
 #[derive(Debug, Args)]
@@ -86,8 +98,31 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     match command {
         Command::Pack(args) => println!("{}", pack(&args)?),
         Command::Open(args) => viewer::run(*args, socket).await?,
+        Command::Confirm(args) => println!("{}", confirm(&args, socket).await?),
     }
     Ok(())
+}
+
+async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json::Value> {
+    let bytes = super::read_manifest_bytes(&args.manifest)?;
+    let manifest = volparossa_content::SignedManifest::decode(&bytes)?
+        .verify(&args.publisher_key, super::now_seconds()?)?;
+    if manifest.metadata().content_type != SITE_CONTENT_TYPE || manifest.length() == 0 {
+        bail!("expected a signed native site publication");
+    }
+    super::named_download::confirm_local(&args.publisher_key, &manifest, SITE_CONTENT_TYPE, socket)
+        .await?;
+    Ok(serde_json::json!({
+        "operation": "native_site_confirm",
+        "local_registry_read_verified": true,
+        "publisher_key": hex::encode(manifest.publisher()),
+        "name": manifest.metadata().name,
+        "revision": manifest.metadata().revision,
+        "manifest_id": hex::encode(manifest.manifest_id()),
+        "bytes": manifest.length(),
+        "chunks": manifest.chunks().len(),
+        "expires_unix_seconds": manifest.validity().expires,
+    }))
 }
 
 fn pack(args: &Pack) -> Result<serde_json::Value> {
