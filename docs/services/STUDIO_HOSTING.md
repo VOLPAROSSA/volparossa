@@ -58,11 +58,17 @@ external requests, service workers and persistent origin storage. Do not weaken
 that sandbox merely to call a Silex export compatible; conventional website and
 dynamic modes need explicit, separately verified origin/execution boundaries.
 
-Remaining production work includes the editor-to-Core publication adapter, independent browser
-rendering, identity/domain/TLS integration, authorized atomic update/rollback and
-withdrawal, continuity of retention when the publisher/controller is offline,
-measured independent replica health and repair/fairness, protected shared AI and
-dynamic execution with durable private state. All remain unfinished.
+Silex saved and reopened a page with a chart. After signing, an independent
+holder retained the five exported files. A fresh Firefox rendered the page
+and decoded the chart while the original publisher was offline. A separate
+owner-local restore activated the original bytes as a new signed revision.
+[Editor-to-browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
+· [Owner restore trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
+
+Remaining work includes a production editor publication adapter, domain and TLS
+integration, deployment and withdrawal of authorized revisions, and sustained
+availability as holders leave. Replica health, capacity fairness, protected
+shared AI and dynamic execution with durable private state also remain open.
 
 ## Silex source selection and interfaces
 
