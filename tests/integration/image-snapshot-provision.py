@@ -26,6 +26,7 @@ PINS = HERE / "image-snapshot-pins.json"
 SOURCE = Path("/opt/volparossa-image")
 RUNTIME = Path("/opt/volparossa-node")
 REVISION = "e177afebabd99ac0773de2a73d60275346a5de52"
+OWNER_REVISION = "0da0c35e9372a828553f376c3eb404a6081e0bb8"
 FILES = frozenset(("scripts/immich_snapshot.py", "scripts/snapshot-storage.mjs",
                    "src/core-storage.mjs", "LICENSE"))
 TOOLS = {"gpg": "gpg", "gpg-agent": "gpg-agent", "gpgconf": "gpgconf", "tar": "tar"}
@@ -45,10 +46,15 @@ def loader():
     return runpy.run_path(str(HERE / "agent-private-task-code.py"))
 
 
-def load_pins():
-    pins = json.loads(PINS.read_text())
+def pin_path(revision):
+    require(revision in (REVISION, OWNER_REVISION))
+    return PINS if revision == REVISION else HERE / "image-snapshot-owner-pins.json"
+
+
+def load_pins(revision=REVISION):
+    pins = json.loads(pin_path(revision).read_text())
     require(set(pins) == {"version", "repository", "revision", "files", "runtime"}
-            and pins["version"] == 1 and pins["revision"] == REVISION
+            and pins["version"] == 1 and pins["revision"] == revision
             and pins["repository"] == "https://github.com/VOLPAROSSA/volparossa-image"
             and set(pins["files"]) == FILES
             and pins["runtime"] == loader()["load_pins"]()["runtime"])
@@ -107,8 +113,8 @@ def expose(root):
     root.chmod(0o555)
 
 
-def provision():
-    pins = load_pins()
+def provision(revision=REVISION):
+    pins = load_pins(revision)
     guard()
     os.umask(0o077)
     runtime_stage = loader()
@@ -116,7 +122,7 @@ def provision():
     SOURCE.mkdir(mode=0o700)
     RUNTIME.mkdir(mode=0o700)
     for name, record in pins["files"].items():
-        runtime_stage["fetch"](f"https://raw.githubusercontent.com/VOLPAROSSA/volparossa-image/{REVISION}/{name}",
+        runtime_stage["fetch"](f"https://raw.githubusercontent.com/VOLPAROSSA/volparossa-image/{revision}/{name}",
                                SOURCE / name, record)
     # Download archive is private, short-lived, and never extracted by archive paths.
     with tempfile.TemporaryDirectory(prefix="image-node-stage.", dir="/opt") as temporary:
@@ -129,7 +135,7 @@ def provision():
     require(subprocess.check_output([str(RUNTIME / "bin/node"), "--version"],
             text=True, timeout=10, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}).strip() == "v24.19.0")
     report = dict(version=1, kind="image-snapshot-runtime-provision", success=True,
-                  pins=pins, pins_sha256=digest(PINS), tools=tools,
+                  pins=pins, pins_sha256=digest(pin_path(revision)), tools=tools,
                   guest_only=True, source_files_verified=True, runtime_files_verified=True,
                   original_licenses_retained=True, snapshot_created=False,
                   peer_storage_proven=False, immich_server_started=False)
@@ -145,10 +151,11 @@ def main():
     parser.add_argument("action", choices=("provision",))
     parser.add_argument("--download", action="store_true", required=True,
                         help="explicit guest-only pinned Image source and Node runtime download")
-    parser.parse_args()
-    print(json.dumps(dict(plan="guest-only-pinned-image-runtime", image_revision=REVISION,
+    parser.add_argument("--revision", choices=(REVISION, OWNER_REVISION), default=REVISION)
+    args = parser.parse_args()
+    print(json.dumps(dict(plan="guest-only-pinned-image-runtime", image_revision=args.revision,
                           snapshot_created=False, peer_storage_proven=False)), flush=True)
-    provision()
+    provision(args.revision)
     print("Pinned Image source and Node runtime verified; no snapshot or network storage tested")
 
 
