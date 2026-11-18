@@ -163,6 +163,28 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   retirement of sixteen peer copies and zero remaining test objects passed.
   [Successful Cloud topology](https://github.com/VOLPAROSSA/volparossa/actions/runs/44374814775)
   · [Source bindings and receipt hashes](https://github.com/VOLPAROSSA/volparossa-cloud/blob/08f3d2551ed80372693df4a69fcef70eef67fa02/docs/OWNER_UPLOADS.md#owner-upload-and-recovery-on-18-november-2026)
+  Cloud `720f88f2` adds the owner command `cloud-serve.mjs resume-upload`.
+  After a browser lost its source file, a restarted owner process used the
+  retained ciphertext and its existing journal to complete the pending upload.
+  The OpenCloud SDK listed and downloaded the result. Repeating the command
+  after completion made zero additional Storage calls. The tests rejected a
+  wrong owner token, a changed grant template or ciphertext, and an absent
+  journal. All 141 Node and 14 Python cases passed with a fixture for the peer
+  interface. Recovery requires a previously persisted deposit journal.
+  [Source, usage and test coverage](https://github.com/VOLPAROSSA/volparossa-cloud/blob/720f88f2a639ef5e2eecbba18c7bb2acb93f9645/docs/OWNER_UPLOADS.md)
+- **Image** restored a private album into a fresh Immich 3.2.4 instance on
+  Image `ef9b2260` and upstream `db355f79`. An authenticated client uploaded
+  and read an 8,516-byte PNG. With the server stopped, Image encrypted the
+  logical PostgreSQL dump and media, retained the owner's key separately, and
+  removed the original Docker project. The 51,283-byte ciphertext restored
+  into an empty database and fresh media volume. A new owner login confirmed
+  the album membership and all original image bytes. Anonymous access was
+  denied and the owned networks, containers, volumes and scratch were removed.
+  The producer passed the ciphertext locally in this run. An earlier fixture
+  invocation stopped after PostgreSQL restore on an unsupported Compose flag.
+  [Real Immich restoration](https://github.com/VOLPAROSSA/volparossa-image/actions/runs/44410004375)
+  · [Earlier attempt](https://github.com/VOLPAROSSA/volparossa-image/actions/runs/44409707182)
+  · [Separate owner-key support](https://github.com/VOLPAROSSA/volparossa-image/commit/0da0c35e9372a828553f376c3eb404a6081e0bb8)
 - **Mail** now connects from the browser and lets the account owner recheck
   a reported import after an interrupted metadata lookup. Chromium 154 exercised
   its actual form with a synthetic JMAP fixture. It performed one upload, one
