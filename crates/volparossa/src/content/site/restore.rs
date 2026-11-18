@@ -9,7 +9,7 @@ use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use volparossa_content::{
     ChunkStore, SignedManifest, VerifiedManifest,
-    site::{SITE_CONTENT_TYPE, SiteBundle},
+    site::{SITE_CONTENT_TYPE, SiteLayoutVerifier},
 };
 
 use crate::content::{
@@ -86,10 +86,10 @@ impl Release {
     }
 
     fn complete_site(&self, cache: &mut ChunkStore, now: u64) -> Result<()> {
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(usize::try_from(self.verified.length())?)?;
-        volparossa_content::reassemble(&self.verified, &mut [cache], now, &mut bytes)?;
-        SiteBundle::decode(bytes)
+        let mut layout = SiteLayoutVerifier::default();
+        volparossa_content::reassemble(&self.verified, &mut [cache], now, &mut layout)?;
+        layout
+            .finish()
             .context("restoration requires a complete canonical static site")?;
         Ok(())
     }

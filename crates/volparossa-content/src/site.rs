@@ -163,10 +163,15 @@ impl SiteBundle {
     /// Rejects limits, noncanonical indexes, unsupported versions, invalid metadata, gaps,
     /// overlaps, trailing/truncated bytes, and a missing HTML entry point.
     pub fn decode(encoded: Vec<u8>) -> Result<Self, SiteError> {
-        if u64::try_from(encoded.len()).map_err(|_| SiteError::Limit)? > MAX_OBJECT_BYTES {
+        let assets = Self::asset_ranges(&encoded, encoded.len())?;
+        Ok(Self { encoded, assets })
+    }
+
+    fn asset_ranges(prefix: &[u8], total: usize) -> Result<Vec<AssetRange>, SiteError> {
+        if u64::try_from(total).map_err(|_| SiteError::Limit)? > MAX_OBJECT_BYTES {
             return Err(SiteError::Limit);
         }
-        let header: [u8; 4] = encoded
+        let header: [u8; 4] = prefix
             .get(..4)
             .ok_or(SiteError::Encoding)?
             .try_into()
@@ -177,7 +182,7 @@ impl SiteBundle {
             return Err(SiteError::Limit);
         }
         let payload_start = 4 + index_bytes;
-        let wire = encoded.get(4..payload_start).ok_or(SiteError::Encoding)?;
+        let wire = prefix.get(4..payload_start).ok_or(SiteError::Encoding)?;
         let index = decode_index(wire)?;
         if index.version != VERSION || index.encode_to_vec() != wire {
             return Err(SiteError::Encoding);
@@ -202,7 +207,7 @@ impl SiteBundle {
             let start = end;
             end = end
                 .checked_add(usize::try_from(entry.length).map_err(|_| SiteError::Limit)?)
-                .filter(|end| *end <= encoded.len())
+                .filter(|end| *end <= total)
                 .ok_or(SiteError::Encoding)?;
             assets.push(AssetRange {
                 path: entry.path,
@@ -210,10 +215,10 @@ impl SiteBundle {
                 bytes: start..end,
             });
         }
-        if end != encoded.len() {
+        if end != total {
             return Err(SiteError::Encoding);
         }
-        Ok(Self { encoded, assets })
+        Ok(assets)
     }
 
     /// Exact path lookup; this does not URL-decode, normalize or access the filesystem.
@@ -237,6 +242,59 @@ impl SiteBundle {
         self.assets.len()
     }
 }
+
+/// Validate the layout of an authenticated stream without holding its asset payloads.
+/// The native reassembler independently verifies chunk and complete object hashes.
+#[derive(Default)]
+pub struct SiteLayoutVerifier {
+    prefix: Vec<u8>,
+    total: usize,
+}
+
+impl SiteLayoutVerifier {
+    /// Check the same canonical index and exact payload bounds as [`SiteBundle::decode`].
+    ///
+    /// # Errors
+    /// Rejects malformed framing, index, asset metadata, and incorrect aggregate length.
+    pub fn finish(self) -> Result<(), SiteError> {
+        SiteBundle::asset_ranges(&self.prefix, self.total).map(|_| ())
+    }
+}
+
+impl Write for SiteLayoutVerifier {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let total = self
+            .total
+            .checked_add(bytes.len())
+            .filter(|total| u64::try_from(*total).is_ok_and(|len| len <= MAX_OBJECT_BYTES))
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let header = 4_usize.saturating_sub(self.prefix.len()).min(bytes.len());
+        self.prefix.extend_from_slice(&bytes[..header]);
+        if let Some(length) = self.prefix.first_chunk::<4>() {
+            let size = u32::from_be_bytes(*length) as usize;
+            // Invalid lengths are retained in the header for the canonical decoder.
+            if size <= MAX_SITE_INDEX_BYTES {
+                let remaining = (4 + size) - self.prefix.len();
+                let take = remaining.min(bytes.len() - header);
+                if take != 0 {
+                    self.prefix
+                        .try_reserve_exact(remaining)
+                        .map_err(|_| io::ErrorKind::OutOfMemory)?;
+                    self.prefix.extend_from_slice(&bytes[header..header + take]);
+                }
+            }
+        }
+        self.total = total;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod layout_tests;
 
 struct SiteEncoding<R> {
     index: Index,

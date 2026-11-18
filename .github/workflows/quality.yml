@@ -308,6 +308,7 @@ jobs:
             cargo test --locked --offline -p volparossa --test studio_site_pack --no-run
           else
             cargo fmt --all -- --check
+            cargo test --locked --offline -p volparossa-content --lib site::
             cargo test --locked --offline -p volparossa --bin volparossa content::site::
             cargo test --locked --offline -p volparossa --test studio_site_restore
             cargo build --locked --offline -p volparossa --bin volparossa
