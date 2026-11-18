@@ -143,6 +143,34 @@ class LogProjection(unittest.TestCase):
         self.assertNotIn(b'timestamp', raw)
         self.assertNotIn(b'target', raw)
 
+    def test_closed_coordinator_reasons_do_not_displace_socket_failure_records(self):
+        def event(reason, **extras):
+            return (json.dumps(dict(fields=dict(diagnostic_code=M.COORDINATOR_MARKER,
+                reason=reason, **extras), target=CANARY)) + '\n').encode()
+
+        reasons = sorted(('record_absent', 'process_absent', 'lease_expired', 'liveness_lost',
+            'lease_expired_and_liveness_lost', 'dead_unspecified', 'quarantined', 'shutting_down',
+            'runtime_unavailable'))
+        raw = line() * M.MAX_RECORDS
+        historical = self.project(raw)
+        self.assertNotIn('coordinator_unavailable_reasons', historical)
+        markers = b''.join(event(reason) for reason in reversed(reasons)) + event('record_absent')
+        value = self.project(raw + markers)
+        self.assertEqual(value, dict(historical, version=2, coordinator_unavailable_reasons=reasons))
+        self.assertEqual(M.decode(M.encoded(value)), value)
+        for invalid_version in (dict(value, version=1), dict(historical, version=2)):
+            with self.assertRaises(ValueError):
+                M.validate(invalid_version)
+        self.assertNotIn(CANARY.encode(), M.encoded(value))
+        invalid = self.project(event(CANARY) + event('record_absent', context=CANARY) + event(None))
+        self.assertEqual(invalid, dict(M.empty(), malformed_records=3, projection_complete=False))
+        for invalid_reasons in ([], ['record_absent'] * 2, ['shutting_down', 'record_absent'],
+                                ['dead'], [CANARY], [None], 'dead'):
+            with self.subTest(reasons=invalid_reasons), self.assertRaises(ValueError):
+                M.validate(dict(value, coordinator_unavailable_reasons=invalid_reasons))
+        with self.assertRaises(ValueError):
+            M.validate(dict(value, source_state='absent'))
+
     def test_absent_and_explicit_null_errno_are_equivalent(self):
         event = json.loads(line(errno=None)); del event['fields']['errno']
         value = self.project(line(errno=None) + (json.dumps(event) + '\n').encode())

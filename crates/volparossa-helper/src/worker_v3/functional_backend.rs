@@ -100,8 +100,8 @@ use super::{
     DurableFunctionalPrepareFailure, DurableFunctionalPrepareInput,
     DurableFunctionalWorkerOwnership, DurablePrepareTerminalSelector,
     DurablePrepareTerminalSettlement, ReapedWorkerRestartCustody, ShutdownStatus,
-    WorkerCoordinator, WorkerGenerationOwnership, WorkerGenerationReap, WorkerLifecycleAdmission,
-    WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
+    WorkerCoordinator, WorkerDeadReason, WorkerGenerationOwnership, WorkerGenerationReap,
+    WorkerLifecycleAdmission, WorkerRecoveryIdentitySource, WorkerRegistry, WorkerV3Error,
     dead_worker_reaper::{
         DeadWorkerCleanupPlan, DeadWorkerNamespaceReaper, ProductionDeadWorkerNamespaceReaper,
     },
@@ -1319,10 +1319,11 @@ impl FunctionalAlphaLeaseBackend {
             }
             Err(WorkerV3Error::Capacity) => return Err(BackendError::Capacity),
             Err(error) => {
-                return Err(self
+                let rejection = self
                     .cleanup_after_failure(key, deadline, BackendError::CleanupIncomplete)
-                    .await
-                    .with_acquire_origin(acquire_coordinator_origin(&error)));
+                    .await;
+                let origin = acquire_coordinator_origin(&error, &internal);
+                return Err(rejection.with_acquire_origin(origin));
             }
         };
 
@@ -3906,17 +3907,35 @@ enum AcquireTransportExecution {
     RequiresCleanup(BackendError),
 }
 
-fn acquire_coordinator_origin(error: &WorkerV3Error) -> AcquireCleanupOrigin {
-    match error {
-        WorkerV3Error::Deadline => AcquireCleanupOrigin::CoordinatorDeadline,
-        WorkerV3Error::Ambiguous => AcquireCleanupOrigin::CoordinatorAmbiguous,
-        // This grouped observation does not identify which of the four states occurred.
-        WorkerV3Error::Dead
-        | WorkerV3Error::Quarantined
-        | WorkerV3Error::ShuttingDown
-        | WorkerV3Error::RuntimeUnavailable => AcquireCleanupOrigin::CoordinatorUnavailable,
-        _ => AcquireCleanupOrigin::CoordinatorOther,
+fn acquire_coordinator_origin(
+    error: &WorkerV3Error,
+    request: &InternalAcquireTransportSocket,
+) -> AcquireCleanupOrigin {
+    let reason = match error {
+        WorkerV3Error::Deadline => return AcquireCleanupOrigin::CoordinatorDeadline,
+        WorkerV3Error::Ambiguous => return AcquireCleanupOrigin::CoordinatorAmbiguous,
+        WorkerV3Error::Dead(reason) => match reason {
+            WorkerDeadReason::RecordAbsent => "record_absent",
+            WorkerDeadReason::ProcessAbsent => "process_absent",
+            WorkerDeadReason::LeaseExpired => "lease_expired",
+            WorkerDeadReason::LivenessLost => "liveness_lost",
+            WorkerDeadReason::LeaseExpiredAndLivenessLost => "lease_expired_and_liveness_lost",
+            WorkerDeadReason::Unspecified => "dead_unspecified",
+        },
+        WorkerV3Error::Quarantined => "quarantined",
+        WorkerV3Error::ShuttingDown => "shutting_down",
+        WorkerV3Error::RuntimeUnavailable => "runtime_unavailable",
+        _ => return AcquireCleanupOrigin::CoordinatorOther,
+    };
+    if request.role == InternalEndpointRole::Client as i32
+        && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+    {
+        tracing::warn!(
+            diagnostic_code = "WORKER_TRANSPORT_COORDINATOR_UNAVAILABLE",
+            reason
+        );
     }
+    AcquireCleanupOrigin::CoordinatorUnavailable
 }
 
 fn log_acquire_failure(execution: &crate::worker_transport::CredentialedWorkerExecution) {
@@ -6258,10 +6277,14 @@ pub(super) mod tests {
     #[test]
     fn acquire_coordinator_origins_are_closed_and_do_not_change_definite_errors() {
         use AcquireCleanupOrigin as Origin;
+        let request = mptcp_connected_acquire_request();
         for (error, origin) in [
             (WorkerV3Error::Deadline, Origin::CoordinatorDeadline),
             (WorkerV3Error::Ambiguous, Origin::CoordinatorAmbiguous),
-            (WorkerV3Error::Dead, Origin::CoordinatorUnavailable),
+            (
+                WorkerV3Error::Dead(WorkerDeadReason::Unspecified),
+                Origin::CoordinatorUnavailable,
+            ),
             (WorkerV3Error::Quarantined, Origin::CoordinatorUnavailable),
             (WorkerV3Error::ShuttingDown, Origin::CoordinatorUnavailable),
             (
@@ -6278,7 +6301,14 @@ pub(super) mod tests {
                 Origin::CoordinatorOther,
             ),
         ] {
-            assert_eq!(acquire_coordinator_origin(&error), origin);
+            let capture = AcquireLogCapture::default();
+            tracing::subscriber::with_default(capture.clone(), || {
+                assert_eq!(acquire_coordinator_origin(&error, &request), origin);
+            });
+            assert_eq!(
+                capture.0.lock().expect("captured fields").is_empty(),
+                origin != Origin::CoordinatorUnavailable
+            );
             for definite in [
                 BackendError::Unavailable,
                 BackendError::Capacity,
@@ -6288,6 +6318,58 @@ pub(super) mod tests {
             ] {
                 assert_eq!(definite.with_acquire_origin(origin), definite);
             }
+        }
+    }
+
+    #[test]
+    fn coordinator_unavailable_traces_two_closed_fields_only_for_client_mptcp_acquire() {
+        use WorkerDeadReason as Dead;
+        for (error, reason) in [
+            (WorkerV3Error::Dead(Dead::RecordAbsent), "record_absent"),
+            (WorkerV3Error::Dead(Dead::ProcessAbsent), "process_absent"),
+            (WorkerV3Error::Dead(Dead::LeaseExpired), "lease_expired"),
+            (WorkerV3Error::Dead(Dead::LivenessLost), "liveness_lost"),
+            (
+                WorkerV3Error::Dead(Dead::LeaseExpiredAndLivenessLost),
+                "lease_expired_and_liveness_lost",
+            ),
+            (WorkerV3Error::Dead(Dead::Unspecified), "dead_unspecified"),
+            (WorkerV3Error::Quarantined, "quarantined"),
+            (WorkerV3Error::ShuttingDown, "shutting_down"),
+            (WorkerV3Error::RuntimeUnavailable, "runtime_unavailable"),
+        ] {
+            let capture = AcquireLogCapture::default();
+            tracing::subscriber::with_default(capture.clone(), || {
+                let mut request = mptcp_connected_acquire_request();
+                request.role = InternalEndpointRole::Exit as i32;
+                assert_eq!(
+                    acquire_coordinator_origin(&error, &request),
+                    AcquireCleanupOrigin::CoordinatorUnavailable
+                );
+                request.role = InternalEndpointRole::Client as i32;
+                request.descriptor_kind = InternalTransportSocketKind::QuicUdpUnconnected as i32;
+                assert_eq!(
+                    acquire_coordinator_origin(&error, &request),
+                    AcquireCleanupOrigin::CoordinatorUnavailable
+                );
+                assert!(capture.0.lock().expect("captured fields").is_empty());
+                request.descriptor_kind = InternalTransportSocketKind::MptcpConnected as i32;
+                assert_eq!(
+                    acquire_coordinator_origin(&error, &request),
+                    AcquireCleanupOrigin::CoordinatorUnavailable
+                );
+            });
+            let expected = BTreeMap::from([
+                (
+                    "diagnostic_code".to_owned(),
+                    AcquireLogValue::Text("WORKER_TRANSPORT_COORDINATOR_UNAVAILABLE".to_owned()),
+                ),
+                (
+                    "reason".to_owned(),
+                    AcquireLogValue::Text(reason.to_owned()),
+                ),
+            ]);
+            assert_eq!(*capture.0.lock().expect("captured fields"), vec![expected]);
         }
     }
 

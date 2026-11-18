@@ -225,6 +225,17 @@ struct WorkerSpawnBinding<'a> {
     deadline: HardDeadline,
 }
 
+/// The observation that caused an existing worker-dead rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerDeadReason {
+    Unspecified,
+    RecordAbsent,
+    ProcessAbsent,
+    LeaseExpired,
+    LivenessLost,
+    LeaseExpiredAndLivenessLost,
+}
+
 #[derive(Debug, Error)]
 enum WorkerV3Error {
     #[error("worker authentication failed")]
@@ -236,7 +247,7 @@ enum WorkerV3Error {
     #[error("worker registry capacity reached")]
     Capacity,
     #[error("worker is not alive")]
-    Dead,
+    Dead(WorkerDeadReason),
     #[error("worker generation is quarantined")]
     Quarantined,
     #[error("worker IPC result is ambiguous")]
@@ -1074,7 +1085,10 @@ fn spawn_with_command_locked(
         return Err(finish_launch_failure(process, error));
     }
     if !process.probe_alive() {
-        return Err(finish_launch_failure(process, WorkerV3Error::Dead));
+        return Err(finish_launch_failure(
+            process,
+            WorkerV3Error::Dead(WorkerDeadReason::Unspecified),
+        ));
     }
     if let Err(error) = parent_handshake(&process, observation, challenge, binding) {
         return Err(finish_launch_failure(process, error));
@@ -5570,11 +5584,11 @@ impl WorkerGenerationOwnership {
             .records
             .get(&self.coordinates.context_id)
             .filter(|record| record.generation == self.coordinates.worker_generation.get())
-            .ok_or(WorkerV3Error::Dead)?;
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         record
             .process
             .as_ref()
-            .ok_or(WorkerV3Error::Dead)?
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?
             .duplicate_network_namespace_pin(deadline)
     }
 
@@ -6242,7 +6256,7 @@ fn worker_error_class(error: &WorkerV3Error) -> WorkerV3Error {
         WorkerV3Error::Invalid => WorkerV3Error::Invalid,
         WorkerV3Error::Conflict => WorkerV3Error::Conflict,
         WorkerV3Error::Capacity => WorkerV3Error::Capacity,
-        WorkerV3Error::Dead => WorkerV3Error::Dead,
+        WorkerV3Error::Dead(reason) => WorkerV3Error::Dead(*reason),
         WorkerV3Error::Quarantined => WorkerV3Error::Quarantined,
         WorkerV3Error::Ambiguous => WorkerV3Error::Ambiguous,
         WorkerV3Error::Stale => WorkerV3Error::Stale,
@@ -6855,7 +6869,7 @@ impl WorkerRegistry {
         } else if self.shutting_down {
             Some(WorkerV3Error::ShuttingDown)
         } else if now >= expires_at {
-            Some(WorkerV3Error::Dead)
+            Some(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))
         } else if self.records.contains_key(&context_id)
             || process.binding != Some((context_id, generation))
         {
@@ -6994,7 +7008,10 @@ impl WorkerRegistry {
         ),
         WorkerV3Error,
     > {
-        let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
+        let record = self
+            .records
+            .get(&context_id)
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         if record.generation != generation {
             return Err(WorkerV3Error::Stale);
         }
@@ -7007,7 +7024,10 @@ impl WorkerRegistry {
         if record.quarantined {
             return Err(WorkerV3Error::Quarantined);
         }
-        let process = record.process.as_ref().ok_or(WorkerV3Error::Dead)?;
+        let process = record
+            .process
+            .as_ref()
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         let pinned_network_namespace = matches!(
             request.operation.as_ref(),
             Some(
@@ -7041,12 +7061,12 @@ impl WorkerRegistry {
         let record = self
             .records
             .get(&coordinates.context_id)
-            .ok_or(WorkerV3Error::Dead)?;
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         if record.generation != coordinates.worker_generation.get() {
             return Err(WorkerV3Error::Stale);
         }
         if Instant::now() >= record.expires_at {
-            return Err(WorkerV3Error::Dead);
+            return Err(WorkerV3Error::Dead(WorkerDeadReason::Unspecified));
         }
         if record.quarantined || record.in_flight.is_some() {
             return Err(WorkerV3Error::Quarantined);
@@ -7054,7 +7074,10 @@ impl WorkerRegistry {
         if record.stable_phase != StablePhase::Starting {
             return Err(WorkerV3Error::Conflict);
         }
-        record.process.as_ref().ok_or(WorkerV3Error::Dead)
+        record
+            .process
+            .as_ref()
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))
     }
 
     fn confirm_recovery_identity_source(
@@ -7086,7 +7109,7 @@ impl WorkerRegistry {
         let record = self
             .records
             .get(&coordinates.context_id)
-            .ok_or(WorkerV3Error::Dead)?;
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         if record.generation != coordinates.worker_generation.get()
             || record.dispatch_fence != WorkerDispatchFence::DurableHandoffPending
         {
@@ -7135,7 +7158,7 @@ impl WorkerRegistry {
         let record = self
             .records
             .get_mut(&coordinates.context_id)
-            .ok_or(WorkerV3Error::Dead)?;
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
         if record.generation != coordinates.worker_generation.get()
             || record.dispatch_fence != WorkerDispatchFence::DurableHandoffPending
             || record.stable_phase != StablePhase::Starting
@@ -7216,14 +7239,20 @@ impl WorkerRegistry {
         };
 
         let (phase, expires_at, liveness, expected_peer, in_flight, initialise_reconciliation) = {
-            let record = self.records.get(&context_id).ok_or(WorkerV3Error::Dead)?;
+            let record = self
+                .records
+                .get(&context_id)
+                .ok_or(WorkerV3Error::Dead(WorkerDeadReason::RecordAbsent))?;
             if record.generation != generation {
                 return Err(WorkerV3Error::Stale);
             }
             if record.quarantined {
                 return Err(WorkerV3Error::Quarantined);
             }
-            let process = record.process.as_ref().ok_or(WorkerV3Error::Dead)?;
+            let process = record
+                .process
+                .as_ref()
+                .ok_or(WorkerV3Error::Dead(WorkerDeadReason::ProcessAbsent))?;
             (
                 record.stable_phase,
                 record.expires_at,
@@ -7235,7 +7264,7 @@ impl WorkerRegistry {
         };
         if now >= expires_at {
             self.quarantine(context_id, generation)?;
-            return Err(WorkerV3Error::Dead);
+            return Err(WorkerV3Error::Dead(WorkerDeadReason::LeaseExpired));
         }
         let (replay_expiry, deadline, budget) = downlink_replay::bounded_replay_expiry(
             request,
@@ -7317,7 +7346,7 @@ impl WorkerRegistry {
         self.tombstone_order.push_back(tombstone_key);
         self.records
             .get_mut(&context_id)
-            .ok_or(WorkerV3Error::Dead)?
+            .ok_or(WorkerV3Error::Dead(WorkerDeadReason::RecordAbsent))?
             .in_flight = Some(in_flight);
         Ok(RegistryPlan::Call(PlannedCall {
             token: PlanToken {
@@ -7404,12 +7433,8 @@ impl WorkerRegistry {
 
             let alive_at_commit = token.in_flight.terminal
                 || (worker_alive && record.alive_hint.load(Ordering::SeqCst));
-            if !valid
-                || !deadline_live
-                || shutting_down
-                || now >= record.expires_at
-                || !alive_at_commit
-            {
+            let lease_expired = now >= record.expires_at;
+            if !valid || !deadline_live || shutting_down || lease_expired || !alive_at_commit {
                 let error = if !valid {
                     WorkerV3Error::Invalid
                 } else if !deadline_live {
@@ -7417,7 +7442,13 @@ impl WorkerRegistry {
                 } else if shutting_down {
                     WorkerV3Error::ShuttingDown
                 } else {
-                    WorkerV3Error::Dead
+                    WorkerV3Error::Dead(if lease_expired && !alive_at_commit {
+                        WorkerDeadReason::LeaseExpiredAndLivenessLost
+                    } else if lease_expired {
+                        WorkerDeadReason::LeaseExpired
+                    } else {
+                        WorkerDeadReason::LivenessLost
+                    })
                 };
                 Self::reject_finish(record, token, error)
             } else if ensure_worker_deadline(token.in_flight.deadline).is_err() {
@@ -7439,7 +7470,7 @@ impl WorkerRegistry {
                     record.quarantined = true;
                     record.process.take().map_or(
                         FinishOutcome::Rejected {
-                            error: WorkerV3Error::Dead,
+                            error: WorkerV3Error::Dead(WorkerDeadReason::Unspecified),
                             detached: None,
                         },
                         |process| {
@@ -7563,7 +7594,7 @@ impl WorkerRegistry {
                     } else if !deadline_live || ensure_worker_deadline(call.deadline).is_err() {
                         WorkerV3Error::Deadline
                     } else {
-                        WorkerV3Error::Dead
+                        WorkerV3Error::Dead(WorkerDeadReason::Unspecified)
                     },
                     detached,
                 }
@@ -11385,7 +11416,7 @@ impl WorkerCoordinator {
             let record = registry
                 .records
                 .get(&ownership.coordinates.context_id)
-                .ok_or(WorkerV3Error::Dead)?;
+                .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
             if record.generation != ownership.coordinates.worker_generation.get()
                 || !matches!(
                     record.dispatch_fence,
@@ -11425,7 +11456,7 @@ impl WorkerCoordinator {
             let record = registry
                 .records
                 .get(&ownership.coordinates.context_id)
-                .ok_or(WorkerV3Error::Dead)?;
+                .ok_or(WorkerV3Error::Dead(WorkerDeadReason::Unspecified))?;
             if record.generation != ownership.coordinates.worker_generation.get()
                 || !matches!(
                     record.dispatch_fence,
@@ -11498,7 +11529,7 @@ impl WorkerCoordinator {
             liveness
         };
         if !liveness.probe_alive_until(deadline)? {
-            return Err(WorkerV3Error::Dead);
+            return Err(WorkerV3Error::Dead(WorkerDeadReason::Unspecified));
         }
         ensure_worker_deadline(deadline)?;
         let registry = lock_worker_registry_until(&self.registry, deadline)?;
@@ -21442,7 +21473,7 @@ mod tests {
         }
         release.wait();
         let (result, ownership) = recovery.join().expect("TTL recovery thread");
-        assert!(matches!(result, Err(WorkerV3Error::Dead)));
+        assert!(matches!(result, Err(WorkerV3Error::Dead(_))));
 
         lock_worker_registry(&coordinator.registry)
             .records
@@ -22021,7 +22052,7 @@ mod tests {
                 &ownership,
                 HardDeadline::after(Duration::from_secs(1)).expect("expired-source deadline"),
             ),
-            Err(WorkerV3Error::Dead)
+            Err(WorkerV3Error::Dead(_))
         ));
         {
             let mut registry = lock_worker_registry(&coordinator.registry);
@@ -22698,31 +22729,83 @@ mod tests {
     }
 
     #[test]
-    fn finish_rechecks_process_liveness_at_commit() {
+    fn acquire_observes_distinct_registry_rejections_before_dispatch() {
         let now = Instant::now();
+        let ttl = Duration::from_secs(3);
         let context_id = [26; 16];
-        let request = initialise(context_id, 20);
-        let mut registry = WorkerRegistry::new(1, 2, Duration::from_secs(10));
-        let (process, _peer, alive) = fake_process(Duration::from_secs(1));
-        let generation = registry
-            .register(context_id, process, Duration::from_secs(5), now)
-            .expect("register");
-        let planned = call(
-            registry
-                .plan(context_id, generation, &request, now)
-                .expect("plan"),
-        );
-        let response = initialised_response(&request, context_id);
-        alive.store(false, Ordering::SeqCst);
+        let request = acquire(context_id, 17);
+        let mut registry = WorkerRegistry::new(1, 4, Duration::from_secs(10));
+        assert!(matches!(
+            registry.plan(context_id, 1, &request, now),
+            Err(WorkerV3Error::Dead(WorkerDeadReason::RecordAbsent))
+        ));
 
-        let FinishOutcome::Rejected {
-            error: WorkerV3Error::Dead,
-            detached: Some(detached),
-        } = registry.finish(planned.token, &request, &response, now, true)
-        else {
-            panic!("commit must recheck process liveness after a stale positive snapshot")
-        };
+        let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context_id, process, ttl, now)
+            .expect("register");
+        let process = registry
+            .records
+            .get_mut(&context_id)
+            .unwrap()
+            .process
+            .take();
+        assert!(matches!(
+            registry.plan(context_id, generation, &request, now),
+            Err(WorkerV3Error::Dead(WorkerDeadReason::ProcessAbsent))
+        ));
+        registry.records.get_mut(&context_id).unwrap().process = process;
+        assert!(matches!(
+            registry.plan(context_id, generation, &request, now + ttl),
+            Err(WorkerV3Error::Dead(WorkerDeadReason::LeaseExpired))
+        ));
+        assert!(matches!(
+            registry.plan(context_id, generation, &request, now + ttl),
+            Err(WorkerV3Error::Quarantined)
+        ));
+        let detached = registry
+            .detach_quarantined(context_id, generation)
+            .unwrap()
+            .unwrap();
         stop_and_purge(&mut registry, detached);
+    }
+
+    #[test]
+    fn finish_rechecks_process_liveness_at_commit() {
+        let ttl = Duration::from_secs(5);
+        for (alive_at_commit, elapsed, expected) in [
+            (false, Duration::ZERO, WorkerDeadReason::LivenessLost),
+            (true, ttl, WorkerDeadReason::LeaseExpired),
+            (false, ttl, WorkerDeadReason::LeaseExpiredAndLivenessLost),
+        ] {
+            let now = Instant::now();
+            let context_id = [26; 16];
+            let request = initialise(context_id, 20);
+            let mut registry = WorkerRegistry::new(1, 2, Duration::from_secs(10));
+            let (process, _peer, alive) = fake_process(Duration::from_secs(1));
+            let generation = registry
+                .register(context_id, process, ttl, now)
+                .expect("register");
+            let planned = call(
+                registry
+                    .plan(context_id, generation, &request, now)
+                    .expect("plan"),
+            );
+            let response = initialised_response(&request, context_id);
+            alive.store(alive_at_commit, Ordering::SeqCst);
+
+            let FinishOutcome::Rejected {
+                error: WorkerV3Error::Dead(reason),
+                detached: Some(detached),
+            } = registry.finish(planned.token, &request, &response, now + elapsed, true)
+            else {
+                panic!(
+                    "commit must reject expired or dead workers after a positive liveness snapshot"
+                )
+            };
+            assert_eq!(reason, expected);
+            stop_and_purge(&mut registry, detached);
+        }
     }
 
     #[test]
@@ -22919,7 +23002,7 @@ mod tests {
         };
         alive.store(false, Ordering::SeqCst);
         let FinishOutcome::Rejected {
-            error: WorkerV3Error::Dead,
+            error: WorkerV3Error::Dead(_),
             detached: Some(detached),
         } = registry.validate_cached(&cached, now, true)
         else {
@@ -25212,7 +25295,7 @@ mod tests {
         let coordinator = WorkerCoordinator::new(registry);
         assert!(matches!(
             coordinator.execute(context_id, generation, request).await,
-            Err(WorkerV3Error::Dead)
+            Err(WorkerV3Error::Dead(WorkerDeadReason::LeaseExpired))
         ));
         worker.join().expect("worker join");
         assert!(matches!(
@@ -25255,7 +25338,7 @@ mod tests {
         let coordinator = WorkerCoordinator::new(registry);
         assert!(matches!(
             coordinator.execute(context_id, generation, request).await,
-            Err(WorkerV3Error::Dead)
+            Err(WorkerV3Error::Dead(WorkerDeadReason::LivenessLost))
         ));
         worker.join().expect("worker join");
         let mut byte = [0_u8; 1];
