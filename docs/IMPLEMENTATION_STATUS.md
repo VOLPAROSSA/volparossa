@@ -42,6 +42,14 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   passed all three jobs on `6350130d`, which integrates the Storage bind
   diagnostic, exact release selection and restored-site deployment fixture.
   Its workspace test step reported 4,493 passed, zero failed and 21 ignored.
+  On `ed1764f6` the MPTCP client rechecks the signed route deadline after
+  waiting for the previous flow's retirement. When the route expired during
+  that wait, the adapter sent zero new helper acquisition requests. A still
+  valid route issued its normal request. Both IPC regressions passed, as did
+  strict Clippy and the workspace suite (4,495 passed, zero failed, 21 ignored).
+  These tests isolate the admission window. The cross-application reservations
+  have separate evidence in the Storage section.
+  [Route lifetime quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409970591)
 - **Studio** saved an edited page, reopened it in a fresh browser context,
   verified its text and 37 px styling, and exported it. The Core CLI packed
   the four files from the 1,474-byte ZIP and the production decoder verified
@@ -266,6 +274,15 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   Weather `f850f74f`. These observations cover one nominal hour.
   [Runnable archive example](https://github.com/VOLPAROSSA/volparossa-weather/tree/f850f74f7347d121f039115afb6e5fb1d43e12f5#score-cached-archive-fields-with-the-verification-cli)
   · [Four-station report](https://github.com/VOLPAROSSA/volparossa-weather/blob/f850f74f7347d121f039115afb6e5fb1d43e12f5/third_party/ecmwf-dwd-archive-report.json)
+  Main also includes the pinned decoder rebuild. Core `c7d65a4b` and Weather
+  `05a7350c` reproduced the 14 source-built payload files (93,841,627 bytes).
+  A separate Debian 13 guest verified all eight offline ABI checks, including
+  isolated relocation and both ends of the CCSDS test field. The 97 public
+  evidence files and both guest cleanups were independently checked. This
+  concerns the Linux decoder ABI. Mobile sensors and forecast accuracy have
+  separate evidence.
+  [Native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44412679519)
+  · [Main integration and archive digests](https://github.com/VOLPAROSSA/volparossa/pull/350)
 - **Map** clears an expired positioning-quality result when the Android
   activity or its window regains focus, and when a new assessment is requested.
   Eight synthetic Android/JNI emulator cases passed on `249266a8`, including
@@ -278,6 +295,15 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   within aggregate ownership limits and remaining TEST cash. Nine library and
   four CLI tests, formatting and strict Clippy passed locally.
   [Bank source and runnable example](https://github.com/VOLPAROSSA/volparossa-bank/tree/29e79f9b9c5b3e4a83a80672580ee1c18276e526)
+
+  The subsequent Bank integration staged an owner-signed TEST transfer, used
+  Core's actual ordered store to commit it, reopened the store, and replayed
+  the same receipt after expiry. The 100 synthetic units were conserved as
+  balances of 30 and 70. The normal hosted command and 28 tests passed.
+  This fixture supplies the transaction order locally. Network consensus and
+  real financial settlement remain open.
+  [Hosted example](https://github.com/VOLPAROSSA/volparossa-bank/actions/runs/44413979688)
+  · [Bank main integration](https://github.com/VOLPAROSSA/volparossa-bank/pull/13)
 
 ### Core project website — 2026-10-30
 
