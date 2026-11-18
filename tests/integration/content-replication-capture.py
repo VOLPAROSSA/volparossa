@@ -255,13 +255,32 @@ def exact_repair_wireguard_unreachable(layout, node, iface, source, destination,
             and wireguard_shape(quote[offset + 8:], udp_length - 8) is not None)
 
 
-def exact_repair_mdns_membership(layout, node, iface, source, destination, payload, frame):
-    """Only the observed single-group IGMPv3 mDNS join on an assigned fixture link."""
+def witnessed_repair_leave(layout, node, iface, source, observed_ns):
+    if layout["phase"] != "repair-uptake" or source not in MDNS_INTERFACE_ADDRESSES.get((node, iface), ()):
+        return False
+    sender, _, link = FIXTURE_ADDRESS_LABELS.get(source, "").partition(".")
+    if sender not in ("relay4", "relay5") or type(observed_ns) is not int:
+        return False
+    source_link = "underlay" if link == "public" else link
+    membership = layout.get("restart_memberships", {}).get(sender, {})
+    observed = membership.get("interfaces", {}).get(source_link, {})
+    if membership.get("group") != "224.0.0.251" or observed.get("source") != source:
+        return False
+    robustness, interval = membership["robustness"], observed["interval_ms"]
+    start, stop = membership["stop_started_ns"], membership["stop_completed_ns"]
+    return (0 < start <= stop and 1 <= robustness <= 7 and 1 <= interval <= 10000
+            and start <= observed_ns <= stop + robustness * interval * 1_000_000)
+
+
+def exact_repair_mdns_membership(layout, node, iface, source, destination, payload, frame, observed_ns):
+    """Single-group IGMPv3 join, or a witnessed departing repair agent’s timed leave."""
     addresses = LEARNER_MDNS_ADDRESSES if layout["phase"] == "peer-learning" else MDNS_INTERFACE_ADDRESSES
     return (layout["phase"] in ("repair-uptake", "peer-learning")
             and source in addresses.get((node, iface), ())
             and destination == "224.0.0.22" and len(payload) == 16
-            and payload[:2] == b"\x22\x00" and payload[4:12] == b"\x00\x00\x00\x01\x04\x00\x00\x00"
+            and payload[:2] == b"\x22\x00" and payload[4:8] == b"\x00\x00\x00\x01" and payload[9:12] == bytes(3)
+            and (payload[8] == 4 or (payload[8] == 3 and witnessed_repair_leave(
+                layout, node, iface, source, observed_ns)))
             and payload[12:] == socket.inet_aton("224.0.0.251")
             and valid_internet_checksum(payload)
             and frame is not None and len(frame) >= 54 and frame[14] == 0x46
@@ -296,7 +315,7 @@ def role_node(layout, role):
     return node
 
 
-def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, frame=None):
+def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, frame=None, observed_ns=None):
     """Return increments for one decoded IP packet on an explicitly captured interface.
 
     The layout is prevalidated by capture(). Neither a control-port exception nor an
@@ -361,7 +380,9 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
     if pair == {client, exit_ip}:
         return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
     if protocol == socket.IPPROTO_IGMP and exact_repair_mdns_membership(
-            layout, node, iface, src, dst, payload, frame):
+            layout, node, iface, src, dst, payload, frame, observed_ns):
+        if payload[8] == 3:
+            return {"control_packets": 1, "mdns_membership_packets": 1, "repair_mdns_leave_packets": 1}
         return {"control_packets": 1, "mdns_membership_packets": 1}
     # Pinned libp2p-mdns uses a separate ephemeral-port send socket, not source5353.
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport == 5353 \
@@ -651,6 +672,8 @@ def capture(layout, output, ready, role, interfaces, max_seconds=MAX_SECONDS):
                   observed_frames=0, packet_socket_drops=0, truncated=False, complete=False,
                   forbidden_header_samples=[], forbidden_header_sample_overflow_packets=0,
                   **dict.fromkeys((*COUNTERS, *DIAGNOSTIC_COUNTERS), 0))
+    if layout["phase"] == "repair-uptake":
+        record.update(repair_mdns_leave_packets=0, repair_mdns_leaves={})
     if max_seconds != MAX_SECONDS:
         record["max_seconds"] = max_seconds
     if layout["phase"] == "peer-learning":
@@ -685,7 +708,19 @@ def capture(layout, output, ready, role, interfaces, max_seconds=MAX_SECONDS):
                 updates = {"neighbor_packets": 1}
             else:
                 record[f"ipv{packet[0]}_frames"] += 1
-                updates = classify(layout, role, *packet[1:], sockets[observer], frame=frame)
+                iface = sockets[observer]
+                if layout["phase"] == "repair-uptake" and packet[1] == socket.IPPROTO_IGMP:
+                    observed_ns = time.monotonic_ns()
+                    updates = classify(layout, role, *packet[1:], iface, frame=frame, observed_ns=observed_ns)
+                    if updates.get("repair_mdns_leave_packets"):
+                        # One fixed source per assigned restart endpoint, bounded by physical links.
+                        sender = FIXTURE_ADDRESS_LABELS[packet[2]]
+                        sample = record["repair_mdns_leaves"].setdefault(iface + "/" + sender, dict(
+                            header=fixture_header_sample(packet, iface, frame), first_ns=observed_ns, packets=0))
+                        sample["last_ns"] = observed_ns
+                        sample["packets"] += 1
+                else:
+                    updates = classify(layout, role, *packet[1:], iface, frame=frame)
                 if layout["phase"] == "uptake" and updates.get("provider_response_payload_bytes", 0):
                     flow = packet[2:6]
                     provider_flows.setdefault(flow, len(provider_flows))
