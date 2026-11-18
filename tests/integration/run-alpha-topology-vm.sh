@@ -23,6 +23,7 @@ code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
+cloud_owner_resume=no
 weather_client_bundle=
 weather_client_manifest_sha256=
 weather_android_source=
@@ -55,6 +56,7 @@ usage() {
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
+        '       cloud-private-upload optionally accepts --cloud-owner-resume to exercise an interrupted real upload.' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
         '       weather-decoder-abi defaults to historical-v1 with --decoder-abi-inputs DIRECTORY.' \
         '       --decoder-mode source-input-inventory requires --decoder-source DIRECTORY (fixed reviewed Weather source only).' \
@@ -557,6 +559,7 @@ while [ "$#" -gt 0 ]; do
             code_bundle=$2
             shift
             ;;
+        --cloud-owner-resume) cloud_owner_resume=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -651,6 +654,10 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$cloud_owner_resume" = yes ] && [ "$scenario" != cloud-private-upload ]; then
+    usage >&2
+    exit 64
+fi
 if [ "$mode" = preview ]; then
     [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
     if [ "$approval" != no ] \
@@ -659,6 +666,9 @@ if [ "$mode" = preview ]; then
         exit 64
     fi
     print_plan
+    if [ "$cloud_owner_resume" = yes ]; then
+        printf '%s\n' 'Retained-owner profile requires a real interrupted browser upload and offline owner CLI resume.'
+    fi
     printf '%s\n' 'PREVIEW ONLY: no image, VM, key, file, service or network state was changed.'
     exit 0
 fi
@@ -2036,6 +2046,7 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+cloud_owner_resume=no
 code_archive_sha256=none
 code_manifest_sha256=none
 browser_filter_archive_sha256=none
@@ -2077,6 +2088,13 @@ case $scenario in
         else
             [ "$#" -eq 5 ] || exit 64
         fi
+        ;;
+    cloud-private-upload)
+        case $# in
+            5) ;;
+            6) [ "$6" = retained-owner ] || exit 64; cloud_owner_resume=yes ;;
+            *) exit 64 ;;
+        esac
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
@@ -2410,7 +2428,11 @@ elif [ "$scenario" = private-storage-maintenance ]; then
     /opt/volparossa-node/bin/node --test tests/integration/test-storage-consumer-maintenance.mjs
 elif [ "$scenario" = cloud-private-upload ]; then
     guest_phase cloud-upload-runtime-provision
-    sudo -n python3 -B tests/integration/cloud-private-upload-provision.py provision --download
+    if [ "$cloud_owner_resume" = yes ]; then
+        sudo -n python3 -B tests/integration/cloud-private-upload-provision.py --owner-resume provision --download
+    else
+        sudo -n python3 -B tests/integration/cloud-private-upload-provision.py provision --download
+    fi
 elif [ "$scenario" = cloud-private-file ]; then
     guest_phase cloud-runtime-provision
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
@@ -2542,6 +2564,10 @@ if [ "$scenario" = image-snapshot ]; then
 elif [ "$scenario" = cloud-private-upload ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
         CLOUD_REVISION=ffdcfaa15cdd2a029dae545904b0a58603da4e17
+    if [ "$cloud_owner_resume" = yes ]; then
+        set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
+            CLOUD_UPLOAD_PROFILE=retained-owner CLOUD_REVISION=396d5d4907f4859437b69b88943c18fefba9a2e8
+    fi
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
         CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
@@ -2948,6 +2974,12 @@ case $scenario in
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
         fi
+        ;;
+    cloud-private-upload)
+        set --
+        [ "$cloud_owner_resume" = no ] || set -- retained-owner
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
         ;;
     agent-native-coding|agent-native-editor)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
