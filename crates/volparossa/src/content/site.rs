@@ -1,5 +1,6 @@
 //! Explicit static-site bundles reuse native signatures, names and protected chunk retrieval.
 
+mod source;
 mod viewer;
 
 use std::{
@@ -7,11 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::Result;
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
-use rustix::fs::{Dir, Mode, OFlags, open, openat};
-use volparossa_content::site::{MAX_SITE_ASSETS, SITE_CONTENT_TYPE, SiteAssetSource, SiteBundle};
+use rustix::fs::{Mode, OFlags, open};
+use volparossa_content::site::{SITE_CONTENT_TYPE, SiteBundle};
 
 use super::{FetchName, Limits, ensure_new_output, output_parent};
 
@@ -93,8 +94,7 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
-    let mut assets = Vec::new();
-    collect(&root, "", 0, &mut 0, &mut assets)?;
+    let assets = source::collect(&root)?;
     let count = assets.len();
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.output))?;
     let bytes = SiteBundle::write_to(assets, temporary.as_file_mut())?;
@@ -108,59 +108,6 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
         "content_type":SITE_CONTENT_TYPE, "output":args.output,
         "network_published":false, "hidden_entries_excluded":true, "symlinks_followed":false,
     }))
-}
-
-fn collect(
-    directory: &File,
-    prefix: &str,
-    depth: usize,
-    entries: &mut usize,
-    assets: &mut Vec<SiteAssetSource<File>>,
-) -> Result<()> {
-    if depth > 16 {
-        bail!("site directory nesting exceeds 16 levels");
-    }
-    let mut listing = Dir::read_from(directory)?;
-    while let Some(entry) = listing.read() {
-        let entry = entry?;
-        let name = entry
-            .file_name()
-            .to_str()
-            .context("site asset name must be UTF-8")?;
-        if matches!(name, "." | "..") {
-            continue;
-        }
-        *entries += 1;
-        if *entries > 4096 {
-            bail!("site directory entry bound exceeded");
-        }
-        if name.starts_with('.') {
-            continue;
-        }
-        let file = File::from(openat(
-            directory,
-            entry.file_name(),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?);
-        let metadata = file.metadata()?;
-        let path = format!("{prefix}/{name}");
-        if metadata.is_dir() {
-            collect(&file, &path, depth + 1, entries, assets)?;
-            continue;
-        }
-        if !metadata.is_file() || assets.len() == MAX_SITE_ASSETS {
-            bail!("site requires at most {MAX_SITE_ASSETS} regular assets");
-        }
-        // Keep the checked descriptor so a renamed path cannot redirect a later read.
-        assets.push(SiteAssetSource {
-            content_type: media_type(&path).into(),
-            path,
-            length: metadata.len(),
-            reader: file,
-        });
-    }
-    Ok(())
 }
 
 fn media_type(path: &str) -> &'static str {
@@ -308,29 +255,5 @@ mod tests {
             })
             .is_err()
         );
-    }
-
-    #[test]
-    fn streaming_reads_the_original_open_file_when_its_name_is_replaced() {
-        let directory = tempfile::tempdir().unwrap();
-        let index = directory.path().join("index.html");
-        fs::write(&index, b"reviewed").unwrap();
-        let mut assets = Vec::new();
-        collect(
-            &File::open(directory.path()).unwrap(),
-            "",
-            0,
-            &mut 0,
-            &mut assets,
-        )
-        .unwrap();
-        fs::rename(&index, directory.path().join("original")).unwrap();
-        fs::write(&index, b"replaced").unwrap();
-
-        let mut encoded = Vec::new();
-        let length = SiteBundle::write_to(assets, &mut encoded).unwrap();
-        assert_eq!(length, encoded.len() as u64);
-        let bundle = SiteBundle::decode(encoded).unwrap();
-        assert_eq!(bundle.asset("/index.html").unwrap().bytes, b"reviewed");
     }
 }
