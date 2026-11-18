@@ -3,6 +3,7 @@
 """Synthetic repair evidence gates only; these fixtures do not establish a live VM result."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import runpy
@@ -10,13 +11,47 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 CHECK = runpy.run_path(str(HERE / "content-repair-smoke.py"))
 BASE = runpy.run_path(str(HERE / "test-content-replication-smoke.py"))
+SITE_TEST = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))
 CAPTURE = CHECK["SHARED"]["CAPTURE"]
 CHUNK = CHECK["CHUNK"]
 REVISION = "12" * 20
+
+
+def site_fixture(existing, publisher_pid):
+    source = SITE_TEST["fixture"]()
+    expected, viewer = source["input"], source["application"]
+    peers = existing["expected_peers"]
+    key, size = expected["publisher_key"], expected["bundle_bytes"]
+    manifest = viewer["ready"]["manifest_id"]
+    publish = dict(source["publish"], operation="content_publish", network_publication=True, serving=True,
+                   name=expected["name"], content_type=expected["content_type"], revision=1, manifest_id=manifest)
+    uptake, view = (copy.deepcopy(existing["phases"][kind]) for kind in ("uptake", "reserve-fetch"))
+    for phase in (uptake, view):
+        for role in ("exit", "provider"):
+            phase["captures"][role]["provider_response_payload_bytes"] = size + 4096
+    acquire = dict(existing["foreground_fetch"], operation="named_content_download", bytes=size, chunks=9,
+                   peer_bytes=size, name=expected["name"], publisher_key=key, manifest_id=manifest, revision=1,
+                   publication_expires_unix_seconds=publish["expires_unix_seconds"],
+                   sha256=expected["bundle_sha256"], cache_only=False)
+    viewer["agent_cache"] = "/state-client/offline-publisher-site-cache"
+    for label in ("ready", "final"):
+        viewer[label].update(provider_peer_ids=[peers["relay4"]], providers_used=1,
+                             control_relay_peer_id=existing["final_fetch"]["control_relay_peer_id"])
+    boundary = dict(publisher_node="relay5", holder_node="relay4", reader_node="client", publisher_pid=publisher_pid,
+                    publisher_absent_from_unix_seconds=1788850000, publisher_absent_through_unix_seconds=1788850004,
+                    pid_listener_and_unit_absent_before_and_after=True, fresh_client_cache=True,
+                    agent_cache=viewer["agent_cache"], user_uid=985, user_gid=985, control_gid=1003)
+    return dict(input=expected, publish=publish, source_removed=source["publisher_cleanup"], acquire=acquire,
+                holder=dict(serving=True, replication_enabled=True, publications=2, replica_publications=2,
+                            replica_chunks=12, replica_bytes=3 * CHUNK + size),
+                acquisition_removed=dict(temporary_output_removed=True, temporary_cache_removed=True,
+                                         sha256=expected["bundle_sha256"], bytes=size),
+                viewer=viewer, boundary=boundary, cleanup=source["cleanup"], uptake=uptake, view=view)
 
 
 def fixture():
@@ -67,7 +102,7 @@ def fixture():
         restarted[node] = dict(unit=stopped[node]["unit"], pid_before=100 + index, pid_after=200 + index,
             active_state="active", executable_verified=True, original_cache_identity_preserved=True,
             cache_identity=stopped[node]["cache_identity"], network_namespace_identity=f"3:{81 + index}")
-    return dict(success=True, expected_peers=peers,
+    return dict(success=True, expected_peers=peers, offline_site=site_fixture(existing, restarted["relay5"]["pid_after"]),
         publication=dict(report_kind="volparossa-public-repair-seed", bytes=3 * CHUNK, chunks=3,
             object_sha256=CHECK["SHA"], holder_chunks=3, receiver_chunks=1, receiver_bytes=CHUNK,
             missing_chunks=2, missing_bytes=2 * CHUNK, publisher_removed=True,
@@ -103,7 +138,7 @@ def fixture():
 
 
 def report():
-    return dict(source_revision=REVISION, report_kind="volparossa-content-repair", schema_version=1,
+    return dict(source_revision=REVISION, report_kind="volparossa-content-repair", schema_version=2, publisher_offline_site_verified=True,
         success=True, runner_exit_status=0, phase="content-repair-complete", observed_blocker=None,
         cleanup=dict(complete=True, remaining_owned_objects=0),
         host_state=dict(unchanged=True, before_sha256="f" * 64, after_sha256="f" * 64),
@@ -155,10 +190,48 @@ class RepairEvidence(unittest.TestCase):
             with self.subTest(missing=(phase, role)), self.assertRaises(ValueError):
                 CHECK["validate_evidence"](invalid)
 
+    def test_site_requires_same_manifest_independent_retention_physical_path_and_ordinary_http(self):
+        valid = fixture()
+        CHECK["validate_evidence"](valid)
+        mutations = (
+            (("source_removed", "manifest_removed"), False),
+            (("publish", "network_publication"), False),
+            (("publish", "content_type"), "application/octet-stream"),
+            (("boundary", "publisher_pid"), 123),
+            (("boundary", "pid_listener_and_unit_absent_before_and_after"), False),
+            (("boundary", "fresh_client_cache"), False),
+            (("boundary", "publisher_absent_through_unix_seconds"), valid["offline_site"]["publish"]["expires_unix_seconds"]),
+            (("acquire", "manifest_id"), "f" * 64),
+            (("acquire", "origin_body_bytes"), 12),
+            (("acquire", "provider_peer_ids"), ["peer-relay4"]),
+            (("holder", "replica_chunks"), 8),
+            (("acquisition_removed", "temporary_cache_removed"), False),
+            (("uptake", "captures", "provider", "provider_response_payload_bytes"), CHUNK),
+            (("view", "captures", "receiver", "direct_provider_packets"), 1),
+            (("viewer", "ready", "provider_peer_ids"), ["peer-relay5"]),
+            (("viewer", "final", "manifest_id"), "f" * 64),
+            (("viewer", "ready", "publication_expires_unix_seconds"), 100),
+            (("viewer", "ready", "peer_bytes"), 0),
+            (("viewer", "assets", "/main.js", "sha256"), "f" * 64),
+            (("viewer", "listener_closed"), False),
+        )
+        for path, value in mutations:
+            invalid = copy.deepcopy(valid["offline_site"])
+            target = invalid
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_offline_site"](invalid, valid["expected_peers"], valid["holder_offline"])
+        del valid["offline_site"]
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](valid)
+
     def test_report_entrypoint_binds_revision_host_cleanup_and_truthful_scope(self):
         valid = report()
         CHECK["validate_report"](valid, REVISION)
         for key, replacement in (("source_revision", "34" * 20), ("runner_exit_status", 1),
+                ("schema_version", 1), ("publisher_offline_site_verified", False),
                 ("full_alpha_acceptance_claimed", True), ("initial_placement_over_network", True),
                 ("cleanup", dict(complete=False, remaining_owned_objects=1)),
                 ("host_state", dict(unchanged=True, before_sha256="f" * 64, after_sha256="e" * 64))):
@@ -173,6 +246,31 @@ class RepairEvidence(unittest.TestCase):
                                      "report", str(path), REVISION], capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(json.loads(result.stdout)["success"])
+
+    def test_holder_removes_only_exact_verified_acquisition_scratch(self):
+        payload = b"a" * CHUNK + b"tail"
+        expected = dict(BUNDLE_SHA256=hashlib.sha256(payload).hexdigest(), BUNDLE_BYTES=len(payload))
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(CHECK["SITE"], expected):
+            state = Path(temporary) / "state-relay4"
+            cache, output = state / "site-acquisition-cache", state / "site-acquired.vps"
+            state.mkdir(mode=0o700)
+            cache.mkdir(mode=0o700)
+            write = CHECK["SITE"]["write_new"]
+            write(output, payload)
+            for value in (payload[:CHUNK], payload[CHUNK:]):
+                write(cache / hashlib.sha256(value).hexdigest(), value)
+            for name in (".volparossa-index-v1", ".volparossa-owner-v1"):
+                write(cache / name, b"fixture metadata")
+            unknown = cache / "unrelated"
+            write(unknown, b"keep me")
+            with self.assertRaises(ValueError):
+                CHECK["remove_site_acquisition"](state)
+            self.assertTrue(unknown.exists() and output.exists())
+            unknown.unlink()
+            self.assertEqual(CHECK["remove_site_acquisition"](state),
+                             dict(temporary_cache_removed=True, temporary_output_removed=True,
+                                  sha256=expected["BUNDLE_SHA256"], bytes=len(payload)))
+            self.assertFalse(cache.exists() or output.exists())
 
     def test_local_cache_and_output_snapshots_require_actual_private_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:

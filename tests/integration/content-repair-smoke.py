@@ -12,6 +12,7 @@ import runpy
 import stat
 import sys
 
+SITE = runpy.run_path(str(Path(__file__).with_name("content-provider-site-smoke.py")))
 SHARED = runpy.run_path(str(Path(__file__).with_name("content-replication-smoke.py")))
 read, require = SHARED["read"], SHARED["require"]
 CHUNK = 262144
@@ -86,6 +87,41 @@ def output_snapshot(path):
     data = owned_file(path, metadata.st_uid, metadata.st_gid, len(PAYLOAD))
     require(data == PAYLOAD, "fresh consumer did not reconstruct original fixture")
     return dict(bytes=len(data), sha256=SHA, mode="0600", path=str(path))
+
+
+def remove_site_acquisition(state):
+    state = Path(state)
+    require(state.is_absolute() and state.name == "state-relay4", "unexpected site acquisition root")
+    SITE["private"](state, True)
+    cache, output = state / "site-acquisition-cache", state / "site-acquired.vps"
+    meta = SITE["private"](cache, True)
+    bundle = owned_file(output, meta.st_uid, meta.st_gid, SITE["BUNDLE_BYTES"])
+    digest = hashlib.sha256(bundle).hexdigest()
+    require(len(bundle) == SITE["BUNDLE_BYTES"] and digest == SITE["BUNDLE_SHA256"], "wrong acquired site output")
+    hashes = {hashlib.sha256(bundle[offset:offset + CHUNK]).hexdigest()
+              for offset in range(0, len(bundle), CHUNK)}
+    metadata = {".volparossa-owner-v1", ".volparossa-index-v1",
+                ".volparossa-name-revisions-v1", ".volparossa-named-manifests-v1"}
+    owner = os.open(cache / ".volparossa-owner-v1", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        # The just-completed contribution may still be releasing the source store.
+        # The capless guest helper already runs under a bounded timeout.
+        fcntl.flock(owner, fcntl.LOCK_EX)
+        entries = list(cache.iterdir())
+        names = {entry.name for entry in entries}
+        require(hashes | {".volparossa-owner-v1", ".volparossa-index-v1"} <= names <= hashes | metadata,
+                "unexpected acquisition cache contents")
+        for entry in entries:
+            data = owned_file(entry, meta.st_uid, meta.st_gid, CHUNK)
+            require(entry.name in metadata or hashlib.sha256(data).hexdigest() == entry.name,
+                    "wrong acquisition cache chunk")
+        for entry in entries:
+            entry.unlink()
+        cache.rmdir()
+        output.unlink()
+    finally:
+        os.close(owner)
+    return dict(temporary_output_removed=True, temporary_cache_removed=True, bytes=len(bundle), sha256=digest)
 
 
 def validate_cache(snapshot, chunks):
@@ -212,6 +248,61 @@ def validate_evidence(evidence):
             and evidence["events"]["exit_mptcp_completed"] >= 2,
             "actual repair or MPTCP/TLS flow-completion event missing")
 
+    require("offline_site" in evidence, "independent publisher-offline site evidence missing")
+    validate_offline_site(evidence["offline_site"], peers, offline)
+
+
+def validate_offline_site(site, peers, stopped):
+    expected, publication = site["input"], site["publish"]
+    size = SITE["BUNDLE_BYTES"]
+    require(expected["name"] == SITE["NAME"] and expected["content_type"] == SITE["CONTENT_TYPE"]
+            and expected["assets"] == SITE["inventory"]() and expected["bundle_bytes"] == size
+            and expected["bundle_sha256"] == SITE["BUNDLE_SHA256"], "site fixture changed")
+    require(publication["operation"] == "content_publish" and publication["network_publication"] is True
+            and publication["serving"] is True and publication["name"] == expected["name"]
+            and publication["content_type"] == expected["content_type"]
+            and publication["revision"] == 1 and publication["bytes"] == size and publication["chunks"] == 9
+            and publication["publisher_key_hex"] == expected["publisher_key"]
+            and re.fullmatch(r"[0-9a-f]{64}", expected["publisher_key"])
+            and re.fullmatch(r"[0-9a-f]{64}", publication["manifest_id"])
+            and site["source_removed"] == dict(publisher_files_removed=True, source_cache_removed=True,
+                                               manifest_removed=True), "site publisher or source cleanup unverified")
+    boundary = site["boundary"]
+    require([boundary[key] for key in ("publisher_node", "holder_node", "reader_node")] == ["relay5", "relay4", "client"]
+            and len({peers["client"], peers["relay4"], peers["relay5"]}) == 3
+            and boundary["publisher_pid"] == stopped["pid_before"] and stopped["listener_absent"] is True
+            and 0 < boundary["publisher_absent_from_unix_seconds"] <= boundary["publisher_absent_through_unix_seconds"]
+                < publication["expires_unix_seconds"]
+            and boundary["pid_listener_and_unit_absent_before_and_after"] is True
+            and boundary["fresh_client_cache"] is True
+            and Path(boundary["agent_cache"]).parts[-2:] == ("state-client", "offline-publisher-site-cache")
+            and site["cleanup"] == dict(user_directory_removed=True), "publisher shutdown or fresh consumer unverified")
+    holder = site["holder"]
+    require(holder["serving"] is True and holder["replication_enabled"] is True
+            and holder["replica_publications"] == holder["publications"] == 2
+            and holder["replica_chunks"] == 12 and holder["replica_bytes"] == 3 * CHUNK + size,
+            "independent holder did not register the complete site")
+    require(site["acquisition_removed"] == dict(temporary_output_removed=True, temporary_cache_removed=True,
+            bytes=size, sha256=expected["bundle_sha256"]), "holder acquisition scratch remained")
+    acquisition, app = site["acquire"], site["viewer"]
+    require(acquisition["operation"] == "named_content_download"
+            and acquisition["publisher_key"] == expected["publisher_key"] and acquisition["name"] == expected["name"]
+            and acquisition["revision"] == 1 and acquisition["manifest_id"] == publication["manifest_id"]
+            and acquisition["publication_expires_unix_seconds"] == publication["expires_unix_seconds"]
+            and acquisition["sha256"] == expected["bundle_sha256"] and acquisition["cache_only"] is False,
+            "holder acquired a different site")
+    for phase, kind, supplier, receipt in ((site["uptake"], "uptake", "relay5", acquisition),
+                                           (site["view"], "reserve-fetch", "relay4", app["ready"])):
+        SHARED["validate_phase"](phase, kind, peers, size)
+        control = {peers[node] for node in RELAYS} - {slot["relay_peer_id"] for slot in phase["route"]["benchmark_slots"]}
+        require(phase["layout"]["provider"]["node"] == supplier, "wrong protected site provider")
+        SHARED["validate_fetch"](receipt, size, 9, peers[supplier], control)
+    require(site["uptake"]["route"]["route_context_id"] != site["view"]["route"]["route_context_id"],
+            "holder and reader reused the same route")
+    SITE["validate_application"](dict(input=expected, publish=publication, expected_peers=peers, isolation=boundary,
+        layout=dict(provider_nodes=["relay4"], control_relay_peer_id=app["ready"]["control_relay_peer_id"])),
+        app, {publication["manifest_id"]}, False)
+
 
 def event_count(path, code, baseline):
     value = bounded(path, 2 * 1024 * 1024)
@@ -239,6 +330,15 @@ def build_evidence(work):
     result["final"] = dict(layout=read(work / f"{prefix}final-fetch-layout.json"),
         route=read(work / f"{prefix}final-live-selection.json"),
         captures={role: read(work / f"{prefix}final-fetch-{role}.json") for role in SHARED["ROLES"]})
+    site = {key: read(work / f"{prefix}site-{suffix}.json") for key, suffix in (
+        ("input", "public-input"), ("publish", "publish"), ("source_removed", "source-removed"),
+        ("acquire", "acquire"), ("acquisition_removed", "acquisition-removed"), ("holder", "holder"), ("viewer", "viewer"), ("cleanup", "viewer-cleanup"),
+        ("boundary", "boundary"))}
+    for phase in ("uptake", "view"):
+        site[phase] = dict(layout=read(work / f"{prefix}site-{phase}-layout.json"),
+            route=read(work / f"{prefix}site-{phase}-live-selection.json"),
+            captures={role: read(work / f"{prefix}site-{phase}-{role}.json") for role in SHARED["ROLES"]})
+    result["offline_site"] = site
     baseline = result["startup"]["event_baseline_unix_ms"]
     result["events"] = dict(repair_complete=event_count(work / f"{prefix}receiver-events.txt", "CONTENT_REPAIR_COMPLETE", baseline),
                            exit_mptcp_completed=event_count(work / f"{prefix}exit-events.txt", "MPTCP_EXIT_FLOW_COMPLETED", baseline))
@@ -248,7 +348,8 @@ def build_evidence(work):
 
 def validate_report(report, revision):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and report["source_revision"] == revision
-            and report["report_kind"] == "volparossa-content-repair" and report["schema_version"] == 1
+            and report["report_kind"] == "volparossa-content-repair" and report["schema_version"] == 2
+            and report["publisher_offline_site_verified"] is True
             and report["success"] is True and report["runner_exit_status"] == 0
             and report["phase"] == "content-repair-complete" and report["observed_blocker"] is None
             and report["cleanup"] == dict(complete=True, remaining_owned_objects=0)
@@ -261,12 +362,16 @@ def validate_report(report, revision):
 
 
 def main(args):
-    require(len(args) == 3, "usage: cache|output|evidence|report INPUT OUTPUT_OR_REVISION")
+    require(len(args) == 3, "usage: cache|output|evidence|report INPUT OUTPUT_OR_REVISION; remove-site-acquisition STATE -")
     command, source, destination = args
     if command == "cache":
         result = cache_snapshot(source)
     elif command == "output":
         result = output_snapshot(source)
+    elif command == "remove-site-acquisition":
+        require(destination == "-", "site cleanup writes only its public receipt to stdout")
+        print(json.dumps(remove_site_acquisition(source), sort_keys=True))
+        return
     elif command == "evidence":
         result = build_evidence(Path(source))
     elif command == "report":

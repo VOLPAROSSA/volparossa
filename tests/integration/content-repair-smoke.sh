@@ -134,6 +134,117 @@ content_repair_isolation() {
     done
 }
 
+# Run publication and acquisition inside the corresponding live agent's private mount
+# and network namespace, as its unprivileged account. Only the signed site's public
+# name/key and expected digest are handed to the independent viewer.
+content_repair_site_node() (
+    site_node=$1
+    shift
+    site_pid=$(systemctl show --property=MainPID --value "volparossa-alpha-agent@$site_node.service") || exit 1
+    case $site_pid in ''|0|*[!0-9]*) exit 1 ;; esac
+    case $site_node in relay4) site_ns=$R4 ;; relay5) site_ns=$R5 ;; *) exit 1 ;; esac
+    [ "$(readlink "/proc/$site_pid/ns/net")" = "$(ip netns exec "$site_ns" readlink /proc/self/ns/net)" ] || exit 1
+    timeout --signal=TERM --kill-after=5s 180s nsenter --target "$site_pid" --mount --net \
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- "$@"
+)
+
+content_repair_site_acquire() {
+    PHASE=content-repair-site-publish
+    site_source=$WORK/state-relay5/site-publisher
+    site_cli=$binary_directory/volparossa
+    site_driver=$WORK/bin/content-provider-site-smoke.py
+    site_r5_control=$WORK/runtime-relay5/control/agent.sock
+    site_publisher_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay5.service) || return 1
+    content_repair_site_node relay5 mkdir -m 0700 -- "$site_source" || return 1
+    content_repair_site_node relay5 python3 -B "$site_driver" init "$site_source" >"$WORK/content-repair-site-assets.json" || return 1
+    content_repair_site_node relay5 "$site_cli" init --identity "$site_source/identity.key" \
+        --passphrase-file "$site_source/passphrase" >"$WORK/content-repair-site-init.log" || return 1
+    content_repair_site_node relay5 "$site_cli" content site pack --directory "$site_source/assets" \
+        --output "$site_source/bundle.bin" >"$WORK/content-repair-site-pack.json" || return 1
+    content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content publish --contribute \
+        --input "$site_source/bundle.bin" --manifest "$site_source/manifest.bin" --cache "$site_source/source-cache" \
+        --identity "$site_source/identity.key" --passphrase-file "$site_source/passphrase" \
+        --content-type application/vnd.volparossa.site.v1 --name disposable-native-static-site --revision 1 \
+        --lifetime-seconds 7200 >"$WORK/content-repair-site-publish.json" || return 1
+    site_key=$(jq -er '.publisher_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-repair-site-publish.json") || return 1
+    site_sha_line=$(content_repair_site_node relay5 sha256sum "$site_source/bundle.bin") || return 1
+    jq -ce --arg key "$site_key" --arg hash "${site_sha_line%% *}" --slurpfile inventory "$WORK/content-repair-site-assets.json" \
+        '$inventory[0] + {publisher_key:$key,bundle_sha256:$hash,bundle_bytes:.bytes}' "$WORK/content-repair-site-pack.json" \
+        >"$WORK/content-repair-site-public-input.json" || return 1
+    content_repair_site_node relay5 python3 -B "$site_driver" publisher-cleanup "$site_source" \
+        >"$WORK/content-repair-site-source-removed.json" || return 1
+    content_repair_site_node relay5 test ! -e "$site_source" || return 1
+    PHASE=content-repair-site-holder-acquisition
+    content_repair_isolation relay4 || return 1
+    content_replication_capture uptake content-repair-site-uptake "$WORK/content-repair-repaired-live-selection.json" || return 1
+    content_repair_site_node relay4 "$site_cli" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
+        content fetch-name --publisher-key "$site_key" --name disposable-native-static-site --min-revision 1 \
+        --cache "$WORK/state-relay4/site-acquisition-cache" --local-output "$WORK/state-relay4/site-acquired.vps" \
+        >"$WORK/content-repair-site-acquire.json" || return 1
+    content_replication_snapshot relay4 content-repair-site-uptake-live || return 1
+    stop_privacy_observers || return 1
+    # The ordinary named download queues a separate contribution. Wait for all
+    # nine site chunks alongside the three already verified repair chunks.
+    PHASE=content-repair-site-holder-retention
+    site_deadline=$(($(date +%s) + 180))
+    while [ "$(date +%s)" -lt "$site_deadline" ]; do
+        if CONTENT_REPLICATION_COMMAND_TIMEOUT=3s content_replication_cli relay4 content status \
+            >"$WORK/content-repair-site-holder.json" 2>"$WORK/content-repair-site-holder.err" \
+            && jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 2
+                and .replica_chunks == 12 and .replica_bytes == (3 * 262144 + 2097628)' \
+                "$WORK/content-repair-site-holder.json" >/dev/null; then
+            content_repair_site_node relay4 python3 -B "$WORK/bin/content-repair-smoke.py" \
+                remove-site-acquisition "$WORK/state-relay4" - >"$WORK/content-repair-site-acquisition-removed.json"
+            return $?
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+content_repair_site_publisher_absent() {
+    [ "$(unit_load_state volparossa-alpha-agent@relay5.service)" = not-found ] &&
+        [ ! -e "/proc/$site_publisher_pid" ] &&
+        ip netns exec "$R5" ss -H -ltn 'sport = :18080' >"$WORK/content-repair-site-publisher-$1-listeners.txt" &&
+        [ ! -s "$WORK/content-repair-site-publisher-$1-listeners.txt" ]
+}
+
+content_repair_site_view() {
+    PHASE=content-repair-site-publisher-offline
+    site_user=$WORK/client-fixtures/site-viewer
+    site_cache=$WORK/state-client/offline-publisher-site-cache
+    [ ! -e "$site_user" ] && [ ! -L "$site_user" ] && [ ! -e "$site_cache" ] && [ ! -L "$site_cache" ] || return 1
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$site_user" || return 1
+    install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 "$WORK/content-repair-site-public-input.json" "$site_user/expected.json" || return 1
+    site_group=$(getent group volparossa-users | cut -d: -f3) || return 1
+    case $site_group in ''|*[!0-9]*) return 1 ;; esac
+    site_parent_ns=$(readlink /proc/self/ns/net) || return 1
+    site_client_ns=$(ip netns exec "$CLIENT" readlink /proc/self/ns/net) || return 1
+    content_repair_site_publisher_absent before || return 1
+    content_repair_isolation client || return 1
+    site_offline_begin=$(date +%s) || return 1
+    content_replication_capture reserve-fetch content-repair-site-view "$WORK/content-repair-final-live-selection.json" || return 1
+    timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" \
+        setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$site_group" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$site_driver" consume "$site_cli" "$WORK/runtime-client/control/agent.sock" \
+        "$site_cache" "$site_user" "$site_parent_ns" "$site_client_ns" "$WORKER_UID" "$WORKER_GID" "$site_group" \
+        >"$WORK/content-repair-site-viewer.json" 2>"$WORK/content-repair-site-viewer.err" || return 1
+    content_replication_snapshot client content-repair-site-view-live || return 1
+    stop_privacy_observers || return 1
+    content_repair_site_publisher_absent after || return 1
+    jq -cn --argjson pid "$site_publisher_pid" --argjson start "$site_offline_begin" --argjson end "$(date +%s)" \
+        --arg cache "$site_cache" --argjson uid "$WORKER_UID" --argjson gid "$WORKER_GID" --argjson group "$site_group" \
+        '{publisher_node:"relay5",holder_node:"relay4",reader_node:"client",publisher_pid:$pid,
+          publisher_absent_from_unix_seconds:$start,publisher_absent_through_unix_seconds:$end,
+          pid_listener_and_unit_absent_before_and_after:true,fresh_client_cache:true,agent_cache:$cache,user_uid:$uid,user_gid:$gid,control_gid:$group}' \
+        >"$WORK/content-repair-site-boundary.json" || return 1
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$site_driver" user-cleanup "$site_user" >"$WORK/content-repair-site-viewer-cleanup.json"
+}
+
 content_repair_capture() {
     [ -z "${CONTENT_REPAIR_CAPTURE_PIDS:-}" ] || return 1
     jq -cn '{phase:"repair-uptake",client:{node:"relay4",ip:"49.165.5.1"},
@@ -229,11 +340,15 @@ content_repair_run() {
         "$WORK/state-relay4/repair-cache" "$WORK/content-repair-repaired-receiver-cache.json" \
         || fail CONTENT_REPAIR_REPAIRED_CACHE_INVALID
     content_repair_stop_captures || fail CONTENT_REPAIR_CAPTURE_INCOMPLETE
+    content_repair_site_acquire || fail CONTENT_REPAIR_SITE_ACQUISITION_FAILED
     content_replication_disconnect relay4 content-repair-repaired || fail CONTENT_REPAIR_RECEIVER_ROUTE_CLEANUP
 
     PHASE=content-repair-holder-offline
     content_repair_stop_node relay5 holder-offline || fail CONTENT_REPAIR_HOLDER_STILL_ONLINE
-    content_repair_status relay4 receiver-serving 3 || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
+    content_replication_cli relay4 content status >"$WORK/content-repair-receiver-serving.json" || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
+    jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 2
+        and .replica_chunks == 12 and .replica_bytes == (3 * 262144 + 2097628)' \
+        "$WORK/content-repair-receiver-serving.json" >/dev/null || fail CONTENT_REPAIR_RECEIVER_NOT_SERVING
     repair_download=$WORK/state-client/content/repair-download
     repair_output=$WORK/state-client/content/repair-output.bin
     for repair_fresh in "$repair_download" "$repair_output"; do
@@ -268,6 +383,7 @@ content_repair_run() {
         >"$WORK/content-repair-final-output.out" || fail CONTENT_REPAIR_OUTPUT_INVALID
     content_replication_snapshot client content-repair-final-live || fail CONTENT_REPAIR_FINAL_PATHS_MISSING
     stop_privacy_observers || fail CONTENT_REPAIR_FETCH_CAPTURE_INCOMPLETE
+    content_repair_site_view || fail CONTENT_REPAIR_SITE_VIEWER_FAILED
     content_replication_disconnect client content-repair-final || fail CONTENT_REPAIR_CONSUMER_ROUTE_CLEANUP
     content_replication_cli relay4 content stop >"$WORK/content-repair-receiver-stop.json" \
         2>"$WORK/content-repair-receiver-stop.err" || fail CONTENT_REPAIR_RECEIVER_SERVICE_CLEANUP
@@ -302,13 +418,14 @@ content_repair_finalize_report() {
         --argjson status "$repair_final_status" --slurpfile evidence "$WORK/repair-report-evidence.part" \
         --slurpfile host "$WORK/repair-report-host.part" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
-      {schema_version:1,report_kind:"volparossa-content-repair",source_revision:$revision,run_id:$run,
+      {schema_version:2,report_kind:"volparossa-content-repair",source_revision:$revision,run_id:$run,
        phase:$phase,runner_exit_status:$status,repair:$evidence[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-       scope:"healthy one-of-three-chunk public journal repaired autonomously over protected MPTCP after restart; complete original holder then stopped; independent fresh publisher/name retrieval from repaired receiver",
+       scope:"healthy one-of-three-chunk public journal repaired autonomously over protected MPTCP after restart; complete original holder then stopped; independent fresh publisher/name retrieval from repaired receiver. Separate signed site transferred online from R5 to R4 and served by R4 to a fresh Client HTTP viewer with R5 publisher daemon stopped",
        initial_placement_over_network:false,independent_publisher_node_offline_claimed:false,
+       publisher_offline_site_verified:($status == 0 and $evidence[0].offline_site.boundary.pid_listener_and_unit_absent_before_and_after == true),
        future_availability_guaranteed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-repair-smoke.json" || return 1
     install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/content-repair-smoke.json" "$output_directory/content-repair-smoke.json"

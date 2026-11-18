@@ -1128,7 +1128,7 @@ if [ "$scenario" = content-replication ]; then
 fi
 if [ "$scenario" = content-repair ]; then
     for repair_fixture in content-repair-smoke.sh content-repair-smoke.py content-replication-smoke.sh content-replication-smoke.py \
-        content-replication-capture.py; do
+        content-replication-capture.py content-provider-site-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$repair_fixture" ] \
             || [ -L "$source_directory/tests/integration/$repair_fixture" ]; then
             printf '%s\n' 'content repair fixture unavailable' >&2
@@ -3251,7 +3251,8 @@ if [ "$agent_artifact_quarantine" = yes ]; then
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
-    for repair_script in content-repair-smoke.py content-replication-smoke.py content-replication-capture.py; do
+    for repair_script in content-repair-smoke.py content-replication-smoke.py content-replication-capture.py \
+        content-provider-site-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$repair_script" "$WORK/bin/$repair_script"
     done
 fi
