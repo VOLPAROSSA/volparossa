@@ -166,6 +166,15 @@ floor. Peer deployment is a separate owner action using the existing
 The receipt covers this local activation. Deployment, withdrawal and observed peer
 availability have separate state.
 
+Hosted Rust 1.89 exercised two site packs, four owner signatures, restoration of the
+first site's exact bytes as revision 3, an idempotent retry, and rejection of a
+competing revision 3. The streaming layout test processed a 256 MiB single-asset
+bundle with an 8 KiB input block and 37 bytes of retained framing. The accepted
+Core source is `8b3d09a67e804d92a79b982e036ea5f589ba6c90`. The first attempt passed the
+restore cases and exposed three test-code lint findings subsequently corrected.
+[Passing hosted tests](https://github.com/VOLPAROSSA/volparossa/actions/runs/44392313319)
+and [first attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/44390773927).
+
 ## Static, dynamic and application boundaries
 
 Static hosting is the first complete workflow, with ordinary portable export and
