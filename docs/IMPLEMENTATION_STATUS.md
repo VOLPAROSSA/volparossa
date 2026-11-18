@@ -210,6 +210,15 @@ remain open. The retained ZIP has SHA-256
 `5b4303e602b2ec8b6541cdc93b64421ae010b4b64c12f7858d8bf7bab77ea95b`.
 [Trial artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44301340772/artifacts/14428484479)
 
+The [follow-up trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44313217738)
+uses `8ae10f21` to distinguish worker lease and liveness failures.
+On `0b6de949`, the MPTCP worker bounds its connect poll by both five seconds
+and the original request deadline, reserving 250 ms to return the result.
+The failed-consumer sampler takes one final snapshot. In the inert incomplete-flow
+fixture this used eight control queries, down from 104, with the original
+application error preserved. The complete Image and Cloud lifecycle and
+independent zero provider usage still require a hosted trial on the corrected source.
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
