@@ -356,6 +356,9 @@ jobs:
           test ! -e /opt/volparossa-native-browser-build && test ! -L /opt/volparossa-native-browser-build
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
             apparmor bubblewrap zstd make perl unzip pkg-config libarchive-tools
+          # The guarded cleanup can also remove an empty directory if acquisition
+          # stops before the producer writes its ownership marker.
+          printf 'VOLPAROSSA_NATIVE_SCRATCH_RESERVED=true\n' >> "$GITHUB_ENV"
           sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /opt/volparossa-native-browser-build
           bash tests/integration/browser-native-build.sh prepare
 
@@ -371,8 +374,14 @@ jobs:
       - name: Remove this run's compiler checkout and unpacked binaries before VM start
         if: always() && inputs.scenario == 'browser-native-source'
         run: |
-          if test -f /opt/volparossa-native-browser-build/.owner; then
-            bash tests/integration/browser-native-build.sh clean-build
+          scratch=/opt/volparossa-native-browser-build
+          if test "${VOLPAROSSA_NATIVE_SCRATCH_RESERVED:-}" = true && test -d "$scratch"; then
+            if test -f "$scratch/.owner"; then
+              bash tests/integration/browser-native-build.sh clean-build
+            else
+              test ! -L "$scratch" && test "$(stat -c '%u:%a' "$scratch")" = "$(id -u):700"
+              sudo -n rmdir -- "$scratch"
+            fi
           fi
 
       - name: Source-build exact native Codex runtime for the selected coding proof
