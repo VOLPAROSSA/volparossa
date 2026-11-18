@@ -1233,7 +1233,7 @@ if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     done
 fi
 if [ "$cloud_private_upload" = yes ]; then
-    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins.json; do
+    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins-paired.json; do
         [ -f "$source_directory/tests/integration/$upload_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$upload_fixture" ] || exit 69
     done
@@ -3190,7 +3190,7 @@ if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_p
 fi
 if [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-upload-smoke.py" "$WORK/bin/cloud-private-upload-smoke.py"
-    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins.json" "$WORK/bin/cloud-private-upload-pins.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins-paired.json" "$WORK/bin/cloud-private-upload-pins-paired.json"
 fi
 if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-file-smoke.py" \

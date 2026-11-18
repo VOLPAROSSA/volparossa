@@ -26,7 +26,7 @@ F = CLOUD["FRAGMENTS"]
 require, read, create = F["require"], F["read"], F["create"]
 private_file, invoke, unlock = F["private_file"], F["invoke"], F["unlock"]
 owner_root = CLOUD["owner_root"]
-PINS_PATH = HERE / "cloud-private-upload-pins.json"
+PINS_PATH = HERE / "cloud-private-upload-pins-paired.json"
 PINS = json.loads(PINS_PATH.read_text())
 REVISION = PINS["revision"]
 HASHES = {name: record["sha256"] for name, record in PINS["files"].items()}
@@ -197,10 +197,24 @@ def preselection_events(path):
     return value
 
 
+def verify_image_source(vendor):
+    # The guest uses these three exact vendored files when running the Cloud adapter.
+    # The source record itself is already bound by the Cloud pin.
+    originals = ("scripts/immich_snapshot.py", "src/core-storage.mjs", "LICENSE")
+    require(vendor["version"] == 1 and vendor["local_modifications"] is False
+        and vendor["repository"] == "https://github.com/VOLPAROSSA/volparossa-image"
+        and vendor["revision"] == "770a23fef01cb4cc69303a433b31b9df0d26b44e"
+        and set(vendor["files"]) == set(originals), "Cloud Image source differs")
+    for original in originals:
+        local = "vendor/volparossa-image/" + Path(original).name
+        require(vendor["files"][original] == dict(local=local, **PINS["files"][local]),
+            "Cloud Image file identity differs")
+
+
 def tools():
-    require(type(REVISION) is str and re.fullmatch(r"[0-9a-f]{40}", REVISION)
-            and REVISION != "0" * 40, "reviewed Cloud upload source pin required")
-    return CLOUD["tools"]()
+    source, node = CLOUD["tools"]()
+    verify_image_source(json.loads((source / "third_party/volparossa-image-source.json").read_bytes()))
+    return source, node
 
 
 def fixture(root):

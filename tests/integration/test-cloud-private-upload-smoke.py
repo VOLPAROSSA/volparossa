@@ -250,16 +250,35 @@ class UploadContracts(unittest.TestCase):
         module = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
         state = module["configured"]()
         pins = state["load_pins"]()
-        self.assertEqual(pins["revision"], "ffdcfaa15cdd2a029dae545904b0a58603da4e17")
-        self.assertEqual(len(pins["files"]), 27)
-        self.assertTrue({"src/owner-uploads.mjs", "scripts/upload_lock.py", "scripts/smoke_owner_upload_ui.py"} <= pins["files"].keys())
+        legacy = json.loads((HERE / "cloud-private-upload-pins.json").read_text())
+        self.assertEqual(legacy["revision"], "ffdcfaa15cdd2a029dae545904b0a58603da4e17")
+        self.assertEqual(pins["revision"], "998bf2d46ba51ba904500e4f223d5f7d200092dc")
+        self.assertEqual(set(pins["files"]), set(legacy["files"]) | {
+            "src/storage-maintenance.mjs", "src/storage-upload-maintenance.mjs"})
+        self.assertEqual(pins["runtime"], legacy["runtime"])
         self.assertEqual(pins["runtime"]["version"], "24.19.0")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "pins.json"
-            for revision in (None, "0" * 40, "working-tree"):
+            for revision in (None, "0" * 40, "working-tree", legacy["revision"]):
                 invalid = dict(pins, revision=revision); path.write_text(json.dumps(invalid))
                 with mock.patch.dict(module["configured"].__globals__, PIN_PATH=path):
                     with self.assertRaises(ValueError): module["configured"]()
+
+    def test_vendored_image_source_must_match_the_paired_bytes_and_revision(self):
+        pins = CHECK["PINS"]["files"]
+        files = {}
+        for source in ("scripts/immich_snapshot.py", "src/core-storage.mjs", "LICENSE"):
+            local = "vendor/volparossa-image/" + Path(source).name
+            files[source] = dict(local=local, **pins[local])
+        vendor = dict(version=1, local_modifications=False, files=files,
+            repository="https://github.com/VOLPAROSSA/volparossa-image",
+            revision="770a23fef01cb4cc69303a433b31b9df0d26b44e")
+        CHECK["verify_image_source"](vendor)
+        with self.assertRaises(ValueError):
+            CHECK["verify_image_source"](dict(vendor, revision="0" * 40))
+        files["src/core-storage.mjs"]["sha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            CHECK["verify_image_source"](vendor)
 
     def test_exact_ui_fields_and_hash_are_closed(self):
         for mode in ("upload", "download"):

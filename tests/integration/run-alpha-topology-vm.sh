@@ -2465,7 +2465,7 @@ if [ "$scenario" = image-snapshot ]; then
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-upload ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
-        CLOUD_REVISION=ffdcfaa15cdd2a029dae545904b0a58603da4e17
+        CLOUD_REVISION=998bf2d46ba51ba904500e4f223d5f7d200092dc
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
         CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
