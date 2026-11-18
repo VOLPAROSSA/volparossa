@@ -72,6 +72,10 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   guest host-state digests matched. The retained archive has SHA-256
   `e1a135092225929c005577203e41a8f03539a1483d726b7101793948d923a6ad`.
   [Successful full topology and archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44378301593)
+  The first joined Silex-to-independent-Firefox trial stopped in strict Clippy.
+  It flagged the length of the contribution test before any editor or guest
+  started. The follow-up split signed test setup from the receipt checks.
+  [Original joined trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44382248754)
 - **Core site tools** now stream assets to the output bundle and recheck their
   identity at read time. The CLI packed the maximum 256 assets with a process
   limit of 64 file descriptors. Its `content site confirm` command verified
@@ -114,6 +118,12 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   for the same ID succeeded. The fixture saw exactly one 165-byte message
   upload and one import. It removed its profile and stopped all test processes.
   [Native Thunderbird receipt](https://github.com/VOLPAROSSA/volparossa-mail/blob/fb1ba939bbec2833580f6b98c0aa071c7ed95786/third_party/thunderbird-extension-smoke.json)
+  A follow-up joined that native Thunderbird interface to Stalwart Community
+  with SQLite. Stalwart committed one 313-byte message. The fixture replaced
+  the first metadata response with HTTP 503 on its way to the browser. A user
+  recheck confirmed the same message ID. An independent download of the stored
+  MIME matched all 313 original bytes. Profile and server cleanup passed.
+  [Joined real-mailbox receipt and reproduction](https://github.com/VOLPAROSSA/volparossa-mail/blob/350c050e5b59c5205af837137de48058fa1f087c/third_party/thunderbird-stalwart-extension-smoke.json)
 - **Chat** now emits a receipt event once per distinct message timestamp
   within one incoming encrypted Signal receipt. Separate envelopes and linked
   devices keep separate events. Three synthetic cases exercised the method
@@ -396,6 +406,13 @@ writer renames a new manifest after the observer opens the old one and before it
 first stat. The observer now discards an otherwise valid private inode with zero
 links so its existing bounded poll can reopen the current path. Multiple links,
 wrong ownership or mode, and invalid file size remain fatal.
+
+The assembled run `c6a810a8` passed both publication gates and reached
+`image_repair/application_failed` after the earlier private-file observer
+correction. The three providers had 6/7/6 leases with zero reservations.
+The local cleanup and guest host comparison passed. Removal of all peer copies
+remains unverified in this maintenance scenario.
+[Maintenance run and retained report](https://github.com/VOLPAROSSA/volparossa/actions/runs/44375959400)
 
 #### Automatic upload integration candidate
 
