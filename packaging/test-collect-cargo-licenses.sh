@@ -77,8 +77,8 @@ done
 blake3_manifest=$(jq -er '[.packages[] | select(.name == "blake3" and .version == "1.8.7") | .manifest_path] | select(length == 1) | .[0]' "$metadata")
 for license in LICENSE_A2 LICENSE_A2LLVM LICENSE_CC0; do
     original=$(dirname -- "$blake3_manifest")/$license
-    test -s "$original" && cmp "$original" "$notices/blake3-1.8.7/$license" ||
-        fail "blake3 original $license bytes missing or changed"
+    test -s "$original" || fail "blake3 original $license file missing"
+    cmp "$original" "$notices/blake3-1.8.7/$license" || fail "blake3 original $license bytes changed"
 done
 
 for license in LICENSE-APACHE LICENSE-MIT; do
