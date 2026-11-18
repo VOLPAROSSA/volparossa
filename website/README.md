@@ -58,8 +58,8 @@ Python-only; this smoke does not replace browser or accessibility verification.
   mark display switch. Keep the trailing slash on the basepath.
 - `content.html`, `build.py`, `assets/core.css`: English content, semantic build
   and Golden Harbour composition. Native `details` works without JavaScript.
-- `theme/`: unchanged, locally vendored shared design v1.0.3 from reviewed
-  homepage commit `8114d966f3e9be878cb6dbb3d155a5739edfeb03`.
+- `theme/`: unchanged, locally vendored shared design v1.1.0 from reviewed
+  homepage commit `991cf1638c906226574b9c21bb32c6618fc07fb7`.
   `theme/theme-version.json` records every SHA-256; the build verifies them.
   Header, footer, fonts, buttons, badges, navigation registry/renderer and app
   publication destinations come from this export. There is no runtime `main`
