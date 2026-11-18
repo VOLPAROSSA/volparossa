@@ -156,6 +156,8 @@ pub enum StorageFixtureHelperDiagnostic {
     AcquireDescriptorState = 17,
     /// The existing acquisition call deadline failed after descriptor handoff.
     AcquireDescriptorDeadline = 18,
+    /// The kernel rejected the client MPTCP bind because the address was already in use.
+    MptcpBindAddressInUse = 19,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -204,8 +206,11 @@ impl StorageFixtureAcquireSummary {
                 let code = StorageFixtureHelperDiagnostic::try_from(code).map_err(|_| invalid())?;
                 let failure = value.failure.ok_or_else(invalid)?;
                 if failure.stage != Stage::HelperAcquire as i32
-                    || (code == StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
-                        && failure.reason != Reason::HelperKernel as i32)
+                    || (matches!(
+                        code,
+                        StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
+                            | StorageFixtureHelperDiagnostic::MptcpBindAddressInUse
+                    ) && failure.reason != Reason::HelperKernel as i32)
                     || (matches!(
                         code,
                         StorageFixtureHelperDiagnostic::AcquireWorkerBudget

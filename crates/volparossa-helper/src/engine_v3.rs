@@ -660,6 +660,8 @@ pub(crate) enum BackendError {
     Kernel,
     /// Definite MPTCP connect poll timeout; retains the ordinary Kernel rejection.
     MptcpConnectPollTimedOut,
+    /// The authenticated client MPTCP worker failed to bind its selected address.
+    MptcpBindAddressInUse,
     CleanupIncomplete,
     /// Acquire-only origin; identical cleanup authority and public result to `CleanupIncomplete`.
     AcquireCleanupIncomplete(AcquireCleanupOrigin),
@@ -4507,10 +4509,12 @@ impl HelperEngine {
                     backend_response(
                         request,
                         error,
-                        if error == BackendError::MptcpConnectPollTimedOut {
-                            "MPTCP_CONNECT_POLL_TIMED_OUT"
-                        } else {
-                            "TRANSPORT_SOCKET_UNAVAILABLE"
+                        match error {
+                            BackendError::MptcpConnectPollTimedOut => {
+                                "MPTCP_CONNECT_POLL_TIMED_OUT"
+                            }
+                            BackendError::MptcpBindAddressInUse => "MPTCP_BIND_ADDRESS_IN_USE",
+                            _ => "TRANSPORT_SOCKET_UNAVAILABLE",
                         },
                     ),
                     None,
@@ -6330,7 +6334,9 @@ fn backend_response(
         BackendError::Unavailable => HelperResult::Unavailable,
         BackendError::Capacity => HelperResult::Capacity,
         BackendError::Invalid => HelperResult::InvalidRequest,
-        BackendError::Kernel | BackendError::MptcpConnectPollTimedOut => HelperResult::Kernel,
+        BackendError::Kernel
+        | BackendError::MptcpConnectPollTimedOut
+        | BackendError::MptcpBindAddressInUse => HelperResult::Kernel,
         BackendError::CleanupIncomplete | BackendError::AcquireCleanupIncomplete(_) => {
             HelperResult::CleanupIncomplete
         }
@@ -6480,7 +6486,7 @@ mod tests {
         fail_acquire_cleanup: AtomicBool,
         acquire_cleanup_origin: StdMutex<Option<AcquireCleanupOrigin>>,
         fail_next_acquire_kernel: AtomicBool,
-        fail_next_acquire_poll_timeout: AtomicBool,
+        next_acquire_diagnostic: std::sync::Mutex<Option<BackendError>>,
         panic_prepare_factory: AtomicBool,
         panic_prepare_poll: AtomicBool,
         substitute_prepare_generation: AtomicBool,
@@ -6984,11 +6990,13 @@ mod tests {
                     Err(BackendError::CleanupIncomplete)
                 } else if self.fail_next_acquire_kernel.swap(false, Ordering::AcqRel) {
                     Err(BackendError::Kernel)
-                } else if self
-                    .fail_next_acquire_poll_timeout
-                    .swap(false, Ordering::AcqRel)
+                } else if let Some(error) = self
+                    .next_acquire_diagnostic
+                    .lock()
+                    .expect("diagnostic")
+                    .take()
                 {
-                    Err(BackendError::MptcpConnectPollTimedOut)
+                    Err(error)
                 } else {
                     StdUnixStream::pair()
                         .map_err(|_| BackendError::Kernel)
@@ -9156,6 +9164,23 @@ mod tests {
 
     #[tokio::test]
     async fn mptcp_connect_poll_timeout_is_bound_to_request_and_preserves_context() {
+        assert_definite_mptcp_acquire(
+            BackendError::MptcpConnectPollTimedOut,
+            "MPTCP_CONNECT_POLL_TIMED_OUT",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mptcp_bind_address_in_use_is_bound_to_request_and_preserves_context() {
+        assert_definite_mptcp_acquire(
+            BackendError::MptcpBindAddressInUse,
+            "MPTCP_BIND_ADDRESS_IN_USE",
+        )
+        .await;
+    }
+
+    async fn assert_definite_mptcp_acquire(error: BackendError, code: &str) {
         let backend = Arc::new(FakeBackend::default());
         let engine = fake_engine(
             Arc::clone(&backend),
@@ -9171,16 +9196,11 @@ mod tests {
         value.descriptor_kind = RoutingTransportSocketKind::MptcpConnected as i32;
         value.expected_remote = Some(transport_address([10, 77, 0, 3], 443));
         let expected_digest = operation_digest(&acquire).expect("digest").to_vec();
-        backend
-            .fail_next_acquire_poll_timeout
-            .store(true, Ordering::Release);
+        *backend.next_acquire_diagnostic.lock().expect("diagnostic") = Some(error);
 
         let first = engine.execute_with_descriptor(acquire).await;
         assert_eq!(first.response.result, HelperResult::Kernel as i32);
-        assert_eq!(
-            first.response.diagnostic_code,
-            "MPTCP_CONNECT_POLL_TIMED_OUT"
-        );
+        assert_eq!(first.response.diagnostic_code, code);
         assert_eq!(first.response.request_id, vec![70; 16]);
         assert_eq!(first.response.operation_digest, expected_digest);
         assert!(first.response.outcome.is_none());
@@ -9207,15 +9227,16 @@ mod tests {
     }
 
     #[test]
-    fn mptcp_poll_timeout_does_not_relabel_other_backend_responses() {
+    fn mptcp_acquire_diagnostics_do_not_relabel_other_backend_responses() {
         let original = prepare_request(1);
-        let reply = backend_response(
-            &original,
+        for error in [
             BackendError::MptcpConnectPollTimedOut,
-            "COMMIT_PROBE_FAILED",
-        );
-        assert_eq!(reply.result, HelperResult::Kernel as i32);
-        assert_eq!(reply.diagnostic_code, "COMMIT_PROBE_FAILED");
+            BackendError::MptcpBindAddressInUse,
+        ] {
+            let reply = backend_response(&original, error, "COMMIT_PROBE_FAILED");
+            assert_eq!(reply.result, HelperResult::Kernel as i32);
+            assert_eq!(reply.diagnostic_code, "COMMIT_PROBE_FAILED");
+        }
     }
 
     #[tokio::test]

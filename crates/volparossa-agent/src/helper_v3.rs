@@ -1749,6 +1749,9 @@ fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
         "MPTCP_CONNECT_POLL_TIMED_OUT" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpConnectPollTimedOut
         }
+        "MPTCP_BIND_ADDRESS_IN_USE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpBindAddressInUse
+        }
         "ACQUIRE_WORKER_BUDGET" if result == HelperResult::CleanupIncomplete => {
             AcquireDiagnostic::AcquireWorkerBudget
         }
@@ -3954,10 +3957,9 @@ mod tests {
             HelperResult::InvalidRequest,
             HelperResult::Expired,
         ] {
-            assert_eq!(
-                acquire_diagnostic("MPTCP_CONNECT_POLL_TIMED_OUT", result),
-                AcquireDiagnostic::Unknown
-            );
+            for code in ["MPTCP_CONNECT_POLL_TIMED_OUT", "MPTCP_BIND_ADDRESS_IN_USE"] {
+                assert_eq!(acquire_diagnostic(code, result), AcquireDiagnostic::Unknown);
+            }
         }
     }
 
@@ -4062,6 +4064,10 @@ mod tests {
             (
                 |response| response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into(),
                 AcquireDiagnostic::MptcpConnectPollTimedOut,
+            ),
+            (
+                |response| response.diagnostic_code = "MPTCP_BIND_ADDRESS_IN_USE".into(),
+                AcquireDiagnostic::MptcpBindAddressInUse,
             ),
         ] {
             let (error, diagnostic) =

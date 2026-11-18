@@ -132,6 +132,21 @@ fn fixture_cli_keeps_request_local_poll_timeout_before_cleanup_failure() {
             .unwrap()
             .contains("MPTCP_CONNECT_POLL_TIMED_OUT")
     );
+
+    let summary = response.records[0].flow_acquire.as_mut().unwrap();
+    summary.last = Some(StorageFixtureAcquireFailure {
+        helper_diagnostic: Some(StorageFixtureHelperDiagnostic::MptcpBindAddressInUse as i32),
+        ..first
+    });
+    let projected = project(&response, &parse(&value).unwrap()).unwrap();
+    assert_eq!(
+        projected["records"][0]["flow_acquire"]["last"],
+        json!({
+            "stage": "helper_acquire",
+            "reason": "helper_kernel",
+            "helper_diagnostic": "mptcp_bind_address_in_use",
+        })
+    );
 }
 
 #[test]
