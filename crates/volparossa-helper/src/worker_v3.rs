@@ -22809,7 +22809,9 @@ mod tests {
     #[test]
     fn lease_expiring_after_admission_sample_quarantines_before_acquire_dispatch() {
         let context = [26; 16];
-        let sampled_at = Instant::now() - Duration::from_secs(2);
+        let sampled_at = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("fixture admission sample two seconds ago");
         let ttl = Duration::from_secs(1);
         let mut registry = WorkerRegistry::new(1, 4, ttl);
         let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
