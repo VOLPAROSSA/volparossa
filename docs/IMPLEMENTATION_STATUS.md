@@ -172,6 +172,24 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   journal. All 141 Node and 14 Python cases passed with a fixture for the peer
   interface. Recovery requires a previously persisted deposit journal.
   [Source, usage and test coverage](https://github.com/VOLPAROSSA/volparossa-cloud/blob/720f88f2a639ef5e2eecbba18c7bb2acb93f9645/docs/OWNER_UPLOADS.md)
+  Core `83d49a7a` and Cloud `720f88f2` subsequently passed the joined
+  owner recovery through the original OpenCloud Files UI and Firefox ESR
+  140.16.0. Its single PUT was interrupted before HTTP 201. One of eight
+  copies was committed, one was uncertain and six had not been attempted.
+  The original file and browser profile were removed. Two owner resume
+  commands reconciled the same journal, prior leases, ciphertext and catalog
+  to the same ready marker. After removing both local ciphertexts and stopping
+  provider A, a fresh browser downloaded all 262,145 original bytes twice.
+  Deleting the upload and baseline cleared 16 copies. All three providers
+  reported zero usage and leases, with matching before/after host state.
+  This trial exercises explicit owner recovery. Background maintenance
+  enrollment has its own acceptance below. Reproduce with `alpha-topology.yml`
+  and `scenario=cloud-private-upload-resume` on the tested Core commit.
+  The archive SHA-256 is
+  `0c02c37e0ba9b3d4adf234f75d49077ae3c23db3b5479cce9bef7194d05760d9`.
+  The original smoke report SHA-256 is
+  `4740742d8d3fa4f11d7ffba41bd50fb38e9a59a8f4df362c15977bf8892c6dae`.
+  [Interrupted browser upload and owner recovery](https://github.com/VOLPAROSSA/volparossa/actions/runs/44411591772)
 - **Image** restored a private album into a fresh Immich 3.2.4 instance on
   Image `ef9b2260` and upstream `db355f79`. An authenticated client uploaded
   and read an 8,516-byte PNG. With the server stopped, Image encrypted the
@@ -338,7 +356,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. Direct Cloud UI upload and cold downloads also passed. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at the same three Cloud reservations before a protected stream opened. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
