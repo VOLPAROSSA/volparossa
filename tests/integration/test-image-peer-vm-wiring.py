@@ -133,7 +133,9 @@ ssh_base() {
 
     def test_only_exact_successful_return_published_outside_diagnostics(self):
         start = 'if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then\n'
-        retrieve = block(start, 'if [ "$weather_client_version" = 6 ]')
+        # The unindented terminator closes this Image operation; later application
+        # operations can follow it independently.
+        retrieve = block(start, '\nfi\n') + '\nfi\n'
         publish = start + SOURCE.rsplit(start, 1)[1].split('FINISHED=yes', 1)[0]
         self.assertLess(SOURCE.rindex('stop_qemu_child normal'), SOURCE.rindex(start))
         self.assertLess(SOURCE.index('release_image_source "$image_handoff"'), SOURCE.index('GUEST_STATUS=$?'))
