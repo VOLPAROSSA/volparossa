@@ -796,7 +796,7 @@ elif [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperati
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=cooperative-code-kvm
-elif [ -n "$browser_native_bundle" ]; then
+elif [ "$scenario" = browser-network ] && [ -n "$browser_native_bundle" ]; then
     # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
     # disposable VM disk beside, never inside, the SSD evidence directory:
     # temporary SSH keys must not enter the evidence privacy scan or archive.
