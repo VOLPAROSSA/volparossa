@@ -18,13 +18,28 @@ def source_revision():
     return revision
 
 
-def approved_binary(path, expected_sha):
-    metadata = path.lstat()
-    if not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
-            and not metadata.st_mode & 0o022 and 0 < metadata.st_size <= 32 * 1024 * 1024):
-        return False
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest() == expected_sha
+def stage_binary(source, destination, expected_sha, owner_uid):
+    """Copy a bounded ordinary file once. Only the verified root-owned copy can execute."""
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as input_file:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != owner_uid or metadata.st_mode & 0o022
+                or not 0 < metadata.st_size <= 32 * 1024 * 1024):
+            raise ValueError("bank_binary_input")
+        digest = hashlib.sha256()
+        remaining = metadata.st_size
+        with destination.open("xb") as output:
+            while remaining:
+                block = input_file.read(min(remaining, 65536))
+                if not block:
+                    raise ValueError("bank_binary_length")
+                output.write(block)
+                digest.update(block)
+                remaining -= len(block)
+            if input_file.read(1) or digest.hexdigest() != expected_sha:
+                raise ValueError("bank_binary_digest")
+            os.fchmod(output.fileno(), 0o555)
 
 
 class Owner:

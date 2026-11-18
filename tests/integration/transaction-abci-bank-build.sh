@@ -15,11 +15,14 @@ git init -q "$work/bank"
 git -C "$work/bank" -c transfer.fsckObjects=true fetch --quiet --depth 1 https://github.com/VOLPAROSSA/volparossa-bank.git "$revision"
 git -C "$work/bank" checkout -q --detach FETCH_HEAD
 [[ $(git -C "$work/bank" rev-parse HEAD) == "$revision" ]]
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends musl-tools protobuf-compiler
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends musl-tools \
+    protobuf-compiler=3.21.12-8.2ubuntu0.4 libprotoc32t64=3.21.12-8.2ubuntu0.4 libprotobuf32t64=3.21.12-8.2ubuntu0.4
+test "$(protoc --version)" = 'libprotoc 3.21.12'
 target=x86_64-unknown-linux-musl
 rustup toolchain install 1.98.1 --profile minimal --target "$target"
 export CARGO_HOME="$work/cargo" CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS=2
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+export CC_x86_64_unknown_linux_musl=musl-gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 manifest="$work/bank/paper-payments/Cargo.toml"
 cargo +1.98.1 fetch --locked --manifest-path "$manifest" --target "$target"
 cargo +1.98.1 build --locked --offline --manifest-path "$manifest" --example ordered_authorizer --target "$target"

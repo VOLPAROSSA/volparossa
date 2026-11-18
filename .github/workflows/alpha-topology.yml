@@ -1,5 +1,5 @@
 name: Alpha production-helper topology
-run-name: ${{ inputs.scenario || 'datapath' }} — ${{ startsWith(inputs.scenario, 'transaction-abci') && 'isolated transaction TEST proof' || 'production-helper proof' }}
+run-name: ${{ inputs.scenario || 'datapath' }} — ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'isolated transaction TEST proof' || 'production-helper proof' }}
 
 on:
   workflow_dispatch:
@@ -104,7 +104,7 @@ env:
 
 jobs:
   alpha-topology:
-    name: ${{ startsWith(inputs.scenario, 'transaction-abci') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
+    name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -433,6 +433,7 @@ jobs:
       - name: Run disposable production-helper topology
         id: topology
         env:
+          BANK_REQUESTED: ${{ inputs.scenario == 'transaction-abci-bank' }}
           BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}
         run: |
           set -euo pipefail
@@ -442,7 +443,8 @@ jobs:
           native_args=()
           coding_args=()
           bank_args=()
-          if [[ -n $BANK_AUTHORIZER_SHA256 ]]; then
+          if [[ $BANK_REQUESTED == true ]]; then
+            [[ $BANK_AUTHORIZER_SHA256 =~ ^[0-9a-f]{64}$ ]]
             bank_args=(--bank-authorizer-sha256 "$BANK_AUTHORIZER_SHA256")
           fi
           cloud_args=()

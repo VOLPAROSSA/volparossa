@@ -879,10 +879,10 @@ def execute(args):
         if args.bank_authorizer_sha256:
             source = Path("/home/vpci/bank-ordered-authorizer")
             destination = work / "bin/ordered_authorizer"
-            require(bank.approved_binary(source, args.bank_authorizer_sha256), "bank_authorizer_digest")
-            shutil.copyfile(source, destination)
-            os.chmod(destination, 0o555)
-            require(bank.approved_binary(destination, args.bank_authorizer_sha256), "bank_authorizer_copy")
+            try:
+                bank.stage_binary(source, destination, args.bank_authorizer_sha256, pwd.getpwnam("vpci").pw_uid)
+            except ValueError:
+                raise TrialFailure("bank_authorizer_digest") from None
         existing_names = {line.split()[0] for line in checked(["ip", "netns", "list"]).decode().splitlines()}
         require(not existing_names.intersection(namespace_names(prefix)), "namespace_collision")
         for command in network_plan(prefix):

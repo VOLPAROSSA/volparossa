@@ -8,6 +8,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -51,17 +52,26 @@ class FixtureContracts(unittest.TestCase):
             binary.write_bytes(b"closed parser fixture")
             binary.chmod(0o500)
             sha = hashlib.sha256(binary.read_bytes()).hexdigest()
-            self.assertTrue(FIXTURE.bank.approved_binary(binary, sha))
-            self.assertFalse(FIXTURE.bank.approved_binary(binary, "0" * 64))
+            destination = binary.with_name("verified")
+            FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
+            self.assertEqual(destination.read_bytes(), binary.read_bytes())
+            destination.unlink()
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, "0" * 64, os.getuid())
+            self.assertFalse(destination.stat().st_mode & 0o111)
+            destination.unlink()
             binary.chmod(0o770)
-            self.assertFalse(FIXTURE.bank.approved_binary(binary, sha))
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
             binary.chmod(0o500)
             link = binary.with_name("link")
             link.symlink_to(binary)
-            self.assertFalse(FIXTURE.bank.approved_binary(link, sha))
+            with self.assertRaises(OSError):
+                FIXTURE.bank.stage_binary(link, destination, sha, os.getuid())
             link.unlink()
             link.hardlink_to(binary)
-            self.assertFalse(FIXTURE.bank.approved_binary(binary, sha))
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
 
     def countdown(self, before, after, *, label="routes6", times=(100_000_000_000, 100_010_000_000,
                                                                 110_000_000_000, 110_010_000_000)):
