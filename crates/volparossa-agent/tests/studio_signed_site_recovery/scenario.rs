@@ -125,6 +125,9 @@ async fn operations(
     {
         return Err("original_publication_changed");
     }
+    if super::topology::enabled()? {
+        super::topology::write_verified(&packed.bytes, &original)?;
+    }
     Ok(Observed {
         bindings: bindings(&packed, &manifest),
         browser: browser_receipt,
