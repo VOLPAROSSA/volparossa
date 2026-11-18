@@ -56,8 +56,10 @@ pub(in crate::content) async fn run(
             ChunkStore::open(path, limits).context("cannot reopen your owned source cache")?
         }
         Source::File(path) => {
-            temporary =
-                tempfile::tempdir().context("cannot create private contribution staging")?;
+            temporary = tempfile::Builder::new()
+                .permissions(Permissions::from_mode(0o700))
+                .tempdir()
+                .context("cannot create private contribution staging")?;
             stage_file(path, manifest, &temporary.path().join("chunks"), limits)?
         }
     };
