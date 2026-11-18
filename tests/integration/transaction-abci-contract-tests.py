@@ -22,6 +22,47 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class FixtureContracts(unittest.TestCase):
+    def test_bank_authorization_uses_private_stdin_and_reopens_without_seed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "node0").mkdir()
+            (root / "node0/app.json").write_bytes(b'{"version":1}')
+            calls = []
+
+            def checked(command, *, input_bytes):
+                calls.append((command, input_bytes))
+                return b"ready\n" if command[command.index(str(root / "bin/ordered_authorizer")) + 1] == "init" else b"original"
+
+            with patch.object(FIXTURE.bank.pwd, "getpwuid", side_effect=KeyError), \
+                    patch.object(FIXTURE.bank.os, "chown") as chown:
+                owner = FIXTURE.bank.Owner(root, "1" * 64, checked, FIXTURE.require)
+            chown.assert_called_once_with(root / "bank-owner", FIXTURE.bank.OWNER_UID, FIXTURE.bank.OWNER_UID)
+            seed = bytes(range(32))
+            raw = owner.prepare("reserve", "2" * 64, 100, 300, ("3" * 64, "70"), seed)
+            self.assertEqual(owner.replay("2" * 64, raw), raw)
+            self.assertEqual([stdin for _, stdin in calls], [b'{"version":1}', seed, None])
+            self.assertTrue(all(argv[:4] == ["unshare", "--net", "--", "setpriv"] for argv, _ in calls))
+            with self.assertRaises(FIXTURE.TrialFailure):
+                owner.replay("2" * 64, b"different")
+
+    def test_bank_binary_binding_refuses_wrong_digest_writable_mode_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "example"
+            binary.write_bytes(b"closed parser fixture")
+            binary.chmod(0o500)
+            sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+            self.assertTrue(FIXTURE.bank.approved_binary(binary, sha))
+            self.assertFalse(FIXTURE.bank.approved_binary(binary, "0" * 64))
+            binary.chmod(0o770)
+            self.assertFalse(FIXTURE.bank.approved_binary(binary, sha))
+            binary.chmod(0o500)
+            link = binary.with_name("link")
+            link.symlink_to(binary)
+            self.assertFalse(FIXTURE.bank.approved_binary(link, sha))
+            link.unlink()
+            link.hardlink_to(binary)
+            self.assertFalse(FIXTURE.bank.approved_binary(binary, sha))
+
     def countdown(self, before, after, *, label="routes6", times=(100_000_000_000, 100_010_000_000,
                                                                 110_000_000_000, 110_010_000_000)):
         left = FIXTURE.timed_parent_read(label, json.dumps(before).encode(), *times[:2])

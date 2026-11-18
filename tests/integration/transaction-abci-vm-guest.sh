@@ -144,6 +144,13 @@ sudo -n systemd-run --quiet --wait --pipe --collect --unit "$build_unit" \
     --property KillMode=control-group \
     /bin/sh /home/vpci/source/tests/integration/transaction-abci-vm-guest.sh "$revision" build
 phase=real-consensus-trial
+if [ -n "${3:-}" ]; then
+    case $3 in *[!0-9a-f]*) exit 64 ;; esac
+    [ "${#3}" -eq 64 ] || exit 64
+    set -- --bank-authorizer-sha256 "$3"
+else
+    set --
+fi
 # Keep logs in the private guest journal, not in exported evidence. Only closed
 # receipts are exported; no private keys, signed command payloads or raw stores.
 sudo -n systemd-run --quiet --wait --collect --unit "$trial_unit" \
@@ -154,5 +161,5 @@ sudo -n systemd-run --quiet --wait --collect --unit "$trial_unit" \
     /usr/bin/python3 -B /home/vpci/source/tests/integration/transaction-abci-smoke.py \
     --execute --yes --expected-commit "$revision" \
     --comet "$tools/bin/cometbft" --adapter "$tools/bin/volparossa-transaction-abci" \
-    --build-receipt "$tools/build-receipt.json" --output "$output"
+    --build-receipt "$tools/build-receipt.json" --output "$output" "$@"
 phase=complete
