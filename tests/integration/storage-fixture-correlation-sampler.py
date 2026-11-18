@@ -42,10 +42,10 @@ MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete'
 ACQUIRE_ORIGINS = ('acquire_worker_budget', 'acquire_worker_state', 'acquire_coordinator_deadline',
     'acquire_coordinator_ambiguous', 'acquire_coordinator_unavailable', 'acquire_coordinator_other',
     'acquire_worker_response', 'acquire_descriptor_state', 'acquire_descriptor_deadline')
+KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out', 'mptcp_bind_address_in_use')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
-    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete',
-    'mptcp_connect_poll_timed_out') + ACQUIRE_ORIGINS
+    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS + ACQUIRE_ORIGINS
 HELPER_REASONS = ('helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
     'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
     'helper_validation', 'helper_authority', 'helper_correlation', 'helper_runtime_changed')
@@ -123,7 +123,7 @@ def acquire_summary(value, phase, terminal):
         code = failure['helper_diagnostic']
         require(code is None or (type(code) is str and code in HELPER_DIAGNOSTICS
             and failure['stage'] == 'helper_acquire' and failure['reason'] in HELPER_REASONS[:6]))
-        require(code != 'mptcp_connect_poll_timed_out' or failure['reason'] == 'helper_kernel')
+        require(code not in KERNEL_DIAGNOSTICS or failure['reason'] == 'helper_kernel')
         require(code not in ACQUIRE_ORIGINS or failure['reason'] == 'helper_cleanup_incomplete')
 
 

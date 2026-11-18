@@ -154,7 +154,8 @@ fn the_maximum_native_object_fits_through_one_reused_block() {
         verifier.write_all(&prefix).unwrap();
         let mut remaining = length;
         while remaining > 0 {
-            let count = remaining.min(block.len() as u64) as usize;
+            let count = usize::try_from(remaining.min(block.len() as u64))
+                .expect("chunk length is bounded by the 8192-byte block");
             verifier.write_all(&block[..count]).unwrap();
             remaining -= count as u64;
         }
