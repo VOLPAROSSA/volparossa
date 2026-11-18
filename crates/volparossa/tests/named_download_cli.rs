@@ -22,9 +22,9 @@ use volparossa_content::{
     transfer::{TransferLimits, serve_peer},
 };
 use volparossa_local_control::{
-    CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
-    NamedContentTransferReady, control_request::Operation, control_response::Payload, read_request,
-    write_response,
+    CONTROL_PROTOCOL_VERSION, ContentFetchNameRequest, ContentReceipt, ControlResponse,
+    ControlResult, NamedContentTransferReady, control_request::Operation,
+    control_response::Payload, read_request, write_response,
 };
 
 const NAME: &str = "notes.résumé";
@@ -188,6 +188,19 @@ impl Fixture {
     }
 
     async fn serve(&mut self, listener: &UnixListener, fault: Fault, resume: bool) {
+        self.serve_checked(listener, fault, resume, |parameters| {
+            assert_eq!(parameters.min_revision, resume.then_some(3));
+        })
+        .await;
+    }
+
+    async fn serve_checked(
+        &mut self,
+        listener: &UnixListener,
+        fault: Fault,
+        resume: bool,
+        inspect: impl FnOnce(&ContentFetchNameRequest),
+    ) {
         let (mut stream, _) = listener.accept().await.unwrap();
         let request = read_request(&mut stream).await.unwrap();
         let Some(Operation::ContentFetchName(parameters)) = request.operation else {
@@ -198,7 +211,7 @@ impl Fixture {
             self.key.verifying_key().to_bytes()
         );
         assert_eq!(parameters.name, NAME);
-        assert_eq!(parameters.min_revision, resume.then_some(3));
+        inspect(&parameters);
         assert_eq!(parameters.reuse_cache, resume);
         assert_eq!(parameters.cache_only, self.cache_only);
         assert_eq!(
@@ -289,6 +302,7 @@ fn transfer_receipt(manifest: &VerifiedManifest, network: bool) -> ContentReceip
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     None,
+    UnselectedEnvelope,
     WrongPublisher,
     WrongName,
     OldRevision,
@@ -303,7 +317,8 @@ impl Fault {
     fn rejects_ready(self) -> bool {
         matches!(
             self,
-            Self::WrongPublisher
+            Self::UnselectedEnvelope
+                | Self::WrongPublisher
                 | Self::WrongName
                 | Self::OldRevision
                 | Self::Expired

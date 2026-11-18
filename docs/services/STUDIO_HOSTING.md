@@ -173,6 +173,20 @@ floor. Peer deployment is a separate owner action using the existing
 The receipt covers this local activation. Deployment, withdrawal and observed peer
 availability have separate state.
 
+A reader can open the exact restored release using the publisher key, site name
+and manifest ID from the owner's review. For revision 3, use the ID in the
+restore receipt.
+
+```sh
+volparossa content site open --publisher-key "$SITE_KEY" --name "$SITE_NAME" \
+  --expected-manifest-id "$V3_MANIFEST_ID" --cache "$READER_CACHE"
+```
+
+The usual named lookup and retained revision floor still apply. Add
+`--min-revision 3` to set an explicit minimum as well. A different selected
+manifest, a conflict, or a release below the floor stops the command before it
+creates a browser URL. Pinning the ID does not search historical objects.
+
 ## Static, dynamic and application boundaries
 
 Static hosting is the first complete workflow, with ordinary portable export and

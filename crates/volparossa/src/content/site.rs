@@ -67,6 +67,10 @@ pub(crate) struct Open {
     /// Reject an older signed revision; not proof of a globally latest version.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     min_revision: Option<u64>,
+    /// Require this exact signed manifest ID for the named result; keep all revision floors.
+    /// A different selected release fails before the browser URL is created.
+    #[arg(long, value_parser = super::parse_input_sha256)]
+    expected_manifest_id: Option<[u8; 32]>,
     /// New agent-owned destination cache, or explicitly reopened owned cache.
     #[arg(long)]
     cache: PathBuf,

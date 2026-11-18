@@ -160,7 +160,7 @@ content_repair_site_node() (
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- "$@"
 )
 
-content_repair_studio_contribution() {
+content_repair_studio_publication() {
     site_input=/run/volparossa-studio-handoff
     # Only this root process can read the guest transport source. The publisher
     # receives the two original files via stdin inside its own private state.
@@ -174,16 +174,6 @@ content_repair_studio_contribution() {
             <"$site_input/$site_file" || return 1
     done
     rm -- "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json" && rmdir -- "$site_input" || return 1
-    content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content contribute \
-        --manifest "$site_source/manifest.bin" --publisher-key "$site_key" --input "$site_source/bundle.bin" \
-        --expected-manifest-id "$site_manifest_id" \
-        >"$WORK/content-repair-site-publish.json" || return 1
-    jq -e --slurpfile e "$WORK/content-repair-site-public-input.json" '.operation == "content_contribute"
-        and .network_publication and .serving and .original_signature_reused and (.private_keys_transferred == false)
-        and .manifest_id == $e[0].studio_handoff.manifest_id and .publisher_key_hex == $e[0].publisher_key
-        and .name == $e[0].name and .chunks == $e[0].chunks and .bytes == $e[0].bundle_bytes
-        and .expires_unix_seconds == $e[0].studio_handoff.publication_expires_unix_seconds' \
-        "$WORK/content-repair-site-publish.json" >/dev/null
 }
 
 content_repair_generated_publication() {
@@ -192,15 +182,15 @@ content_repair_generated_publication() {
         --passphrase-file "$site_source/passphrase" >"$WORK/content-repair-site-init.log" || return 1
     content_repair_site_node relay5 "$site_cli" content site pack --directory "$site_source/assets" \
         --output "$site_source/bundle.bin" >"$WORK/content-repair-site-pack.json" || return 1
-    content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content publish --contribute \
-        --input "$site_source/bundle.bin" --manifest "$site_source/manifest.bin" --cache "$site_source/source-cache" \
-        --identity "$site_source/identity.key" --passphrase-file "$site_source/passphrase" \
-        --content-type application/vnd.volparossa.site.v1 --name disposable-native-static-site --revision 1 \
-        --lifetime-seconds 7200 >"$WORK/content-repair-site-publish.json" || return 1
-    site_key=$(jq -er '.publisher_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-repair-site-publish.json") || return 1
+    content_repair_site_node relay5 python3 -B "$WORK/bin/content-repair-site-restore.py" "$site_cli" "$site_source" \
+        >"$WORK/content-repair-site-owner-restore.json" || return 1
+    site_key=$(jq -er '.restore.publisher_key' "$WORK/content-repair-site-owner-restore.json") || return 1
+    site_manifest_id=$(jq -er '.restore.manifest_id' "$WORK/content-repair-site-owner-restore.json") || return 1
     site_sha_line=$(content_repair_site_node relay5 sha256sum "$site_source/bundle.bin") || return 1
-    jq -ce --arg key "$site_key" --arg hash "${site_sha_line%% *}" --slurpfile inventory "$WORK/content-repair-site-assets.json" \
-        '$inventory[0] + {publisher_key:$key,bundle_sha256:$hash,bundle_bytes:.bytes}' "$WORK/content-repair-site-pack.json" \
+    jq -ce --arg key "$site_key" --arg hash "${site_sha_line%% *}" --arg manifest "$site_manifest_id" \
+        --slurpfile inventory "$WORK/content-repair-site-assets.json" \
+        '$inventory[0] + {publisher_key:$key,bundle_sha256:$hash,bundle_bytes:.bytes,
+            restored_release:{revision:3,manifest_id:$manifest}}' "$WORK/content-repair-site-pack.json" \
         >"$WORK/content-repair-site-public-input.json" || return 1
 }
 
@@ -219,10 +209,22 @@ content_repair_site_acquire() {
     site_publisher_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay5.service) || return 1
     content_repair_site_node relay5 mkdir -m 0700 -- "$site_source" || return 1
     if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ]; then
-        content_repair_studio_contribution || return 1
+        site_revision=1
+        content_repair_studio_publication || return 1
     else
+        site_revision=3
         content_repair_generated_publication || return 1
     fi
+    content_repair_site_node relay5 "$site_cli" --control-socket "$site_r5_control" content contribute \
+        --manifest "$site_source/manifest.bin" --publisher-key "$site_key" --input "$site_source/bundle.bin" \
+        --expected-manifest-id "$site_manifest_id" >"$WORK/content-repair-site-publish.json" || return 1
+    jq -e --arg id "$site_manifest_id" --argjson rev "$site_revision" --slurpfile e "$WORK/content-repair-site-public-input.json" '
+        .operation == "content_contribute" and .network_publication and .serving and .original_signature_reused
+        and (.private_keys_transferred == false) and .manifest_id == $id and .revision == $rev
+        and .publisher_key_hex == $e[0].publisher_key and .name == $e[0].name and .bytes == $e[0].bundle_bytes
+        and ($e[0].studio_handoff == null or (.chunks == $e[0].chunks
+            and .expires_unix_seconds == $e[0].studio_handoff.publication_expires_unix_seconds))' \
+        "$WORK/content-repair-site-publish.json" >/dev/null || return 1
     site_name=$(jq -er '.name' "$WORK/content-repair-site-public-input.json") || return 1
     site_chunks=$(jq -er '.chunks' "$WORK/content-repair-site-publish.json") || return 1
     site_bytes=$(jq -er '.bundle_bytes' "$WORK/content-repair-site-public-input.json") || return 1
@@ -233,9 +235,11 @@ content_repair_site_acquire() {
     content_repair_isolation relay4 || return 1
     content_replication_capture uptake content-repair-site-uptake "$WORK/content-repair-repaired-live-selection.json" || return 1
     content_repair_site_node relay4 "$site_cli" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
-        content fetch-name --publisher-key "$site_key" --name "$site_name" --min-revision 1 \
+        content fetch-name --publisher-key "$site_key" --name "$site_name" --min-revision "$site_revision" \
         --cache "$WORK/state-relay4/site-acquisition-cache" --local-output "$WORK/state-relay4/site-acquired.vps" \
         >"$WORK/content-repair-site-acquire.json" || return 1
+    jq -e --arg id "$site_manifest_id" --argjson revision "$site_revision" \
+        '.manifest_id == $id and .revision == $revision' "$WORK/content-repair-site-acquire.json" >/dev/null || return 1
     content_replication_snapshot relay4 content-repair-site-uptake-live || return 1
     stop_privacy_observers || return 1
     # The ordinary named download queues a separate contribution. Wait for all
@@ -490,5 +494,6 @@ content_repair_finalize_report() {
        future_availability_guaranteed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-repair-smoke.json" || return 1
     install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/content-repair-smoke.json" "$output_directory/content-repair-smoke.json"
-    python3 -B "$source_directory/tests/integration/content-repair-smoke.py" report "$WORK/content-repair-smoke.json" "$expected_commit"
+    if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ]; then repair_check=report-studio; else repair_check=report-restored; fi
+    python3 -B "$source_directory/tests/integration/content-repair-smoke.py" "$repair_check" "$WORK/content-repair-smoke.json" "$expected_commit"
 }

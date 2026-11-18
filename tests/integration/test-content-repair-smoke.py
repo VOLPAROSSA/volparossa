@@ -289,6 +289,54 @@ class RepairEvidence(unittest.TestCase):
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](valid)
 
+    def test_generated_restore_requires_owner_activation_and_exact_immutable_deployment(self):
+        valid = report()
+        site = valid["repair"]["offline_site"]
+        expected, publish = site["input"], site["publish"]
+        candidate_id, digest = publish["manifest_id"], expected["bundle_sha256"]
+        expiry = publish["expires_unix_seconds"]
+        expected["restored_release"] = dict(revision=3, manifest_id=candidate_id)
+        publish.update(operation="content_contribute", revision=3, original_signature_reused=True,
+                       origin_authenticated=False, ownership_changed=False, private_keys_transferred=False)
+        site["acquire"]["revision"] = 3
+        for key in ("ready", "final"):
+            site["viewer"][key]["revision"] = 3
+        site["viewer"]["release_selection"] = ["--min-revision", "3", "--expected-manifest-id", candidate_id]
+        first_id, previous_id = "1" * 64, "2" * 64
+        site["owner_restore"] = dict(source=dict(revision=1, manifest_id=first_id, bundle_sha256=digest,
+            expires_unix_seconds=expiry), current=dict(revision=2, manifest_id=previous_id, bundle_sha256="a" * 64,
+            expires_unix_seconds=expiry), candidate=dict(revision=3, manifest_id=candidate_id, bundle_sha256=digest,
+            expires_unix_seconds=expiry), owner_state_removed=True, restored_bytes_verified=True,
+            restore=dict(schema_version=1, operation="local_site_restore", base="reviewed_initial_current",
+                state="activated", publisher_key=expected["publisher_key"], name=expected["name"],
+                source_manifest_id=first_id, source_revision=1, previous_manifest_id=previous_id, previous_revision=2,
+                manifest_id=candidate_id, revision=3, bundle_sha256=digest, bundle_bytes=expected["bundle_bytes"],
+                expires_unix_seconds=expiry, predecessor_observed_in_this_operation=True,
+                network_publication=False, globally_latest=False))
+        CHECK["validate_report"](valid, REVISION, "restored")
+        for value, variant in ((report(), "restored"), (valid, "studio")):
+            with self.assertRaises(ValueError):
+                CHECK["validate_report"](value, REVISION, variant)
+        for path, replacement in (
+            (("owner_restore", "restore", "state"), "already_current"),
+            (("owner_restore", "restore", "previous_manifest_id"), first_id),
+            (("owner_restore", "current", "bundle_sha256"), digest),
+            (("owner_restore", "owner_state_removed"), False),
+            (("owner_restore", "candidate", "expires_unix_seconds"), expiry + 1),
+            (("publish", "original_signature_reused"), False),
+            (("input", "restored_release", "revision"), 1),
+            (("acquire", "manifest_id"), first_id),
+            (("acquire", "revision"), 1),
+            (("viewer", "ready", "revision"), 1),
+            (("viewer", "release_selection"), ["--min-revision", "3"])):
+            changed = copy.deepcopy(site)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = replacement
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_offline_site"](changed, valid["repair"]["expected_peers"], valid["repair"]["holder_offline"])
+
     def test_report_entrypoint_binds_revision_host_cleanup_and_truthful_scope(self):
         valid = report()
         CHECK["validate_report"](valid, REVISION)
