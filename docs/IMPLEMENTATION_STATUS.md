@@ -35,7 +35,8 @@ original bytes for offline inspection. Read only evidence relevant to the task.
 
 - The [integrated Core quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44372813034)
   passed its Storage contracts, build, integration and unprivileged quality
-  jobs on `dc5a1bac`. The topology and application trials below identify
+  jobs on `dc5a1bac`. Cargo reported 4,476 passed and 21 ignored in the
+  workspace test step. The topology and application trials below identify
   the source revisions they each exercised.
 - **Studio** saved an edited page, reopened it in a fresh browser context,
   verified its text and 37 px styling, and exported it. The Core CLI packed
@@ -97,6 +98,18 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   failed before issuing its first request. Fourteen connector tests and 25
   Python source checks passed locally.
   [Mail development source](https://github.com/VOLPAROSSA/volparossa-mail/commit/650e96a56a77e0300a5aae7d36fa5db9233ab201)
+  Thunderbird 157.0 then exercised the actual add-on using an isolated profile
+  and loopback JMAP fixture. The first metadata request returned HTTP 503.
+  After the user selected **Check stored metadata again**, the second request
+  for the same ID succeeded. The fixture saw exactly one 165-byte message
+  upload and one import. It removed its profile and stopped all test processes.
+  [Native Thunderbird receipt](https://github.com/VOLPAROSSA/volparossa-mail/blob/fb1ba939bbec2833580f6b98c0aa071c7ed95786/third_party/thunderbird-extension-smoke.json)
+- **Chat** now emits a receipt event once per distinct message timestamp
+  within one incoming encrypted Signal receipt. Separate envelopes and linked
+  devices keep separate events. Three synthetic cases exercised the method
+  from the pinned desktop receiver. The app also passed its 42 Python and 14
+  existing Node tests. Peer delivery and the full desktop session remain open.
+  [Chat receiver and test](https://github.com/VOLPAROSSA/volparossa-chat/commit/20b028db922142ef9772983211350fb8f44d56e2)
 - **Weather** compares IFS and AIFS 2 m temperature forecasts against supplied
   public station observations on matched runs, grids and observation times.
   The CLI reports signed and absolute error, coverage and exclusions. Its
