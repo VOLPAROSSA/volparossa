@@ -392,7 +392,7 @@ class SourceBindings(unittest.TestCase):
             'tests/integration/protected-resident-model-host-observation.py',
             'tests/integration/protected-resident-model-run.py')
         public = workflow.split('\n  public-model:\n',1)[1]
-        historical = public.replace('refs/heads/integration/resident-model-main-20261022',
+        historical = public.replace('refs/heads/development/public-resident-result-trial-20261118',
             'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
         defects = (None,'missing','extra','duplicate','status','actual-job','checkpoint',feature,main)+unchanged
         for defect in defects:
@@ -429,7 +429,7 @@ class SourceBindings(unittest.TestCase):
                 for field in ('actual_model_execution','guest_boot','private_workload_acceptance','hardware_attestation'):
                     self.assertFalse(receipt[field])
                 self.assertNotIn('historical_cause_proven',receipt)
-        target = 'refs/heads/integration/resident-model-main-20261022'
+        target = 'refs/heads/development/public-resident-result-trial-20261118'
         for job in ('contracts','public-model'):
             condition = workflow.split('\n  '+job+':\n',1)[1].split('    if: >-\n',1)[1].split('\n    runs-on:',1)[0]
             expression = ' '.join(condition.splitlines()).replace('&&',' and ').replace('||',' or ').strip()

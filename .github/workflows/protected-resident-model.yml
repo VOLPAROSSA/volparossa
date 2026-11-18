@@ -34,7 +34,7 @@ jobs:
   contracts:
     if: >-
       github.repository == 'VOLPAROSSA/volparossa' &&
-      github.ref == 'refs/heads/integration/resident-model-main-20261022' &&
+      github.ref == 'refs/heads/development/public-resident-result-trial-20261118' &&
       github.event_name == 'workflow_dispatch' &&
       (inputs.scenario == 'source-contracts' ||
       (inputs.scenario == 'public-model' && inputs.expected_source == github.sha))
@@ -50,14 +50,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Bind the reviewed merge and the closed workflow consolidation
+      - name: Bind the writer parent and the reviewed public trial recipe
         timeout-minutes: 2
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa
-          test "$GITHUB_REF" = refs/heads/integration/resident-model-main-20261022
+          test "$GITHUB_REF" = refs/heads/development/public-resident-result-trial-20261118
           test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
@@ -66,14 +66,14 @@ jobs:
           python3 -B - <<'PYBIND'
           import json,os,pathlib,subprocess
           def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
-          def bind_composition(git, public_job):
+          def bind_composition(git, public_job, revision='HEAD'):
             main='235c2c9165c2c07e7cd3bca82ec8b70152bb8d90'
             feature='812b25ed08cee33c6e4a865ce6ce0ba87f5a9e7e'
             checkpoint='a7acb02089c2a93964a35d8fa005408e92eb6d7e'
             # Publish the normal merge as a separate ancestor. The exact tree
             # retains current main policy/dependencies and the reviewed feature.
-            for parent in (feature,main): git('merge-base','--is-ancestor',parent,'HEAD')
-            assert checkpoint in git('log','--first-parent','--format=%T','HEAD').splitlines()
+            for parent in (feature,main): git('merge-base','--is-ancestor',parent,revision)
+            assert checkpoint in git('log','--first-parent','--format=%T',revision).splitlines()
             expected={
               '.github/workflows/protected-resident-model.yml':'M',
               '.github/workflows/resident-current-main.yml':'D',
@@ -84,7 +84,7 @@ jobs:
               'tests/integration/test-protected-resident-model-host-observation.py':'M',
               'tests/integration/test-protected-resident-model-run.py':'M',
             }
-            changes=git('diff','--no-renames','--name-status',checkpoint,'HEAD').splitlines()
+            changes=git('diff','--no-renames','--name-status',checkpoint,revision).splitlines()
             pairs=[line.split('\t') for line in changes]
             assert all(len(pair)==2 for pair in pairs)
             assert len(pairs)==len(expected)
@@ -94,17 +94,39 @@ jobs:
             original=git('show',feature+':.github/workflows/resident-pinned-compiler.yml')
             canonical=original.split('\n  public-model:\n',1)[1].rstrip()
             canonical=canonical.replace('refs/heads/fix/resident-runtime-assembly-diagnostic-20261028',
-              'refs/heads/integration/resident-model-main-20261022')
+              'refs/heads/development/public-resident-result-trial-20261118')
             assert public_job.rstrip()==canonical
             return dict(main_parent=main,feature_parent=feature,normal_merge_tree=checkpoint,
               consolidation_paths=expected,actual_recipe_preserved=True,
               source_contracts_only=True,actual_model_execution=False,guest_boot=False,
               private_workload_acceptance=False,hardware_attestation=False)
+          def bind_writer_candidate(git):
+            parent='884069991097753a2209d9cbdfb70a785320b0af'
+            accepted='6ac9f2a8c2a2b66c0e4692172fecb45f0e68c467'
+            assert git('rev-list','--parents','-n','1','HEAD').split()[1:]==[parent]
+            git('merge-base','--is-ancestor',accepted,parent)
+            allowed={
+              '.github/workflows/protected-resident-model.yml',
+              'tests/integration/protected-resident-model-run.py',
+              'tests/integration/test-protected-resident-model-run.py',
+              'tests/integration/test-protected-resident-model-host-observation.py',
+            }
+            changes=git('diff','--no-renames','--name-status',parent,'HEAD').splitlines()
+            assert sorted(changes)==sorted('M\t'+path for path in allowed)
+            # This pinned controller differs from the writer parent only in the
+            # hosted ref comparison, narrowed from five historical refs to one.
+            controller='tests/integration/protected-resident-model-run.py'
+            controller_blob=git('rev-parse','HEAD:'+controller)
+            assert controller_blob=='2c7c54aa5eb0b1cca245d923cb2ebe7a23fbad37'
+            return dict(writer_parent=parent,accepted_recipe_commit=accepted,
+              parent_controller_blob=git('rev-parse',parent+':'+controller),
+              controller_blob=controller_blob,trial_paths=sorted(allowed))
+          candidate=bind_writer_candidate(git)
           public_job=pathlib.Path('.github/workflows/protected-resident-model.yml').read_text().split('\n  public-model:\n',1)[1]
-          receipt=bind_composition(git,public_job)
-          receipt.update(version=1,source_commit=os.environ['GITHUB_SHA'],workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
-            source_tree=git('rev-parse','HEAD^{tree}'),
-            source_blobs={name:git('rev-parse','HEAD:'+name) for name,status in receipt['consolidation_paths'].items() if status=='M'})
+          historical=bind_composition(git,public_job,candidate['accepted_recipe_commit'])
+          receipt=dict(version=2,source_commit=os.environ['GITHUB_SHA'],workflow_commit=os.environ['GITHUB_WORKFLOW_SHA'],
+            source_tree=git('rev-parse','HEAD^{tree}'),historical_consolidation=historical,**candidate)
+          receipt['source_blobs']={name:git('rev-parse','HEAD:'+name) for name in candidate['trial_paths']}
           pathlib.Path('resident-model-evidence/source.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
           PYBIND
 
@@ -207,7 +229,7 @@ jobs:
               'tests/integration/test-resident-model-debian.py':19,
               'tests/integration/test-protected-resident-model-install.py':61,
               'tests/integration/test-protected-resident-model-assemble.py':35,
-              'tests/integration/test-protected-resident-model-run.py':252,
+              'tests/integration/test-protected-resident-model-run.py':253,
               'tests/integration/test-protected-resident-model-host-observation.py':20,
               'tests/integration/test-protected-resident-model-initrd.py':31,
               'tests/integration/test-protected-resident-initrd.py':21,
@@ -228,7 +250,7 @@ jobs:
                 pattern=r'^'+re.escape(method)+r' \((?:[^() ]+\.)?'+re.escape(test)+r'\) \.\.\. ok$'
                 assert len(re.findall(pattern,raw,re.M))==1,(name,test)
               inventory[name]=names
-            assert sum(map(len,inventory.values()))==729
+            assert sum(map(len,inventory.values()))==730
             return inventory
           root=pathlib.Path('resident-model-evidence')
           inventory=verify_python_contracts(root,pathlib.Path)
@@ -348,7 +370,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' && inputs.scenario == 'public-model' &&
       github.repository == 'VOLPAROSSA/volparossa' &&
-      github.ref == 'refs/heads/integration/resident-model-main-20261022' &&
+      github.ref == 'refs/heads/development/public-resident-result-trial-20261118' &&
       inputs.expected_source == github.sha && needs.contracts.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 300

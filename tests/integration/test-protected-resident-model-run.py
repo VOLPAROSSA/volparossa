@@ -2510,12 +2510,8 @@ class MainHostedAdmission(Inert):
             GITHUB_REPOSITORY='VOLPAROSSA/volparossa', GITHUB_SHA='a'*40,
             GITHUB_WORKFLOW_SHA='a'*40, GITHUB_REF=branch)
 
-    def test_only_five_exact_refs_reach_source_binding_before_any_host_effect(self):
-        branches = ('refs/heads/feature/protected-resident-model',
-            'refs/heads/integration/resident-model-main-20261022',
-            'refs/heads/integration/resident-current-main-20261028',
-            'refs/heads/fix/resident-pinned-guest-compiler-20261028',
-            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
+    def test_only_the_trial_ref_reaches_source_binding_before_any_host_effect(self):
+        branches = ('refs/heads/development/public-resident-result-trial-20261118',)
         args = types.SimpleNamespace(execute=True, yes=True, expected_source='a'*40)
         for branch in branches:
             with mock.patch.dict(R.os.environ, self.environment(branch), clear=True), \
@@ -2528,11 +2524,15 @@ class MainHostedAdmission(Inert):
                 module.assert_not_called(); mkdir.assert_not_called()
 
     def test_environment_and_explicit_execution_fail_before_source_or_host_effects(self):
-        branch = 'refs/heads/integration/resident-model-main-20261022'
+        branch = 'refs/heads/development/public-resident-result-trial-20261118'
         cases = [(key, value) for key, value in dict(GITHUB_ACTIONS='false', RUNNER_ENVIRONMENT='self-hosted',
             RUNNER_OS='Other', GITHUB_REPOSITORY='other/repository', GITHUB_SHA='b'*40,
             GITHUB_WORKFLOW_SHA='b'*40).items()]
         cases += [('GITHUB_REF', value) for value in ('', 'refs/heads/main',
+            'refs/heads/integration/resident-model-main-20261022', 'refs/heads/feature/protected-resident-model',
+            'refs/heads/fix/resident-pinned-guest-compiler-20261028',
+            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028',
+            'refs/heads/integration/resident-current-main-20261028',
             'refs/heads/integration/resident-main-runtime-20261023', 'refs/pull/1/merge',
             branch+'-other', 'refs/heads/fix/resident-host-config-20261023',
             'refs/heads/integration/resident-current-main-20261028-other',
@@ -2607,7 +2607,7 @@ class ReceiptAndBindings(Inert):
         if defect == 'status': changes[0] = changes[0].replace('M\t','A\t')
         if defect == 'rename': changes[0] = 'R100\told.yml\tnew.yml'
         public = self._resident_workflow().split('\n  public-model:\n',1)[1]
-        historical = public.replace('refs/heads/integration/resident-model-main-20261022',
+        historical = public.replace('refs/heads/development/public-resident-result-trial-20261118',
             'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028')
         calls = []
         def git(*args):
@@ -2636,7 +2636,7 @@ class ReceiptAndBindings(Inert):
         public_body = workflow.split('\n  public-model:\n',1)[1]
         self.assertTrue(public_body.startswith('    needs: contracts\n'))
         self.assertNotIn('always()',public_body.split('    runs-on:',1)[0])
-        target = 'refs/heads/integration/resident-model-main-20261022'
+        target = 'refs/heads/development/public-resident-result-trial-20261118'
         branches = (target,target+'-other','refs/heads/main','refs/pull/1/merge',
             'refs/heads/feature/protected-resident-model',
             'refs/heads/diagnostic/protected-export-inventory-20261021',
@@ -2662,6 +2662,35 @@ class ReceiptAndBindings(Inert):
                                 actual = eligible and scenario=='public-model' and pin=='a'*40
                                 self.assertEqual(eval(public,context),actual and result=='success')
                                 self.assertEqual(eval(contracts,context),eligible and (scenario=='source-contracts' or actual))
+
+    def test_writer_trial_requires_single_reviewed_parent_exact_controller_and_closed_paths(self):
+        tree = ast.parse(self._workflow_python('PYBIND'))
+        gate = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='bind_writer_candidate')
+        namespace = {}
+        exec(compile(ast.Module(body=[gate],type_ignores=[]),'inert-writer-binding','exec'),namespace)
+        parent = '884069991097753a2209d9cbdfb70a785320b0af'
+        accepted = '6ac9f2a8c2a2b66c0e4692172fecb45f0e68c467'
+        controller = 'tests/integration/protected-resident-model-run.py'
+        paths = sorted(('.github/workflows/protected-resident-model.yml', controller,
+            'tests/integration/test-protected-resident-model-run.py',
+            'tests/integration/test-protected-resident-model-host-observation.py'))
+        controller_blob = '2c7c54aa5eb0b1cca245d923cb2ebe7a23fbad37'
+        replies = {('rev-list','--parents','-n','1','HEAD'):'a'*40+' '+parent,
+            ('merge-base','--is-ancestor',accepted,parent):'',
+            ('diff','--no-renames','--name-status',parent,'HEAD'):'\n'.join('M\t'+p for p in paths),
+            ('rev-parse','HEAD:'+controller):controller_blob,
+            ('rev-parse',parent+':'+controller):'b'*40}
+        def bind(replies):
+            return namespace['bind_writer_candidate'](lambda *args: replies[args])
+        result = bind(replies)
+        self.assertEqual(result['trial_paths'],paths)
+        self.assertEqual(result['writer_parent'],parent)
+        self.assertEqual(result['controller_blob'],controller_blob)
+        for args,replacement in ((('rev-list','--parents','-n','1','HEAD'),'a'*40+' '+parent+' '+'b'*40),
+                                 (('rev-parse','HEAD:'+controller),'d'*40),
+                                 (('diff','--no-renames','--name-status',parent,'HEAD'),'M\tCargo.lock')):
+            with self.subTest(args=args),self.assertRaises(AssertionError):
+                bind({**replies,args:replacement})
 
     def test_maintained_composition_requires_both_parents_exact_tree_and_closed_changes(self):
         bind,git,public,values,calls = self._composition_fixture()
@@ -2690,7 +2719,7 @@ class ReceiptAndBindings(Inert):
             ('--requester "$GITHUB_WORKSPACE/target/resident-public-requester"','--requester /tmp/unbound'),
             ('systemctl stop','systemctl show'),
             ('/evidence/result.json','/**'),
-            ('refs/heads/integration/resident-model-main-20261022','refs/heads/main'))
+            ('refs/heads/development/public-resident-result-trial-20261118','refs/heads/main'))
         for old,new in mutations:
             self.assertIn(old,public)
             with self.subTest(old=old),self.assertRaises(AssertionError): bind(git,public.replace(old,new))
@@ -2798,7 +2827,7 @@ class ReceiptAndBindings(Inert):
             'tests/integration/test-resident-model-debian.py':19,
             'tests/integration/test-protected-resident-model-install.py':61,
             'tests/integration/test-protected-resident-model-assemble.py':35,
-            'tests/integration/test-protected-resident-model-run.py':252,
+            'tests/integration/test-protected-resident-model-run.py':253,
             'tests/integration/test-protected-resident-model-host-observation.py':20,
             'tests/integration/test-protected-resident-model-initrd.py':31,
             'tests/integration/test-protected-resident-initrd.py':21,
@@ -2824,7 +2853,7 @@ class ReceiptAndBindings(Inert):
                 with self.subTest(defect=defect),self.assertRaises(AssertionError): verify()
             else:
                 inventory = verify()
-                self.assertEqual(sum(map(len,inventory.values())),729)
+                self.assertEqual(sum(map(len,inventory.values())),730)
 
     def test_maintained_compiler_and_cargo_callers_preserve_current_main_policy(self):
         workflow = self._resident_workflow()

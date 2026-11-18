@@ -620,11 +620,8 @@ def hosted(args, deadline):
                           'RUNNER_OS': 'Linux', 'GITHUB_REPOSITORY': 'VOLPAROSSA/volparossa',
                           'GITHUB_SHA': args.expected_source, 'GITHUB_WORKFLOW_SHA': args.expected_source}.items():
         require(os.environ.get(key) == expected, 'hosted_source_scope')
-    require(os.environ.get('GITHUB_REF') in ('refs/heads/feature/protected-resident-model',
-            'refs/heads/integration/resident-model-main-20261022',
-            'refs/heads/integration/resident-current-main-20261028',
-            'refs/heads/fix/resident-pinned-guest-compiler-20261028',
-            'refs/heads/fix/resident-runtime-assembly-diagnostic-20261028'), 'hosted_source_scope')
+    require(os.environ.get('GITHUB_REF') == 'refs/heads/development/public-resident-result-trial-20261118',
+            'hosted_source_scope')
     require(os.uname().machine == 'x86_64', 'host_architecture')
     source = source_binding(args.expected_source, deadline)
     base = module('protected-resident-image')
