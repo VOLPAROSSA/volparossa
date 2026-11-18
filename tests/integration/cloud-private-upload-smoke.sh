@@ -24,7 +24,10 @@ cloud_private_upload_run() {
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_owner_parent"
     [ "$CLOUD_SOURCE" = /opt/volparossa-cloud ] || fail CLOUD_SOURCE_INVALID
     [ "$CLOUD_NODE" = /opt/volparossa-node/bin/node ] || fail CLOUD_NODE_INVALID
-    [ "$CLOUD_REVISION" = 178592a3881d49f839f7716a154f7ef446ecbda5 ] || fail CLOUD_REVISION_INVALID
+    case ${CLOUD_UPLOAD_PROFILE:-ordinary}:$CLOUD_REVISION in
+        ordinary:178592a3881d49f839f7716a154f7ef446ecbda5|retained-owner:720f88f2a639ef5e2eecbba18c7bb2acb93f9645) ;;
+        *) fail CLOUD_REVISION_INVALID ;;
+    esac
     if [ ! -f "$CLOUD_SOURCE/provision.json" ] || [ -L "$CLOUD_SOURCE/provision.json" ]; then
         fail CLOUD_PROVISION_MISSING
     fi
@@ -43,11 +46,15 @@ cloud_private_upload_run() {
 
 cloud_private_upload_finalize_report() {
     cloud_status=$1
+    cloud_scope="Pinned original Files/Uppy upload, guest owner encryption and protected fragments. Source and both local ciphertexts removed; service/browser restarted; provider A offline; two baseline and two UI restores, exact charges and all-copy retirement. No full OpenCloud account/sharing/sync proof."
+    if [ "${CLOUD_UPLOAD_PROFILE:-ordinary}" = retained-owner ]; then
+        cloud_scope="Original Files/Uppy upload interrupted after a committed copy. Owner CLI reopened original encrypted catalog/ciphertext/journal after browser and source removal. Two fresh UI downloads with one provider stopped; bounded test cleanup and physical charges. No maintenance enrollment or independent-device proof."
+    fi
     optional_json_evidence "$WORK/cloud-private-upload-evidence.json" >"$WORK/handoff-report-evidence.part"
     optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/handoff-report-host.part"
     python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" \
         preselection-events "$WORK/logs-client.txt" >"$WORK/cloud-preselection.part" || return 1
-    jq -cn --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
+    jq -cn --arg scope "$cloud_scope" --arg revision "$expected_commit" --arg run "$RUN_ID" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$cloud_status" --slurpfile evidence "$WORK/handoff-report-evidence.part" \
         --slurpfile host "$WORK/handoff-report-host.part" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" --slurpfile selection "$WORK/cloud-preselection.part" '
@@ -56,7 +63,7 @@ cloud_private_upload_finalize_report() {
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),preselection_events:$selection[0],
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-       scope:"Pinned Cloud original Files/Uppy upload through real owner encryption and protected fragments. Authenticated synthetic DAV baseline source stopped; both local ciphertexts removed; service stopped and restarted; provider A offline; two baseline restores and two original UI downloads. Exact retained physical charges, all-copy retirement and joined private service/browser cleanup. No full OpenCloud accounts, sharing, writable synchronization or general server-independent availability proof."}' \
+       scope:$scope}' \
         >"$WORK/cloud-private-upload-smoke.json" || return 1
     cloud_exports=$(python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" export-names) || return 1
     for cloud_name in $cloud_exports; do
