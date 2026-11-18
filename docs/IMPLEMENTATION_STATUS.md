@@ -38,6 +38,10 @@ original bytes for offline inspection. Read only evidence relevant to the task.
   jobs on `dc5a1bac`. Cargo reported 4,476 passed and 21 ignored in the
   workspace test step. The topology and application trials below identify
   the source revisions they each exercised.
+  The [subsequent combined Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44401197512)
+  passed all three jobs on `6350130d`, which integrates the Storage bind
+  diagnostic, exact release selection and restored-site deployment fixture.
+  Its workspace test step reported 4,493 passed, zero failed and 21 ignored.
 - **Studio** saved an edited page, reopened it in a fresh browser context,
   verified its text and 37 px styling, and exported it. The Core CLI packed
   the four files from the 1,474-byte ZIP and the production decoder verified
