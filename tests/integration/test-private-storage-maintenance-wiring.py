@@ -1030,7 +1030,7 @@ with target.open('xb') as stream:
 
     def test_guest_build_profiles_are_scoped_and_preserve_commands_and_failures(self):
         source = (HERE / 'run-alpha-topology-vm.sh').read_text()
-        start = source.index('guest_phase build\nif [ "$scenario" = private-storage-maintenance ]; then')
+        start = source.index('\nguest_phase build\n') + 1
         block = source[start:source.index('\nif [ "$scenario" = dns-cache ]; then', start)]
         commands = [
             ['test', '--locked', '-p', 'volparossa', '--bin', 'volparossa',
@@ -1051,7 +1051,10 @@ with target.open('xb') as stream:
             ('private-storage-maintenance', 'volparossa-agent', 2, 7, True),
             ('private-storage-maintenance', 'volparossa-content', 3, 7, True),
             ('private-storage-maintenance', 'build', 4, 1, True)]
+        cases += [('cloud-upload-maintenance', fail, count, status, inherited)
+            for scenario, fail, count, status, inherited in cases if scenario == SCENARIO]
         for scenario, fail, count, status, inherited in cases:
+            maintenance = scenario in (SCENARIO, 'cloud-upload-maintenance')
             with self.subTest(scenario=scenario, fail=fail, inherited=inherited), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 shim = root / 'cargo'
@@ -1082,23 +1085,23 @@ with target.open('xb') as stream:
                     capture_output=True, timeout=5, env=env)
                 self.assertEqual(result.returncode, status, result.stderr)
                 owner_status = root / 'storage-maintenance-tests.status'
-                self.assertEqual(owner_status.exists(), scenario == SCENARIO)
-                if scenario == SCENARIO:
+                self.assertEqual(owner_status.exists(), maintenance)
+                if maintenance:
                     self.assertEqual(owner_status.read_text(), '7\n' if fail == 'volparossa' else '0\n')
                 calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
                 cargo_calls = [call for call in calls if call['tool'] == 'cargo']
                 self.assertEqual(len(cargo_calls), count)
-                selected = commands[:count] if scenario == SCENARIO else commands[-1:]
+                selected = commands[:count] if maintenance else commands[-1:]
                 self.assertEqual([call['args'] for call in cargo_calls], selected)
                 for call in cargo_calls:
-                    expected_profile = '0' if scenario == SCENARIO else '1' if inherited else None
+                    expected_profile = '0' if maintenance else '1' if inherited else None
                     self.assertEqual(call['env'], dict(CARGO_BUILD_JOBS='2' if call['args'][0] == 'build' else '1',
                         CARGO_TARGET_DIR=str(root / 'target'), **dict.fromkeys(profile_keys, expected_profile)))
                 timeout_calls = [call['args'] for call in calls if call['tool'] == 'timeout']
                 self.assertEqual(timeout_calls, [
                     ['--signal=TERM', '--kill-after=15s', deadline, 'cargo', *command]
                     for deadline, command in zip(('1200s', '900s', '600s'), commands[:min(count, 3)])
-                ] if scenario == SCENARIO else [])
+                ] if maintenance else [])
 
     def test_route_diagnostic_export_does_not_replace_primary_failed_report(self):
         script = r'''

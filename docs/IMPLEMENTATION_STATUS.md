@@ -108,7 +108,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | Components pass; full consumer restore/deletion and zero remote usage remain open after catalog/retention failures. |
+| Storage / Image / Cloud | Core restore and deletion passed. Image publish stopped during stream opening and all three consumer providers retained usage. [Storage trial](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | Real local edit/style/preview/export/Core packing passes in 39869460125; production publication, independent hosting, shared AI and dynamic execution remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -122,9 +122,9 @@ is removed; behavioral tests and production paths are unchanged.
 Choose complete executable slices by shared dependency, demonstrated failure and
 system value; these priorities impose no fixed application/model/agent order.
 
-1. **Storage:** drive the required ordinary renewal rotation without weakening
-   retention authority; then exercise catalog restore and finish Image/Cloud
-   publish, repair, restore, deletion and confirmed zero remote usage.
+1. **Storage.** Resolve the Image publish failure during stream opening. Complete
+   Image and Cloud publish, repair, restore and deletion with confirmed zero
+   provider usage before running the joined upload trial.
 2. **Protected model.** Build on the verified public resident session. Private
    execution requires separately authorized inputs and its own acceptance proof.
 3. **Studio publication:** bound request geometry and Storage reads before
@@ -163,7 +163,7 @@ system value; these priorities impose no fixed application/model/agent order.
   analyses and 66 Node tests pass. These source results do not prove catalog
   restoration. Failure snapshots are bounded/sequential, not per-request cause
   evidence; empty saturated rings do not prove absence of failures.
-- **Latest actual and follow-up:** Alpha 39864473079 fails
+- **October failure and follow-up:** Alpha 39864473079 fails
   `private-storage-maintenance-core-restart`, specifically
   `baseline_custody/reconcile_progress/pending_handoff` with
   `replacement_retention_insufficient`. The retention guard correctly prevents
@@ -181,23 +181,104 @@ system value; these priorities impose no fixed application/model/agent order.
   establish the underlying failure substage, rotation convergence, catalog
   restoration or independent remote cleanup.
 
-The central continuation on 5 November reapplies PR339's bounded ordinary
-rotation fixture to current main. It also keeps version-4 failure diagnostics
-compact through export and revalidation, and records only the validated closed
-diagnostic in job logs. The original run's seven-day artifacts have expired;
-its retained logs do not establish the failure substage. A fresh source-bound
-trial [42113671903](https://github.com/VOLPAROSSA/volparossa/actions/runs/42113671903)
-on `e50af83d` stops before Storage: the guest compiler source policy rejects its
-environment. Alpha's SSH caller now drops only the two transport metadata
-variables already removed by the helper VM; credentials/configuration remain
-rejected. This caller correction still needs a new actual trial. Historical consumer
-profile 10 pins remain unchanged, so that trial cannot accept the later
-Image/Cloud draft heads by implication.
+PR371 restored bounded ordinary renewal rotation and validated failure
+diagnostics. On PR279 at `2a8b4fdff5eec755cbad14998d2411f54c066cbe`, Quality
+passed the Storage contracts, build and integration tests, and their shared gate.
+Its test merge `1485ae3c` has the same tree as that source. CodeQL also passed.
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/42147777520) · [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/42147771678) · [Earlier Storage runs, pins and artifact digests](https://github.com/VOLPAROSSA/volparossa/blob/2a8b4fdff5eec755cbad14998d2411f54c066cbe/docs/IMPLEMENTATION_STATUS.md#storage-consumer-and-provider-evidence)
 
-[Full Storage evidence and original failures](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#execution-priorities-and-next-milestones)
-retain exact pins, artifacts and receipts. Automatic upload branch PR279 still
-requires the complete consumer profile, finite authority, actual enrollment,
-repeated restore and all-copy deletion; SDK source checks do not replace it.
+The 18 November trial at that same source failed during Image publish. Core
+maintenance reached cursor 9, restored twice and deleted all eleven copies.
+Three independent provider readings then showed zero reserved bytes, committed
+bytes and leases. Image later received `CONTENT_UNAVAILABLE` on fragment 2,
+copy 0, during APPEND. Opening the stream reached `flow_acquire` and recorded
+three rounds. The first failed with `helper_kernel` and the last with
+`helper_cleanup_incomplete`, both at `helper_acquire`. Cloud did not start.
+[Run 44301340772](https://github.com/VOLPAROSSA/volparossa/actions/runs/44301340772)
+
+A separate phase-wide observer recorded `mptcp_connect_poll_timed_out` first
+and `acquire_coordinator_unavailable` last across three attempts. The record
+has no application, fragment, copy or provider identity. The helper log separately
+reported a bind failure (errno 98) and two poll timeouts. The cause of the
+Image request failure remains open.
+
+The guest host-state comparison passed, and local fixture cleanup left
+zero owned objects. Consumer providers A, B and C still held 3, 3 and 2 leases
+respectively. Their committed bytes were 599,359, 599,359 and 199,787. C also
+held 199,787 reserved bytes. Remote consumer deletion and owner reconciliation
+remain open. The retained ZIP has SHA-256
+`5b4303e602b2ec8b6541cdc93b64421ae010b4b64c12f7858d8bf7bab77ea95b`.
+[Trial artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44301340772/artifacts/14428484479)
+
+Two further hosted trials restored the Core archive and deleted all eleven copies.
+Each recorded zero leases and bytes at the three Core providers. On `8ae10f21`,
+Image FINALIZE waited 90–120 seconds for the challenge length on fragment 2.
+On `43e9027e`, Image RESERVE on that fragment hit the TLS deadline for copy 0
+and helper cleanup was unconfirmed during stream acquisition for copy 1.
+The helper independently recorded `lease_expired` during the publish phase.
+The same route had already served the preceding Core phases for over 561 seconds.
+The log cannot link that expiry to a particular copy. Cloud did not start.
+Consumer providers retained eight leases in the first trial and six in the second.
+[First trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44313217738) · [Second trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44315089745)
+
+The second source bounded the worker connect poll by the five-second cap and
+the original request deadline, reserving 250 ms to return the result. It also
+reduced the failed-consumer sampler to one final snapshot. The inert incomplete-flow
+fixture used eight control queries, down from 104, and preserved the original error.
+The next revision also caps a connected client MPTCP acquisition at the registered
+worker lease expiry before dispatch. The caller's earlier deadline takes precedence.
+The remaining acceptance check is Image and Cloud publication, restoration after
+provider withdrawal, deletion and independent zero usage through route turnover.
+
+On `ff268f3e`, the trial stopped earlier. The foreground `storage peer progress`
+command exited while the maintenance turn was marked `working`. The receipt
+contained no cause for that exit. The fixture now requests a diagnostic from
+that same call and can retain its exit status, typed operation stage, error
+category and bounded agent code. A failure outside a known stage is recorded
+as `unknown`. Image and Cloud were not reached in this run.
+[Foreground trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44332080434)
+
+On `49955656`, foreground progress succeeded. Core restored twice and deleted
+all eleven copies. Each Core provider reported zero leases and bytes. Consumer
+publication then stopped at `cloud_catalog_create/catalog_materialization_failed`.
+The catalog's single Storage restore returned verified and complete. Consumer
+providers A, B and C retained 6, 6 and 4 leases.
+[Catalog trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44341178239)
+
+Without a user runtime directory, the Cloud catalog's private GnuPG socket
+would use a 105-byte path. The pinned helper allows up to 103 bytes. The
+fixture now uses a 102-byte catalog socket path and checks it before consumer
+publication. The trial did not record which runtime directory GnuPG selected.
+
+The next [catalog trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44348799240)
+at `5186411b` failed during Cloud catalog creation. Its bound restore returned
+`retained_operation_incomplete` with both Core operation completion and restore
+verification false. Providers A/B/C retained 6/6/4 leases with zero reserved
+bytes. Guest cleanup and host comparison passed. The
+[artifact](https://github.com/VOLPAROSSA/volparossa/actions/runs/44348799240/artifacts/14452602822)
+has SHA-256 `d0a3e132d6cfc0402e63db407b01cc36e7310e0e3cd7d2896712b3e5ddfb8abf`.
+The copy and transport cause of this restore failure are unknown.
+
+Foreground restore now shares one retry per copy across its Progress preflight
+and verified range reads when the agent reports a provider TLS handshake deadline
+before READY. The retry keeps the existing exchange deadline, offset and grant.
+Background turns and ordinary successful flow counts are preserved.
+
+#### Automatic upload integration candidate
+
+Upload profiles 1–6 retain their application pins and finite authorization
+ceilings. Before upload profile 6 can run, shared consumer profile 10 must pass
+the full Image and Cloud lifecycle with verified cleanup and zero usage on all
+providers. The run also requires TLS-close diagnostic 9. Consumer profile 10
+pins Image `f51b8ace` and Cloud `5f143725`. Upload profile 6 pins Image
+`1e812ec6` and Cloud `35598609`. Each phase checks its own source and preceding
+receipt. Quality covers the reusable upload checks and two isolated TLS-close
+contracts. Both upload export paths validate the two diagnostic sidecars.
+[PR279](https://github.com/VOLPAROSSA/volparossa/pull/279) · [Original candidate](https://github.com/VOLPAROSSA/volparossa/blob/dd1fd4dff55413ade4cfb26ffcb7bf5a9ad26c01/docs/IMPLEMENTATION_STATUS.md)
+
+The joined trial must demonstrate authenticated upload, automatic enrollment
+under finite authority, provider withdrawal, repair, two cold restorations
+across restart, deletion and cleanup. That trial remains pending.
 
 ### Protected Compute evidence
 
@@ -331,7 +412,7 @@ using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
 | Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
 | Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
 | Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |
-| Automatic upload | `feature/cloud-upload-tls-v9`, `.git/codex-cloud-upload-tls-v9`, PR279 at dd1fd4df | Complete shared consumer profile and remote cleanup before upload acceptance. |
+| Automatic upload | `feature/cloud-upload-tls-v9`, `.git/codex-cloud-upload-tls-v9`, PR279 | Complete shared consumer profile and remote cleanup before upload acceptance. |
 | Earlier Storage dependencies | `.git/codex-storage-route-retirement`, `.git/codex-storage-real-route-sequence`, `.git/codex-storage-natural-expiry-sequence`, `.git/codex-storage-post-acquire-clock` | Preserve PR275/285/287/288 history and later integrated corrections; old heads are not current implementation status. |
 | Map | `feature/native-traffic-lifecycle` at ca7a4e59; quality work `.volparossa-dev/worktrees/dps-native-quality-20261021` | Preserve unpublished work and accepted debug fixture; complete real sensors/navigation. |
 | Studio publication | `.volparossa-dev/worktrees/studio-publisher-pin-20261023`, PR337 | Pin guard integrated; preparation, native authority and hosting remain required. |

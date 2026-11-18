@@ -212,6 +212,13 @@ class ConsumerNetwork(unittest.TestCase):
                     patch.object(os, 'stat', side_effect=named), patch.object(os, 'geteuid', return_value=0):
                 with self.assertRaises(ValueError): M['OLD']['read'](flow, maximum=16384, private=True)
                 self.assertEqual(M['worker_flow'](work, flow), {'synthetic': True})
+                for phase in ('upload', 'exercise', 'finish'):
+                    cloud = U['save'](parent, f'flow-cloud-upload-{phase}.json', b'{"synthetic":true}')
+                    self.assertEqual(M['worker_flow'](work, cloud), {'synthetic': True})
+                for invalid in ('flow-cloud-upload-prepare.json', 'flow-cloud-upload-publish.json',
+                        'flow-cloud-other-upload.json', 'flow-cloud-upload-finish.json.bak'):
+                    with self.assertRaisesRegex(ValueError, 'consumer_worker_flow_path'):
+                        M['worker_flow'](work, parent / invalid)
                 for inode in (actual_stat(flow).st_ino, actual_stat(parent).st_ino):
                     wrong_owners.add(inode)
                     with self.assertRaises(ValueError): M['worker_flow'](work, flow)

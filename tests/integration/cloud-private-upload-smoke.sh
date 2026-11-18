@@ -24,7 +24,7 @@ cloud_private_upload_run() {
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$storage_owner_parent"
     [ "$CLOUD_SOURCE" = /opt/volparossa-cloud ] || fail CLOUD_SOURCE_INVALID
     [ "$CLOUD_NODE" = /opt/volparossa-node/bin/node ] || fail CLOUD_NODE_INVALID
-    [ "$CLOUD_REVISION" = ffdcfaa15cdd2a029dae545904b0a58603da4e17 ] || fail CLOUD_REVISION_INVALID
+    [ "$CLOUD_REVISION" = 998bf2d46ba51ba904500e4f223d5f7d200092dc ] || fail CLOUD_REVISION_INVALID
     if [ ! -f "$CLOUD_SOURCE/provision.json" ] || [ -L "$CLOUD_SOURCE/provision.json" ]; then
         fail CLOUD_PROVISION_MISSING
     fi

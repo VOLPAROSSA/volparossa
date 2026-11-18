@@ -168,7 +168,7 @@ def validate_diagnostic(value):
 
 @contextmanager
 def capture(binary, socket, baseline, minimum, *, client, policy, diagnostic=None):
-    """Same 3s sample, 5s cadence/drain, limits and owned joins; no RPC retry."""
+    """Use 3s samples and a 5s cadence. Drain completions after owner success."""
     coverage = Coverage(baseline, policy)
     require(type(minimum) is int and minimum >= 0)
     stopped, failures = threading.Event(), []
@@ -233,22 +233,27 @@ def capture(binary, socket, baseline, minimum, *, client, policy, diagnostic=Non
     finally:
         stopped.set()
         thread.join()
-        try:
-            if failures: raise failures[0]
-            deadline = time.monotonic() + 5
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0: raise failed('final_drain', 'completion', 'deadline')
-                sample(timeout=min(3, remaining), phase='final_drain')
-                if coverage.completed >= minimum and coverage.contexts.get(coverage.current_context, {}).get('completed', 0) > 0:
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0: raise failed('final_drain', 'completion', 'deadline')
-                time.sleep(min(0.2, remaining))
+        # Capture the failure boundary once. Only a successful owner can use
+        # later Exit completions as acceptance evidence.
+        if owner_failed and not failures:
             try:
-                validate_summary(coverage.report(True), baseline, minimum)
-            except (ValueError, TypeError, KeyError):
-                raise failed('final_drain', 'coverage', 'invalid') from None
-            coverage.joined = True
-        except (OLD['SamplerFailure'], ValueError):
-            if not owner_failed: raise
+                sample(phase='final_drain')
+            except ValueError:
+                pass  # Preserve the owner's error and the sampler's own diagnostic.
+
+    if failures: raise failures[0]
+    deadline = time.monotonic() + 5
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise failed('final_drain', 'completion', 'deadline')
+        sample(timeout=min(3, remaining), phase='final_drain')
+        if coverage.completed >= minimum and coverage.contexts.get(coverage.current_context, {}).get('completed', 0) > 0:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise failed('final_drain', 'completion', 'deadline')
+        time.sleep(min(0.2, remaining))
+    try:
+        validate_summary(coverage.report(True), baseline, minimum)
+    except (ValueError, TypeError, KeyError):
+        raise failed('final_drain', 'coverage', 'invalid') from None
+    coverage.joined = True

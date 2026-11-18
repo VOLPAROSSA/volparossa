@@ -890,6 +890,21 @@ impl Diagnostics {
     }
 }
 
+pub(super) fn progress_failure(error: &Error) -> serde_json::Value {
+    let stage = error
+        .downcast_ref::<Boundary>()
+        .filter(|boundary| matches!(boundary.operation, Operation::Progress))
+        .map_or(Stage::Unknown, |boundary| boundary.stage);
+    let (category, agent_code) = classify(error);
+    serde_json::json!({
+        "version": 1,
+        "operation": Operation::Progress,
+        "stage": stage,
+        "category": category,
+        "agent_code": agent_code,
+    })
+}
+
 fn classify(error: &Error) -> (Category, Option<AgentCode>) {
     if let Some(rejected) = error.downcast_ref::<crate::control::AgentRejected>() {
         let code = match rejected.diagnostic_code.as_str() {

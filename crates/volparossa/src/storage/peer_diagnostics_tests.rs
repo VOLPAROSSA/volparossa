@@ -22,6 +22,33 @@ fn value(error: &Error) -> serde_json::Value {
 }
 
 #[test]
+fn progress_failure_reports_only_its_own_typed_stage_and_category() {
+    let error = Error::new(WireError::Io(io::Error::other("/private/archive")));
+    let unknown_stage = serde_json::json!({
+        "version": 1, "operation": "progress", "stage": "unknown",
+        "category": "io", "agent_code": null,
+    });
+    assert_eq!(progress_failure(&error), unknown_stage);
+    let other_operation = error.context(Boundary::new(
+        StorageOperation::Finalize,
+        Stage::WireReceipt,
+    ));
+    assert_eq!(progress_failure(&other_operation), unknown_stage);
+
+    let error = Error::new(WireError::Protocol(ProtocolError::Expired)).context(Boundary::new(
+        StorageOperation::Progress,
+        Stage::WireReceipt,
+    ));
+    assert_eq!(
+        progress_failure(&error),
+        serde_json::json!({
+            "version": 1, "operation": "progress", "stage": "wire_receipt",
+            "category": "protocol", "agent_code": null,
+        })
+    );
+}
+
+#[test]
 fn closed_diagnostic_preserves_typed_boundary_without_private_error_text() {
     let error = Error::new(io::Error::other(
         "/private/owner.key secret-key provider-id",
@@ -114,8 +141,15 @@ async fn agent_code_requires_actual_correlated_rejection_and_is_closed() {
         let error = crate::control::finish_request(&mut owner, &[1; 16])
             .await
             .unwrap_err();
-        let report =
-            value(&error.context(Boundary::new(StorageOperation::Progress, Stage::AgentReady)));
+        let error = error.context(Boundary::new(StorageOperation::Progress, Stage::AgentReady));
+        assert_eq!(
+            progress_failure(&error),
+            serde_json::json!({
+                "version": 1, "operation": "progress", "stage": "agent_ready",
+                "category": "agent_rejected", "agent_code": expected,
+            })
+        );
+        let report = value(&error);
         assert_eq!(report["failures"][0]["category"], "agent_rejected");
         assert_eq!(report["failures"][0]["agent_code"], expected);
         assert!(!report.to_string().contains("private"));

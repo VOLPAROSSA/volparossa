@@ -138,6 +138,24 @@ pub enum StorageFixtureHelperDiagnostic {
     ExpiredExtensionCleanupIncomplete = 8,
     /// The connected MPTCP poll elapsed without readiness; no kernel errno was reported.
     MptcpConnectPollTimedOut = 9,
+    /// Acquire could not reserve its existing worker-operation deadline tail.
+    AcquireWorkerBudget = 10,
+    /// Acquire lacked its exact backend entry or worker ownership.
+    AcquireWorkerState = 11,
+    /// The worker coordinator returned its closed Deadline error.
+    AcquireCoordinatorDeadline = 12,
+    /// The worker coordinator returned its closed Ambiguous error.
+    AcquireCoordinatorAmbiguous = 13,
+    /// Coordinator Dead, Quarantined, `ShuttingDown` or `RuntimeUnavailable`; not which one.
+    AcquireCoordinatorUnavailable = 14,
+    /// Another coordinator error, excluding Capacity and the classes above; no raw text.
+    AcquireCoordinatorOther = 15,
+    /// The authenticated worker response or descriptor shape required cleanup.
+    AcquireWorkerResponse = 16,
+    /// Post-handoff context or hard-lifetime validation failed; not a remote state claim.
+    AcquireDescriptorState = 17,
+    /// The existing acquisition call deadline failed after descriptor handoff.
+    AcquireDescriptorDeadline = 18,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -188,6 +206,18 @@ impl StorageFixtureAcquireSummary {
                 if failure.stage != Stage::HelperAcquire as i32
                     || (code == StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
                         && failure.reason != Reason::HelperKernel as i32)
+                    || (matches!(
+                        code,
+                        StorageFixtureHelperDiagnostic::AcquireWorkerBudget
+                            | StorageFixtureHelperDiagnostic::AcquireWorkerState
+                            | StorageFixtureHelperDiagnostic::AcquireCoordinatorDeadline
+                            | StorageFixtureHelperDiagnostic::AcquireCoordinatorAmbiguous
+                            | StorageFixtureHelperDiagnostic::AcquireCoordinatorUnavailable
+                            | StorageFixtureHelperDiagnostic::AcquireCoordinatorOther
+                            | StorageFixtureHelperDiagnostic::AcquireWorkerResponse
+                            | StorageFixtureHelperDiagnostic::AcquireDescriptorState
+                            | StorageFixtureHelperDiagnostic::AcquireDescriptorDeadline
+                    ) && failure.reason != Reason::HelperCleanupIncomplete as i32)
                     || !matches!(
                         Reason::try_from(failure.reason),
                         Ok(Reason::HelperKernel

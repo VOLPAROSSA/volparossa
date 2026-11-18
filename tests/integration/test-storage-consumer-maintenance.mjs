@@ -13,7 +13,13 @@ import { fileURLToPath } from 'node:url';
 import { boundedFile, fixtureBytes, ForegroundObservation, MAX_CIPHER, PHASES, PLAIN_BYTES,
   consumerFailureReport, depositDiagnostic, parseProcStat, replacementReady, requirePublishComplete, retainedSnapshot,
   retentionAdvanced, validateAppendProfile, validateCheckpoint, validateStorage,
-  createPublishCatalog, observeCatalogRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+  catalogWorkDirectory, createPublishCatalog, observeCatalogRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+
+test('Cloud catalog publication and reads fit the guest GnuPG socket limit', () => {
+  const app = join('/opt', `va.${'a'.repeat(32)}.ABCDEF`, 'u/m/cloud');
+  const socket = join(catalogWorkDirectory(app), 'catalog-read-ABCDEF/g-abcdefgh/S.gpg-agent');
+  assert.ok(Buffer.byteLength(socket) < 104, socket);
+});
 
 test('request-stage target uses the actual per-copy journal and manifest provider association', () => {
   const providers = [1, 2, 3].map(value => ({ key: [...Buffer.alloc(32, value)] }));

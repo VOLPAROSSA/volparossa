@@ -550,6 +550,9 @@ export function observeCatalogRestore(storageFactory) {
   } };
 }
 
+// GnuPG nests a temporary home under the catalog staging directory in the guest.
+export function catalogWorkDirectory(app) { return join(app, 'w'); }
+
 export async function createPublishCatalog(ctx, m, request, options) {
   if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_create';
   const observer = ctx.profileVersion === 10 ? observeCatalogRestore(options.storageFactory) : null;
@@ -1013,10 +1016,11 @@ export async function publish(ctx, m) {
       }
       if (name === 'cloud') {
         ctx.stage = [8, 9, 10].includes(ctx.profileVersion) ? 'cloud_catalog_prepare' : 'cloud_catalog';
-        await fresh(join(app, 'work'));
+        const workDirectory = catalogWorkDirectory(app);
+        await fresh(workDirectory);
         await createPublishCatalog(ctx, m, { selection: [{ segments: ['synthetic-space', 'synthetic.bin'],
           bundle: join(app, 'bundle'), config: join(app, 'storage.json') }], output: join(app, 'catalog'),
-        workDirectory: join(app, 'work'), maxTotalBytes: 4 * MAX_CIPHER }, { signal: ctx.signal, storageFactory: factory });
+        workDirectory, maxTotalBytes: 4 * MAX_CIPHER }, { signal: ctx.signal, storageFactory: factory });
       }
       if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = `${name}_policy_read`;
       const policy = await json(join(app, 'maintenance-policy.json'), 32768);
@@ -1098,7 +1102,8 @@ async function exercise(ctx, m) {
       } else {
         ctx.stage = 'cloud_start';
         const token = randomBytes(32).toString('base64url');
-        const service = await m.startCloudService({ version: 1, catalog: join(app, 'catalog'), workDirectory: join(app, 'work'),
+        const workDirectory = catalogWorkDirectory(app);
+        const service = await m.startCloudService({ version: 1, catalog: join(app, 'catalog'), workDirectory,
           bearerToken: token, port: 0, allowedOrigins: [], maxOpenBytes: 4 * MAX_CIPHER, maxConcurrent: 1,
           requestTimeoutMs: 900000, maxRangeBytes: 4 * MAX_CIPHER,
           storageMaintenance: [{ config: join(app, 'storage.json'), enrollment: join(app, 'maintenance') }] }, { signal: ctx.signal });
@@ -1127,7 +1132,7 @@ async function exercise(ctx, m) {
               authenticated_get_body_verified: true, wrong_token_status: 401, plaintext_sha256: sha(fixtureBytes(name)),
               plaintext_bytes: PLAIN_BYTES, original_enrollment_and_journals_retained: true, owner_joined: true };
           } finally { await core.close(); }
-          check((await readdir(join(app, 'work'))).length === 0, 'cloud_plaintext_cleanup');
+          check((await readdir(workDirectory)).length === 0, 'cloud_plaintext_cleanup');
         } finally { await service.close(); }
       }
       await unchanged(app, retained[name]);

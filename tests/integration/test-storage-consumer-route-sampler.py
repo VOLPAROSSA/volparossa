@@ -303,6 +303,34 @@ class ContextSampler(unittest.TestCase):
         self.assertEqual(query.call_count, 5)
         self.assertEqual(diagnostic['phase'], 'final_drain')
 
+    def test_owner_failure_takes_one_final_sample_with_incomplete_flows(self):
+        replies = snapshot('a' * 32, 0, OLD['event'](9)) * 2
+        primary = ValueError('owner operation failed')
+        with patch.object(M['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=x) for x in replies]) as query, \
+                patch.object(M['time'], 'sleep') as sleep:
+            with self.assertRaises(ValueError) as failure:
+                with M['capture']('/synthetic/core', '/synthetic/exit', 10, 1,
+                        client='/synthetic/client', policy=POLICY) as coverage:
+                    raise primary
+        self.assertIs(failure.exception, primary)
+        self.assertEqual(query.call_count, 8)
+        self.assertEqual(coverage.completed, 0)
+        sleep.assert_not_called()
+        self.assertFalse(any(t.name == 'consumer-exit-flow-sampler' for t in threading.enumerate()))
+
+    def test_owner_success_waits_for_late_exit_completion(self):
+        context = 'a' * 32
+        baseline = OLD['event'](9)
+        replies = snapshot(context, 0, baseline) * 2 + snapshot(context, 0, baseline + OLD['event'](11, context=context))
+        with patch.object(M['subprocess'], 'run', side_effect=[SimpleNamespace(stdout=x) for x in replies]) as query, \
+                patch.object(M['time'], 'sleep') as sleep:
+            with M['capture']('/synthetic/core', '/synthetic/exit', 10, 1,
+                    client='/synthetic/client', policy=POLICY) as coverage:
+                pass
+        self.assertEqual(query.call_count, 12)
+        sleep.assert_called_once()
+        M['validate_summary'](coverage.report(coverage.joined), 10, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

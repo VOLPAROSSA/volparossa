@@ -2257,6 +2257,72 @@ class MaintenanceEvidence(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), 'retain')
 
 
+class ForegroundProgressFailure(unittest.TestCase):
+    REPORT = dict(version=1, operation='progress', stage='agent_ready', category='agent_rejected',
+        agent_code='CONTENT_BUSY')
+
+    def test_failed_progress_callback_exports_only_closed_fields(self):
+        raw = json.dumps(self.REPORT).encode()
+        invalid = [dict(self.REPORT, version=True), dict(self.REPORT, operation='deposit'),
+            dict(self.REPORT, stage='PRIVATE_STAGE'), dict(self.REPORT, category='PRIVATE_CATEGORY'),
+            dict(self.REPORT, agent_code='PRIVATE_CODE'), dict(self.REPORT, agent_code=None),
+            dict(self.REPORT, category='io'), dict(self.REPORT, private_path='PRIVATE_PATH'),
+            {k: v for k, v in self.REPORT.items() if k != 'agent_code'}]
+        cases = [(b'', 'missing'), (b'x' * 1025, 'oversize'), (b'\xff', 'invalid'),
+            (raw.replace(b'"version": 1', b'"version": 2, "version": 1'), 'invalid'),
+            *((json.dumps(value).encode(), 'invalid') for value in invalid)]
+        turn = {}
+        with patch.dict(CHECK['foreground_progress_failure'].__globals__, TURN_DIAGNOSTIC=turn):
+            for output, state in cases:
+                with self.subTest(output=output[:75]):
+                    CHECK['foreground_progress_failure'](7, output, b'PRIVATE_STDERR')
+                    self.assertEqual(turn['foreground_progress'], dict(exit_status=7, diagnostic_state=state, diagnostic=None))
+            for report in (self.REPORT, dict(self.REPORT, agent_code='unknown'),
+                    dict(self.REPORT, stage='unknown', category='unknown', agent_code=None)):
+                CHECK['foreground_progress_failure'](1, json.dumps(report).encode(), b'PRIVATE_STDERR')
+                self.assertEqual(turn['foreground_progress'], dict(exit_status=1, diagnostic_state='observed', diagnostic=report))
+
+    def test_real_foreground_call_keeps_its_nonzero_result_separate_from_owner(self):
+        import tarfile
+        guest = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        published = guest / 'alpha-output'
+        published.mkdir()
+        upload = published / 'private-storage-fragments-upload.json'
+        namespace = CHECK['run_turn'].__globals__
+        root = Path('/private')
+        owner = Mock()
+        owner.poll.return_value = None
+        foreground = Mock(returncode=9)
+        foreground.poll.return_value = 9
+        foreground.communicate.return_value = (json.dumps(self.REPORT).encode(), b'PRIVATE_STDERR')
+        with patch.dict(namespace, STAGE='foreground', LIFECYCLE_DIAGNOSTIC=None,
+                checkpoint=Mock(return_value={'turns': 2}), private_json=Mock(return_value={'turns': 3, 'stage': 'working'})), \
+                patch.object(CHECK['subprocess'], 'Popen', side_effect=[owner, foreground]) as spawn:
+            with self.assertRaisesRegex(ValueError, '^private replica CLI operation failed$') as error:
+                CHECK['run_turn'](root, 'cli', 'control', 'key', 'foreground')
+            with upload.open('w', encoding='utf-8') as output, patch.object(sys, 'stdout', output):
+                CHECK['_write_failure'](error.exception)
+        raw = upload.read_bytes()
+        receipt = json.loads(raw)
+        commands = [call.args[0] for call in spawn.call_args_list]
+        self.assertEqual(len(commands), 2)
+        self.assertNotIn('--failure-diagnostic', commands[0])
+        self.assertEqual(commands[1][3:7], ['storage', 'peer', 'progress', '--failure-diagnostic'])
+        foreground.communicate.assert_called_once_with(timeout=180)
+        self.assertEqual((receipt['version'], receipt['code']), (4, 'cli_exit'))
+        self.assertIsNone(receipt['turn']['worker_exit_status'])
+        self.assertEqual(receipt['turn']['foreground_progress'],
+            dict(exit_status=9, diagnostic_state='observed', diagnostic=self.REPORT))
+        self.assertNotIn('PRIVATE', json.dumps(receipt))
+        with patch('builtins.print') as names:
+            CHECK['main'](['export-names', str(published)])
+        self.assertIn(upload.name, names.call_args.args[0].splitlines())
+        wiring = runpy.run_path(str(HERE / 'test-cloud-upload-maintenance-vm-wiring.py'))
+        archive = wiring['collect'](wiring['diagnostics'](), guest, guest / 'opt', 'private-storage-maintenance')
+        with tarfile.open(archive) as bundle:
+            self.assertEqual(bundle.extractfile('published/' + upload.name).read(), raw)
+
+
 class UploadFailureProjection(unittest.TestCase):
     def setUp(self):
         self.namespace = CHECK['upload_invoke'].__globals__

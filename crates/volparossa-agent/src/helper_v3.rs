@@ -1749,6 +1749,33 @@ fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
         "MPTCP_CONNECT_POLL_TIMED_OUT" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpConnectPollTimedOut
         }
+        "ACQUIRE_WORKER_BUDGET" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireWorkerBudget
+        }
+        "ACQUIRE_WORKER_STATE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireWorkerState
+        }
+        "ACQUIRE_COORDINATOR_DEADLINE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireCoordinatorDeadline
+        }
+        "ACQUIRE_COORDINATOR_AMBIGUOUS" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireCoordinatorAmbiguous
+        }
+        "ACQUIRE_COORDINATOR_UNAVAILABLE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireCoordinatorUnavailable
+        }
+        "ACQUIRE_COORDINATOR_OTHER" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireCoordinatorOther
+        }
+        "ACQUIRE_WORKER_RESPONSE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireWorkerResponse
+        }
+        "ACQUIRE_DESCRIPTOR_STATE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireDescriptorState
+        }
+        "ACQUIRE_DESCRIPTOR_DEADLINE" if result == HelperResult::CleanupIncomplete => {
+            AcquireDiagnostic::AcquireDescriptorDeadline
+        }
         "BACKEND_RESULT_AMBIGUOUS" => AcquireDiagnostic::BackendResultAmbiguous,
         "STALE_BACKEND_RESULT" => AcquireDiagnostic::StaleBackendResult,
         "MPTCP_FLOW_IDENTITY_UNAVAILABLE" => AcquireDiagnostic::FlowIdentityUnavailable,
@@ -3808,7 +3835,7 @@ mod tests {
 
     async fn acquire_transport_rejection_observed(
         result: HelperResult,
-        alter: fn(&mut HelperResponse),
+        alter: impl FnOnce(&mut HelperResponse) + Send + 'static,
         trusted: bool,
     ) -> (HelperClientError, Option<AcquireDiagnostic>) {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -3931,6 +3958,85 @@ mod tests {
                 acquire_diagnostic("MPTCP_CONNECT_POLL_TIMED_OUT", result),
                 AcquireDiagnostic::Unknown
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_acquire_origins_require_correlated_cleanup_rejection() {
+        for (raw, expected) in [
+            (
+                "ACQUIRE_WORKER_BUDGET",
+                AcquireDiagnostic::AcquireWorkerBudget,
+            ),
+            (
+                "ACQUIRE_WORKER_STATE",
+                AcquireDiagnostic::AcquireWorkerState,
+            ),
+            (
+                "ACQUIRE_COORDINATOR_DEADLINE",
+                AcquireDiagnostic::AcquireCoordinatorDeadline,
+            ),
+            (
+                "ACQUIRE_COORDINATOR_AMBIGUOUS",
+                AcquireDiagnostic::AcquireCoordinatorAmbiguous,
+            ),
+            (
+                "ACQUIRE_COORDINATOR_UNAVAILABLE",
+                AcquireDiagnostic::AcquireCoordinatorUnavailable,
+            ),
+            (
+                "ACQUIRE_COORDINATOR_OTHER",
+                AcquireDiagnostic::AcquireCoordinatorOther,
+            ),
+            (
+                "ACQUIRE_WORKER_RESPONSE",
+                AcquireDiagnostic::AcquireWorkerResponse,
+            ),
+            (
+                "ACQUIRE_DESCRIPTOR_STATE",
+                AcquireDiagnostic::AcquireDescriptorState,
+            ),
+            (
+                "ACQUIRE_DESCRIPTOR_DEADLINE",
+                AcquireDiagnostic::AcquireDescriptorDeadline,
+            ),
+        ] {
+            let (error, diagnostic) = acquire_transport_rejection_observed(
+                HelperResult::CleanupIncomplete,
+                move |response| response.diagnostic_code = raw.into(),
+                true,
+            )
+            .await;
+            assert!(matches!(
+                error,
+                HelperClientError::Rejected(HelperResult::CleanupIncomplete)
+            ));
+            assert_eq!(diagnostic, Some(expected));
+            for result in [
+                HelperResult::Kernel,
+                HelperResult::Capacity,
+                HelperResult::Unavailable,
+                HelperResult::NotFound,
+                HelperResult::InvalidRequest,
+                HelperResult::Expired,
+            ] {
+                assert_eq!(acquire_diagnostic(raw, result), AcquireDiagnostic::Unknown);
+            }
+            assert_eq!(
+                acquire_diagnostic(&format!("{raw}_EXTRA"), HelperResult::CleanupIncomplete),
+                AcquireDiagnostic::Unknown
+            );
+            let (error, diagnostic) = acquire_transport_rejection_observed(
+                HelperResult::CleanupIncomplete,
+                move |response| {
+                    response.diagnostic_code = raw.into();
+                    response.operation_digest[0] ^= 1;
+                },
+                true,
+            )
+            .await;
+            assert!(matches!(error, HelperClientError::Correlation));
+            assert_eq!(diagnostic, None);
         }
     }
 

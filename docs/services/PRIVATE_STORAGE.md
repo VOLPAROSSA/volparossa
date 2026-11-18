@@ -1046,3 +1046,12 @@ Each trial retains its own protected-path, private-cleanup and host-observation
 scope. They do not establish independent physical failure domains, automatic
 account/contribution recovery or general application availability. Execution uses
 the approved disposable workflow; a scenario preview is not runtime proof.
+
+Automatic enrollment and background repair of new uploads remain a separate,
+unfinished milestone. The `cloud-upload-maintenance` candidate first requires
+the complete Storage maintenance and Image/Cloud consumer proof, then tests a
+new authenticated upload under finite authority, provider withdrawal, repair,
+two cold reads across restart and deletion of all retained copies. Its profile
+uses the preceding proof's verified control underlay with separate per-phase
+captures and unchanged private-data boundaries. Historical upload success does
+not establish this longer maintenance lifecycle.

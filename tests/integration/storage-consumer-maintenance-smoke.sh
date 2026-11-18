@@ -8,9 +8,10 @@ private_storage_consumer_private() {
     consumer_profile_version=${storage_consumer_profile_version-7}
     case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
+    # Publish observation starts before Image and includes owner cleanup.
+    # These phase-wide diagnostics do not bind an application or failed request.
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:10) set -- "$@" --fixture-request-stage ;;
-        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
+        publish:yes:10|publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
@@ -123,7 +124,9 @@ private_storage_consumer_run() {
     storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
     if [ -e "$WORK/u" ] || [ -L "$WORK/u" ]; then fail CONSUMER_OWNER_PARENT_NOT_NEW; fi
     consumer_user=$WORK/u/m
-    consumer_longest_socket=$consumer_user/image/restored-bundle/g-xxxxxxxx/S.gpg-agent
+    # Without a per-user runtime directory, the pinned GPG agent binds inside
+    # its temporary home. Cloud catalog restoration creates the deepest home.
+    consumer_longest_socket=$consumer_user/cloud/w/catalog-read-XXXXXX/g-xxxxxxxx/S.gpg-agent
     [ "${#consumer_longest_socket}" -lt 104 ] || fail CONSUMER_SOCKET_PATH_TOO_LONG
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/u" "$consumer_user"
     # Recheck the actual new owner root in the current client mount namespace;

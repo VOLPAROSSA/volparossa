@@ -290,6 +290,14 @@ def validate_challenge_read(value, phase):
             and value['returned_outcome'] in allowed[value['step']])), 'deposit_diagnostics')
 
 
+def valid_peer_failure(failure):
+    return (failure['stage'] in ('journal_open', 'authorization', 'agent_ready', 'challenge', 'signed_request',
+            'wire_receipt', 'agent_terminal', 'accounting', 'local_input', 'receipt_validation', 'journal_save', 'deadline', 'unknown')
+        and failure['category'] in ('io', 'timeout', 'protocol', 'agent_rejected', 'invalid', 'busy', 'store', 'unknown')
+        and (failure['agent_code'] in ('CONTENT_INVALID', 'CONTENT_UNAVAILABLE', 'CONTENT_BUSY', 'CONTENT_POLICY', 'unknown')
+            if failure['category'] == 'agent_rejected' else failure['agent_code'] is None))
+
+
 def validate_deposit_diagnostics(value, version=1):
     require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 'deposit_diagnostics')
     keys(value, ('version', 'failures', 'omitted_failures'))
@@ -302,11 +310,7 @@ def validate_deposit_diagnostics(value, version=1):
             *(('agent_detail',) if version >= 2 else ()), *(('agent_outcome',) if version >= 4 else ())))
         require(count(failure['fragment_index'], 0, 3) and count(failure['copy_index'], 0, 1)
             and failure['operation'] in ('prepare', 'reserve', 'progress', 'append', 'finalize', 'renew', 'read_range', 'delete')
-            and failure['stage'] in ('journal_open', 'authorization', 'agent_ready', 'challenge', 'signed_request',
-                'wire_receipt', 'agent_terminal', 'accounting', 'local_input', 'receipt_validation', 'journal_save', 'deadline', 'unknown')
-            and failure['category'] in ('io', 'timeout', 'protocol', 'agent_rejected', 'invalid', 'busy', 'store', 'unknown')
-            and (failure['agent_code'] in ('CONTENT_INVALID', 'CONTENT_UNAVAILABLE', 'CONTENT_BUSY', 'CONTENT_POLICY', 'unknown')
-                if failure['category'] == 'agent_rejected' else failure['agent_code'] is None), 'deposit_diagnostics')
+            and valid_peer_failure(failure), 'deposit_diagnostics')
         if version >= 2 and failure['agent_detail'] is not None:
             detail = failure['agent_detail']
             keys(detail, ('stage', 'deadline_scope', *(('tls_failure',) if version >= 3 else ()),

@@ -82,7 +82,7 @@ class UploadWiring(unittest.TestCase):
         self.assertIn('[ "$scenario" != cloud-private-upload ] || driver_time_bound=3600s', source)
         topology = (HERE / "kvm-alpha-topology.sh").read_text()
         self.assertIn('cloud_private_upload_run\n    exit 0\nelif [ "$cloud_private_file" = yes ]', topology)
-        for name in ("cloud-private-upload-smoke.py", "cloud-private-upload-pins.json",
+        for name in ("cloud-private-upload-smoke.py", "cloud-private-upload-pins-paired.json",
                      "cloud-private-file-smoke.py", "cloud-private-file-pins.json", "image-snapshot-smoke.py"):
             self.assertIn(f'"$WORK/bin/{name}"', topology)
         workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
