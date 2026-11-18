@@ -952,13 +952,12 @@ impl ProductionMpquicPathHealth {
             return Err(());
         }
         for status in native {
-            if let Some(previous) = self.counters.get(&status.path_id) {
-                if status.delivered_bytes < previous.delivered_bytes
+            if let Some(previous) = self.counters.get(&status.path_id)
+                && (status.delivered_bytes < previous.delivered_bytes
                     || status.acked_transport_bytes < previous.acked_transport_bytes
-                    || status.packets_lost < previous.packets_lost
-                {
-                    return Err(());
-                }
+                    || status.packets_lost < previous.packets_lost)
+            {
+                return Err(());
             }
         }
         let route_progressed = native.iter().any(|status| {
@@ -2149,104 +2148,104 @@ impl ClientRouteControl {
         self.retire_expired_route(now_ms, Instant::now()).await;
         {
             let mut state = self.state.lock().await;
-            if let ClientRouteControlState::Established(established) = &mut *state {
-                if let ClientTransportState::NativeUdp(active) = &mut established.transport {
-                    if let Some(binding) = active.binding.as_ref() {
-                        let lifetime = active
-                            .lifetime
-                            .as_mut()
-                            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
-                        let payload = binding
-                            .bind_next_native_datagram(ingress, policy, now_ms)
-                            .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
-                        let (flow, _) = binding.activation();
-                        let SocketAddr::V4(destination) = binding.destination() else {
-                            return Err(ClientRouteConnectError::UdpIngressUnavailable);
-                        };
-                        let submitted = active
-                            .session
-                            .try_send_general_udp(
-                                flow,
-                                binding.source().port(),
-                                destination,
-                                &payload,
-                                now_ms,
-                            )
-                            .await
-                            .map_err(|error| {
-                                // This error contains only bounded local/native categories; it
-                                // never contains the datagram, tuple, route ID, or credentials.
-                                eprintln!("native general UDP activation failed: {error}");
-                                ClientRouteConnectError::TransportRuntimeUnavailable
-                            })?;
-                        if !submitted {
-                            // UDP backpressure drops only this already-authorized datagram. It
-                            // is not a route failure or activity/delivery-counter increment.
-                            tracing::debug!("native general UDP continuation backpressured");
-                            return Ok(ClientRouteProgress::TransportActive);
-                        }
-                        lifetime.record_activity(crate::unix_millis(), Instant::now())?;
-                        self.replace_agent_single_udp_path(active.path_summary().await?)
-                            .await?;
-                        return Ok(ClientRouteProgress::TransportActive);
-                    }
-                    if active.lifetime.is_some() {
-                        return Err(ClientRouteConnectError::UdpIngressUnavailable);
-                    }
-                    let route = established
-                        .route
-                        .as_ref()
-                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
-                    let protocol = route
-                        .established
-                        .owner
-                        .as_ref()
-                        .and_then(PreparedContextOwner::protocol)
-                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
-                    let authorized = ingress
-                        .bind_to_route(
-                            &active.path,
-                            &protocol.coordinator,
-                            policy,
-                            idle_timeout,
-                            now_ms,
-                        )
+            if let ClientRouteControlState::Established(established) = &mut *state
+                && let ClientTransportState::NativeUdp(active) = &mut established.transport
+            {
+                if let Some(binding) = active.binding.as_ref() {
+                    let lifetime = active
+                        .lifetime
+                        .as_mut()
+                        .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+                    let payload = binding
+                        .bind_next_native_datagram(ingress, policy, now_ms)
                         .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
-                    let (flow, signed_authorization) = authorized.activation();
-                    let idle_timeout = flow.idle_timeout();
-                    let expires_at_ms = flow.expires_at_ms();
-                    let SocketAddr::V4(destination) = authorized.destination() else {
+                    let (flow, _) = binding.activation();
+                    let SocketAddr::V4(destination) = binding.destination() else {
                         return Err(ClientRouteConnectError::UdpIngressUnavailable);
                     };
-                    active
+                    let submitted = active
                         .session
-                        .send_general_udp(
+                        .try_send_general_udp(
                             flow,
-                            Some(signed_authorization),
-                            authorized.source().port(),
+                            binding.source().port(),
                             destination,
-                            authorized.payload(),
+                            &payload,
                             now_ms,
                         )
                         .await
                         .map_err(|error| {
-                            // See the repeated-flow branch above: retain a privacy-safe reason
-                            // so acceptance failures do not require speculative datapath changes.
+                            // This error contains only bounded local/native categories; it
+                            // never contains the datagram, tuple, route ID, or credentials.
                             eprintln!("native general UDP activation failed: {error}");
                             ClientRouteConnectError::TransportRuntimeUnavailable
                         })?;
-                    let lifetime = GeneralUdpSessionLifetime::start(
-                        idle_timeout,
-                        expires_at_ms,
-                        crate::unix_millis(),
-                        Instant::now(),
-                    )?;
-                    active.binding = Some(authorized);
-                    active.lifetime = Some(lifetime);
+                    if !submitted {
+                        // UDP backpressure drops only this already-authorized datagram. It
+                        // is not a route failure or activity/delivery-counter increment.
+                        tracing::debug!("native general UDP continuation backpressured");
+                        return Ok(ClientRouteProgress::TransportActive);
+                    }
+                    lifetime.record_activity(crate::unix_millis(), Instant::now())?;
                     self.replace_agent_single_udp_path(active.path_summary().await?)
                         .await?;
                     return Ok(ClientRouteProgress::TransportActive);
                 }
+                if active.lifetime.is_some() {
+                    return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                }
+                let route = established
+                    .route
+                    .as_ref()
+                    .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                let protocol = route
+                    .established
+                    .owner
+                    .as_ref()
+                    .and_then(PreparedContextOwner::protocol)
+                    .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                let authorized = ingress
+                    .bind_to_route(
+                        &active.path,
+                        &protocol.coordinator,
+                        policy,
+                        idle_timeout,
+                        now_ms,
+                    )
+                    .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+                let (flow, signed_authorization) = authorized.activation();
+                let idle_timeout = flow.idle_timeout();
+                let expires_at_ms = flow.expires_at_ms();
+                let SocketAddr::V4(destination) = authorized.destination() else {
+                    return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                };
+                active
+                    .session
+                    .send_general_udp(
+                        flow,
+                        Some(signed_authorization),
+                        authorized.source().port(),
+                        destination,
+                        authorized.payload(),
+                        now_ms,
+                    )
+                    .await
+                    .map_err(|error| {
+                        // See the repeated-flow branch above: retain a privacy-safe reason
+                        // so acceptance failures do not require speculative datapath changes.
+                        eprintln!("native general UDP activation failed: {error}");
+                        ClientRouteConnectError::TransportRuntimeUnavailable
+                    })?;
+                let lifetime = GeneralUdpSessionLifetime::start(
+                    idle_timeout,
+                    expires_at_ms,
+                    crate::unix_millis(),
+                    Instant::now(),
+                )?;
+                active.binding = Some(authorized);
+                active.lifetime = Some(lifetime);
+                self.replace_agent_single_udp_path(active.path_summary().await?)
+                    .await?;
+                return Ok(ClientRouteProgress::TransportActive);
             }
         }
         let previous = {
@@ -5983,7 +5982,7 @@ struct ProductionUdpPreparationFailure {
 }
 
 struct ProductionUdpCertificateFailure {
-    prepared: PreparedProductionUdpRoute,
+    prepared: Box<PreparedProductionUdpRoute>,
     cause: ProductionUdpRouteError,
 }
 
@@ -6354,7 +6353,7 @@ impl PreparedProductionUdpRoute {
         };
         self.bind_exit_session_signal(&local_signal)
             .map_err(|failure| ProductionUdpSessionFailure {
-                prepared: failure.prepared,
+                prepared: *failure.prepared,
                 cause: failure.cause,
             })
     }
@@ -6371,7 +6370,7 @@ impl PreparedProductionUdpRoute {
         let certificate_der = signal.certificate_der().to_vec();
         let Some(authorization) = self.route.established.native_authorization.as_ref() else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
@@ -6387,7 +6386,7 @@ impl PreparedProductionUdpRoute {
                 != 1
         {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         }
@@ -6395,19 +6394,19 @@ impl PreparedProductionUdpRoute {
         let mut roots = RootCertStore::empty();
         if roots.add(certificate).is_err() {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         }
         let Ok(client_config) = quinn::ClientConfig::with_root_certificates(Arc::new(roots)) else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
         let Ok(target) = ProtectedExitUdpTarget::new(&self.path, SINGLE_RELAY_UDP_EXIT_PORT) else {
             return Err(ProductionUdpCertificateFailure {
-                prepared: self,
+                prepared: Box::new(self),
                 cause: ProductionUdpRouteError::ExitCertificate,
             });
         };
@@ -8242,7 +8241,7 @@ impl<P: ClientReservationProtocol> Drop for RouteSetupHandle<P> {
 enum RouteAttemptState<P: ClientReservationProtocol> {
     Vacant,
     Pending(RouteSetupHandle<P>),
-    Established(EstablishedRoute<P>),
+    Established(Box<EstablishedRoute<P>>),
     Settling,
     Quarantined,
 }
@@ -8284,11 +8283,14 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
         Ok(())
     }
 
-    fn adopt_established(&mut self, route: EstablishedRoute<P>) -> Result<(), EstablishedRoute<P>> {
+    fn adopt_established(
+        &mut self,
+        route: EstablishedRoute<P>,
+    ) -> Result<(), Box<EstablishedRoute<P>>> {
         if !matches!(self.state, RouteAttemptState::Vacant) {
-            return Err(route);
+            return Err(Box::new(route));
         }
-        self.state = RouteAttemptState::Established(route);
+        self.state = RouteAttemptState::Established(Box::new(route));
         Ok(())
     }
 
@@ -8300,7 +8302,7 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
         };
         match handle.wait().await {
             Ok(route) => {
-                self.state = RouteAttemptState::Established(route);
+                self.state = RouteAttemptState::Established(Box::new(route));
                 RouteAttemptSettlement::Established(self)
             }
             Err(failure) => {
@@ -8329,7 +8331,7 @@ impl<P: ClientReservationProtocol> RouteAttemptOwner<P> {
                 }
             }
             RouteAttemptState::Established(route) => {
-                RouteAttemptDrain::Retired(route.teardown().await)
+                RouteAttemptDrain::Retired((*route).teardown().await)
             }
             RouteAttemptState::Settling | RouteAttemptState::Quarantined => {
                 RouteAttemptDrain::Quarantined

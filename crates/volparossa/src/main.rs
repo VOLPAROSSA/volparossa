@@ -5,6 +5,7 @@ mod compute;
 mod content;
 mod control;
 mod doctor;
+mod dps;
 mod policy_bootstrap;
 mod secret;
 mod storage;
@@ -73,6 +74,11 @@ enum CliCommand {
     Compute {
         #[command(subcommand)]
         command: compute::Command,
+    },
+    /// Explicitly acquire and assess one local positioning claim, without sharing it.
+    Dps {
+        #[command(subcommand)]
+        command: dps::Command,
     },
     /// Create a new encrypted permanent Ed25519 identity.
     Init {
@@ -284,6 +290,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Identity { command } => maintain_identity_command(command).await,
         CliCommand::Content { command } => content::run(*command, &cli.control_socket).await,
         CliCommand::Compute { command } => compute::run(command, &cli.control_socket).await,
+        CliCommand::Dps { command } => dps::run(command).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,

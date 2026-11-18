@@ -205,7 +205,7 @@ class GuestEvidenceContracts(unittest.TestCase):
         self.assertIn('protected-compute-guest.py test', raw)
         self.assertIn('protected-compute-guest.py receipt', raw)
         self.assertIn('protected-compute-guest-software-${{ github.sha }}', raw)
-        self.assertEqual(G.ARGV, ['cargo', '+1.85.0', 'test', '--locked', '--offline', '-p',
+        self.assertEqual(G.ARGV, ['cargo', 'test', '--locked', '--offline', '-p',
             'volparossa-content', '--lib', G.PREFIX, '--', '--test-threads=1'])
 
 

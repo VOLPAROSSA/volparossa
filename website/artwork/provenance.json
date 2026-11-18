@@ -1,0 +1,300 @@
+{
+  "generator": "image_gen.imagegen",
+  "created": "2026-10-30",
+  "reference": "artwork/reference.png",
+  "reference_sha256": "503577d96d3e17782dddf03147954798287931dd47c3d6ccd0e49aea6bae4457",
+  "images": {
+    "hero-desktop": {
+      "master": "artwork/masters/hero-desktop.png",
+      "prompt": "artwork/prompts/hero-desktop.txt",
+      "sha256": "d3e6158da38c5e0ad547359d3b9e29b11288eaae1a5c4b5ea15e4502afa6b9a7",
+      "width": 1672,
+      "height": 941,
+      "responsive": [
+        {
+          "file": "hero-desktop-640.webp",
+          "fallback": "hero-desktop-640.jpg",
+          "width": 640,
+          "height": 360,
+          "bytes": 50552,
+          "fallback_bytes": 73959
+        },
+        {
+          "file": "hero-desktop-800.webp",
+          "fallback": "hero-desktop-800.jpg",
+          "width": 800,
+          "height": 450,
+          "bytes": 75430,
+          "fallback_bytes": 112549
+        },
+        {
+          "file": "hero-desktop-960.webp",
+          "fallback": "hero-desktop-960.jpg",
+          "width": 960,
+          "height": 540,
+          "bytes": 101400,
+          "fallback_bytes": 155699
+        },
+        {
+          "file": "hero-desktop-1280.webp",
+          "fallback": "hero-desktop-1280.jpg",
+          "width": 1280,
+          "height": 720,
+          "bytes": 209656,
+          "fallback_bytes": 254720
+        },
+        {
+          "file": "hero-desktop-1672.webp",
+          "fallback": "hero-desktop-1672.jpg",
+          "width": 1672,
+          "height": 941,
+          "bytes": 302008,
+          "fallback_bytes": 392666
+        }
+      ],
+      "composition": "Full-frame landscape derivatives; no baked text or controls"
+    },
+    "hero-mobile": {
+      "master": "artwork/masters/hero-mobile.png",
+      "prompt": "artwork/prompts/hero-mobile.txt",
+      "sha256": "0c460e084bba728aa7253d95692081bb86703a40784d7bcb75bdf00c4b0614b6",
+      "width": 1122,
+      "height": 1402,
+      "responsive": [
+        {
+          "file": "hero-mobile-480.webp",
+          "fallback": "hero-mobile-480.jpg",
+          "width": 480,
+          "height": 600,
+          "bytes": 65946,
+          "fallback_bytes": 95645
+        },
+        {
+          "file": "hero-mobile-800.webp",
+          "fallback": "hero-mobile-800.jpg",
+          "width": 800,
+          "height": 1000,
+          "bytes": 149728,
+          "fallback_bytes": 234543
+        },
+        {
+          "file": "hero-mobile-1122.webp",
+          "fallback": "hero-mobile-1122.jpg",
+          "width": 1122,
+          "height": 1402,
+          "bytes": 239328,
+          "fallback_bytes": 402120
+        }
+      ],
+      "composition": "Intentional portrait composition"
+    },
+    "shared-harbour": {
+      "master": "artwork/masters/shared-harbour.png",
+      "prompt": "artwork/prompts/shared-harbour.txt",
+      "sha256": "9d67aa2097af8a9bd8cd0aa051ffaf4d3f24c2a85c8800d8618e5b1896bec345",
+      "width": 2060,
+      "height": 763,
+      "responsive": [
+        {
+          "file": "shared-harbour-9d67aa2097-640.webp",
+          "fallback": "shared-harbour-9d67aa2097-640.jpg",
+          "width": 640,
+          "height": 237,
+          "bytes": 48596,
+          "fallback_bytes": 62599
+        },
+        {
+          "file": "shared-harbour-9d67aa2097-800.webp",
+          "fallback": "shared-harbour-9d67aa2097-800.jpg",
+          "width": 800,
+          "height": 296,
+          "bytes": 72494,
+          "fallback_bytes": 94484
+        },
+        {
+          "file": "shared-harbour-9d67aa2097-960.webp",
+          "fallback": "shared-harbour-9d67aa2097-960.jpg",
+          "width": 960,
+          "height": 356,
+          "bytes": 99152,
+          "fallback_bytes": 134473
+        },
+        {
+          "file": "shared-harbour-9d67aa2097-1280.webp",
+          "fallback": "shared-harbour-9d67aa2097-1280.jpg",
+          "width": 1280,
+          "height": 474,
+          "bytes": 205324,
+          "fallback_bytes": 225892
+        },
+        {
+          "file": "shared-harbour-9d67aa2097-1672.webp",
+          "fallback": "shared-harbour-9d67aa2097-1672.jpg",
+          "width": 1672,
+          "height": 619,
+          "bytes": 314552,
+          "fallback_bytes": 356079
+        },
+        {
+          "file": "shared-harbour-9d67aa2097-2060.webp",
+          "fallback": "shared-harbour-9d67aa2097-2060.jpg",
+          "width": 2060,
+          "height": 763,
+          "bytes": 426502,
+          "fallback_bytes": 498356
+        }
+      ],
+      "composition": "Full-frame landscape derivatives; no baked text or controls"
+    },
+    "intelligence": {
+      "master": "artwork/masters/intelligence.png",
+      "prompt": "artwork/prompts/intelligence.txt",
+      "sha256": "cfa55b31a6a0d66ea7000dca2c526c12c293cddbab9df83c3cf2091b05b22f80",
+      "width": 2021,
+      "height": 778,
+      "responsive": [
+        {
+          "file": "intelligence-cfa55b31a6-640.webp",
+          "fallback": "intelligence-cfa55b31a6-640.jpg",
+          "width": 640,
+          "height": 246,
+          "bytes": 31496,
+          "fallback_bytes": 47854
+        },
+        {
+          "file": "intelligence-cfa55b31a6-800.webp",
+          "fallback": "intelligence-cfa55b31a6-800.jpg",
+          "width": 800,
+          "height": 308,
+          "bytes": 46316,
+          "fallback_bytes": 71936
+        },
+        {
+          "file": "intelligence-cfa55b31a6-960.webp",
+          "fallback": "intelligence-cfa55b31a6-960.jpg",
+          "width": 960,
+          "height": 370,
+          "bytes": 62108,
+          "fallback_bytes": 99046
+        },
+        {
+          "file": "intelligence-cfa55b31a6-1280.webp",
+          "fallback": "intelligence-cfa55b31a6-1280.jpg",
+          "width": 1280,
+          "height": 493,
+          "bytes": 128350,
+          "fallback_bytes": 160242
+        },
+        {
+          "file": "intelligence-cfa55b31a6-1672.webp",
+          "fallback": "intelligence-cfa55b31a6-1672.jpg",
+          "width": 1672,
+          "height": 644,
+          "bytes": 186144,
+          "fallback_bytes": 245554
+        }
+      ],
+      "composition": "Full-frame landscape derivatives; no baked text or controls"
+    },
+    "dps": {
+      "master": "artwork/masters/dps.png",
+      "prompt": "artwork/prompts/dps.txt",
+      "sha256": "ec0cc39c201b80b3dc96dd0f2f04752abd5c8584b3ed02282cf067542c445f5b",
+      "width": 1672,
+      "height": 941,
+      "responsive": [
+        {
+          "file": "dps-ec0cc39c20-640.webp",
+          "fallback": "dps-ec0cc39c20-640.jpg",
+          "width": 640,
+          "height": 360,
+          "bytes": 52888,
+          "fallback_bytes": 76250
+        },
+        {
+          "file": "dps-ec0cc39c20-800.webp",
+          "fallback": "dps-ec0cc39c20-800.jpg",
+          "width": 800,
+          "height": 450,
+          "bytes": 75630,
+          "fallback_bytes": 113440
+        },
+        {
+          "file": "dps-ec0cc39c20-960.webp",
+          "fallback": "dps-ec0cc39c20-960.jpg",
+          "width": 960,
+          "height": 540,
+          "bytes": 100596,
+          "fallback_bytes": 153850
+        },
+        {
+          "file": "dps-ec0cc39c20-1280.webp",
+          "fallback": "dps-ec0cc39c20-1280.jpg",
+          "width": 1280,
+          "height": 720,
+          "bytes": 196940,
+          "fallback_bytes": 244681
+        },
+        {
+          "file": "dps-ec0cc39c20-1672.webp",
+          "fallback": "dps-ec0cc39c20-1672.jpg",
+          "width": 1672,
+          "height": 941,
+          "bytes": 279432,
+          "fallback_bytes": 369074
+        }
+      ],
+      "composition": "Full-frame landscape derivatives; no baked text or controls"
+    },
+    "closing": {
+      "master": "artwork/masters/closing.png",
+      "prompt": "artwork/prompts/closing.txt",
+      "sha256": "9b8093f3e1aef0a7a74b51fa403ad00adeeab17bbdc63619291f65638874826d",
+      "width": 1672,
+      "height": 941,
+      "responsive": [
+        {
+          "file": "closing-9b8093f3e1-640.webp",
+          "fallback": "closing-9b8093f3e1-640.jpg",
+          "width": 640,
+          "height": 360,
+          "bytes": 63032,
+          "fallback_bytes": 85447
+        },
+        {
+          "file": "closing-9b8093f3e1-800.webp",
+          "fallback": "closing-9b8093f3e1-800.jpg",
+          "width": 800,
+          "height": 450,
+          "bytes": 92694,
+          "fallback_bytes": 129249
+        },
+        {
+          "file": "closing-9b8093f3e1-960.webp",
+          "fallback": "closing-9b8093f3e1-960.jpg",
+          "width": 960,
+          "height": 540,
+          "bytes": 127122,
+          "fallback_bytes": 178279
+        },
+        {
+          "file": "closing-9b8093f3e1-1280.webp",
+          "fallback": "closing-9b8093f3e1-1280.jpg",
+          "width": 1280,
+          "height": 720,
+          "bytes": 250934,
+          "fallback_bytes": 289480
+        },
+        {
+          "file": "closing-9b8093f3e1-1672.webp",
+          "fallback": "closing-9b8093f3e1-1672.jpg",
+          "width": 1672,
+          "height": 941,
+          "bytes": 369756,
+          "fallback_bytes": 442546
+        }
+      ],
+      "composition": "Full-frame landscape derivatives; no baked text or controls"
+    }
+  }
+}

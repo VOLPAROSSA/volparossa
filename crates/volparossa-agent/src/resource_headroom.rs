@@ -159,15 +159,15 @@ fn cgroup_headroom(mut memory: u64) -> Option<u64> {
     let mut path = root.join(relative);
     loop {
         // A limit on a parent slice applies even when the service's own limit is "max".
-        if let Some(limit) = system_text(&path.join("memory.max")) {
-            if limit.trim() != "max" {
-                let limit = limit.trim().parse::<u64>().ok()?;
-                let used = system_text(&path.join("memory.current"))?
-                    .trim()
-                    .parse::<u64>()
-                    .ok()?;
-                memory = memory.min(limit.saturating_sub(used));
-            }
+        if let Some(limit) = system_text(&path.join("memory.max"))
+            && limit.trim() != "max"
+        {
+            let limit = limit.trim().parse::<u64>().ok()?;
+            let used = system_text(&path.join("memory.current"))?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            memory = memory.min(limit.saturating_sub(used));
         }
         if path == root {
             break;

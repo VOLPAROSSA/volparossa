@@ -243,8 +243,8 @@ fn wifi_mesh_survey_uses_exact_in_use_channel_and_preserves_unavailable_vs_malfo
         survey::parse(&[survey_record(7, 2412, true, &[])], 7, 2412).unwrap(),
         None
     );
-    assert!(survey::parse(&[valid.clone()], 8, 2412).is_err());
-    assert!(survey::parse(&[valid.clone()], 7, 2437).is_err());
+    assert!(survey::parse(std::slice::from_ref(&valid), 8, 2412).is_err());
+    assert!(survey::parse(std::slice::from_ref(&valid), 7, 2437).is_err());
     assert!(survey::parse(&[valid.clone(), valid], 7, 2412).is_err());
     for invalid in [vec![0; 7], 12_001_u64.to_ne_bytes().to_vec()] {
         let mut fields = Vec::new();

@@ -1,7 +1,11 @@
 # Privileged helper protocol v3
 
-This document records the implemented external helper boundary and the exact point at which the
-live Linux implementation currently stops. It is not evidence that a VOLPAROSSA datapath works.
+This reference records helper-v3 wire, ownership, worker and cleanup contracts.
+Implementation stages and their evidence do not define today's completion status;
+use [the execution index](../IMPLEMENTATION_STATUS.md) for source-bound acceptance.
+The authoritative active request types and dispatch are in
+[`volparossa-routing`](../../crates/volparossa-routing/src/v3.rs) and the
+[helper engine](../../crates/volparossa-helper/src/engine_v3.rs).
 
 ## External boundary
 
@@ -50,9 +54,10 @@ The v3 route-context lifecycle is:
    the same operation.
 4. `AcquireTransportSocket` requests one descriptor for an exact committed context, lease path,
    endpoint role, closed transport kind and concrete address tuple. The descriptor is transferred
-   separately and is not representable in protobuf. Production currently accepts only explicitly
-   unconnected QUIC UDP for an exact Client or Exit singleton; Relay and both MPTCP forms remain
-   unavailable.
+   separately and is not representable in protobuf. Connected MPTCP is Client-only,
+   listening MPTCP is Exit-only, and unconnected QUIC UDP is Client/Exit-only;
+   Relay application transport acquisition is unavailable. A separate native-probe
+   socket kind is authorized in Activated phase, not as an application transport.
 5. `DestroyContext` removes one exact owned context. Relay Destroy first restores policy-drop and
    proves the active fence absent before deleting the links and retiring the baseline. Repeated
    destruction is successful and reports whether a context existed. Cleanup ambiguity quarantines
@@ -96,8 +101,15 @@ remain usable after resume until the serialized BOOTTIME-aware reaper obtains th
 destroys the exact worker namespace. The KVM proof does not exercise suspend/resume. This is not a
 containment claim against compromised host root, which can already rewrite or starve host networking.
 
-The active v3 agent API has no private-key input or output and no caller-selected interface name,
-local overlay address, allowed prefix, listen port, filesystem path, sysctl, command, or nftables expression.
+The active v3 API accepts no private keys, filesystem paths, commands, sysctls or
+free-form nftables expressions. Route-context and transport operations also accept
+no caller-selected interface name, local overlay address, allowed prefix or listen
+port. Two separate typed owners have narrower explicit inputs: upload sharing
+accepts one bounded physical-interface name that the helper resolves and revalidates;
+explicit direct mesh accepts an existing radio, bounded mesh ID/channel and private
+connected subnet for its newly created interface. Mesh cannot replace an existing
+interface or install an Internet route. These exceptions do not grant free-form
+privileged input or relax route-context ownership.
 Historical operation tags 10 (`CreateContext`), 11 (`ConfigureWireguard`), 12
 (`InstallRelayFence`), 14 (`SetLinkState`), and 24 (`InstallInterception`) are permanently reserved.
 Their protobuf variants and message types are absent from the active source and must never be
@@ -162,10 +174,10 @@ rejecting malformed, legacy, or mismatched helper aliases. The marker is evidenc
 journal-phase or cleanup authority. Production Prepare reconstructs the original canonical
 `PrepareIntent` from immutable backend lineage plus the correlated `PrepareLeaseBatch`, rejects any
 context or expiry mismatch, and commits that exact intent to the durable journal before reserving
-or authenticating a worker generation. Crash/restart rollback is still absent. The production
-server selects a crate-private functional-alpha backend for exactly one live Client/Exit
-singleton or one live Relay context with exactly the ordered matching
-`WireguardRole::RelayClient` + `WireguardRole::RelayExit` pair. It
+or authenticating a worker generation. Restart recovery has separate journal/custody
+proof obligations; a successful Prepare alone is not recovery evidence. The functional
+backend preserves the Client/Exit endpoint roles and strictly ordered matching
+`WireguardRole::RelayClient` + `WireguardRole::RelayExit` pair for each path. It
 obtains a consistent read-only direct-underlay
 snapshot before mutation, opens a process-owned worker coordinator, initializes the authenticated
 child, exclusively creates the helper-derived WireGuard birth link at one deterministic high
@@ -199,12 +211,10 @@ engine independently revalidate that proof before returning the exact `Committed
 identical external Commit retry is served by the bounded exact-response cache. Destroy sends the
 exact child operation from either Activated or Committed state, first restores Relay policy-drop,
 deletes the complete lease set, proves fence absence, and succeeds only after worker termination,
-reap and registry purge. The backend permits no second live context. This remains a helper-internal,
-single-path seam. For a committed Client or Exit singleton, the production server can satisfy a
-valid unconnected-QUIC-UDP `AcquireTransportSocket` request and hand off exactly one descriptor for
-that request. MPTCP and Relay acquisition, multi-path routing, every production transport caller and
-every usable datapath remain `Unavailable`; shutdown succeeds only with empty backend state and
-confirmed coordinator cleanup. The periodic driver uses an owned,
+reap and registry purge. Application transport acquisition uses the closed role/kind
+mapping in the external boundary above and the exact committed path lineage; helper
+socket creation alone is not a datapath acceptance claim. Shutdown succeeds only with
+empty backend state and confirmed coordinator cleanup. The periodic driver uses an owned,
 cancellation-safe engine supervisor with nonzero domain-separated exact-lineage correlation; it
 retries cleanup-pending Quarantined contexts and orphan Pending preparations, and unexpected driver
 exit stops the server. Shutdown first stops and joins this driver, then cleans the engine, then joins
@@ -212,8 +222,8 @@ the durable actor. The driver schedules a sweep once per second with missed tick
 begins only after every earlier request in the serialized operation gate has settled. Once begun,
 its kernel-absence attempt remains bounded by the backend hard deadline. The public
 `HelperEngine::new` constructor remains fully fail-closed and does not select this backend.
-Same-runtime durable journal/systemd custody is described below; inherited-custody adoption and
-crash/restart recovery are not claimed. The signed grant is
+Same-runtime durable journal/systemd custody is described below. Recovery evidence
+remains source- and scenario-bound rather than implied by a journal entry. The signed grant is
 self-contained: the request-to-response authority is cryptographically bound, but the helper does
 not yet receive an independent discovery/connection trust anchor or a separately trusted
 selected-relay/exit or policy authority. It therefore cannot distinguish a correctly signed grant
@@ -444,8 +454,9 @@ durably CAS only the unchanged singleton `MayOwnCustody -> CleanupConfirmed` whi
 `Starting` and lock-held. The existing exact-name `FDSTOREREMOVE`, fresh exact-empty manager proof and
 `CleanupConfirmed -> Absent` chain then run under the same spawn-admission guard before the helper
 socket may be bound. A crash after the phase CAS restarts at durable `CleanupConfirmed`; a committed
-fence deletion with a lost child reply remains retryable only as exact-empty. Broader crash recovery
-and live forced-crash/KVM proof are still absent, so AV1-10 and the 11/100 alpha score do not change.
+fence deletion with a lost child reply remains retryable only as exact-empty. This bounded
+reaper proof does not alone establish broader crash recovery or a project completion score;
+later source-bound acceptance is recorded in the implementation status.
 
 A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
@@ -662,14 +673,12 @@ separately cloneable arm-only journal handle authorizes only the exact
 `MayOwnCustody -> MayOwnPrepare` transition; `ProductionOwnershipRuntime` remains the sole owner of
 actor startup, shutdown and thread settlement.
 
-The supervisor and publisher remain private but are reached only through production durable
-Prepare. Same-runtime clean Destroy consumes the successful terminal and authority-orders exact
-manager removal between `CleanupConfirmed` and `Absent`. Cross-process/restart-stable
-reconciliation and adoption remain disconnected, inherited descriptors are refused, and no restart
-reaper exists. The executable live-proof path has not yet
-produced recorded evidence inside the required disposable Debian 13 transient service. This
-therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
-crash-cleanup, datapath or acceptance milestone.
+The supervisor and publisher remain private production-Prepare components. Same-runtime
+clean Destroy consumes successful terminal authority and orders exact manager removal
+between `CleanupConfirmed` and `Absent`. Publication alone is not restart recovery:
+inherited descriptor classification, journal state and exact reaper proof must authorize
+any adoption or retirement. The original isolated publication proof and score statement
+are retained in the development archive; current source-bound acceptance is separate.
 
 The unprivileged route owner retains a non-cloneable `RuntimeBoundPreparedLeaseBatch`: the exact
 helper runtime ID, canonical Prepare plan, opaque context handle and complete `PreparedLease` set.
@@ -1486,18 +1495,12 @@ registry mutation, no-runtime polling before admission or PLAN, mutex-poison own
 around PLAN, generation ABA, late/dead commit rejection, descriptor closure, tombstone bounds and
 registry-lock availability.
 
-The production server's functional-alpha backend now calls this worker path for one Client/Exit
-singleton lease or one exact Relay endpoint pair; no production route manager calls it. The
-production engine supervises cancellation-safe
-PLAN -> CALL -> COMMIT/rollback transactions: it
-reserves and revalidates state under `EngineState`, while every backend call runs without that mutex
-held. The narrow backend implements real complete-batch Prepare, Activate, correlated Probe/Commit,
-and Destroy. It also acquires one bound unconnected QUIC UDP socket per successfully committed valid
-request for a committed Client/Exit singleton. Relay operations are fail-atomic, install the exact
-two-direction fence, and
-both lease and forwarding proofs must pass before pair Commit. MPTCP and Relay transport acquisition
-remain `Unavailable`, and the engine rejects client ingress as `Unavailable` before backend
-dispatch. This scoped helper-internal composition is not full production readiness.
+The production engine supervises cancellation-safe PLAN -> CALL -> COMMIT/rollback
+transactions. It reserves and revalidates under `EngineState` while every backend call
+runs outside that mutex. Complete-batch Prepare, Activate, Probe/Commit and Destroy
+preserve role/lease ordering; Relay pair Commit requires both lease and both forwarding
+proofs. Transport acquisition and ingress dispatch use the closed mappings described
+above and below. These backend contracts do not independently establish runtime acceptance.
 
 ### Affine asynchronous engine/backend boundary
 
@@ -1736,15 +1739,12 @@ quarantines rather than releasing. The production journal now has request-path i
 exact same-runtime clean settlement and the narrow singleton restart reaper, but no cross-runtime
 tag-28 proof or broad inherited worker/kernel-cleanup executor exists to settle that case.
 
-This same-runtime reconciliation path remains containment rather than crash recovery. The
-functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
-singleton or one exact Relay endpoint pair. A valid Acquire request for an exact committed
-Client/Exit singleton can also hand off exactly one bound unconnected QUIC UDP descriptor. This
-at-most-once rule is scoped only to the outer request ID and digest: an exact retry returns
-descriptorless `TRANSPORT_SOCKET_ALREADY_ACQUIRED`, while a fresh request ID is not rejected as a
-per-context/path/role replay. No production route-manager or transport caller adopts the descriptor,
-and no simultaneous production Client/Relay/Exit route, ingress or usable VPN datapath exists.
-Cross-leg forwarding exists only inside the isolated single-path Relay worker.
+Same-runtime reconciliation is containment, not by itself crash recovery. Application
+transport acquisition follows the closed role/kind mapping above. Its at-most-once
+handoff is scoped to the exact request ID and digest: an exact retry returns
+`TRANSPORT_SOCKET_ALREADY_ACQUIRED` without a descriptor, while a fresh request ID
+still requires independently valid association authority and resource bounds. A current
+runtime or recovery claim needs the source-specific evidence in the status index.
 
 ## Namespace-local transport descriptor
 
@@ -1816,12 +1816,11 @@ regressions prove invalid source rejection, `F_DUPFD_CLOEXEC` with minimum 3, in
 namespace test proves the fixed `SIOCGSKNS` wrapper and exact same/different-namespace comparison
 without changing host networking. Other socket
 tests perform read-only kernel revalidation; no route, link, firewall or sysctl was changed. The
-production functional backend now advertises its narrow transport capability and independently
-requires the complete committed lineage, Client/Exit singleton role/path, worker-derived overlay
-address, unconnected-UDP shape and live wall/boottime/call deadlines. Its authenticated production
-v3 child invokes only the existing unconnected-UDP factory, drops the source before the release
-record, and returns exactly one descriptor through the consuming namespace validator. MPTCP and
-Relay requests remain unavailable. Once backend descriptor validation and engine COMMIT succeed, the
+production functional backend requires the complete committed lineage, exact
+Client/Exit role/path, worker-derived overlay address, permitted closed socket kind
+and live wall/boottime/call deadlines. The authenticated v3 child drops its source
+owner before the release record and returns exactly one descriptor through the
+consuming namespace validator. Relay application requests remain unavailable. Once backend descriptor validation and engine COMMIT succeed, the
 helper records the request ID/digest in a separate bounded same-runtime context-generation ledger,
 before outer response/FD delivery can be known. The ledger retains no descriptor and survives generic
 cache expiry/eviction; an exact retry returns descriptorless
@@ -1833,8 +1832,9 @@ association request. Only confirmed Destroy of that generation purges its record
 saturation rejects new Acquire requests without restricting terminal Destroy. Unit tests run
 successful Client and Exit transfers inside disposable user/network namespaces and cover binding,
 role, path, address, phase, worker-error, descriptor-rejection, cancellation and channel-ambiguity
-closure. The agent transport stacks do not yet consume this helper API, and no live WireGuard route
-or working namespace datapath is claimed.
+closure. The current agent transport integration and source-bound route acceptance are
+recorded in [implementation status](../IMPLEMENTATION_STATUS.md); these descriptor
+checks alone do not establish a live WireGuard path.
 
 ## Pre-route client ingress boundary
 
@@ -1869,83 +1869,28 @@ rejects missing, duplicate, wrong-family, malformed, truncated, or extra ancilla
 are cleared. Pure and Unix-socketpair tests cover these fail-closed parsers without root, network
 namespaces, routes, firewall changes, or live product networking.
 
-These are protocol, type, descriptor-handoff, and UAPI foundations only. The production engine
-returns `Unavailable/CLIENT_INGRESS_UNAVAILABLE` for all four operations before consulting its
-clock, cache, state, backend, or network. It creates no namespace, listener, nftables rule, route,
-mark, DNS state, receipt, or descriptor. A future privileged runtime must itself cache or refuse a
-second transfer for each runtime/identity and implement transaction-wide rollback; the agent's
+The production engine dispatches these operations through dedicated asynchronous
+prepare/acquire/activate/destroy handlers; it no longer unconditionally returns the
+early `CLIENT_INGRESS_UNAVAILABLE` result. A distinct typed reply-socket acquisition
+also exists. The privileged runtime must cache or refuse a second transfer for each
+runtime/identity and implement transaction-wide rollback or quarantine; the agent's
 one-shot guard is defense in depth, not a substitute for that privileged invariant.
+Current source and scenario acceptance remain separate from these wire/UAPI checks.
 
-## WRITE-STOP: remaining live-kernel gaps
+<a id="write-stop-remaining-live-kernel-gaps"></a>
 
-No development-host network configuration is mutated or authorized for this slice. The committed gate confines
-its fixed dummy underlay and ephemeral WireGuard leases to a transient `PrivateNetwork` and child
-network namespaces inside the disposable VM. Before `Prepare`, `Activate`, `Commit`, transport
-acquisition, client ingress, or datapath operation can be called complete, all of the following
-remain. The Client lifecycle and equal enumerated host-state fences have retained exact-main
-evidence from run 33294974441 at `77b60aed3c39ba0c80d3e2dac2b9817fd6d7be2f`; the separate Exit
-lifecycle has retained exact-main evidence from run 33296892632 at
-`1ca51fe0d2a2be855adb182e85c229d1d12bc017`; and Relay-pair run 33301595311 at
-`0095b113e450a0ab29da853fafa53b2b130f05fc` retained the simultaneous endpoint-pair proof. Those
-retained scoped results predate Relay forwarding and are not staged-package, simultaneous-route,
-restart or acceptance evidence. Non-retained branch smoke [run
-33306523739](https://github.com/VOLPAROSSA/volparossa/actions/runs/33306523739) at
-`8d9cc533edfc1e9add273c03a9ce3fa164c3353d` subsequently proved bounded `::1` to `::4` ICMPv6
-cross-leg forwarding through the exact two WireGuard interfaces, growth of all four WireGuard peer
-counter views and both nftables forwarding counters, Commit plus identical retry, complete teardown,
-and the enumerated unchanged-host-state fence. That branch smoke deliberately retained no artifact.
-Exact-main run 33309109220 at `1f3cee798787ed4673a3ba28d88931947800ca22` reproduced the scoped
-forwarding proof and retained artifact 9731470248. It does not join a production route manager,
-transport or ingress, and does not change the alpha score.
+## Acceptance and remaining integration
 
-- validate the shipped seven-capability helper bootstrap and locked sysusers contract from the staged
-  Debian package under the same acceptance environment, including the generated local
-  passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
-  absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
-  the final worker must retain only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`;
-- extend the asynchronous `HelperEngine` backend beyond the current
-  Client/Exit-singleton-or-Relay-pair Prepare/Activate/Probe-Commit/Destroy path and narrow committed
-  Client/Exit unconnected-QUIC-UDP acquisition: connected/listening MPTCP for the exact Client/Exit
-  roles still needs the same plan/call/commit discipline and exact
-  context/generation/phase/handle revalidation; Relay application transport acquisition remains
-  intentionally unavailable;
-- wire the handed-off descriptor into a live production route runtime whose affine receiver closes
-  every socket on Destroy, helper loss or route rollback. Same-request retry refusal is already
-  descriptorless and same-runtime generation-bound, but `HelperClient` currently creates a fresh ID
-  for each call and no agent/runtime transport caller adopts the descriptor;
-- extend the bounded `DirectAssigned` parent snapshot from the current one direct underlay to the
-  exact multi-path evidence required by complete route setup, retaining rejection of multipath,
-  duplicate, truncated or ambiguous dumps;
-- extend the exact single-path Relay endpoint pair to every selected path while preserving complete
-  batch preflight, rollback, proof and cleanup;
-- join the scoped single-path helper-internal Relay fence with the separately retained Client and Exit
-  foundations under one production route manager, extend it to every selected path, and prove one
-  simultaneous production client-to-relay-to-exit route with correlated handshake, WireGuard,
-  forwarding-counter, transport, ingress and cleanup evidence;
-- extend the connected same-runtime durable two-step settlement with restart-stable
-  pidfd/namespace adoption, exact old-worker death, and a real inherited namespace/kernel cleanup
-  backend. Exact-name manager removal is already authority-ordered between `CleanupConfirmed` and
-  `Absent` for a correlated clean live Destroy. The pure-tested typed marker/kernel foundation rejects an old
-  same-name link carrying a non-exact marker but grants no journal-phase or cleanup authority;
-- add the cross-runtime tag-28 proof plus restart reaper; until then a runtime mismatch must
-  remain quarantined and the runtime-lifetime `Absent` ledger cannot be acknowledged or pruned;
-- exercise the wired Client/Exit QUIC UDP factory, credentialed private-channel transfer, parent
-  namespace/shape validation and outer ancillary handoff in one disposable live-WireGuard route;
-  current unit tests use synthetic committed state and do not prove a live route;
-- adopt those descriptors in the TCP/QUIC datapaths and prove the exact tuple and real transport;
-- connect the implemented pre-route client-ingress protocol to a distinct privileged
-  runtime/profile namespace transaction. It must create and revalidate all four socket kinds for
-  both families, retain exactly one socket/receipt transfer per identity, and atomically own TPROXY,
-  DNS and kill-switch nftables/routing state. Prepare, partial acquisition, activation failure,
-  destruction, expiry, client crash, helper crash and ambiguous worker IPC each require exact
-  rollback or quarantine. The unprivileged agent must never enter the namespace. The TCP/UDP
-  consumers must adopt the descriptors and preserve the implemented original-destination evidence
-  without destination substitution;
-- implement signed reservation/lease renewal before supporting configured contexts beyond the
-  current signed 15-minute grant;
-- run disposable root namespace integration tests covering success, denial, ambiguity, expiry,
-  crash cleanup, packet traversal, privacy, and proof that the development host is unchanged.
+The former WRITE-STOP checklist described the early helper-only milestone and is
+preserved in the [development archive](../archive/network-architecture-notes-20261026.txt).
+It is not a permanent prohibition or current list of absent transports. The source-bound
+v1 acceptance checkpoint in [implementation status](../IMPLEMENTATION_STATUS.md#current-live-integration-checkpoint)
+records the later complete route/ingress/transport and crash-cleanup proof; it does not
+qualify a different source or every later extension.
 
-Until those items pass, production route preparation and client ingress remain deliberately
-unavailable. The isolated helper-internal Relay forwarding proof does not justify a product tunnel,
-interception, reservation, transport, capacity, or datapath-active claim.
+Changes to helper ownership still require disposable evidence for exact role/tuple
+binding, rollback or quarantine after ambiguity, expiry, helper/client crashes,
+packet traversal, privacy and unchanged host networking. The unprivileged agent
+must never enter the helper namespace or acquire arbitrary privileged operations.
+A longer configured context cannot exceed the signed grant: lease renewal requires
+its own signed protocol and acceptance, not merely a configuration increase.

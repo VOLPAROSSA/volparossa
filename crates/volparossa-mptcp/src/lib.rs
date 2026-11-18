@@ -498,22 +498,18 @@ impl SynchronousKernelMptcpPathManager {
             if is_errno(&error, libc::EEXIST) {
                 let mut contexts = self.backend.contexts.blocking_lock();
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                    && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
                 {
-                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                    endpoints.remove(&endpoint.id);
                 }
                 return Err(error);
             }
             if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
                 let mut contexts = self.backend.contexts.blocking_lock();
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                    && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
                 {
-                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                    endpoints.remove(&endpoint.id);
                 }
                 return Err(error);
             }
@@ -895,11 +891,9 @@ impl MptcpPathManagerBackend for KernelMptcpPathManager {
             if is_errno(&error, libc::EEXIST) {
                 let mut contexts = self.contexts.lock().await;
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                    && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
                 {
-                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                    endpoints.remove(&endpoint.id);
                 }
                 return Err(error);
             }
@@ -910,11 +904,9 @@ impl MptcpPathManagerBackend for KernelMptcpPathManager {
             if rollback.is_ok() {
                 let mut contexts = self.contexts.lock().await;
                 if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                    && matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
                 {
-                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
-                    {
-                        endpoints.remove(&endpoint.id);
-                    }
+                    endpoints.remove(&endpoint.id);
                 }
                 return Err(error);
             }

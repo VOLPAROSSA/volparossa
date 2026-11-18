@@ -136,6 +136,8 @@ pub enum StorageFixtureHelperDiagnostic {
     ExpiredContextCleanupIncomplete = 7,
     /// A global expired-extension reap was incomplete, not necessarily this route.
     ExpiredExtensionCleanupIncomplete = 8,
+    /// The connected MPTCP poll elapsed without readiness; no kernel errno was reported.
+    MptcpConnectPollTimedOut = 9,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -181,9 +183,11 @@ impl StorageFixtureAcquireSummary {
         }
         for value in [first, last] {
             if let Some(code) = value.helper_diagnostic {
-                StorageFixtureHelperDiagnostic::try_from(code).map_err(|_| invalid())?;
+                let code = StorageFixtureHelperDiagnostic::try_from(code).map_err(|_| invalid())?;
                 let failure = value.failure.ok_or_else(invalid)?;
                 if failure.stage != Stage::HelperAcquire as i32
+                    || (code == StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
+                        && failure.reason != Reason::HelperKernel as i32)
                     || !matches!(
                         Reason::try_from(failure.reason),
                         Ok(Reason::HelperKernel

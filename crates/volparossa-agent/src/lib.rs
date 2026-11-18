@@ -44,13 +44,14 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd},
+    io::{AsyncReadExt, AsyncWriteExt},
     sync::{RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
 use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
 use volparossa_inspection::InspectionError;
+use volparossa_linux_uapi::OwnedAsyncFd;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
@@ -265,15 +266,15 @@ impl Agent {
                 return Err(AgentError::WifiMesh);
             }
         };
-        if self.config.wifi_mesh.enabled {
-            if let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
-                tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::WifiMesh);
-            }
+        if self.config.wifi_mesh.enabled
+            && let Err(error) = self.discovery.configure_mesh_network(mesh.is_some())
+        {
+            tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::WifiMesh);
         }
         let client_ingress = if roles.client {
             let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
@@ -469,23 +470,23 @@ impl Agent {
             }
         }
 
-        if let Some(mesh) = mesh {
-            if mesh.shutdown().await.is_err() {
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::ShutdownCleanup);
-            }
+        if let Some(mesh) = mesh
+            && mesh.shutdown().await.is_err()
+        {
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::ShutdownCleanup);
         }
-        if let Some(sharing) = sharing {
-            if sharing.shutdown().await.is_err() {
-                self.helper
-                    .cleanup_owned()
-                    .await
-                    .map_err(|_| AgentError::ShutdownCleanup)?;
-                return Err(AgentError::ShutdownCleanup);
-            }
+        if let Some(sharing) = sharing
+            && sharing.shutdown().await.is_err()
+        {
+            self.helper
+                .cleanup_owned()
+                .await
+                .map_err(|_| AgentError::ShutdownCleanup)?;
+            return Err(AgentError::ShutdownCleanup);
         }
         if self.state.read().await.has_network_state() {
             self.helper
@@ -760,9 +761,10 @@ async fn run_client_udp_ingress(
             .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
         return;
     };
-    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
-        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
-    else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) = (
+        OwnedAsyncFd::register(ipv4_descriptor),
+        OwnedAsyncFd::register(ipv6_descriptor),
+    ) else {
         state
             .write()
             .await
@@ -1069,7 +1071,6 @@ async fn run_client_udp_ingress(
                     "INGRESS_UDP_ROUTE_UNAVAILABLE",
                     unix_millis(),
                 );
-                continue;
             }
             // Submission is complete. The independent reverse-drain branch above owns replies;
             // the next application datagram must not wait for this destination to answer.
@@ -1102,9 +1103,10 @@ async fn run_client_dns_ingress(
             .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
         return;
     };
-    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
-        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
-    else {
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) = (
+        OwnedAsyncFd::register(ipv4_descriptor),
+        OwnedAsyncFd::register(ipv6_descriptor),
+    ) else {
         state
             .write()
             .await
@@ -1626,15 +1628,15 @@ async fn run_maintenance(
                     let state = state.read().await;
                     (state.policy_snapshot(now_ms), state.roles().client)
                 };
-                if client_policy_revoked(&previous_policy, &current_policy, client_enabled) {
-                    if control::disconnect_client_routes(&routes, &dns_routes).await.is_err() {
-                        state.write().await.log(
-                            LogLevel::Warn,
-                            "CLIENT_CLEANUP_PENDING",
-                            now_ms,
-                        );
-                    }
-                    continue;
+                if client_policy_revoked(&previous_policy, &current_policy, client_enabled)
+                    && control::disconnect_client_routes(&routes, &dns_routes)
+                        .await
+                        .is_err()
+                {
+                    state
+                        .write()
+                        .await
+                        .log(LogLevel::Warn, "CLIENT_CLEANUP_PENDING", now_ms);
                 }
             }
         }

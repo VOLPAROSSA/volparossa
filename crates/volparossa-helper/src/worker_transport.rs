@@ -564,7 +564,7 @@ fn send_credential_message_with_deadline<S: AsFd>(
                 validate_complete_send(written, expected_bytes)?;
                 return deadline.complete(());
             }
-            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => continue,
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => {}
             Err(error) => return Err(errno_io(error)),
         }
     }
@@ -1839,7 +1839,7 @@ mod tests {
         env,
         io::{IoSlice, Read as _, Write as _},
         net::{Ipv6Addr, UdpSocket},
-        os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd},
+        os::fd::{IntoRawFd as _, OwnedFd},
         os::unix::net::UnixStream,
         process::{Command, Stdio},
         thread,

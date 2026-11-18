@@ -644,10 +644,11 @@ impl AsyncWrite for RefusalWrite {
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let result = Pin::new(&mut self.inner).poll_flush(cx);
-        if result.is_ready() && self.armed.load(Ordering::SeqCst) {
-            if let Some(authority) = &self.revoke {
-                authority.0.store(false, Ordering::SeqCst);
-            }
+        if result.is_ready()
+            && self.armed.load(Ordering::SeqCst)
+            && let Some(authority) = &self.revoke
+        {
+            authority.0.store(false, Ordering::SeqCst);
         }
         result
     }

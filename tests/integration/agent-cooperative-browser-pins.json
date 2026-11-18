@@ -14,7 +14,7 @@
   "runtime": {
     "version": "140.16.0",
     "source_stamp": "d864999404b3032f682d74ccc60d1ce38c9ce609",
-    "url": "https://security.debian.org/debian-security/pool/updates/main/f/firefox-esr/firefox-esr_140.16.0esr-1~deb13u1_amd64.deb",
+    "url": "https://snapshot.debian.org/file/15ff34b5e34e83cd1c27448c6eb80226e955168f",
     "bytes": 71994716,
     "sha256": "e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508",
     "files": {

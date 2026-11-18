@@ -1,7 +1,9 @@
 # Explicit native CPU inference candidate
 
-This is an **opt-in experimental backend**, not a working-model or coding-quality
-claim. The legacy PyTorch backend remains unchanged. Only owner-authorized local
+This is an **opt-in experimental backend**. Its manifest, conversion and execution
+contracts are documented here; [implementation status](../../../docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence)
+records the separately pinned actual coding milestone. That bounded result is not
+a general quality/performance or protected-peer-execution claim. The legacy PyTorch backend remains unchanged. Only owner-authorized local
 private conversations using `qwen3-4b-instruct-2507-v1` and explicit `greedy_v1`
 are eligible. This does not enable private execution on arbitrary peers.
 
@@ -114,8 +116,8 @@ old meaning; they are not evidence that the alignment issue is corrected.
 The new wrapper inventory has eight files, including the patch, so downstream
 Code provenance must be explicitly joined before another paired model trial.
 Seven inert alignment/provenance cases and the existing 91 Python cases pass;
-the new normal and complete ASan/UBSan source builds remain required. The full
-sanitizer suite must not yet be described as passing.
+new normal and complete ASan/UBSan builds require their own source-bound result.
+This candidate's source controls alone do not supersede the preserved sanitizer failure.
 
 A separate owned wrapper reused the original upstream BF16 conversion,
 reference and dot-product functions and tolerances, plus its F32 vector cases.
@@ -187,9 +189,8 @@ and resume are acknowledged at stopped decode boundaries by the existing owner
 protocol. All handles are closed deterministically, and the supervisor retains
 its independent hard-budget and process-cleanup authority.
 
-Actual guest conversion has passed in the preserved trials, including complete
-tensor-value verification. The latest unpatched-loader trial stopped during model
-loading; neither its unique failure cause nor successful native inference is
-established. Patched loading, memory/performance feasibility, real EOS completion
-and the unchanged OpenCode read/edit/test scenario still require their own guest
-evidence. A source build, ABI smoke or synthetic tensor test is not that evidence.
+Recorded guest conversion includes complete tensor-value verification. Historical
+loader/sanitizer failures remain bound to their original sources; the separate
+accepted Code/Core read-edit-test pair is linked above. Neither a source build,
+ABI smoke nor synthetic tensor test proves model loading, EOS completion, broad
+coding quality, responsiveness or performance for another source/profile.

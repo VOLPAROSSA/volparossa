@@ -387,10 +387,10 @@ impl Service {
     }
 
     async fn response(&self, request: &wire::Request) -> Value {
-        if matches!(request.operation, wire::Operation::Fetch {}) {
-            if let Err(code) = self.fetch().await {
-                return wire::error(Some(&request.id), code);
-            }
+        if matches!(request.operation, wire::Operation::Fetch {})
+            && let Err(code) = self.fetch().await
+        {
+            return wire::error(Some(&request.id), code);
         }
         self.access(|broker| {
             let now = broker.check()?;

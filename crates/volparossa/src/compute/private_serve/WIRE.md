@@ -104,7 +104,9 @@ schema remains unchanged; the core binds
 the worker's native artifact identity and reported precision internally.
 
 This is still same-owner local execution, not confidential execution on peers.
-Actual conversion, full generation and application trials remain required.
+Conversion, generation and application claims need their own exact-source evidence;
+see the [bounded native coding milestone](../../../../../docs/IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence),
+which does not qualify arbitrary profiles, Firefox integration or private-peer execution.
 
 ## Browser boundary
 

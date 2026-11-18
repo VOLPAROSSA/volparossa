@@ -9,6 +9,7 @@ pub mod dataset;
 pub mod guest;
 mod protocol;
 pub mod quote;
+pub mod resident_task;
 mod transcript;
 
 pub use transcript::{

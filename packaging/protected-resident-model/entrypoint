@@ -1,0 +1,184 @@
+#!/usr/bin/python3.13 -I
+# SPDX-License-Identifier: GPL-3.0-only
+"""Fixed PUBLIC guest launcher; no host networking or caller-selected command.
+
+This is sealed with the full OS. It is not a TEE/key-origin/appraisal mechanism.
+Only the requester can validate two model results and the signed-session close;
+an exit status alone does not establish that either model turn occurred.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+UID = GID = 985
+BASE = Path("/usr/lib/volparossa")
+PROFILE = json.loads(r'''@PROFILE_JSON@''')
+SELF = str(BASE / "protected-resident-model-entrypoint")
+LAUNCH = BASE / "protected-resident-model-launch.json"
+PORT_NAME = "org.volparossa.resident"
+ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": "/run/volparossa-resident",
+       "TMPDIR": "/run/volparossa-resident/work", "PYTHONDONTWRITEBYTECODE": "1"}
+READY = (b'VP_PROTECTED_MODEL_READY_V1 {"version":1,"scope":"public_fixture",'
+         b'"privileges_dropped":true,"hardware_attestation":false,"private_inputs":false,'
+         b'"model_execution":false,"worker_execution":false}\n')
+
+
+def require(condition):
+    if not condition:
+        raise ValueError("resident_guest_launch_rejected")
+
+
+def pairs(items):
+    result = {}
+    for key, value in items:
+        require(key not in result)
+        result[key] = value
+    return result
+
+
+def read_regular(path, maximum, owner, mode):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        meta = os.fstat(fd)
+        require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1
+                and (meta.st_uid, meta.st_gid, stat.S_IMODE(meta.st_mode)) == (owner, owner, mode)
+                and meta.st_size <= maximum)
+        raw = os.read(fd, maximum + 1)
+        require(len(raw) == meta.st_size)
+        return raw
+    finally:
+        os.close(fd)
+
+
+def argv_for(digest):
+    return ["/usr/bin/volparossa", "compute", "resident-guest",
+            "--runtime-root", "/opt/volparossa/runtime", "--model-root", "/opt/volparossa/model",
+            "--work-parent", "/run/volparossa-resident/work",
+            "--native-backend-root", "/opt/volparossa/native-backend",
+            "--native-backend-sha256", digest, "--public-policy", "/etc/volparossa-resident/public-policy.json",
+            "--certificate", "/etc/volparossa-resident/server.der",
+            "--private-key", "/etc/volparossa-resident/server-key.der", "--execute"]
+
+
+def decode_launch(raw):
+    require(len(raw) <= 16384)
+    value = json.loads(raw, object_pairs_hook=pairs,
+                       parse_constant=lambda _item: require(False))
+    require(type(value) is dict and value.keys() == {"profile", "native_backend_sha256", "argv"})
+    # Canonical bytes distinguish JSON booleans from integer lookalikes.
+    encode = lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    require(encode(value["profile"]) == encode(PROFILE))
+    digest = value["native_backend_sha256"]
+    require(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest) is not None)
+    require(value["argv"] == argv_for(digest))
+    return argv_for(digest)
+
+
+def attribute(path, maximum):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        require(stat.S_ISREG(os.fstat(fd).st_mode))
+        raw = os.read(fd, maximum + 1)
+        require(len(raw) <= maximum)
+        return raw.decode("ascii")
+    finally:
+        os.close(fd)
+
+
+def select_port(sys_root=Path("/sys"), dev_root=Path("/dev")):
+    directory = sys_root / "class/virtio-ports"
+    found, count = [], 0
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            count += 1
+            require(count <= 16 and re.fullmatch(r"vport[0-9]{1,4}p[0-9]{1,4}", entry.name) is not None)
+            target = Path(entry.path).resolve(strict=True)
+            require(target.is_relative_to(sys_root / "devices") and target.is_dir())
+            name = attribute(target / "name", 128)
+            if name != PORT_NAME + "\n":
+                continue
+            number = attribute(target / "dev", 32)
+            require(re.fullmatch(r"[0-9]{1,7}:[0-9]{1,7}\n", number) is not None)
+            major, minor = map(int, number.strip().split(":"))
+            require(0 < major <= 4095 and 0 <= minor <= 1048575)
+            node = dev_root / entry.name
+            meta = node.lstat()
+            require(stat.S_ISCHR(meta.st_mode) and meta.st_uid == 0 and meta.st_gid == 0
+                    and os.major(meta.st_rdev) == major and os.minor(meta.st_rdev) == minor)
+            found.append(node)
+    require(len(found) == 1)
+    return found[0]
+
+
+def bind_port():
+    node = select_port()
+    # No existing alias is accepted and the worker cannot alter this directory.
+    directory = Path("/dev/virtio-ports")
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)  # init's umask is 077; UID 985 must traverse this alias.
+    os.chown(node, UID, GID, follow_symlinks=False)
+    os.chmod(node, 0o600, follow_symlinks=False)
+    (directory / PORT_NAME).symlink_to(node)
+
+
+def unprivileged():
+    require(os.getuid() == os.geteuid() == UID and os.getgid() == os.getegid() == GID
+            and os.getgroups() == [])
+    # Fixed proc status fields only; no process metadata or labels are exported.
+    raw = attribute(Path("/proc/self/status"), 16384)
+    expected = {"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb", "NoNewPrivs"}
+    seen = {}
+    for line in raw.splitlines():
+        key, _, value = line.partition(":")
+        if key in expected:
+            require(key not in seen)
+            seen[key] = value.strip()
+    require(seen.keys() == expected and seen["NoNewPrivs"] == "1")
+    require(all(re.fullmatch(r"0{16}", seen[key]) is not None for key in expected - {"NoNewPrivs"}))
+
+
+def announce_ready():
+    # stdout was opened by PID1 to the fixed serial console. The nonroot process
+    # cannot open that device itself; it closes this inherited authority before
+    # core/model execution. No new child or long-lived diagnostic FD is created.
+    console = os.fstat(1)
+    require(stat.S_ISCHR(console.st_mode) and console.st_rdev == os.makedev(5, 1))
+    null = os.open("/dev/null", os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        meta = os.fstat(null)
+        require(stat.S_ISCHR(meta.st_mode) and meta.st_rdev == os.makedev(1, 3))
+        require(os.write(1, READY) == len(READY))
+        os.dup2(null, 0)
+        os.dup2(null, 1)
+        os.dup2(null, 2)
+    finally:
+        os.close(null)
+
+
+def main():
+    argv = decode_launch(read_regular(LAUNCH, 16384, 0, 0o444))
+    if sys.argv[1:] == ["--unprivileged"]:
+        unprivileged()
+        manifest = read_regular(Path("/opt/volparossa/native-backend/backend.json"), 65536, UID, 0o600)
+        require(hashlib.sha256(manifest).hexdigest() == argv[12])
+        announce_ready()
+        os.execve(argv[0], argv, ENV)
+    require(sys.argv[1:] == [] and os.getuid() == os.geteuid() == 0)
+    bind_port()
+    # Fixed util-linux privilege drop; neither shell nor model-supplied command.
+    drop = ["/usr/bin/setpriv", "--reuid=985", "--regid=985", "--clear-groups",
+            "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all", "--no-new-privs",
+            "--", "/usr/bin/python3.13", "-I", SELF, "--unprivileged"]
+    os.execve(drop[0], drop, ENV)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+        # No policy, key, argv, device metadata or exception text on serial.
+        raise SystemExit(1) from None

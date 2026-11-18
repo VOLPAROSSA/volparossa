@@ -377,54 +377,52 @@ impl ActiveProductionMpquicExitRoute {
                 let Some(packet) = packet else {
                     break;
                 };
-                if self.transport_mode == TransportMode::SinglePathGeneralUdp {
-                    if let Some(control) =
+                if self.transport_mode == TransportMode::SinglePathGeneralUdp
+                    && let Some(control) =
                         parse_general_udp_authorization(&packet, assigned_client_ipv4)?
+                {
+                    assigned_client_ipv4 = Some(*control.key.client.ip());
+                    let path = self
+                        .single_path_udp
+                        .as_ref()
+                        .ok_or(ProductionMpquicError::Invalid("native UDP verified path"))?;
+                    let replay = general_udp_replay
+                        .as_mut()
+                        .ok_or(ProductionMpquicError::Invalid("native UDP replay owner"))?;
+                    let flow = UdpAuthorizationScope::new(path, &self.policy).verify(
+                        control.signed_authorization,
+                        current_ms,
+                        TimePolicy::default(),
+                        replay,
+                    )?;
+                    if !flow.matches_exact_ip_destination(SocketAddr::V4(control.key.destination))
+                        || (!authorized_general_udp.contains_key(&control.key)
+                            && authorized_general_udp.len() >= MAXIMUM_EXIT_UDP_FLOWS)
                     {
-                        assigned_client_ipv4 = Some(*control.key.client.ip());
-                        let path = self
-                            .single_path_udp
-                            .as_ref()
-                            .ok_or(ProductionMpquicError::Invalid("native UDP verified path"))?;
-                        let replay = general_udp_replay
-                            .as_mut()
-                            .ok_or(ProductionMpquicError::Invalid("native UDP replay owner"))?;
-                        let flow = UdpAuthorizationScope::new(path, &self.policy).verify(
-                            control.signed_authorization,
-                            current_ms,
-                            TimePolicy::default(),
-                            replay,
-                        )?;
-                        if !flow
-                            .matches_exact_ip_destination(SocketAddr::V4(control.key.destination))
-                            || (!authorized_general_udp.contains_key(&control.key)
-                                && authorized_general_udp.len() >= MAXIMUM_EXIT_UDP_FLOWS)
-                        {
-                            return Err(ProductionMpquicError::Invalid(
-                                "native UDP signed destination",
-                            ));
-                        }
-                        let pending = pending_general_udp.remove(&control.key);
-                        authorized_general_udp.insert(control.key, flow);
-                        if let Some(pending) = pending {
-                            let authorization = authorized_general_udp.get(&control.key).ok_or(
-                                ProductionMpquicError::Invalid(
-                                    "native UDP retained signed destination",
-                                ),
-                            )?;
-                            forward_authorized_general_udp(
-                                &mut flows,
-                                &self.policy,
-                                authorization,
-                                control.key,
-                                &pending.payload,
-                                current_ms,
-                                self.independent_egress.as_ref(),
-                            )
-                            .await?;
-                        }
-                        continue;
+                        return Err(ProductionMpquicError::Invalid(
+                            "native UDP signed destination",
+                        ));
                     }
+                    let pending = pending_general_udp.remove(&control.key);
+                    authorized_general_udp.insert(control.key, flow);
+                    if let Some(pending) = pending {
+                        let authorization = authorized_general_udp.get(&control.key).ok_or(
+                            ProductionMpquicError::Invalid(
+                                "native UDP retained signed destination",
+                            ),
+                        )?;
+                        forward_authorized_general_udp(
+                            &mut flows,
+                            &self.policy,
+                            authorization,
+                            control.key,
+                            &pending.payload,
+                            current_ms,
+                            self.independent_egress.as_ref(),
+                        )
+                        .await?;
+                    }
+                    continue;
                 }
                 let datagram = parse_exit_ipv4_udp(&packet, assigned_client_ipv4)?;
                 assigned_client_ipv4 = Some(*datagram.client.ip());

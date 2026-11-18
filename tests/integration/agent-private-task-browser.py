@@ -201,8 +201,7 @@ def load_pins():
     require(runtime["version"] == "140.16.0" and runtime["source_stamp"] == "d864999404b3032f682d74ccc60d1ce38c9ce609"
             and runtime["bytes"] == 71994716
             and runtime["sha256"] == "e32aeabcab2e74fe112332fad10f7d9630e14cd6f4564a596a71073018d24508"
-            and runtime["url"] == "https://security.debian.org/debian-security/pool/updates/main/f/firefox-esr/"
-                "firefox-esr_140.16.0esr-1~deb13u1_amd64.deb"
+            and runtime["url"] == "https://snapshot.debian.org/file/15ff34b5e34e83cd1c27448c6eb80226e955168f"
             and set(runtime["files"]) == {"firefox-esr", "libxul.so", "omni.ja", "browser/omni.ja"}
             and all(re.fullmatch(r"[0-9a-f]{64}", item) for item in runtime["files"].values()))
     return value

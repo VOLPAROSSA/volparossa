@@ -69,7 +69,7 @@ access and explicitly chosen system-wide operation remain separate permissions.
 
 ## Development status
 
-**Development evidence through 20 October 2026.** Working milestones exist across all five
+**Selected development milestones.** Working milestones exist across all five
 layers, but they do not yet form a complete, supported service. The distinction matters
 especially for private data and applications that depend on several layers at once.
 
@@ -97,16 +97,13 @@ performance, general coding reliability or confidential execution on other peopl
 
 The next shared dependencies are **private-storage maintenance with Image/Cloud** and
 **protected peer computation**, while preserving the demonstrated coding workflow.
-The [ordinary-expiry trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/39081968944)
-fails its required acceptance step. The [earlier Cloud consumer failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/38917106698)
-and unconfirmed remote cleanup remain separate; ordinary expiry has not been established
-as their cause. Joined publication, repair, repeated restore and deletion remain open.
-
-The [latest public-model guest trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/39082065142)
-passes contracts but fails public-model execution. Its retained artifact identifies an
-export inventory pathname rejection, with the exact pathname and failing rule still
-unknown. Public model execution and confidential private workloads remain unproven.
-A public guest trial does not establish confidential hardware or authorize private tasks.
+Joined storage publication, repair, repeated restore and deletion remain open.
+Public model trials do not establish confidential hardware or authorize private tasks.
+The [current implementation status](docs/IMPLEMENTATION_STATUS.md) owns the latest
+recorded results and blockers; [original failures](docs/archive/README.md) remain
+preserved with their source revisions. The
+[organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md)
+coordinates retained branches and integration work across repositories.
 
 Complete applications, dependable shared reasoning, the full immune system and authorized
 automatic software updates also remain in development. The
@@ -171,6 +168,15 @@ flowchart LR
     class C,R1,R2,R3,RN peer;
     class E,D endpoint;
 ```
+
+The diagram starts with your node in the client role: Path 1 reaches Peer A over local
+Wi-Fi, Path 2 reaches Peer B over the existing Internet, and Path 3 reaches Peer C over
+local Ethernet. These different relays each connect over WireGuard to the same selected
+exit peer. The dotted route shows additional local or Internet paths through further
+relays and WireGuard links to that same exit, when useful and supported. The exit's
+independent uplink reaches the allowed Internet destination. Each normal path remains
+client → exactly one relay → exit → destination, with payloads encrypted from client
+to exit; local links do not permit a direct client-to-exit dataplane.
 
 The diagram shows **several parallel routes**. Within each route, one WireGuard link
 connects your node to its relay, and a second connects that relay to the selected exit.
@@ -351,6 +357,7 @@ and compute coordination belongs in the core.
 | [Chat](https://github.com/VOLPAROSSA/volparossa-chat) | Signal | Encrypted messages, calls and private backups. |
 | [Mail](https://github.com/VOLPAROSSA/volparossa-mail) | Thunderbird + Stalwart | Existing accounts, decentralized delivery and self-hosting. |
 | [Code](https://github.com/VOLPAROSSA/volparossa-code) | OpenCode | Coding agents using core-managed models and collaboration. |
+| [Studio](https://github.com/VOLPAROSSA/volparossa-studio) | Silex | Visual website editing, portable export, explicit publication and shared hosting/AI. |
 | [Image](https://github.com/VOLPAROSSA/volparossa-image) | Immich | Private photo/video libraries and recoverable state. |
 | [Map](https://github.com/VOLPAROSSA/volparossa-map) | Organic Maps | Offline maps, shared distribution and traffic information. |
 | [Weather](https://github.com/VOLPAROSSA/volparossa-weather) | Direct ECMWF/NOAA data; Drizz.li + Overmorrow clients | Shared forecasts, client delivery and measured forecast improvement. |

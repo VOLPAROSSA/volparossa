@@ -73,7 +73,10 @@ jobs:
       - name: Install declared compiler only on disposable runner
         run: |
           set -euo pipefail
-          timeout --kill-after=15s 300s rustup toolchain install 1.85.0 --profile minimal --component clippy --no-self-update
+          python3 -B scripts/provision-rust189.py runner
+          export CARGO_HOME="$RUNNER_TEMP/volparossa-cargo-public-v1"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+          export PATH="$RUNNER_TEMP/volparossa-rust-1.89.0/bin:$PATH"
           python3 -B tests/integration/protected-compute-admission.py prepare
       - name: Fetch committed dependencies locked without changing source or Cargo.lock
         run: python3 -B tests/integration/protected-compute-admission.py fetch

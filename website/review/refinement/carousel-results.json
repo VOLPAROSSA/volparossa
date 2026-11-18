@@ -1,0 +1,138 @@
+[
+  {
+    "browser": "chromium",
+    "width": 320,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 390,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 768,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 1440,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "chromium",
+    "width": 2560,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "chromium",
+    "automaticRotation": true,
+    "hoverPause": true,
+    "keyboardFocusPause": true,
+    "explicitPauseStart": true,
+    "offscreenPause": true,
+    "changedReducedMotionPause": true
+  },
+  {
+    "browser": "chromium",
+    "reducedMotionInitialPause": true,
+    "reducedMotionManualNavigation": true
+  },
+  {
+    "browser": "chromium",
+    "noJavaScriptAllNineReachable": true
+  },
+  {
+    "browser": "firefox",
+    "width": 320,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 390,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 768,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 1440,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "firefox",
+    "width": 2560,
+    "inventory9": true,
+    "allIconsLoaded": true,
+    "navigationWrap": true,
+    "textZoom200": true,
+    "swipeSuppressesClick": true,
+    "consoleAndHTTPErrorCount": 0
+  },
+  {
+    "browser": "firefox",
+    "automaticRotation": true,
+    "hoverPause": true,
+    "keyboardFocusPause": true,
+    "explicitPauseStart": true,
+    "offscreenPause": true,
+    "changedReducedMotionPause": true
+  },
+  {
+    "browser": "firefox",
+    "reducedMotionInitialPause": true,
+    "reducedMotionManualNavigation": true
+  },
+  {
+    "browser": "firefox",
+    "noJavaScriptAllNineReachable": true
+  }
+]

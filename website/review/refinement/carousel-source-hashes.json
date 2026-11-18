@@ -1,0 +1,28 @@
+{
+  "source_sha256": {
+    "CAROUSEL-ASSETS.md": "3db5255ccbe01a207a09566fe33b16eed700f54af3eb77db5c7da3876329abb2",
+    "applications.py": "dc6926d485fe5e05892401f033e82c89a73c8abf84b55daabe6c3cff76fd3acc",
+    "assets/apps/DRIZZLI-LICENSE.txt": "20b067f86de375aae6db0f283ab2e65de24d537733b89bd58432c101259d84cf",
+    "assets/apps/OPENCLOUD-LICENSE.txt": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+    "assets/apps/ORGANIC-MAPS-LICENSE.txt": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+    "assets/apps/ORGANIC-MAPS-NOTICE.txt": "5a6de5958934e42968c20ff6d98fada69079b66b60de67d551c68aff1bbf8014",
+    "assets/apps/OVERMORROW-LICENSE.txt": "3743f7a4ab5132f7dbeb88e68097657ab8374e74b46b6402efbe80ccfb1b6488",
+    "assets/apps/SIGNAL-LICENSE.txt": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+    "assets/apps/SILEX-LICENSE.txt": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+    "assets/apps/drizzli.svg": "b00a3171cb1a704c4920003f42f74fc193aab5fa9c81ea039cb6865181a4f91b",
+    "assets/apps/firefox.png": "1d58e7af9c848ae3ae30c795a16732d6ebc72d216a8e63078cf4efde4beb3805",
+    "assets/apps/opencloud.svg": "77b8afc0644b41105470eddd7259a63e9349477f23fda8882de567fc91309ea5",
+    "assets/apps/organic-maps.png": "fcd77150375551a6431e5236b7c40367232603eba007b15e84217d09ef66fc3e",
+    "assets/apps/overmorrow.png": "42f3c46cfa9b18ce6a983f9aab3332ffe50ed86da5135f00848c351da5ea3c45",
+    "assets/apps/signal.svg": "fa35613b9df137966fa1873ad2acc41655b2cbdf11003bd87913abb02060940e",
+    "assets/apps/silex.svg": "d7bd4cafa7ba9087f4bde4694d1f526c03d1b61b245a29283c703381785296a9",
+    "assets/apps/sources.json": "28f8b65eb279317cea34744db8528b9a8a9a6889c043fcf28a2e20eabb746f02",
+    "assets/apps/thunderbird.png": "8629f1128a5011b42edd09b00aba627c0dbd505fe11c333e350b6c53a7010942",
+    "assets/carousel.css": "ea545e2246eb8f061f7d6362b60a639ca2f72a76d370272d1f79068d2a468f87",
+    "assets/carousel.js": "ebd0321c597fb5c96eec06d60d35594c81f54356709c5d7eff1d0397ec9e8146",
+    "carousel_check.mjs": "4c03fddfb5e703872bdc63f346dbfda1afeca172f043c4ea741ebc684ec853f2",
+    "theme/data/applications.json": "031decc72c06e1eaa2c8cb41edd6a7b10ae28a4f08121b7bb563fbe96b28c14a"
+  },
+  "tested_url": "http://127.0.0.1:8767/volparossa/",
+  "served_css_js_match_source": true
+}

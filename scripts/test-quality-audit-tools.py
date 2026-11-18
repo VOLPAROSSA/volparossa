@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location("audit_tools", Path(__file__).with_name("quality-audit-tools.py"))
@@ -22,6 +22,10 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/quality.yml"
 
 class CacheTests(unittest.TestCase):
     def setUp(self):
+        policy = patch.dict(CACHE.POLICY, activate=lambda mode, **kwargs:
+                            dict(os.environ, CARGO_HOME=str(kwargs['home'])), audit_tool=lambda name: None,
+                            write_scope=lambda *a, **k: None)
+        policy.start(); self.addCleanup(policy.stop)
         directory = tempfile.TemporaryDirectory(prefix="audit-cache-inert-")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name) / "cache"
@@ -35,17 +39,23 @@ class CacheTests(unittest.TestCase):
     def runner(self, command, **kwargs):
         self.calls.append(command)
         self.assertTrue(kwargs["check"])
-        if command[0] == "rustup":
-            self.assertEqual(command, ["rustup", "toolchain", "install", "1.88.0", "--profile", "minimal"])
-        elif command[0] == "cargo":
+        if command[:2] == ["rustup", "toolchain"]:
+            self.assertIn(command[3], {compiler for compiler, _ in CACHE.TOOLS.values()})
+            self.assertEqual(command[4:], ["--profile", "minimal"])
+        elif command[:2] == ["rustup", "which"]:
+            self.assertEqual(command[2], "--toolchain")
+            self.assertEqual(command[4], "rustc")
+            return subprocess.CompletedProcess(command, 0, "/inert/" + command[3] + "/rustc\n")
+        elif command[:2] == ["rustup", "run"]:
             name = command[-1]
             compiler, version = CACHE.TOOLS[name]
-            self.assertEqual(command[1:5], ["+" + compiler, "install", "--locked", "--root"])
-            self.assertEqual(command[6:], ["--version", "=" + version, name])
-            destination = Path(command[5]) / "bin"
+            self.assertEqual(command[2:7], [compiler, "cargo", "install", "--locked", "--root"])
+            self.assertEqual(command[8:], ["--version", "=" + version, "--registry", "crates-io", name])
+            self.assertEqual(kwargs["env"]["RUSTC"], "/inert/" + compiler + "/rustc")
+            self.assertIn('cargo-home-'+name, kwargs['env']['CARGO_HOME'])
+            destination = Path(command[7]) / "bin"
             destination.mkdir(parents=True, exist_ok=True)
             (destination / name).write_bytes(b"inert tool fixture: " + name.encode())
-            # Cargo's install metadata must never enter the cache.
             (destination.parent / ".crates.toml").write_text("inert metadata")
         else:
             name = Path(command[0]).name
@@ -53,6 +63,15 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(kwargs["timeout"], 10)
             return subprocess.CompletedProcess(command, 0, name + " " + CACHE.TOOLS[name][1] + "\n")
         return subprocess.CompletedProcess(command, 0)
+
+    def test_source_or_bundled_archive_rejection_stops_before_any_tool_or_cargo(self):
+        for boundary in ('activate', 'audit_tool'):
+            with self.subTest(boundary=boundary), patch.dict(CACHE.POLICY,
+                    {boundary: Mock(side_effect=ValueError('fixed source-policy rejection'))}):
+                run = Mock(side_effect=AssertionError('tool must not execute'))
+                with self.assertRaises(ValueError): CACHE.source_build(self.root, self.expected, run)
+                run.assert_not_called()
+                self.assertFalse((self.root/'receipt.json').exists())
 
     def seed(self):
         CACHE.source_build(self.root, self.expected, self.runner)
@@ -62,7 +81,7 @@ class CacheTests(unittest.TestCase):
         outcome, size = CACHE.install(self.root, self.expected, False, self.runner)
         self.assertEqual(outcome, "miss-source-built")
         self.assertGreater(size, 0)
-        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(len(self.calls), 8)
         self.assertEqual({p.name for p in self.root.iterdir()}, CACHE.FILES)
         self.assertEqual([p.name for p in self.root.parent.iterdir()], ["cache"])
 

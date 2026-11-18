@@ -10,6 +10,7 @@ No Cargo home, advisory database, audit result or repository artifact is cached.
 import hashlib
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import stat
@@ -23,6 +24,7 @@ TOOLS = {"cargo-deny": ("1.88.0", "0.18.6"), "cargo-audit": ("1.85.0", "0.22.1")
 MAX_BYTES = 128 * 1024 * 1024
 MAX_RECEIPT_BYTES = 16 * 1024
 FILES = {"bin", "receipt.json"}
+POLICY = runpy.run_path(str(Path(__file__).with_name('cargo-source-policy.py')))
 
 
 def digest(path):
@@ -36,6 +38,7 @@ def recipe():
         "helper_sha256": digest(Path(__file__)),
         "rust_toolchain_sha256": digest(Path("rust-toolchain.toml")),
         "workflow_sha256": digest(Path(".github/workflows/quality.yml")),
+        "cargo_source_policy_sha256": digest(Path(__file__).with_name('cargo-source-policy.py')),
     }
 
 
@@ -103,10 +106,19 @@ def source_build(root, expected, run=subprocess.run):
     # the cache. A failed command propagates; it cannot become a cache success.
     with tempfile.TemporaryDirectory(prefix="audit-tools-build-", dir=root.parent) as directory:
         staging = Path(directory) / "install"
-        run(["rustup", "toolchain", "install", "1.88.0", "--profile", "minimal"], check=True)
         for name, (compiler, version) in TOOLS.items():
-            run(["cargo", "+" + compiler, "install", "--locked", "--root", str(staging),
-                 "--version", "=" + version, name], check=True)
+            cargo_env = POLICY['activate']('runner', home=Path(directory)/('cargo-home-'+name))
+            POLICY['audit_tool'](name)  # Exact public crate + bundled canonical lock, before Cargo.
+            POLICY['write_scope'](cargo_env, root.parent/('cargo-source-policy-'+name+'.json'), tool=name)
+            run(["rustup", "toolchain", "install", compiler, "--profile", "minimal"], check=True, env=cargo_env)
+            rustc = run(["rustup", "which", "--toolchain", compiler, "rustc"],
+                        check=True, capture_output=True, text=True, env=cargo_env).stdout.strip()
+            require(Path(rustc).is_absolute())
+            # Core's verified compiler prefix precedes rustup shims on PATH.
+            # Bind both the tool Cargo and its child rustc to their own recipe.
+            run(["rustup", "run", compiler, "cargo", "install", "--locked", "--root", str(staging),
+                 "--version", "=" + version, "--registry", "crates-io", name], check=True,
+                env=dict(cargo_env, RUSTC=rustc))
         (root / "bin").mkdir(parents=True, mode=0o700)
         for name in TOOLS:
             shutil.copyfile(staging / "bin" / name, root / "bin" / name)

@@ -251,8 +251,6 @@ pub(super) fn private_output(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod directory_lock_tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
     fn private_directory() -> tempfile::TempDir {

@@ -218,7 +218,7 @@ class QuoteEvidenceContracts(unittest.TestCase):
         self.assertIn('protected-compute-quote.py receipt', raw)
         self.assertIn('protected-compute-quote-software-${{ github.sha }}', raw)
         self.assertLess(raw.index('protected-compute-guest.py receipt'), raw.index('protected-compute-quote.py test'))
-        self.assertEqual(Q.ARGV, ['cargo', '+1.85.0', 'test', '--locked', '--offline', '-p',
+        self.assertEqual(Q.ARGV, ['cargo', 'test', '--locked', '--offline', '-p',
             'volparossa-content', '--lib', Q.PREFIX, '--', '--test-threads=1'])
 
 

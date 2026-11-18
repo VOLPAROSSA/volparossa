@@ -33,7 +33,10 @@ release-build claim. The guest proof compares those digests to both build output
 installed files, runs the existing package install/upgrade/remove lifecycle, and tests the
 real installed agent's roles-off/missing-worker startup. A separate source-built resolver
 probe inherits the shipped agent sandbox; that is not a full agent DNS-query proof.
-This new package proof remains pending an exact-source disposable run.
+The recorded source-bound run `36719475479` on `138787d14848` passes this
+staged install/upgrade/remove and installed-sandbox resolver slice. It proves
+neither a release build nor a complete installed-agent DNS request; see
+[private Unbound evidence](../docs/network/UNBOUND_FALLBACK.md).
 
 If `SOURCE_DATE_EPOCH` is absent, the script uses the latest Git commit timestamp and falls back to
 zero in an uncommitted source tree. A release should build the same committed source twice in clean
@@ -69,7 +72,8 @@ the complete Debian 13 namespace suite before release. `ProtectKernelTunables=no
 documented exception needed for namespace-local MPTCP sysctls; the typed helper must prove it never
 writes host sysctls. Do not weaken the other sandbox settings merely to hide an implementation bug.
 
-The repository now has a sequential live worker-identity and production-IPC driver. Preview is
+The sequential worker-identity and production-IPC driver provides an explicit
+scoped gate. Preview is
 always safe and non-writing. Build the helper and its fixed probe as the workspace user, then run
 the explicit gate only as root inside a disposable Debian 13 amd64 VM:
 

@@ -1,0 +1,11 @@
+systemd-documentation.patch
+full-systemd-support
+gpsd_hotplug_rules_disable_generic_serial_converters
+ignore-test-xgps_deps_check
+desktop-add-keywords.patch
+man-page-typos.patch
+build-on-hurd.patch
+CVE-2025-67268.patch
+CVE-2025-67269.patch
+CVE-2026-58459.patch
+CVE-2026-60122.patch

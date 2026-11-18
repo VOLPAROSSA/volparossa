@@ -69,10 +69,10 @@ that already obtained answer only after confirmed child reaping.
 
 Build dependencies: C11 compiler, CMake 3.25+, pkg-config, `libunbound-dev` >= 1.26.1.
 Runtime dependencies: Debian `libunbound8` and `dns-root-data`; no `unbound`
-daemon package is necessary. The separate optional Debian-13-only companion
-`volparossa-private-dns-worker` builds it from this source; the existing core
-package build/dependencies remain unchanged. Neither package activates roles or
-changes DNS. Explicit private configuration fails agent startup with
+daemon package is necessary. The Debian-13-only companion
+`volparossa-private-dns-worker` builds it from this source; the core package requires
+the matching companion version as recorded in [package control](../../packaging/debian/control.binary.in).
+Neither package activates roles or changes DNS. Explicit private configuration fails agent startup with
 `DNS_PRIVATE_WORKER_UNAVAILABLE` if its fixed worker or root-anchor files are absent
 or unsafe. This installation check does not prove recursive connectivity.
 
@@ -91,7 +91,10 @@ No package installation, unchecked fetch or host DNS query is part of that build
 The exact reviewed source/package provenance is in
 [`THIRD_PARTY_LICENSES.md`](../../THIRD_PARTY_LICENSES.md).
 
-Compilation, pure protocol tests and owned inert-process lifecycle tests are not
-proof of real recursive DNS, DNSSEC rejection or reciprocal Client+Exit privacy.
-That proof still needs a disposable network/VM execution with packet captures,
-no publicly reachable resolver, exact child cleanup and unchanged host state.
+Compilation, pure protocol tests and inert child lifecycle tests do not prove
+recursive DNS or reciprocal Client+Exit privacy. The [Unbound guide](../../docs/network/UNBOUND_FALLBACK.md)
+records the separate actual resolver and reciprocal-route trials, their sources,
+DNSSEC/timeout/cancellation results and cleanup limits. The installed-sandbox
+resolver example is not a complete installed-agent DNS-request proof, and a staged
+development package is not a release build. New source or topology claims need their
+own disposable execution, packet/privacy evidence and unchanged-host observations.
