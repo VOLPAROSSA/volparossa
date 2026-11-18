@@ -499,6 +499,19 @@ An atomic link publishes the complete receipt only if the final name is unused.
 Synthetic writer tests exercise these boundaries and preserve existing evidence.
 The public inference result above belongs to its original revision.
 
+A fresh public model trial on `82c3e068` exercised the result writer from
+`88406999` with the accepted execution recipe restricted to its own branch.
+Both requests returned their expected outputs, `READY` and `4`. The requester
+retained the session between requests, then reaped the child and removed its
+private state. The corrupted image failed `verity_read` before the entrypoint.
+The VM, tools and scratch data were cleaned up. The host configuration check
+passed with a raw difference in IPv6 reference metadata. The two source and
+runtime artifacts were checked independently. The execution ZIP SHA-256 is
+`9a16964f34facde0d3a4dd5e046eef7f119e935b030df06d1eeded48cbbd5f19`.
+The trial used public inputs. Confidential hardware attestation and private
+network inference remain open.
+[Updated public model trial and receipts](https://github.com/VOLPAROSSA/volparossa/actions/runs/44383609439)
+
 The resident workflow consolidates three historical wrappers. Source validation
 passed 143 Rust tests, two documentation tests and 729 Python tests. For an
 explicit public trial, use the reviewed commit on
