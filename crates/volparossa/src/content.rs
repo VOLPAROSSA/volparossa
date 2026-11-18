@@ -1942,6 +1942,7 @@ mod contribution_tests {
         let mut cache =
             ChunkStore::create(&root.join("source"), limits().cache_limits().unwrap()).unwrap();
         let now = now_seconds().unwrap();
+        let length = bytes.len() as u64;
         let signed = volparossa_content::publish(
             &mut bytes,
             Publication {
@@ -1950,7 +1951,7 @@ mod contribution_tests {
                     revision: 7,
                     content_type: "application/octet-stream".into(),
                 },
-                length: bytes.len() as u64,
+                length,
                 validity: Validity {
                     created: now,
                     expires: now + 300,
