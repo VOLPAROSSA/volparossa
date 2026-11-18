@@ -19,6 +19,9 @@ host_tools_directory=
 output_directory=
 expected_commit=
 scenario=alpha
+image_handoff=
+image_return=
+image_revision=
 studio_handoff=
 studio_evidence_sha256=
 code_bundle=
@@ -43,6 +46,19 @@ guest_memory_for_scenario() {
     esac
 }
 
+image_input_identity() {
+    stat -c '%d:%i:%u:%a:%h:%s:%z' -- "$1" "$1/receipt.json" "$1/snapshot.pgp"
+}
+
+release_image_source() {
+    [ "$(image_input_identity "$1")" = "$2" ] || return 1
+    [ "$(python3 -B "$HERE/image-topology-input.py" verify "$1")" = "$image_handoff_sha256" ] || return 1
+    [ "$(sha256sum <"$1/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ] || return 1
+    [ "$(image_input_identity "$1")" = "$2" ] || return 1
+    rm -- "$1/snapshot.pgp" || return 1
+    [ ! -e "$1/snapshot.pgp" ] && [ ! -L "$1/snapshot.pgp" ]
+}
+
 usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
@@ -52,6 +68,7 @@ usage() {
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
+        '       image-snapshot optionally accepts --image-handoff DIRECTORY --image-return DIRECTORY --image-revision SHA.' \
         '       content-repair optionally accepts --studio-handoff DIRECTORY --studio-evidence-sha256 SHA256.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
@@ -532,6 +549,14 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
+        --image-handoff|--image-return|--image-revision)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || exit 64
+            case $1 in
+                --image-handoff) [ -z "$image_handoff" ] || exit 64; image_handoff=$2 ;;
+                --image-return) [ -z "$image_return" ] || exit 64; image_return=$2 ;;
+                --image-revision) [ -z "$image_revision" ] || exit 64; image_revision=$2 ;;
+            esac
+            shift ;;
         --studio-handoff|--studio-evidence-sha256)
             [ "$#" -ge 2 ] || exit 64
             case $1 in --studio-handoff) studio_handoff=$2 ;; *) studio_evidence_sha256=$2 ;; esac
@@ -631,7 +656,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$studio_handoff$studio_evidence_sha256" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$studio_handoff$studio_evidence_sha256$image_handoff$image_return$image_revision" ]; then
         usage >&2
         exit 64
     fi
@@ -649,6 +674,23 @@ case $image_path:$output_directory in
     /*:/*) ;;
     *) exit 64 ;;
 esac
+if [ -n "$image_handoff$image_return$image_revision" ]; then
+    [ "$scenario" = image-snapshot ] && [ "$image_revision" = 0da0c35e9372a828553f376c3eb404a6081e0bb8 ] || exit 64
+    for directory in "$image_handoff" "$image_return" "$output_directory"; do
+        case $directory in /*) ;; *) exit 64 ;; esac
+        case $directory in *[[:cntrl:]]*) exit 64 ;; esac
+        [ -d "$directory" ] && [ "$(readlink -f -- "$directory")" = "$directory" ] || exit 64
+    done
+    # Empty return and diagnostic roots must be independent of the private input and one another.
+    for directory in "$image_handoff" "$image_return"; do
+        [ "$(stat -c '%u:%a' -- "$directory")" = "$(id -u):700" ] || exit 64
+        case "$directory/" in "$output_directory/"*) exit 64 ;; esac
+        case "$output_directory/" in "$directory/"*) exit 64 ;; esac
+    done
+    case "$image_handoff/" in "$image_return/"*) exit 64 ;; esac
+    case "$image_return/" in "$image_handoff/"*) exit 64 ;; esac
+    [ -z "$(find "$image_return" -mindepth 1 -maxdepth 1 -printf x -quit)" ] || exit 64
+fi
 if [ -n "$studio_handoff$studio_evidence_sha256" ]; then
     [ "$scenario" = content-repair ] && [ "${studio_handoff##*/}" = studio-topology-handoff ] || exit 64
     case $studio_handoff in /*) ;; *) exit 64 ;; esac
@@ -720,6 +762,15 @@ qemu-system-x86_64 -accel help | grep -Fx kvm >/dev/null \
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPOSITORY=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)
+if [ -n "$image_handoff" ]; then
+    image_original_identity=$(image_input_identity "$image_handoff")
+    image_handoff_sha256=$(python3 -B "$HERE/image-topology-input.py" verify "$image_handoff")
+    case $image_handoff_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#image_handoff_sha256}" -eq 64 ] || exit 64
+    image_receipt_sha256=$(sha256sum <"$image_handoff/receipt.json" | cut -d ' ' -f1)
+    image_handoff_bytes=$(stat -c %s -- "$image_handoff/snapshot.pgp")
+    [ "$(image_input_identity "$image_handoff")" = "$image_original_identity" ] || exit 64
+fi
 if [ -n "${studio_handoff:-}" ]; then
     python3 -B "$HERE/studio-topology-input.py" "$studio_handoff" "$studio_evidence_sha256" "$expected_commit" >/dev/null
 fi
@@ -811,7 +862,7 @@ elif [ "$scenario" = weather-decoder-abi ]; then
             printf '%s\n' 'Decoder ABI VM scratch requires non-memory-backed workspace storage' >&2
             exit 69 ;;
     esac
-elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ]; then
+elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}${image_handoff:-}" ]; then
     # Every provider proof builds Rust in this 4 GiB guest. A growing qcow2
     # overlay on tmpfs otherwise competes directly with the guest's RAM.
     # Keep scratch beside validated workspace evidence, never in its export.
@@ -819,6 +870,7 @@ elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || 
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=content-provider-kvm
     [ -z "${studio_handoff:-}" ] || RUN_DIRECTORY_PREFIX=studio-topology-kvm
+    [ -z "${image_handoff:-}" ] || RUN_DIRECTORY_PREFIX=image-topology-kvm
     [ -z "$browser_filter_bundle" ] || RUN_DIRECTORY_PREFIX=browser-filter-kvm
     [ -z "${weather_client_bundle:-}" ] || RUN_DIRECTORY_PREFIX=weather-client-kvm
     runner_scratch_filesystem=$(stat -f -c '%T' -- "$RUN_DIRECTORY_PARENT") || exit 69
@@ -931,6 +983,12 @@ cleanup() {
     if [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ]; then
         cleanup_report=protected-quote-vm-cleanup.json
         [ -z "${studio_handoff:-}" ] || cleanup_report=studio-vm-cleanup.json
+    elif [ -n "${image_handoff:-}" ]; then
+        cleanup_report=image-vm-cleanup.json
+    else
+        cleanup_report=
+    fi
+    if [ -n "$cleanup_report" ]; then
         quote_private_removed=false
         if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then quote_private_removed=true; fi
         [ "$quote_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
@@ -949,6 +1007,15 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ -n "$image_handoff" ]; then
+    image_stage=$RUN_DIRECTORY/image-input
+    mkdir -m 0700 -- "$image_stage"
+    cp --no-dereference --preserve=mode -- "$image_handoff/snapshot.pgp" "$image_handoff/receipt.json" "$image_stage/"
+    [ "$(python3 -B "$HERE/image-topology-input.py" verify "$image_stage")" = "$image_handoff_sha256" ] || exit 64
+    [ "$(sha256sum <"$image_stage/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ] || exit 64
+    image_stage_identity=$(image_input_identity "$image_stage")
+fi
 
 SOURCE_ARCHIVE=$RUN_DIRECTORY/source.tar.gz
 git -C "$REPOSITORY" archive --format=tar --prefix=source/ "$expected_commit" \
@@ -2046,7 +2113,22 @@ weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
 # Native and cooperative bundles share positions only in disjoint scenarios.
 studio_evidence_sha256=
+image_handoff_sha256=
+image_receipt_sha256=
+image_revision=
 case $scenario in
+    image-snapshot)
+        case $# in
+            5) ;;
+            8) image_revision=$6; image_handoff_sha256=$7; image_receipt_sha256=$8
+               [ "$image_revision" = 0da0c35e9372a828553f376c3eb404a6081e0bb8 ] || exit 64
+               for digest in "$image_handoff_sha256" "$image_receipt_sha256"; do
+                   case $digest in ''|*[!0-9a-f]*) exit 64 ;; esac
+                   [ "${#digest}" -eq 64 ] || exit 64
+               done ;;
+            *) exit 64 ;;
+        esac
+        ;;
     content-repair)
         case $# in
             5) ;;
@@ -2351,7 +2433,11 @@ if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ];
         /home/vpci/signal-backup-runtime --download "$@"
 elif [ "$scenario" = image-snapshot ]; then
     guest_phase image-runtime-provision
-    sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+    if [ -n "$image_revision" ]; then
+        sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download --revision "$image_revision"
+    else
+        sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+    fi
 elif [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
     guest_phase storage-consumer-runtime-provision
     sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10
@@ -2503,6 +2589,18 @@ if [ -n "$studio_evidence_sha256" ]; then
     test ! -L /run/volparossa-studio-handoff
     sudo -n mv -T -- "$site_input" /run/volparossa-studio-handoff
     set -- STUDIO_EVIDENCE_SHA256="$studio_evidence_sha256"
+elif [ "$scenario" = image-snapshot ] && [ -n "${image_handoff_sha256:-}" ]; then
+    guest_phase image-handoff-admission
+    image_input=/home/vpci/image-peer-handoff
+    [ "$(python3 -B tests/integration/image-topology-input.py verify "$image_input")" = "$image_handoff_sha256" ]
+    [ "$(sha256sum <"$image_input/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ]
+    image_handoff_bytes=$(stat -c %s -- "$image_input/snapshot.pgp")
+    test ! -e /run/volparossa-image-handoff
+    test ! -L /run/volparossa-image-handoff
+    sudo -n chown root:root -- "$image_input" "$image_input/snapshot.pgp" "$image_input/receipt.json"
+    sudo -n mv -T -- "$image_input" /run/volparossa-image-handoff
+    set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
+        IMAGE_REVISION="$image_revision" IMAGE_HANDOFF_SHA256="$image_handoff_sha256"
 elif [ "$scenario" = image-snapshot ]; then
     set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
@@ -2671,6 +2769,24 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-stor
 else
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
 fi
+if [ -n "$image_handoff_sha256" ] && [ "$topology_status" -eq 0 ]; then
+    guest_phase image-peer-return
+    # Claim the fixed worker directory after topology cleanup and verify the restored ciphertext
+    # before making the separate, private vpci return file available to the host.
+    image_private=/run/volparossa-image-handoff
+    image_peer_return=/home/vpci/image-peer-return
+    [ "$(readlink -f -- "$image_private")" = "$image_private" ]
+    [ "$(stat -c '%u:%a:%F' -- "$image_private")" = "$(id -u volparossa-worker):700:directory" ]
+    sudo -n chown --no-dereference root:root -- "$image_private"
+    [ -z "$(sudo -n find "$image_private" -mindepth 1 -maxdepth 1 ! -name snapshot.pgp -printf x -quit)" ]
+    [ "$(sudo -n stat -c '%u:%a:%h:%s:%F' -- "$image_private/snapshot.pgp")" = \
+        "$(id -u volparossa-worker):600:1:$image_handoff_bytes:regular file" ]
+    mkdir -m 0700 -- "$image_peer_return"
+    sudo -n install -o vpci -g vpci -m 0600 -- "$image_private/snapshot.pgp" "$image_peer_return/snapshot.pgp"
+    (cd "$image_peer_return" && printf '%s  snapshot.pgp\n' "$image_handoff_sha256" | sha256sum --check --status --strict -)
+    sudo -n rm -- "$image_private/snapshot.pgp"
+    sudo -n rmdir -- "$image_private"
+fi
 guest_phase driver-finished
 if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
 if [ "$private_dns_status" -ne 0 ]; then exit "$private_dns_status"; fi
@@ -2838,6 +2954,20 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ -n "$image_handoff" ]; then
+    ssh_base mkdir -m 0700 /home/vpci/image-peer-handoff
+    for image_file in snapshot.pgp receipt.json; do
+        scp_to "$image_stage/$image_file" "/home/vpci/image-peer-handoff/$image_file"
+        ssh_base chmod 0600 "/home/vpci/image-peer-handoff/$image_file"
+    done
+    # Verify the exact privately owned pair as vpci before releasing either host source.
+    [ "$(ssh_bounded 30s python3 -I -B - verify /home/vpci/image-peer-handoff <"$HERE/image-topology-input.py")" = \
+        "$image_handoff_sha256" ] || exit 1
+    [ "$(ssh_base sha256sum /home/vpci/image-peer-handoff/receipt.json)" = \
+        "$image_receipt_sha256  /home/vpci/image-peer-handoff/receipt.json" ] || exit 1
+    release_image_source "$image_stage" "$image_stage_identity"
+    release_image_source "$image_handoff" "$image_original_identity"
+fi
 if [ -n "${studio_handoff:-}" ]; then
     ssh_base mkdir -m 0700 /home/vpci/studio-topology-handoff
     for studio_file in site.vps manifest.bin evidence.json; do
@@ -2932,6 +3062,12 @@ case $scenario in
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
         fi
         ;;
+    image-snapshot)
+        set --
+        [ -z "$image_handoff" ] || set -- "$image_revision" "$image_handoff_sha256" "$image_receipt_sha256"
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
+        ;;
     content-repair)
         set --
         [ -z "$studio_evidence_sha256" ] || set -- "$studio_evidence_sha256"
@@ -2982,6 +3118,13 @@ if ! scp_from_bounded "$retrieval_bound" /home/vpci/alpha-output.tar.gz "$RUN_DI
     exit "$GUEST_STATUS"
 fi
 tar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-output.tar.gz"
+if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    # Reject overlong private transfers even if the guest return changes after its verification.
+    (ulimit -f "$(( (image_handoff_bytes + 511) / 512 ))"
+     scp_from_bounded 60s /home/vpci/image-peer-return/snapshot.pgp "$RUN_DIRECTORY/image-peer-restored.pgp")
+    [ "$(stat -c %s -- "$RUN_DIRECTORY/image-peer-restored.pgp")" -eq "$image_handoff_bytes" ] || exit 1
+    [ "$(sha256sum <"$RUN_DIRECTORY/image-peer-restored.pgp" | cut -d ' ' -f1)" = "$image_handoff_sha256" ] || exit 1
+fi
 if [ "$weather_client_version" = 6 ] && [ "$GUEST_STATUS" -eq 0 ]; then
     python3 -B "$HERE/weather-android-owner.py" join --config "$WEATHER_ANDROID_CONFIG" || GUEST_STATUS=1
 fi
@@ -2998,5 +3141,16 @@ if ! stop_qemu_child normal; then
     exit "$GUEST_STATUS"
 fi
 printf '%s  %s\n' "$IMAGE_SHA512" "$image_path" | sha512sum --check --strict -
+if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    [ "$(readlink -f -- "$image_return")" = "$image_return" ] || exit 1
+    [ "$(stat -c '%u:%a:%F' -- "$image_return")" = "$(id -u):700:directory" ] || exit 1
+    [ -z "$(find "$image_return" -mindepth 1 -maxdepth 1 -printf x -quit)" ] || exit 1
+    (
+        returned=$(mktemp -- "$image_return/.snapshot.XXXXXXXX")
+        trap 'rm -f -- "$returned"' EXIT
+        install -m 0600 -- "$RUN_DIRECTORY/image-peer-restored.pgp" "$returned"
+        ln -T -- "$returned" "$image_return/snapshot.pgp"
+    )
+fi
 FINISHED=yes
 exit "$GUEST_STATUS"
