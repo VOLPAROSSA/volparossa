@@ -20,7 +20,8 @@ NET = BASE["NET"]
 read, require, ROLES = BASE["read"], BASE["require"], BASE["ROLES"]
 private_root, private_file, create = BASE["private_root"], BASE["private_file"], BASE["create"]
 invoke, unlock = BASE["invoke"], BASE["unlock"]
-CHUNK = 262144
+WIRE_CHUNK_BYTES = 262144
+CHUNK = WIRE_CHUNK_BYTES
 FIXTURE = bytes(range(256)) * (3 * CHUNK // 256) + b"VOLPAROSSA synthetic opaque fragment transport fixture".ljust(73, b".")
 BYTES, SHA = len(FIXTURE), hashlib.sha256(FIXTURE).hexdigest()
 LENGTHS = (CHUNK, CHUNK, CHUNK, 73)
@@ -65,16 +66,18 @@ RESTORE_FAILURES = {
 }
 
 
-def configure_payload_geometry(ciphertext_bytes):
+def configure_payload_geometry(ciphertext_bytes, fragment_bytes=WIRE_CHUNK_BYTES):
     """Reuse physical-path checks for a real application's four-fragment archive.
 
     This changes only fixture geometry, never an encryption/success claim.
     The Image checker supplies its independently measured OpenPGP byte length.
     """
-    global BYTES, LENGTHS, PROVIDER_BYTES
-    require(type(ciphertext_bytes) is int and 3 * CHUNK < ciphertext_bytes <= 4 * CHUNK,
+    global BYTES, CHUNK, LENGTHS, PROVIDER_BYTES
+    require(type(fragment_bytes) is int and 1 <= fragment_bytes <= WIRE_CHUNK_BYTES
+            and type(ciphertext_bytes) is int and 3 * fragment_bytes < ciphertext_bytes <= 4 * fragment_bytes,
             "application ciphertext must occupy four bounded fragments")
     BYTES = ciphertext_bytes
+    CHUNK = fragment_bytes
     LENGTHS = (CHUNK, CHUNK, CHUNK, BYTES - 3 * CHUNK)
     PROVIDER_BYTES = (2 * CHUNK + LENGTHS[-1], 2 * CHUNK + LENGTHS[-1], 2 * CHUNK)
 

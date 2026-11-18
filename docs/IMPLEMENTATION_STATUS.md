@@ -142,6 +142,20 @@ system value; these priorities impose no fixed application/model/agent order.
 
 ### Storage consumer and provider evidence
 
+The Image-only trial on Core `46f5c2c98f49eeda1816517530961f2d8090657c` and Image
+`ce16debc9277bdf80fa76c373746e3d502fc96fb` recovered a live Immich 3.2.4 album from three
+Storage providers. The owner removed the source project and ciphertext, withdrew one provider,
+and restored the 51,283-byte OpenPGP snapshot twice. A fresh PostgreSQL database and Immich
+server returned the original 8,516-byte photo to the authenticated owner. Anonymous access was
+denied. All eight fragment copies were deleted and final usage was zero at every provider.
+The independently vaulted key stayed with the owner. [Run 44411540175](https://github.com/VOLPAROSSA/volparossa/actions/runs/44411540175) · [Immich receipt](development/evidence/immich-peer-44411540175/immich-restore-result.json) · [Core receipt](development/evidence/immich-peer-44411540175/image-topology-receipt.json)
+
+The two retained JSON files are the original artifact contents. The ZIP SHA-256 is
+`f467c00dfa0aa8036e52106d85961c67dc530ba53c39ce4b8e7d71a619036478`. To repeat the joined
+trial on a selected Core ref containing the scenario, use
+`gh workflow run alpha-topology.yml --ref <core-ref> -f scenario=image-immich -f image_revision=ce16debc9277bdf80fa76c373746e3d502fc96fb`.
+The separate multi-application maintenance scenario is tracked below.
+
 - **Integrated provider fixes:** PR327 merges close-before-log source
   `a41030a51471` as `157908ad1e4a`. Scoped run 39832609493 proves actual TLS
   session release under held event-log locks; ordinary Quality/CodeQL pass.

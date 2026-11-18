@@ -3133,6 +3133,10 @@ if [ "$private_storage_maintenance" = yes ]; then
         "$WORK/bin/agent-private-task-code-pins.json"
 fi
 if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
+    if [ "${IMAGE_HANDOFF_SHA256:-}" ]; then
+        install -o root -g root -m 0444 "$source_directory/tests/integration/image-snapshot-owner-pins.json" "$WORK/bin/image-snapshot-owner-pins.json"
+        install -o root -g root -m 0555 "$source_directory/tests/integration/image-topology-input.py" "$WORK/bin/image-topology-input.py"
+    fi
     install -o root -g root -m 0555 "$source_directory/tests/integration/image-snapshot-smoke.py" \
         "$WORK/bin/image-snapshot-smoke.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/image-snapshot-pins.json" \
