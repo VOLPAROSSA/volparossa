@@ -248,7 +248,8 @@ class PublicSources(unittest.TestCase):
             else:
                 count+=file_count
         self.assertEqual(seen_resident,set(resident_callers))
-        self.assertEqual(count,20)
+        # Includes the signed site's public-content daemon recovery workflow.
+        self.assertEqual(count,21)
         helper=(ROOT/'tests/helper/run-helper-boundary-evidence-vm.sh').read_text()
         self.assertTrue(('python3 -B scripts/provision-rust189.py guest\n'
                          'export CARGO_HOME=/home/volparossa/.local/volparossa-cargo-public-v1\n'+git_export) in helper)
