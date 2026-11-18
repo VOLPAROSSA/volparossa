@@ -99,6 +99,9 @@ async fn exercise() {
         } else {
             assert!(!output.status.success(), "accepted {reply:?}");
             assert!(output.stdout.is_empty());
+            if reply == Reply::Withheld {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("CONTENT_POLICY"));
+            }
         }
     }
     assert_eq!(
@@ -174,7 +177,7 @@ async fn answer(
     if reply == Reply::Withheld {
         final_response.result = ControlResult::Policy as i32;
         final_response.diagnostic_code = "CONTENT_POLICY".into();
-        final_response.payload = None;
+        final_response.payload = Some(Payload::Ack(volparossa_local_control::Empty {}));
     }
     write_response(&mut stream, &final_response).await.unwrap();
 }
