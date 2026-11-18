@@ -4,7 +4,6 @@ mod viewer;
 
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -12,10 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use ed25519_dalek::VerifyingKey;
 use rustix::fs::{Dir, Mode, OFlags, open, openat};
-use volparossa_content::{
-    MAX_OBJECT_BYTES,
-    site::{SITE_CONTENT_TYPE, SiteAsset, SiteBundle},
-};
+use volparossa_content::site::{MAX_SITE_ASSETS, SITE_CONTENT_TYPE, SiteAssetSource, SiteBundle};
 
 use super::{FetchName, Limits, ensure_new_output, output_parent};
 
@@ -98,18 +94,17 @@ fn pack(args: &Pack) -> Result<serde_json::Value> {
         Mode::empty(),
     )?);
     let mut assets = Vec::new();
-    collect(&root, "", 0, &mut 0, &mut 0, &mut assets)?;
+    collect(&root, "", 0, &mut 0, &mut assets)?;
     let count = assets.len();
-    let bytes = SiteBundle::encode(assets)?;
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.output))?;
-    temporary.write_all(&bytes)?;
+    let bytes = SiteBundle::write_to(assets, temporary.as_file_mut())?;
     temporary.as_file().sync_all()?;
     temporary
         .persist_noclobber(&args.output)
         .map_err(|error| error.error)?;
     File::open(output_parent(&args.output))?.sync_all()?;
     Ok(serde_json::json!({
-        "operation":"site_pack", "assets":count, "bytes":bytes.len(),
+        "operation":"site_pack", "assets":count, "bytes":bytes,
         "content_type":SITE_CONTENT_TYPE, "output":args.output,
         "network_published":false, "hidden_entries_excluded":true, "symlinks_followed":false,
     }))
@@ -120,8 +115,7 @@ fn collect(
     prefix: &str,
     depth: usize,
     entries: &mut usize,
-    total: &mut u64,
-    assets: &mut Vec<SiteAsset>,
+    assets: &mut Vec<SiteAssetSource<File>>,
 ) -> Result<()> {
     if depth > 16 {
         bail!("site directory nesting exceeds 16 levels");
@@ -152,28 +146,18 @@ fn collect(
         let metadata = file.metadata()?;
         let path = format!("{prefix}/{name}");
         if metadata.is_dir() {
-            collect(&file, &path, depth + 1, entries, total, assets)?;
+            collect(&file, &path, depth + 1, entries, assets)?;
             continue;
         }
-        if !metadata.is_file() || assets.len() == 256 {
-            bail!("site requires at most 256 regular assets");
+        if !metadata.is_file() || assets.len() == MAX_SITE_ASSETS {
+            bail!("site requires at most {MAX_SITE_ASSETS} regular assets");
         }
-        let remaining = MAX_OBJECT_BYTES
-            .checked_sub(*total)
-            .context("site payload exceeds object limit")?;
-        if metadata.len() > remaining {
-            bail!("site asset exceeds remaining object limit");
-        }
-        let mut bytes = Vec::new();
-        file.take(remaining + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > remaining {
-            bail!("site changed beyond remaining object limit");
-        }
-        *total += bytes.len() as u64;
-        assets.push(SiteAsset {
+        // Keep the checked descriptor so a renamed path cannot redirect a later read.
+        assets.push(SiteAssetSource {
             content_type: media_type(&path).into(),
             path,
-            bytes,
+            length: metadata.len(),
+            reader: file,
         });
     }
     Ok(())
@@ -324,5 +308,29 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn streaming_reads_the_original_open_file_when_its_name_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let index = directory.path().join("index.html");
+        fs::write(&index, b"reviewed").unwrap();
+        let mut assets = Vec::new();
+        collect(
+            &File::open(directory.path()).unwrap(),
+            "",
+            0,
+            &mut 0,
+            &mut assets,
+        )
+        .unwrap();
+        fs::rename(&index, directory.path().join("original")).unwrap();
+        fs::write(&index, b"replaced").unwrap();
+
+        let mut encoded = Vec::new();
+        let length = SiteBundle::write_to(assets, &mut encoded).unwrap();
+        assert_eq!(length, encoded.len() as u64);
+        let bundle = SiteBundle::decode(encoded).unwrap();
+        assert_eq!(bundle.asset("/index.html").unwrap().bytes, b"reviewed");
     }
 }
