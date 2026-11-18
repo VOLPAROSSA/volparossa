@@ -41,6 +41,12 @@ jobs:
           path: image
           persist-credentials: false
 
+      - name: Verify ciphertext handoff and fixture isolation
+        working-directory: core
+        run: |
+          python3 -B tests/integration/test-image-topology-input.py
+          python3 -B tests/integration/test-image-peer-vm-wiring.py
+
       - name: Prepare the pinned Debian VM and native transport
         run: bash core/tests/integration/image-topology-host.sh prepare
 
