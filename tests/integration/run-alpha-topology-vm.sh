@@ -22,6 +22,7 @@ scenario=alpha
 code_bundle=
 code_manifest_sha256=
 browser_native_bundle=
+browser_native_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
 weather_client_bundle=
@@ -577,6 +578,13 @@ while [ "$#" -gt 0 ]; do
             image_path=$2
             shift
             ;;
+        --browser-native-manifest-sha256)
+            [ "$#" -ge 2 ] && [ -z "$browser_native_manifest_sha256" ] || { usage >&2; exit 64; }
+            browser_native_manifest_sha256=$2
+            case $browser_native_manifest_sha256 in *[!0-9a-f]*) exit 64 ;; esac
+            [ "${#browser_native_manifest_sha256}" -eq 64 ] || exit 64
+            shift
+            ;;
         --browser-native-bundle)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             browser_native_bundle=$2
@@ -626,7 +634,7 @@ done
 
 if [ "$mode" = preview ]; then
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_native_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
         usage >&2
         exit 64
     fi
@@ -694,6 +702,7 @@ if [ -n "$host_tools_directory" ]; then
     export PATH
 fi
 BROWSER_NATIVE_SHA256=none
+[ -z "$browser_native_manifest_sha256" ] || [ -n "$browser_native_bundle" ] || exit 64
 if [ -n "$browser_native_bundle" ]; then
     [ "$scenario" = browser-network ] || exit 64
     case $browser_native_bundle in /*) ;; *) exit 64 ;; esac
@@ -701,6 +710,9 @@ if [ -n "$browser_native_bundle" ]; then
     [ -f "$browser_native_bundle" ] && [ ! -L "$browser_native_bundle" ] || exit 64
     [ "$(stat -Lc '%s' "$browser_native_bundle")" -le 1073741824 ] || exit 64
     BROWSER_NATIVE_SHA256=$(sha256sum "$browser_native_bundle" | awk '{print $1}')
+    if [ -n "$browser_native_manifest_sha256" ]; then
+        BROWSER_NATIVE_SHA256=source:$BROWSER_NATIVE_SHA256:$browser_native_manifest_sha256
+    fi
 fi
 
 for command_name in awk cat chmod cloud-localds cmp cut dpkg-deb find git grep gzip install \
@@ -1977,6 +1989,7 @@ package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
 browser_native_sha256=none
+browser_source_manifest=
 code_archive_sha256=none
 code_manifest_sha256=none
 browser_filter_archive_sha256=none
@@ -1997,6 +2010,16 @@ case $scenario in
     browser-network)
         [ "$#" -eq 6 ] || exit 64
         browser_native_sha256=${6:-none}
+        case $browser_native_sha256 in
+            source:*)
+                hashes=${browser_native_sha256#source:}
+                browser_native_sha256=${hashes%%:*}
+                browser_source_manifest=${hashes#*:}
+                [ "$hashes" = "$browser_native_sha256:$browser_source_manifest" ] || exit 64
+                case $browser_native_sha256$browser_source_manifest in *[!0-9a-f]*) exit 64 ;; esac
+                [ "${#browser_native_sha256}" -eq 64 ] && [ "${#browser_source_manifest}" -eq 64 ] || exit 64
+                ;;
+        esac
         ;;
     content-provider)
         if [ "$#" -eq 8 ]; then
@@ -2301,8 +2324,9 @@ elif [ "$scenario" = browser-network ]; then
         sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
             provision /home/vpci/browser-network-runtime
     else
-        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-native-runtime.py \
-            provision /home/vpci/browser-native-runtime.tar.gz "$browser_native_sha256"
+        set -- provision /home/vpci/browser-native-runtime.tar.gz "$browser_native_sha256"
+        if [ -n "$browser_source_manifest" ]; then set -- "$@" --source-manifest-sha256 "$browser_source_manifest"; fi
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-native-runtime.py "$@"
     fi
 fi
 guest_phase build

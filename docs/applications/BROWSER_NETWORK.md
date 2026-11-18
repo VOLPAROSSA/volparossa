@@ -214,6 +214,26 @@ the integration alone does not prove a fix for this or any earlier failed trial.
 Native ordinary-tab payload, full hashes, two carrying paths per route and
 independent detach still require a new exact-source disposable proof.
 
+## Build the native browser and run the ordinary-tab proof
+
+The manually selected `browser-native-source` scenario in the Alpha production-helper
+topology workflow compiles the public Browser revision
+`c3311ebedcc02dc45ff9c9822cee62f091609f86` against Firefox 157.0.1 and uses
+that build in the same job's disposable Debian guest. The builder checks the
+Mozilla source tree, tooling archives and Rust stage before running two offline
+compiler jobs. The current controller is compiled into Firefox. The producer
+records the transformed source, native binaries and bundle inventory. The guest
+receives the expected inventory digest separately and the final check binds the
+two ordinary-tab transfers and cleanup to that compilation receipt.
+
+The manual `browser-native-capacity` option measures free space and the KVM API
+without fetching compilers or building Firefox. On 18 November 2026 the standard
+`ubuntu-24.04` runner reported 91,302,899,712 free bytes, four CPUs and
+unprivileged KVM API 12. The builder needs 64,424,509,440 free bytes. Only
+bounded evidence is retained by the native workflow. The checkout, compiler
+outputs and private archive are removed during the run.
+[Runner capacity measurement](https://github.com/VOLPAROSSA/volparossa/actions/runs/44413632095)
+
 ## One daemon, independent application connections
 
 An explicitly authorized application can obtain its own short-lived TCP gateway from the

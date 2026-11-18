@@ -21,29 +21,38 @@ def provision_summary(root):
     require(value["browser_pins"] == pins and value["browser_revision"] == pins["revision"])
     driver = root / "scripts/browser_native_core.py"
     require(NATIVE["digest"](driver) == NATIVE["digest"](HERE / "browser-native-core.py"))
-    return dict(version=1, kind="local-reviewed-native-firefox", browser_revision=pins["revision"],
-        original_build_receipt_sha256=NATIVE["BASE_RECEIPT_SHA"],
+    result = dict(version=1, kind="local-reviewed-native-firefox", browser_revision=pins["revision"],
+        original_build_receipt_sha256=value["original_build_receipt_sha256"],
         native_bundle_sha256=NATIVE["digest"](root / "native-bundle.json"),
         native_driver_sha256=NATIVE["digest"](driver),
         runtime_version="157.0.1", runtime_source_stamp=NATIVE["FIREFOX_REVISION"],
         javascript_overlay=value["javascript_overlay"], local_disposable_only=True)
+    if value["kind"] == "source-built-native-firefox-core-trial":
+        result.update(version=2, kind="source-built-native-firefox", source_build=value["source_build"])
+    return result
 
 
 def validate_browser(evidence):
     pins = NATIVE["checked_pins"]()
     browser, provision = evidence["browser"], evidence["provision"]
-    require(provision["version"] == 1 and provision["kind"] == "local-reviewed-native-firefox"
-        and provision["browser_revision"] == pins["revision"]
-        and provision["original_build_receipt_sha256"] == NATIVE["BASE_RECEIPT_SHA"]
+    require(provision["browser_revision"] == pins["revision"]
         and provision["native_driver_sha256"] == NATIVE["digest"](HERE / "browser-native-core.py")
         and provision["local_disposable_only"] is True
         and re.fullmatch(r"[0-9a-f]{64}", provision["native_bundle_sha256"]))
-    overlay = provision["javascript_overlay"]
-    require(overlay["original_build_receipt_sha256"] == NATIVE["BASE_RECEIPT_SHA"]
-        and overlay["original_sha256"] == NATIVE["BEFORE_CONTROLLER"]
-        and overlay["runtime_sha256"] == NATIVE["AFTER_CONTROLLER"]
-        and overlay["native_rebuild"] is False and overlay["compatibility_rewrite"] is False
-        and overlay["original_build_modified"] is False)
+    if provision["kind"] == "source-built-native-firefox":
+        record = provision["source_build"]
+        NATIVE["source_checks"]()["validate_record"](record)
+        require(provision["version"] == 2 and provision["javascript_overlay"] is None
+                and provision["original_build_receipt_sha256"] == record["receipt_sha256"])
+    else:
+        require(provision["version"] == 1 and provision["kind"] == "local-reviewed-native-firefox"
+                and provision["original_build_receipt_sha256"] == NATIVE["BASE_RECEIPT_SHA"])
+        overlay = provision["javascript_overlay"]
+        require(overlay["original_build_receipt_sha256"] == NATIVE["BASE_RECEIPT_SHA"]
+            and overlay["original_sha256"] == NATIVE["BEFORE_CONTROLLER"]
+            and overlay["runtime_sha256"] == NATIVE["AFTER_CONTROLLER"]
+            and overlay["native_rebuild"] is False and overlay["compatibility_rewrite"] is False
+            and overlay["original_build_modified"] is False)
     require(browser["version"] == 1 and browser["passed"] is True
         and browser["runtime_version"] == "157.0.1"
         and browser["runtime_source_stamp"] == NATIVE["FIREFOX_REVISION"]

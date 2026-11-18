@@ -13,6 +13,7 @@ import importlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import runpy
 import shutil
 import socket
 import stat
@@ -87,7 +88,11 @@ def copy_regular(source, destination):
     destination.chmod(0o555 if source.stat().st_mode & 0o111 else 0o444)
 
 
-def export(browser_checkout, native_build, output):
+def source_checks():
+    return runpy.run_path(str(HERE / "browser-native-source.py"))
+
+
+def export(browser_checkout, native_build, output, *, source_built=False):
     browser, build, output = map(canonical, (browser_checkout, native_build, output))
     core = HERE.parents[1]
     require(output.is_relative_to(core / "build") and output != core / "build"
@@ -104,11 +109,19 @@ def export(browser_checkout, native_build, output):
     require(Path(native.__file__).resolve() == browser / "scripts/smoke_network_native.py")
     with (build / "build.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        metadata = native.validate_native_runtime(build, javascript_overlay=True)
-        require(metadata["build_receipt_sha256"] == BASE_RECEIPT_SHA
-                and metadata["source_stamp"] == FIREFOX_REVISION
-                and metadata["javascript_overlay"]["original_sha256"] == BEFORE_CONTROLLER
-                and metadata["javascript_overlay"]["runtime_sha256"] == AFTER_CONTROLLER)
+        if source_built:
+            build_record = source_checks()["validate_build"](browser, build)
+            require(build_record["controller_sha256"] == AFTER_CONTROLLER)
+            receipt = build_record["receipt_sha256"]
+            overlay = None
+        else:
+            metadata = native.validate_native_runtime(build, javascript_overlay=True)
+            require(metadata["build_receipt_sha256"] == BASE_RECEIPT_SHA
+                    and metadata["source_stamp"] == FIREFOX_REVISION
+                    and metadata["javascript_overlay"]["original_sha256"] == BEFORE_CONTROLLER
+                    and metadata["javascript_overlay"]["runtime_sha256"] == AFTER_CONTROLLER)
+            receipt = BASE_RECEIPT_SHA
+            overlay = metadata["javascript_overlay"]
         require(shutil.disk_usage(build).free >= 4 * MAX_BYTES)
         output.mkdir(parents=True, mode=0o700)
         source_runtime = build / "obj/dist/bin"
@@ -122,11 +135,14 @@ def export(browser_checkout, native_build, output):
         # This is explicitly revised product JS, not evidence that the original
         # native compilation already included the corrected DOM-owner lookup.
         controller = output / "build/firefox-native/browser/modules" / CONTROLLER
-        require(digest(controller) == BEFORE_CONTROLLER)
-        controller.chmod(0o600)
-        with controller.open("wb") as destination:
-            destination.write((browser / "integration" / CONTROLLER).read_bytes())
-        controller.chmod(0o444)
+        if source_built:
+            require(digest(controller) == AFTER_CONTROLLER)
+        else:
+            require(digest(controller) == BEFORE_CONTROLLER)
+            controller.chmod(0o600)
+            with controller.open("wb") as destination:
+                destination.write((browser / "integration" / CONTROLLER).read_bytes())
+            controller.chmod(0o444)
         for name, item in pins["files"].items():
             copy_regular(browser / name, output / name)
         for name in ("build-result.json", "overlay.json"):
@@ -138,19 +154,28 @@ def export(browser_checkout, native_build, output):
             require(digest(build / "source" / name) == sha)
             copy_regular(build / "source" / name, output / "provenance/source-overlay" / name)
         copy_regular(build / "source/LICENSE", output / "provenance/FIREFOX-LICENSE")
-        for source, target in ((Path(__file__), "scripts/browser_native_runtime.py"),
-                               (HERE / "browser-native-core.py", "scripts/browser_native_core.py")):
-            copy_regular(source.resolve(), output / target)
-        record = dict(version=1, kind="local-native-firefox-core-trial", local_disposable_only=True,
-            redistribution_reviewed=False, browser_revision=revision, browser_pins=pins,
-            original_build_receipt_sha256=BASE_RECEIPT_SHA, firefox_revision=FIREFOX_REVISION,
-            javascript_overlay=metadata["javascript_overlay"], native_rebuild=False,
-            files=inventory(output))
+        copy_regular(HERE / "browser-native-core.py", output / "scripts/browser_native_core.py")
+        module = "browser_native_shared.py" if source_built else "browser_native_runtime.py"
+        copy_regular(Path(__file__).resolve(), output / "scripts" / module)
+        if source_built:
+            for name in ("browser-native-source.py", "browser-native-pins.json"):
+                copy_regular(HERE / name, output / "scripts" / name)
+            copy_regular(HERE / "browser-native-source-runtime.py", output / "scripts/browser_native_runtime.py")
+        record = dict(version=2 if source_built else 1,
+            kind="source-built-native-firefox-core-trial" if source_built else "local-native-firefox-core-trial",
+            local_disposable_only=True, redistribution_reviewed=False, browser_revision=revision, browser_pins=pins,
+            original_build_receipt_sha256=receipt, firefox_revision=FIREFOX_REVISION,
+            javascript_overlay=overlay, native_rebuild=source_built, files=inventory(output))
+        if source_built:
+            record["source_build"] = build_record
         with (output / "native-bundle.json").open("x") as result:
             json.dump(record, result, indent=2, sort_keys=True)
             result.write("\n")
         validate(output)
-        native.validate_native_runtime(build, javascript_overlay=True)
+        if source_built:
+            require(source_checks()["validate_build"](browser, build) == build_record)
+        else:
+            native.validate_native_runtime(build, javascript_overlay=True)
     return dict(path=str(output), inventory_sha256=digest(output / "native-bundle.json"),
                 files=len(record["files"]), bytes=sum(item["bytes"] for item in record["files"].values()))
 
@@ -160,26 +185,51 @@ def validate(root):
     manifest = root / "native-bundle.json"
     require(manifest.is_file() and not manifest.is_symlink() and manifest.stat().st_size <= 8 * 1024 ** 2)
     value = json.loads(manifest.read_text())
-    require(value["version"] == 1 and value["kind"] == "local-native-firefox-core-trial"
-            and value["local_disposable_only"] is True and value["native_rebuild"] is False
-            and value["original_build_receipt_sha256"] == BASE_RECEIPT_SHA
-            and value["firefox_revision"] == FIREFOX_REVISION)
-    require(digest(root / "provenance/build-result.json") == BASE_RECEIPT_SHA)
-    baseline = json.loads((root / "provenance/build-result.json").read_text())
-    require(json.loads((root / "provenance/overlay.json").read_text()) == baseline["overlay"])
+    require(isinstance(value, dict) and value.get("kind") in (
+        "local-native-firefox-core-trial", "source-built-native-firefox-core-trial"))
+    require(value["local_disposable_only"] is True and value["firefox_revision"] == FIREFOX_REVISION)
+    receipt = root / "provenance/build-result.json"
+    baseline = json.loads(receipt.read_text())
+    overlay = root / "provenance/overlay.json"
+    require(json.loads(overlay.read_text()) == baseline["overlay"])
+    if value["kind"] == "source-built-native-firefox-core-trial":
+        record = value["source_build"]
+        source_checks()["validate_record"](record)
+        require(value["version"] == 2 and value["native_rebuild"] is True and value["javascript_overlay"] is None
+                and value["browser_pins"] == checked_pins() and value["browser_revision"] == record["browser_revision"]
+                and value["original_build_receipt_sha256"] == record["receipt_sha256"]
+                and digest(receipt) == record["receipt_sha256"] and digest(overlay) == record["overlay_sha256"]
+                and baseline["outputs"] == record["outputs"])
+        for name, pin in checked_pins()["files"].items():
+            path = root / name
+            require(path.stat().st_size == pin["bytes"] and digest(path) == pin["sha256"])
+        plugin_sha = record["plugin_container_sha256"]
+    else:
+        require(value["version"] == 1 and value["kind"] == "local-native-firefox-core-trial"
+                and value["native_rebuild"] is False and value["original_build_receipt_sha256"] == BASE_RECEIPT_SHA
+                and digest(receipt) == BASE_RECEIPT_SHA and value["javascript_overlay"]["original_sha256"] == BEFORE_CONTROLLER
+                and value["javascript_overlay"]["runtime_sha256"] == AFTER_CONTROLLER)
+        plugin_sha = PLUGIN_SHA
     for name, sha in baseline["outputs"].items():
         require(digest(root / "build/firefox-native" / Path(name).name) == sha)
-    require(digest(root / "build/firefox-native/plugin-container") == PLUGIN_SHA)
-    require(value["javascript_overlay"]["original_sha256"] == BEFORE_CONTROLLER
-            and value["javascript_overlay"]["runtime_sha256"] == AFTER_CONTROLLER
+    require(digest(root / "build/firefox-native/plugin-container") == plugin_sha
             and digest(root / "build/firefox-native/browser/modules" / CONTROLLER) == AFTER_CONTROLLER)
     require(value["files"] == inventory(root))
     return value
 
 
-def pack(root, archive):
+def admit(root, expected_manifest=None):
+    manifest = root / "native-bundle.json"
+    if expected_manifest is not None:
+        require(digest(manifest) == expected_manifest)
+    value = validate(root)
+    require((value["kind"] == "source-built-native-firefox-core-trial") == (expected_manifest is not None))
+    return value
+
+
+def pack(root, archive, expected_manifest=None):
     root, archive = canonical(root), canonical(archive)
-    validate(root)
+    admit(root, expected_manifest)
     require(archive.parent == root.parent and not archive.exists()
             and not (root / "build/proofs").exists())
     with archive.open("xb") as output:
@@ -192,7 +242,7 @@ def pack(root, archive):
     return dict(path=str(archive), bytes=archive.stat().st_size, sha256=digest(archive))
 
 
-def provision(archive, sha256):
+def provision(archive, sha256, expected_manifest=None):
     require(socket.gethostname() == "volparossa-alpha" and os.getuid() != 0
             and subprocess.check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
             and not GUEST_ROOT.exists() and not GUEST_ROOT.is_symlink()
@@ -213,7 +263,7 @@ def provision(archive, sha256):
             with bundle.extractfile(member) as source, path.open("xb") as output:
                 shutil.copyfileobj(source, output, 1024 * 1024)
             path.chmod(0o555 if member.mode & 0o111 else 0o444)
-    record = validate(GUEST_ROOT)
+    record = admit(GUEST_ROOT, expected_manifest)
     for directory, _, _ in os.walk(GUEST_ROOT):
         Path(directory).chmod(0o555)
     return dict(provisioned=True, browser_revision=record["browser_revision"], archive_sha256=sha256,
@@ -227,6 +277,7 @@ def main():
     create = sub.add_parser("export")
     for name in ("browser-checkout", "native-build", "output"):
         create.add_argument("--" + name, type=Path, required=True)
+    create.add_argument("--source-built", action="store_true")
     check = sub.add_parser("verify")
     check.add_argument("root", type=Path)
     archive = sub.add_parser("pack")
@@ -235,16 +286,18 @@ def main():
     guest = sub.add_parser("provision")
     guest.add_argument("archive", type=Path)
     guest.add_argument("sha256")
+    for operation in (check, archive, guest):
+        operation.add_argument("--source-manifest-sha256")
     args = parser.parse_args()
     if args.command == "export":
-        print(json.dumps(export(args.browser_checkout, args.native_build, args.output)))
+        print(json.dumps(export(args.browser_checkout, args.native_build, args.output, source_built=args.source_built)))
     elif args.command == "verify":
-        value = validate(args.root)
+        value = admit(args.root, args.source_manifest_sha256)
         print(json.dumps(dict(verified=True, files=len(value["files"]))))
     elif args.command == "pack":
-        print(json.dumps(pack(args.root, args.archive)))
+        print(json.dumps(pack(args.root, args.archive, args.source_manifest_sha256)))
     else:
-        print(json.dumps(provision(args.archive, args.sha256)))
+        print(json.dumps(provision(args.archive, args.sha256, args.source_manifest_sha256)))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = runpy.run_path(str(HERE / "browser-native-runtime.py"))
@@ -61,6 +62,40 @@ class NativeBrowserTests(unittest.TestCase):
                                 "a" * 64, "b" * 64, "c" * 64, "browser-network", "none"],
                                capture_output=True, text=True, timeout=5, check=True)
         self.assertEqual(tuple(plain.stdout.splitlines()), ("none",) * 4)
+
+    def test_source_build_passes_an_independent_manifest_hash_to_the_guest(self):
+        source = (HERE / "run-alpha-topology-vm.sh").read_text()
+        parser = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\ncd /home/vpci\n", 1)[0]
+        parser += '\nprintf "%s\\n" "$browser_native_sha256" "$browser_source_manifest"'
+        args = ["sh", "-c", parser, "fixture", "a" * 40, "b" * 64, "c" * 64, "none", "browser-network"]
+        archive, manifest = "d" * 64, "e" * 64
+        for encoded, fields in (("none", ["none", ""]), (archive, [archive, ""]),
+                                (f"source:{archive}:{manifest}", [archive, manifest])):
+            with self.subTest(encoded=encoded):
+                run = subprocess.run([*args, encoded], capture_output=True, text=True, check=True, timeout=5)
+                self.assertEqual(run.stdout.splitlines(), fields)
+        for malformed in (f"source:{archive}", f"source:{archive}:1", f"source:{archive}:x{manifest[1:]}",
+                          f"source:{archive}:{manifest}:extra"):
+            self.assertEqual(subprocess.run([*args, malformed], timeout=5).returncode, 64)
+
+    def test_fresh_source_and_historical_bundle_admission_are_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "native-bundle.json"
+            manifest.write_bytes(b"historical or fresh package bytes")
+            signature = RUNTIME["digest"](manifest)
+            fresh = {"kind": "source-built-native-firefox-core-trial"}
+            original = {"kind": "local-native-firefox-core-trial"}
+            admit = RUNTIME["admit"]
+            for record, expected, accepted in ((fresh, None, False), (fresh, "0" * 64, False),
+                                             (fresh, signature, True), (original, signature, False),
+                                             (original, None, True)):
+                with self.subTest(record=record, digest=expected), patch.dict(admit.__globals__, validate=lambda _: record):
+                    if accepted:
+                        self.assertEqual(admit(root, expected), record)
+                    else:
+                        with self.assertRaises(ValueError):
+                            admit(root, expected)
 
     def test_vm_guest_rejects_cross_scenario_bundle_arity(self):
         source = (HERE / "run-alpha-topology-vm.sh").read_text()
@@ -283,6 +318,26 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
                 changed = copy.deepcopy(evidence)
                 changed["browser"].update(fields)
                 with self.assertRaises(ValueError):
+                    EVIDENCE["validate_browser"](changed)
+
+    def test_native_page_receipt_must_match_the_fresh_compiler_record(self):
+        checks = RUNTIME["source_checks"]()
+        fresh = dict(kind="native-firefox-source-build", browser_revision=checks["BROWSER"],
+            firefox_revision=checks["FIREFOX"], firefox_tree=checks["TREE"], native_patch_sha256=checks["PATCH"],
+            rust_report_sha256=checks["RUST_REPORT"], controller_sha256=checks["CONTROLLER_SHA"],
+            receipt_sha256="d" * 64, overlay_sha256="e" * 64, plugin_container_sha256="f" * 64,
+            outputs={name: "b" * 64 for name in checks["OUTPUTS"]})
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = self.fixture(Path(directory))
+            evidence["provision"].update(version=2, kind="source-built-native-firefox",
+                javascript_overlay=None, source_build=fresh, original_build_receipt_sha256=fresh["receipt_sha256"])
+            evidence["browser"].update(javascript_overlay=None, original_build_receipt_sha256=fresh["receipt_sha256"])
+            EVIDENCE["validate_browser"](evidence)
+            for field, replacement in (("original_build_receipt_sha256", RUNTIME["BASE_RECEIPT_SHA"]),
+                                       ("javascript_overlay", {"native_rebuild": False})):
+                changed = copy.deepcopy(evidence)
+                changed["browser"][field] = replacement
+                with self.subTest(field=field), self.assertRaises(ValueError):
                     EVIDENCE["validate_browser"](changed)
 
     def test_native_does_not_replace_path_or_detach_proof(self):
