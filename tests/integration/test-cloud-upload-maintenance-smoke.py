@@ -288,6 +288,20 @@ class Orchestration(unittest.TestCase):
             [*original, '--profile-version', '3'], [*original, '--profile-version', '4'],
             [*original, '--profile-version', '5'], [*original, '--profile-version', '6']])
 
+    def test_tools_reads_source_digests_from_the_validated_candidate_receipt(self):
+        provision = M['PROVISIONER']
+        receipt = runpy.run_path(str(HERE / 'test-cloud-upload-maintenance-provision.py'))['receipt'](6)
+        pins = provision['load_pins'](6, current=True)
+        receipt.update(pins=pins, pins_sha256=provision['digest'](provision['CURRENT_PINS']))
+        raw = json.dumps(receipt).encode()
+        checked = {}
+        with patch.dict(G, PROFILE_VERSION=6, file_bytes=lambda *a, **kw: raw), \
+                patch.dict(M['OLD'], digest_public=lambda path, record: checked.update({path: record})):
+            self.assertEqual(M['tools'](), hashlib.sha256(raw).hexdigest())
+        for name, source in pins['sources'].items():
+            for relative, record in source['files'].items():
+                self.assertEqual(checked[provision['SOURCES'][name] / relative], record)
+
     def test_tools_rejects_valid_wrong_generation_before_source_access(self):
         fixture = runpy.run_path(str(HERE / 'test-cloud-upload-maintenance-provision.py'))['receipt']
         for wanted, actual in ((a, b) for a in (1, 2, 3, 4, 5, 6) for b in (1, 2, 3, 4, 5, 6) if a != b):

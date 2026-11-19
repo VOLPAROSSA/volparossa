@@ -38,6 +38,8 @@ const APPEND_REVISIONS = Object.freeze({ image: '10c46b9d6424929748e324fdd188a2f
   cloud: 'dda7a21818ece774445cf63d6e9a01fe0f2803b2' });
 const FLOW_REVISIONS = Object.freeze({ image: '9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
   cloud: '47b0f03b84913761570c3de7037ba5509b848c23' });
+export const CURRENT_REVISIONS = Object.freeze({ image: '21988efc1ba112a9840e0f052f4e4d0dc56a9d63',
+  cloud: '08be97111c323df95af68b3331eabd260957d0e4' });
 const CHALLENGE_READ_REVISIONS = Object.freeze({ image: 'f51b8ace0352377c7068a93fc8f4544f18e52978',
   cloud: '5f143725fd18c98848beb61c9198a82066bfec13' });
 const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'working', 'paused',
@@ -922,7 +924,8 @@ async function guard(root, profileVersion) {
     && provision.kind === 'storage-consumer-maintenance-runtime-provision'
     && provision.success === true && provision.guest_only === true && provision.shared_adapter_verified === true,
   'provision');
-  const revisions = profileVersion === 10 ? CHALLENGE_READ_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
+  const current = profileVersion === 10 && provision.pins.sources.image?.revision === CURRENT_REVISIONS.image;
+  const revisions = current ? CURRENT_REVISIONS : profileVersion === 10 ? CHALLENGE_READ_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
     : profileVersion === 4 ? TLS_REVISIONS : profileVersion === 3 ? DETAIL_REVISIONS
     : profileVersion === 2 ? DIAGNOSTIC_REVISIONS : REVISIONS;
   for (const [name, source] of Object.entries(provision.pins.sources)) {

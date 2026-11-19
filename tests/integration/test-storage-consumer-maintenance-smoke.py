@@ -1079,7 +1079,8 @@ class ConsumerOrchestration(unittest.TestCase):
             'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
             'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
             'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
-            'storage-consumer-maintenance-pins-v9.json', 'image-snapshot-provision.py',
+            'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
+            'storage-consumer-maintenance-pins-v10-current.json', 'image-snapshot-provision.py',
             'agent-private-task-code.py', 'agent-private-task-code-pins.json',
             'private-storage-fragments-smoke.py', 'private-storage-replicas-smoke.py',
             'private-storage-peer-smoke.py', 'content-provider-https-smoke.py',
@@ -1092,15 +1093,10 @@ class ConsumerOrchestration(unittest.TestCase):
             with patch.object(subprocess, 'Popen') as spawn, patch.object(os, 'execve') as execute, \
                     patch.object(urllib.request, 'urlopen') as download:
                 loaded = runpy.run_path(str(root / names[0]))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](), M['PROVISIONER']['load_pins']())
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](2), M['PROVISIONER']['load_pins'](2))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](3), M['PROVISIONER']['load_pins'](3))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](4), M['PROVISIONER']['load_pins'](4))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](5), M['PROVISIONER']['load_pins'](5))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](6), M['PROVISIONER']['load_pins'](6))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](7), M['PROVISIONER']['load_pins'](7))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](8), M['PROVISIONER']['load_pins'](8))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](9), M['PROVISIONER']['load_pins'](9))
+                for version in range(1, 11):
+                    self.assertEqual(loaded['PROVISIONER']['load_pins'](version), M['PROVISIONER']['load_pins'](version))
+                self.assertEqual(loaded['PROVISIONER']['load_pins'](10, current=True),
+                    M['PROVISIONER']['load_pins'](10, current=True))
                 self.assertEqual(loaded['FLOW_MINIMUM'], M['FLOW_MINIMUM'])
                 for absent in ('image-snapshot-provision.py', 'agent-private-task-code.py', 'agent-private-task-code-pins.json'):
                     (root / absent).unlink()

@@ -28,6 +28,35 @@ def receipt(profile_version=1):
 
 
 class UploadProvision(unittest.TestCase):
+    def test_current_source_pair_requires_matching_manifests_in_both_phases(self):
+        shared = M['PREVIOUS']['PROVISIONER']
+        current_shared = shared['load_pins'](10, current=True)
+        current_upload = M['load_pins'](6, current=True)
+        old_shared, old_upload = shared['load_pins'](10), M['load_pins'](6)
+        expected = dict(image='21988efc1ba112a9840e0f052f4e4d0dc56a9d63',
+            cloud='08be97111c323df95af68b3331eabd260957d0e4')
+        for module, version, new, old in ((shared, 10, current_shared, old_shared), (M, 6, current_upload, old_upload)):
+            self.assertEqual({name: source['revision'] for name, source in new['sources'].items()}, expected)
+            self.assertEqual(new['runtime'], old['runtime'])
+            for name in expected:
+                self.assertEqual(set(new['sources'][name]['files']), set(old['sources'][name]['files']))
+            with self.assertRaises(ValueError): module['load_pins'](version - 1, current=True)
+            with self.assertRaises(ValueError): module['load_pins'](version, current=1)
+
+        old = receipt(6)
+        new = {**old, 'pins': current_upload, 'pins_sha256': M['digest'](M['CURRENT_PINS'])}
+        M['validate_provision'](new)
+        M['validate_provision'](old)
+        for bad in ({**old, 'pins': current_upload}, {**new, 'pins': old_upload}):
+            with self.assertRaises(ValueError): M['validate_provision'](bad)
+        shared_sha = shared['digest'](shared['CURRENT_PINS'])
+        self.assertEqual(shared['receipt_pins'](10, shared_sha), current_shared)
+        with self.assertRaises(ValueError): shared['receipt_pins'](9, shared_sha)
+        M['require_source_pair'](current_shared, current_upload, 6)
+        M['require_source_pair'](old_shared, old_upload, 6)
+        for earlier, later in ((old_shared, current_upload), (current_shared, old_upload)):
+            with self.assertRaises(ValueError): M['require_source_pair'](earlier, later, 6)
+
     def test_stream_profile_has_separate_closed_pins_with_same_runtime_and_inventory(self):
         old, new = M['load_pins'](), M['load_pins'](2)
         self.assertEqual(new['version'], 2)

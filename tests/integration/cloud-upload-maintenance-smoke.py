@@ -204,11 +204,11 @@ def owner_root(raw, missing=False):
 
 
 def tools():
-    pins = PROVISIONER['load_pins'](PROFILE_VERSION)
     raw = file_bytes(PROVISION, 65536, public=True)
     value = json.loads(raw)
     PROVISIONER['validate_provision'](value)
     require(value['version'] == PROFILE_VERSION, 'provision_profile')
+    pins = value['pins']
     for name, source in pins['sources'].items():
         for relative, record in source['files'].items():
             OLD['digest_public'](PROVISIONER['SOURCES'][name] / relative, record)
