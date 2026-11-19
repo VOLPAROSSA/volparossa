@@ -747,6 +747,19 @@ acceptance checks. The 82,290-byte ZIP has SHA-256
 `a3870f4a6ab880537cb1e8752f3d64c569579f71e5cdb7415378ce1f2c0590e8`.
 [Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44430761553) · [Original application, route and cleanup receipts](development/evidence/storage-maintenance-44430761553)
 
+On `b856970b`, the twelve-node trial deleted all eleven standalone Core copies
+and prepared both 799,146-byte encrypted application inputs. The Cloud CLI
+reported one failure during deposit. Its reserve for fragment 1, copy 1
+returned `CONTENT_POLICY` while waiting for agent READY. The protected
+stream acquisition log projection was empty. The incomplete fixture sample
+included a provider C selector-read error and had no fragment or copy binding.
+Both owners confirmed deletion. All three providers independently reported
+zero leases, reserved bytes and committed bytes. The host snapshots matched.
+Combined repair and cold restoration remain open. The original 81,804-byte
+Actions ZIP has SHA-256
+`38468903864d1f287f161674cfcc4fd1901a92bacef266cc940bd6e39eca8b14`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44440163724) · [Original application, sample and cleanup receipts](development/evidence/storage-maintenance-44440163724)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
