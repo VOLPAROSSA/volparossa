@@ -57,47 +57,7 @@ async fn wire_failure_case(timed: bool) {
         let (mut local, _) = listener.accept().await.unwrap();
         let uid = local.peer_cred().unwrap().uid();
         let original = read_request(&mut local).await.unwrap();
-        assert!(matches!(
-            original.operation,
-            Some(Operation::PrivateStorageRemote(_))
-        ));
-        let now = crate::storage::now().unwrap();
-        let challenge = StorageChallenge::issue(
-            &provider,
-            &server_grant,
-            Validity {
-                created: now,
-                expires: now + 120,
-            },
-        )
-        .unwrap();
-        write_response(
-            &mut local,
-            &ControlResponse {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
-                request_id: original.request_id.clone(),
-                result: 0,
-                diagnostic_code: "PRIVATE_STORAGE_READY".into(),
-                private_storage_remote_detail: None,
-                payload: Some(Payload::PrivateStorageReady(PrivateStorageReady {
-                    provider_key: provider.verifying_key().to_bytes().to_vec(),
-                    challenge: challenge.encode(),
-                })),
-            },
-        )
-        .await
-        .unwrap();
-        let length = local.read_u32().await.unwrap() as usize;
-        assert!((1..=MAX_REQUEST_BYTES).contains(&length));
-        let mut frame = vec![0; length];
-        local.read_exact(&mut frame).await.unwrap();
-        let signed = SignedStorageRequest::decode_and_verify(
-            &frame,
-            &server_grant,
-            &challenge,
-            crate::storage::now().unwrap(),
-        )
-        .unwrap();
+        let signed = signed_request(&mut local, &original, &provider, &server_grant).await;
         assert_eq!(signed.operation(), operation);
         if timed {
             assert_eq!(local.read_u32().await.unwrap(), 32);
@@ -212,4 +172,53 @@ async fn wire_failure_case(timed: bool) {
     ] {
         assert!(!report.to_string().contains(private));
     }
+}
+
+pub(super) async fn signed_request(
+    local: &mut tokio::net::UnixStream,
+    original: &volparossa_local_control::ControlRequest,
+    provider: &SigningKey,
+    grant: &VerifiedStorageGrant,
+) -> volparossa_content::private_storage::protocol::VerifiedStorageRequest {
+    assert!(matches!(
+        original.operation,
+        Some(Operation::PrivateStorageRemote(_))
+    ));
+    let now = crate::storage::now().unwrap();
+    let challenge = StorageChallenge::issue(
+        provider,
+        grant,
+        Validity {
+            created: now,
+            expires: now + 120,
+        },
+    )
+    .unwrap();
+    write_response(
+        local,
+        &ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: original.request_id.clone(),
+            result: 0,
+            diagnostic_code: "PRIVATE_STORAGE_READY".into(),
+            private_storage_remote_detail: None,
+            payload: Some(Payload::PrivateStorageReady(PrivateStorageReady {
+                provider_key: provider.verifying_key().to_bytes().to_vec(),
+                challenge: challenge.encode(),
+            })),
+        },
+    )
+    .await
+    .unwrap();
+    let length = local.read_u32().await.unwrap() as usize;
+    assert!((1..=MAX_REQUEST_BYTES).contains(&length));
+    let mut frame = vec![0; length];
+    local.read_exact(&mut frame).await.unwrap();
+    SignedStorageRequest::decode_and_verify(
+        &frame,
+        grant,
+        &challenge,
+        crate::storage::now().unwrap(),
+    )
+    .unwrap()
 }
