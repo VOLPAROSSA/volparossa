@@ -126,6 +126,7 @@ fn fixture_acquire_origins_preserve_allocations_and_require_cleanup_rejection() 
         (Code::MptcpConnectSocketNetworkUnreachable, 21),
         (Code::MptcpConnectSocketHostUnreachable, 22),
         (Code::MptcpConnectSocketTimedOut, 23),
+        (Code::MptcpConnectOperationDeadline, 24),
     ] {
         assert_eq!(code as i32, number);
         if !(10..=18).contains(&number) {
@@ -185,6 +186,10 @@ fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
         (
             Code::MptcpConnectSocketHostUnreachable,
             "mptcp_connect_socket_host_unreachable",
+        ),
+        (
+            Code::MptcpConnectOperationDeadline,
+            "mptcp_connect_operation_deadline",
         ),
         (
             Code::MptcpConnectSocketTimedOut,

@@ -3992,6 +3992,11 @@ fn classify_acquire_transport_execution(
                 .filter(|failure| request.is_client_mptcp_connect() && failure.validate().is_ok());
             let error = diagnostic.map_or(BackendError::Kernel, |failure| {
                 match (failure.operation(), failure.class(), failure.errno) {
+                    (
+                        AcquireFailureOperation::ConnectOperationDeadline,
+                        AcquireFailureClass::TimedOut,
+                        None,
+                    ) => BackendError::MptcpConnectOperationDeadline,
                     (AcquireFailureOperation::Poll, AcquireFailureClass::TimedOut, None) => {
                         BackendError::MptcpConnectPollTimedOut
                     }
@@ -6476,8 +6481,30 @@ pub(super) mod tests {
             classify_acquire_transport_execution(mptcp_connect_poll_timeout_execution(), &request),
             AcquireTransportExecution::Definite(BackendError::MptcpConnectPollTimedOut)
         ));
+        let operation_deadline = AcquireFailureOperation::ConnectOperationDeadline as i32;
+        let mut worker_budget = mptcp_connect_poll_timeout_execution();
+        worker_budget
+            .response
+            .acquire_failure
+            .as_mut()
+            .unwrap()
+            .operation = operation_deadline;
+        classifies_as(
+            worker_budget,
+            &request,
+            BackendError::MptcpConnectOperationDeadline,
+        );
+        for errno in [0, libc::ETIMEDOUT] {
+            let mut malformed = mptcp_connect_poll_timeout_execution();
+            let failure = malformed.response.acquire_failure.as_mut().unwrap();
+            failure.operation = operation_deadline;
+            failure.errno = Some(errno);
+            classifies_as(malformed, &request, BackendError::Kernel);
+        }
         // Every other declared operation/class and unknown values retain Kernel.
-        for operation in (0..=19).filter(|value| *value != AcquireFailureOperation::Poll as i32) {
+        for operation in (0..=20).filter(|value| {
+            *value != AcquireFailureOperation::Poll as i32 && *value != operation_deadline
+        }) {
             let mut execution = mptcp_connect_poll_timeout_execution();
             execution
                 .response
