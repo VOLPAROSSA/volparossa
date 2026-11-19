@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure coverage/counter contracts, not real core or protected-flow evidence."""
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import copy
+import json
 import os
 import runpy
 import subprocess
@@ -11,7 +14,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).parent
 S = runpy.run_path(str(HERE / 'private-storage-log-sampler.py'))
@@ -448,11 +451,82 @@ class CoveredExitLogs(unittest.TestCase):
             with self.assertRaises(ValueError):
                 S['validate_summary'](dict(report, **changes), 10, 2)
 
-    def test_sampler_is_owner_joined_and_exports_only_closed_existing_gate_files(self):
-        maintenance = (HERE / 'private-storage-maintenance-smoke.py').read_text()
-        self.assertIn("with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]],", maintenance)
-        self.assertIn('client=socket, scope=scope, diagnostic=SAMPLER_DIAGNOSTIC) as coverage:', maintenance)
-        self.assertIn('summary = coverage.report(joined=coverage.joined)', maintenance)
+    def test_owner_phases_join_and_validate_the_selected_sampler_before_publishing(self):
+        main = runpy.run_path(str(HERE / 'private-storage-maintenance-smoke.py'))['main']
+        runtime = main.__globals__
+        policy = dict(exit_peer_id='exit', relay_peers={f'relay{i}': f'r{i}' for i in range(3)})
+        keys = ['provider-a', 'provider-b', 'provider-c']
+        cases = [('upload', False, 56), ('restore', False, 16), ('finish', False, 16),
+                 ('restore', True, 16), ('finish', True, 16)]
+        for phase, matrix, minimum in cases:
+            for failure in (None, 'owner', 'validation'):
+                with self.subTest(phase=phase, matrix=matrix, failure=failure), TemporaryDirectory() as tmp:
+                    root = Path(tmp) / 'private-storage-user'
+                    root.mkdir(mode=0o700)
+                    client = Path(tmp) / 'runtime-client/control/agent.sock'
+                    exit_socket = Path(tmp) / 'runtime-exit/control/agent.sock'
+                    flow = root / f'flow-{phase}.json'
+                    sampler = runtime['matrix_network']()['S'] if matrix else runtime['SAMPLER']
+                    constraint = dict(policy=policy) if matrix else dict(scope=SCOPE)
+                    route_env = 'STORAGE_PROOF_ROUTE_POLICY' if matrix else 'STORAGE_PROOF_ROUTE_SCOPE'
+                    env = {'STORAGE_PROOF_BASELINE_MS': '17', route_env: json.dumps(policy if matrix else SCOPE)}
+                    events = []
+                    summary = dict(samples=minimum)
+                    coverage = Mock(joined=False)
+
+                    @contextmanager
+                    def capture(*args, **options):
+                        self.assertEqual(args, ('fixture-cli', exit_socket, 17, minimum))
+                        self.assertEqual(options, dict(client=client, diagnostic=runtime['SAMPLER_DIAGNOSTIC'], **constraint))
+                        events.append('capture')
+                        try:
+                            yield coverage
+                        finally:
+                            coverage.joined = True
+                            events.append('join')
+
+                    def owner(*args):
+                        self.assertEqual(args, (root, 'fixture-cli', str(client), keys))
+                        self.assertFalse(coverage.joined)
+                        events.append('owner')
+                        if failure == 'owner':
+                            raise ValueError('owner')
+                        return {'complete': True}
+
+                    def report(*, joined):
+                        self.assertIs(joined, True)
+                        events.append('report')
+                        return summary
+
+                    def validate(value, baseline, required):
+                        self.assertEqual((value, baseline, required), (summary, 17, minimum))
+                        self.assertFalse(flow.exists())
+                        events.append('validate')
+                        if failure == 'validation':
+                            raise ValueError('validation')
+
+                    coverage.report.side_effect = report
+                    args = [phase, str(root), 'fixture-cli', str(client), *keys]
+                    if matrix:
+                        args.append('--matrix-route')
+                    with patch.dict(sampler, capture=capture, validate_summary=validate), \
+                            patch.dict(runtime, {phase: owner}), patch.dict(os.environ, env, clear=True), \
+                            patch('builtins.print'):
+                        if failure:
+                            with self.assertRaisesRegex(ValueError, failure):
+                                main(args)
+                        else:
+                            main(args)
+                    expected = ['capture', 'owner', 'join']
+                    if failure != 'owner':
+                        expected += ['report', 'validate']
+                    self.assertEqual(events, expected)
+                    if failure:
+                        self.assertFalse(flow.exists())
+                    else:
+                        self.assertEqual(json.loads(flow.read_bytes()), summary)
+
+    def test_sampler_exports_only_closed_existing_gate_files(self):
         shell = (HERE / 'private-storage-fragments-smoke.sh').read_text()
         self.assertIn('STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0}', shell)
         self.assertIn('"$storage_user/flow-$storage_phase.json"', shell)
