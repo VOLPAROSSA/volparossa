@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import shlex
 import subprocess
@@ -137,7 +138,15 @@ class Wiring(unittest.TestCase):
         topology_job = WORKFLOW.split('\n  alpha-topology:\n', 1)[1].split('\n    steps:', 1)[0]
         line = next(line for line in topology_job.splitlines() if line.startswith('    timeout-minutes:'))
         self.assertIn("inputs.scenario == 'cloud-upload-maintenance' && 270", line)
-        self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150", line)
+        shared_window = re.findall(r'\(([^()]*)\) && 150 \|\|', line)
+        self.assertEqual(len(shared_window), 1)
+        conditions = shared_window[0].split(' || ')
+        scenarios = ['signal-backup', 'signal-backup-fragments', OLD_SCENARIO]
+        if '          - signal-mailbox\n' in WORKFLOW:
+            scenarios.append('signal-mailbox')
+        for scenario in scenarios:
+            self.assertIn(f"inputs.scenario == '{scenario}'", conditions)
+        self.assertNotIn(f"inputs.scenario == '{SCENARIO}'", conditions)
         self.assertNotIn('authorization-expires-at', GUEST)
 
     def test_workflow_has_separate_failclosed_gate_and_source_checks(self):
