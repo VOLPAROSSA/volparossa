@@ -2224,6 +2224,17 @@ jobs:
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
 
+      - name: Correlate the measured response with the visible paths
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mixed-link'
+        run: |
+          set -euo pipefail
+          for case in single aggregate; do
+            test -s "$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-$case-client.json" || exit 0
+          done
+          python3 -I -B tests/integration/mixed-link-response-windows.py "$VOLPAROSSA_ALPHA_OUTPUT" \
+            >"$RUNNER_TEMP/mixed-link-response-windows.json"
+          install -m 0600 "$RUNNER_TEMP/mixed-link-response-windows.json" "$VOLPAROSSA_ALPHA_OUTPUT/"
+
       - name: Require real mixed LAN/public MPQUIC evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mixed-link'
         env:
