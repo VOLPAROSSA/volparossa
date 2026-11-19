@@ -19,6 +19,7 @@ private_storage_handoff=no
 signal_backup=no
 signal_backup_fragments=no
 paired_mail=no
+paired_mail_peers=no
 signal_mailbox=no
 private_storage_fragments=no
 private_storage_maintenance=no
@@ -96,6 +97,10 @@ print_plan() {
             '  wrong requester, actual fixed-device unavailability, then exhausted one-attempt grant;' \
             '  five-role privacy plus control captures and exact cleanup; no fake firmware or private task;' \
             '  two selected distinct relays are not proof of two-subflow bulk traffic.'
+        return
+    fi
+    if [ "$paired_mail_peers" = yes ]; then
+        printf '%s\n' 'Two independently operated Core Clients, external signed custodians and exact Stalwart readback.'
         return
     fi
     if [ "$paired_mail" = yes ]; then
@@ -804,6 +809,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_handoff=no
             signal_backup=no
             signal_backup_fragments=no
+            paired_mail_peers=no
             paired_mail=no
             signal_mailbox=no
             private_storage_fragments=no
@@ -846,6 +852,7 @@ while [ "$#" -gt 0 ]; do
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
+                paired-mail-peers) scenario=content-mailbox; paired_mail_peers=yes; wifi_link=no; uplink_link=no ;;
                 paired-mail) scenario=content-mailbox; paired_mail=yes; wifi_link=no; uplink_link=no ;;
                 signal-mailbox) scenario=content-mailbox; signal_mailbox=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup-fragments) scenario=content-custody; signal_backup=yes; signal_backup_fragments=yes; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
@@ -2349,7 +2356,11 @@ cleanup() {
         content_contribution_publish_cleanup || original_status=1
     fi
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
-        content_mailbox_cleanup || original_status=1
+        if [ "$paired_mail_peers" = yes ]; then
+            paired_mail_peers_cleanup || original_status=1
+        else
+            content_mailbox_cleanup || original_status=1
+        fi
         if [ "$paired_mail" = yes ] && command -v paired_mail_cleanup >/dev/null 2>&1; then
             paired_mail_cleanup || original_status=1
         fi
@@ -2667,7 +2678,11 @@ cleanup() {
     elif [ "$scenario" = content-repair ]; then
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
-        content_mailbox_finalize_report "$original_status" || original_status=1
+        if [ "$paired_mail_peers" = yes ]; then
+            paired_mail_peers_finalize "$original_status" || original_status=1
+        else
+            content_mailbox_finalize_report "$original_status" || original_status=1
+        fi
         if [ "$paired_mail" = yes ]; then paired_mail_finalize "$original_status" || original_status=1; fi
         if [ "$signal_mailbox" = yes ]; then signal_mailbox_finalize_report "$original_status" || original_status=1; fi
     elif [ "$signal_backup_fragments" = yes ]; then
@@ -3015,6 +3030,12 @@ if [ "$scenario" = content-mailbox ]; then
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-mailbox-smoke.sh
     . "$source_directory/tests/integration/content-mailbox-smoke.sh"
+    if [ "$paired_mail_peers" = yes ]; then
+        # shellcheck source=tests/integration/content-replication-smoke.sh
+        . "$source_directory/tests/integration/content-replication-smoke.sh"
+        # shellcheck source=tests/integration/paired-mail-peers-smoke.sh
+        . "$source_directory/tests/integration/paired-mail-peers-smoke.sh"
+    fi
     if [ "$paired_mail" = yes ]; then
         # shellcheck source=tests/integration/paired-mail-smoke.sh
         . "$source_directory/tests/integration/paired-mail-smoke.sh"
@@ -3532,6 +3553,9 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
+elif [ "$paired_mail_peers" = yes ]; then
+    for cr_index in 0 1 2; do content_replication_client_link "$cr_index"; done
+    content_replication_client_filters
 elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
@@ -3716,6 +3740,8 @@ write_config() {
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
     if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
+        content_replication_configure_node
+    elif [ "$paired_mail_peers" = yes ]; then
         content_replication_configure_node
     fi
     if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
@@ -4216,6 +4242,9 @@ launch_agent() {
         if [ "$scenario" = agent-jobs ]; then
             set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed $WORK/agent-jobs-user"
         fi
+    fi
+    if [ "$paired_mail_peers" = yes ] && [ "$node" = relay4 ]; then
+        set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
     if [ "$scenario" = content-replication ] || [ "$agent_train_loop" = yes ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-replication-seed"
@@ -7251,7 +7280,7 @@ if [ "$scenario" = content-provider ]; then
     exit 0
 fi
 if [ "$scenario" = content-mailbox ]; then
-    content_mailbox_run
+    if [ "$paired_mail_peers" = yes ]; then paired_mail_peers_run; else content_mailbox_run; fi
     exit 0
 fi
 if [ "$scenario" = agent-jobs ]; then

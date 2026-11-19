@@ -73,32 +73,43 @@ def send():
     for (profile, _), (_, other), peer in zip(people, reversed(people), reversed(keys)):
         command([NODE, SIGNAL, "pair", "--profile", profile, "--peer-bundle", other, "--core-owner-key", peer,
                  "--trusted-bundle-sha256", hashlib.sha256(other.read_bytes()).hexdigest()], "Signal pair")
+    result = send_mime(people[0][0], PROVIDERS / "a/core.json", Path(a["sendInvitation"]), keys[1])
+    for _, bundle in people:
+        bundle.unlink()
+    return result
+
+
+def send_mime(profile, config_path, invitation_source, peer_key, retain_signed=False):
     original, invitation = STATE / "selected.eml", STATE / "selected.invitation"
     original.write_bytes(MIME)
-    invitation.write_bytes(Path(a["sendInvitation"]).read_bytes())
+    invitation.write_bytes(invitation_source.read_bytes())
     operation = secrets.token_hex(32)
-    sender = [NODE, SIGNAL, "send", "--id", operation, "--profile", people[0][0],
-              "--core-config", PROVIDERS / "a/core.json"]
-    record = command([*sender, "--input", original, "--invitation", invitation, "--core-owner-key", keys[1]], "Mail send")
-    packet = (people[0][0] / "core-send" / operation / "packet").read_bytes()
+    sender = [NODE, SIGNAL, "send", "--id", operation, "--profile", profile,
+              "--core-config", config_path]
+    record = command([*sender, "--input", original, "--invitation", invitation, "--core-owner-key", peer_key], "Mail send")
+    packet = (profile / "core-send" / operation / "packet").read_bytes()
     require(record["operation"] == "send" and record["confirmed_providers"] == 2 and
             record["message_sha256"] == DIGEST and record["message_bytes"] == len(MIME) and
             record["packet_sha256"] == hashlib.sha256(packet).hexdigest() and MIME not in packet, "protected deposit")
     original.unlink()
     invitation.unlink()
     require(command([*sender, "--resume"], "Mail send resume") == record, "resume binding")
-    shutil.rmtree(people[0][0])
-    for _, bundle in people:
-        bundle.unlink()
-    return dict(confirmed_providers=2, resumed_without_inputs=True, message_sha256=DIGEST, message_bytes=len(MIME),
+    signed = json.loads((profile / "core-send" / operation / "custody.json").read_bytes())["core"]
+    shutil.rmtree(profile)
+    result = dict(confirmed_providers=2, resumed_without_inputs=True, message_sha256=DIGEST, message_bytes=len(MIME),
                 packet_sha256=record["packet_sha256"], packet_bytes=len(packet), sender_profile_removed=True,
                 message_id=record["message_id"])
 
+    if retain_signed:
+        result.update(deposit_receipts=signed["storage_receipts"], ciphertext_bytes=signed["ciphertext_bytes"])
+    return result
 
-def receive():
+
+def receive(recipient=None):
     global PHASE
     require(not (STATE / "sender").exists() and not (STATE / "selected.eml").exists(), "sender still present")
-    recipient = config("b")
+    if recipient is None:
+        recipient = config("b")
     def fetch(name):
         return command([CORE, "--control-socket", recipient["socket"], "content", "mailbox", "fetch",
                         *identity(recipient), "--invitation", recipient["receiveInvitation"], "--output-dir", STATE / name],
@@ -125,7 +136,7 @@ def receive():
         require(request("Email/query", {"limit": 2})["ids"] == [], "owner inbox not empty")
         # The connection descriptor accepts only a pathname. The actual owner
         # password is supplied to accept.py over stdin.
-        key_directory = PROVIDERS / "b"
+        key_directory = PROVIDERS / "b" if recipient["identity"] == str(PROVIDERS / "b/identity.key") else STATE
         key_path, credential_path = key_directory / "identity.key", key_directory / "passphrase"
         require(recipient["identity"] == str(key_path) and recipient["passphrase"] == str(credential_path)
                 and key_path.is_file() and credential_path.is_file(), "unexpected recipient credential paths")
