@@ -128,7 +128,13 @@ fixture removed its model runtime, private job roots and publisher key.
 The initial route context was `974ca711032f3c6177157c1a69091737`. The live
 sample after the panel completed returned `9d1373dff2bdba9376f31ab29f05b38b`.
 The Exit capture recorded 615,881 and 564,388 response payload bytes for the two
-providers. The samples do not establish when or why the context changed.
+providers. The first and last observed workers started at 74,607 and 171,892
+Linux clock ticks since guest boot. At 100 ticks per second on x86-64, their
+starts alone span 972.85 seconds. The route existed before the first worker
+and the final comparison followed the last. The default route lifetime was
+600 seconds and the product limit was 900 seconds. The original context could
+therefore no longer be valid at the end of this trial. Its replacement time
+and the route for each intervening flow were not recorded.
 The fixture stopped before its remaining phase-specific transport checks.
 Cleanup left zero owned topology objects and both guest-root snapshots had
 SHA-256 `3db64e4fb6d345423adbd76f7ee84a6a6fe6a5b8b6f8185c210906a4ec7fc4cb`.
@@ -136,6 +142,15 @@ The original Actions ZIP had SHA-256
 `657872ae41b2d7c768a476b75a852355088c67c07a42e6d7382368996c7fb11c`.
 [Retained byte-exact reports](development/evidence/browser-cooperative-44434704508)
 
+The discovered-360M trial now starts the shared protected-route observer
+before the panel can authorize its first task. The observer brackets the
+control-relay query with two matching live path observations and joins fresh
+Exit completion events to those route contexts. It requires a completed flow
+on both the starting and final context, an unbroken sequence of overlapping
+Exit-log samples and at least six completed protected flows. Each sampled
+context must retain the original physical control relay, both data relays and
+the Exit. The five private packet captures and both provider exchanges remain
+part of the final acceptance check.
 
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker

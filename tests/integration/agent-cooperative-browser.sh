@@ -95,7 +95,11 @@ agent_cooperative_browser_run() {
         >"$WORK/agent-cooperative-browser-driver.log" 2>"$WORK/agent-cooperative-browser-driver.err" &
     jobs_batch_pid=$!
     cooperative_observer_status=0
-    agent_cooperative_browser_python observe "$WORK" "$jobs_batch_pid" \
+    set -- observe "$WORK" "$jobs_batch_pid"
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        set -- observe-routes "$WORK" "$jobs_batch_pid" "$provider_baseline_ms"
+    fi
+    agent_cooperative_browser_python "$@" \
         >"$WORK/agent-cooperative-browser-observer.log" 2>"$WORK/agent-cooperative-browser-observer.err" \
         || cooperative_observer_status=$?
     if [ "$cooperative_observer_status" -ne 0 ]; then
@@ -117,7 +121,16 @@ agent_cooperative_browser_run() {
     [ "$cooperative_browser_status" -eq 0 ] || fail COOPERATIVE_BROWSER_PANEL_FAILED
     install -m 0600 "$cooperative_root/build/cooperative-proof/report.json" "$WORK/agent-cooperative-browser-panel.json"
     agent_cooperative_browser_python collect "$WORK" "$expected_commit" || fail COOPERATIVE_BROWSER_RESULT_JOIN_FAILED
-    content_custody_phase_finish 6
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        benchmark_capture_paths content-custody-fetch-live mptcp || fail CUSTODY_LIVE_ROUTE_UNAVAILABLE
+        stop_privacy_observers || fail CUSTODY_CAPTURE_INCOMPLETE
+        content_provider_stop_control_observer || fail CUSTODY_CONTROL_CAPTURE_INCOMPLETE
+        # The sampled Exit log and live route bindings are checked alongside
+        # both provider captures by the final cooperative evidence verifier.
+        test -s "$WORK/content-custody-fetch-gates.json" || fail CUSTODY_PROTECTED_FLOW_INCOMPLETE
+    else
+        content_custody_phase_finish 6
+    fi
     benchmark_disconnect_route agent-jobs || fail COOPERATIVE_BROWSER_ROUTE_CLEANUP_FAILED
     agent_jobs_stop || fail COOPERATIVE_BROWSER_SERVICE_CLEANUP_FAILED
     agent_jobs_cleanup || fail COOPERATIVE_BROWSER_PRIVATE_CLEANUP_FAILED

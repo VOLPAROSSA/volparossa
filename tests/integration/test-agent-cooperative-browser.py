@@ -83,6 +83,25 @@ def discovered_fixture():
     check = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
     check["select_trial"]("discovered-360m")
     value = fixture()
+    sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+    selected = value["path"]["selected_route"]
+    peers, layout = value["peers"], value["layout"]
+    coverage = sampler["Coverage"](100, check["route_policy"](peers))
+    events = b"99\tlevel=1\tevent=STARTED\tsession=\tpath=-\n"
+    status = json.dumps({"control_relay_peer_id": layout["control_relay_peer_id"]}).encode()
+    for ordinal, context in enumerate((layout["route_context_id"], "b" * 32)):
+        selected.update(route_context_id=context, exact_selected_exit=peers["exit"],
+                        exact_selected_relays=[p["relay_peer_id"] for p in selected["paths"]])
+        for path, slot in zip(selected["paths"], selected["benchmark_slots"]):
+            path.update(route_context_id=context, state=1)
+            slot["path_id"] = path["path_id"]
+        paths = "".join(f'context={context} path={p["path_id"]} relay={p["relay_peer_id"]} '
+            f'exit={peers["exit"]} state=1 rtt_us=0 bytes=0\n' for p in selected["paths"]).encode()
+        coverage.route(paths, status, paths)
+        for i in range(3):
+            events += f"{101 + ordinal * 3 + i}\tlevel=1\tevent=MPTCP_EXIT_FLOW_COMPLETED\tsession={context}\tpath=-\n".encode()
+        coverage.add(events)
+    value["path"]["gates"] = coverage.report(True)
     fields, profile = check["trial_fields"](), check["selected_model"]()
     for item in (value, value["input"], value["result"]):
         item.update(fields)
@@ -485,6 +504,36 @@ benchmark_select_route() { printf 'connect\n'; }
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_long_fetch_joins_every_exit_flow_to_the_observed_physical_route(self):
+        check, evidence = discovered_fixture()
+        sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+        phase, layout, peers = evidence["path"], evidence["layout"], evidence["peers"]
+        gates = phase["gates"]
+        validate = lambda value: check["validate_sampled_routes"](sampler, peers, layout,
+            phase["selected_route"], value)
+        validate(gates)
+        # The unmodified short-phase contract still requires its original context.
+        with self.assertRaises(ValueError):
+            CHECK["JOBS"]["CUSTODY"]["validate_path"](phase, peers, layout, "fetch", payload_minimum=1)
+        for mutation in ("initial_count", "unknown_flow", "missing_binding", "different_control", "overlap"):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(gates)
+                if mutation == "initial_count":
+                    changed["exit_flow_contexts"][0]["completed"] = 0
+                    changed["exit_flow_contexts"][1]["completed"] = 6
+                if mutation == "unknown_flow":
+                    changed["exit_flow_contexts"][0]["route_context_id"] = "1" * 32
+                if mutation == "missing_binding":
+                    del changed["observed_context_routes"][0]
+                if mutation == "different_control":
+                    route = changed["observed_context_routes"][0]
+                    route["control_relay_peer_id"] = peers["relay0"]
+                    route["scope"]["paths"][0]["relay_peer_id"] = peers["relay2"]
+                if mutation == "overlap":
+                    changed["exit_log_overlap_verified"] = False
+                with self.assertRaises(ValueError):
+                    validate(changed)
+
     def test_discovered_synthesis_requires_exact_nondefault_serialized_profile(self):
         # DerivedDataset serializes Smol360 explicitly; omission belongs only to
         # the historical 135M schema. Keep exact equality, not a subset check.

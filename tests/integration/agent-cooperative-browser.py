@@ -29,7 +29,7 @@ FILES = (
 )
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
     "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic",
-    "route-diagnostic")) + (
+    "route-diagnostic", "flow-diagnostic")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
@@ -1338,6 +1338,46 @@ def retained_result(document, fixture, layout, observed):
                 refinement=refinement, **trial_fields()) if TRIAL else {}))
 
 
+def route_policy(peers):
+    return dict(exit_peer_id=peers["exit"], relay_peers={node: peers[node] for node in ("relay0", "relay1", "relay2")})
+
+
+def validate_sampled_routes(sampler, peers, layout, selected, gates):
+    policy = route_policy(peers)
+    sampler["validate_phase_route"](policy, selected, gates)
+    require(gates["exit_mptcp_tls_completed"] >= 6 and
+            any(row["route_context_id"] == layout["route_context_id"] and row["completed"] > 0
+                for row in gates["exit_flow_contexts"]), "initial protected task flow missing")
+    # The physical control links and packet observers are fixed for this trial.
+    # A new context must therefore retain this control relay and the same two
+    # data relays. Each context's exact path-ID mapping is checked by the sampler.
+    require(all(route["control_relay_peer_id"] == layout["control_relay_peer_id"]
+                for route in gates["observed_context_routes"]), "cooperative control relay changed")
+
+
+def observe_routes(work, pid, baseline):
+    JOBS["guest_work"](work)
+    require(TRIAL == "discovered-360m", "unexpected sampled route trial")
+    sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+    peers, layout = read(work / "a01-expected-peers.json"), read(work / "agent-jobs-layout.json")
+    diagnostic = {}
+    try:
+        with sampler["capture"](work / "bin/volparossa", work / "runtime-exit/control/agent.sock",
+                baseline, 6, client=work / "runtime-client/control/agent.sock", policy=route_policy(peers),
+                diagnostic=diagnostic) as coverage:
+            initial = coverage.route_bindings[coverage.current_context]
+            require(initial["route_context_id"] == layout["route_context_id"]
+                    and initial["control_relay_peer_id"] == layout["control_relay_peer_id"],
+                    "cooperative starting route differs")
+            # The panel waits for the independent observer's pre-consent gate.
+            observe(work, pid)
+        write(work / "content-custody-fetch-gates.json", coverage.report(True))
+    finally:
+        if diagnostic:
+            sampler["validate_diagnostic"](diagnostic)
+            write(work / f"{NAME}-flow-diagnostic.json", diagnostic)
+
+
 def observe(work, pid):
     JOBS["guest_work"](work)
     progress = dict(version=1, phase="setup", failure=None, invariant_reason=None, task_count=0,
@@ -1533,7 +1573,14 @@ def check_evidence(value, revision, source_pins=None):
             private_job_roots_removed=True, publisher_key_removed=True), "private owned state remains")
     require(value["cleanup"] == dict(public_service_stopped=True, peer_brokers_stopped=True,
             browser_root_removed=True, public_receipts_removed=True, socket_removed=True), "app/service state remains")
-    JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1)
+    if TRIAL:
+        sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+        validate_sampled_routes(sampler, value["peers"], value["layout"],
+                                value["path"]["selected_route"], value["path"]["gates"])
+        JOBS["CUSTODY"]["validate_path_observations"](value["path"], value["peers"], value["layout"],
+                                                     "fetch", payload_minimum=1)
+    else:
+        JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1)
     for node in value["layout"]["provider_nodes"]:
         application = value["path"]["privacy"]["exit"]["provider_application"][node]
         require(application["request_packets"] > 0 and application["response_payload_bytes"] > 0,
@@ -1616,6 +1663,8 @@ def main(args):
         provision(Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
+    elif len(args) == 4 and args[0] == "observe-routes":
+        observe_routes(Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 6 and args[0] == "diagnostic":
         diagnostic(Path(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5]))
     elif len(args) == 3 and args[0] == "collect":

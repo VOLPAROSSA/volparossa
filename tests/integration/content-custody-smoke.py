@@ -220,6 +220,14 @@ def validate_operation(result, keys, publication, layout, operation, complete):
 
 def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES, *,
                   control_provider_nodes=None, discovery_minimum_flows=2):
+    require(phase["selected_route"]["route_context_id"] == layout["route_context_id"],
+            "custody route context changed")
+    validate_path_observations(phase, peers, layout, name, payload_minimum,
+        control_provider_nodes=control_provider_nodes, discovery_minimum_flows=discovery_minimum_flows)
+
+
+def validate_path_observations(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES, *,
+                               control_provider_nodes=None, discovery_minimum_flows=2):
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, providers = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
     # Physical control contacts are not necessarily selected task executors.
@@ -241,7 +249,6 @@ def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES, *,
                  or (name == "executor-discovery" and len(providers) == 1)),
             "invalid executor-discovery completion scope")
     require(selected["transport"] == "mptcp" and len(paths) == len(slots) == 2
-            and selected["route_context_id"] == layout["route_context_id"]
             and re.fullmatch(r"[0-9a-f]{32}", selected["route_context_id"])
             and len({path["relay_peer_id"] for path in paths}) == 2
             and {path["exit_peer_id"] for path in paths} == {peers["exit"]}
