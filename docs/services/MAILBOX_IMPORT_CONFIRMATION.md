@@ -52,11 +52,34 @@ Three states must stay distinct:
 - **Consumer-confirmed:** the owning consumer attests durable import and both provider ACKs
   completed. The core cannot independently prove a native application's database commit.
 
-Mail and chat adapters still need authenticated address/device binding, real application
+An adapter needs authenticated address/device binding, real application
 encryption, durable per-device outboxes, deduplication, retention renewal/replacement and
 visible pending/failure states. Offline recipients are expected and must not alone trigger
-ordinary mail/Signal-server fallback. Future Signal integration must preserve native
+ordinary mail/Signal-server fallback. Signal integrations must preserve native
 Signal sessions and disappearing-message policy: this handoff cannot extend app retention
 or acknowledge before its real decrypt/import transaction. Calling/video media is not a
 store-and-forward mailbox feature. No message loss or exactly-once delivery is guaranteed
 across arbitrary peers and stock mail servers.
+
+## Native Signal Desktop on the protected route
+
+On 19 November 2026, two standalone Signal Desktops, each with its own SQLCipher
+profile, exchanged a paired message through two signed mailbox providers in the
+Debian 13 KVM topology. Both applications used one protected Core client. The
+receiver was offline when the sender deposited the message. With the sender offline,
+the receiver fetched it twice, imported it into Signal, and confirmed custody after
+that transaction. The native row survived a restart. Replaying the import preserved the
+Signal ratchet, the restarted sender displayed Delivered, and both provider inboxes
+were empty. Signal used its ordinary simulated messaging service before pairing and
+made zero stock submissions for the paired message.
+
+The application phase recorded 32 completed Exit MPTCP/TLS exchanges and 32 exact
+provider lookups. All five guest traffic captures passed. The before/after host
+snapshots matched and cleanup left zero owned objects. This trial covers two
+application identities behind a single Core client. Independent client machines,
+other Signal platforms and ordinary Internet peers remain outside this measurement.
+
+The [original guest report](../development/evidence/signal-mailbox-44538844389/signal-mailbox-smoke.json)
+comes from [run 44538844389](https://github.com/VOLPAROSSA/volparossa/actions/runs/44538844389)
+at Core `59c6d6d2` and Chat `7fa73f61`. GitHub artifact 14539906183 contained
+18 files, 27,028 bytes, SHA-256 `e80da35af2d2cb95b084b6c6d369f0233fa743e8312d3542d8fd4a9750a1bef2`.
