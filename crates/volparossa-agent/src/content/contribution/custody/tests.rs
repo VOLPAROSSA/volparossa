@@ -70,6 +70,72 @@ fn custody_agent_empty_receiver_serves_and_stop_restart_rejects_stale_owner() {
     );
 }
 
+#[tokio::test]
+async fn pinned_client_checks_require_a_live_unchanged_policy_and_client_role() {
+    use crate::content::{ContentError, custody::checked_policy};
+
+    let directory = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (context, stop, task) = context(directory.path());
+    let original = context
+        .state
+        .read()
+        .await
+        .active_policy(unix_millis())
+        .unwrap();
+    assert!(matches!(
+        checked_policy(&context, Some(&original)).await,
+        Err(ContentError::Policy)
+    ));
+    let client = RolesConfig {
+        client: true,
+        ..context.config.roles
+    };
+    *context.state.write().await = AgentState::new(
+        &context.config,
+        client,
+        Some(original.clone()),
+        MetricsRegistry::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        checked_policy(&context, Some(&original))
+            .await
+            .unwrap()
+            .policy_hash(),
+        original.policy_hash()
+    );
+    let replacement = verified_development_manifest(
+        unix_millis(),
+        vec![
+            DestinationRule::exact_domain(
+                "replacement.example",
+                [ProtocolPort::new(TransportProtocol::Tcp, 443).unwrap()],
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    assert_ne!(original.policy_hash(), replacement.policy_hash());
+    context.state.write().await.set_policy(Some(replacement));
+    assert!(matches!(
+        checked_policy(&context, Some(&original)).await,
+        Err(ContentError::Policy)
+    ));
+    context.state.write().await.set_policy(None);
+    assert!(matches!(
+        checked_policy(&context, Some(&original)).await,
+        Err(ContentError::Policy)
+    ));
+    stop.send(true).unwrap();
+    timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 fn context(root: &Path) -> (ControlContext, watch::Sender<bool>, JoinHandle<()>) {
     let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let bind = probe.local_addr().unwrap();

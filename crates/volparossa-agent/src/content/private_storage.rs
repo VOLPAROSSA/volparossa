@@ -428,12 +428,34 @@ async fn route_current(
     original: &VerifiedPolicy,
     control: PeerId,
     peer: PeerId,
+    before_ready: Option<&observation::Observation>,
 ) -> Result<VerifiedPolicy, ContentError> {
     let policy = checked_policy(context, Some(original)).await?;
-    if context.routes.content_provider_control(&peer).await != Ok(control) {
-        return Err(ContentError::Policy);
-    }
+    require_pinned_control(
+        control,
+        context.routes.content_provider_control(&peer).await,
+        before_ready,
+    )?;
     Ok(policy)
+}
+
+fn require_pinned_control(
+    pinned: PeerId,
+    live: Result<PeerId, crate::route_setup::ContentProviderRouteError>,
+    before_ready: Option<&observation::Observation>,
+) -> Result<(), ContentError> {
+    if live == Ok(pinned) {
+        return Ok(());
+    }
+    // The original signed operation may already have been dispatched after READY.
+    // Keep its existing terminal disposition and never attach an initial observation.
+    let Some(observation) = before_ready else {
+        return Err(ContentError::Policy);
+    };
+    observation.record_control_rejection();
+    // A different live control and a provider role collision remain policy refusals.
+    // An absent or expired route has no control on which to make that determination.
+    Err(live.err().map_or(ContentError::Policy, ContentError::from))
 }
 
 #[allow(
@@ -471,7 +493,7 @@ async fn remote(
                 .map_err(ContentError::from)
         })
         .await?;
-    route_current(context, &policy, control, request.peer).await?;
+    route_current(context, &policy, control, request.peer, Some(observation)).await?;
     let mut providers = observation
         .requester_boundary(Stage::ProviderLookup, local, async {
             context
@@ -579,7 +601,8 @@ async fn exchange(
     let mut flow;
     let mut reconnect_by = None;
     let (mut remote, challenge) = loop {
-        let current = route_current(context, &policy, control, request.peer).await?;
+        let current =
+            route_current(context, &policy, control, request.peer, Some(observation)).await?;
         grant_current(&request.grant)?;
         let offer = provider.offer.validity();
         if !(offer.created..offer.expires).contains(&now())
@@ -651,7 +674,7 @@ async fn exchange(
                 .retry_before,
         );
     };
-    route_current(context, &policy, control, request.peer).await?;
+    route_current(context, &policy, control, request.peer, Some(observation)).await?;
     grant_current(&request.grant)?;
     outcome.enter(OutcomePhase::ReadyWrite);
     observation.fixture().enter(FixturePhase::ClientExchange);
@@ -703,7 +726,7 @@ async fn exchange(
         })?;
     flow.shutdown();
     outcome.enter(OutcomePhase::FinalRouteCheck);
-    route_current(context, &policy, control, request.peer).await?;
+    route_current(context, &policy, control, request.peer, None).await?;
     outcome.enter(OutcomePhase::FinalGrantCheck);
     grant_current(&request.grant)?;
     outcome.enter(OutcomePhase::FinalLifetimeCheck);

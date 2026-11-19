@@ -469,6 +469,90 @@ async fn fake_agent(
 }
 
 #[tokio::test]
+async fn pinned_control_rejection_does_not_send_or_reissue_an_owner_reservation() {
+    use super::diagnostics::{Boundary, Diagnostics, Stage};
+    use tokio::io::AsyncReadExt as _;
+    use volparossa_local_control::{
+        CONTROL_PROTOCOL_VERSION, ControlResponse, ControlResult, Empty,
+        PrivateStorageRemoteDetail, PrivateStorageRemoteStage, control_request::Operation,
+        control_response::Payload, read_request, write_response,
+    };
+
+    for (result, code) in [
+        (ControlResult::Policy, "CONTENT_POLICY"),
+        (ControlResult::Unavailable, "CONTENT_UNAVAILABLE"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("agent.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (_provider, owner, grant) = fixture_grant();
+        let bytes = [9; 32];
+        let path = directory.path().join("ciphertext");
+        fs::write(&path, bytes).unwrap();
+        let mut input = fs::File::open(path).unwrap();
+        let expires_at = crate::storage::now().unwrap() + 600;
+        let journal = Journal::new(
+            &grant,
+            bytes.len() as u64,
+            Sha256::digest(bytes).into(),
+            expires_at,
+        )
+        .unwrap();
+        let mut retained =
+            LockedJournal::create(&directory.path().join("retained"), journal).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await.unwrap();
+            assert!(matches!(
+                request.operation,
+                Some(Operation::PrivateStorageRemote(_))
+            ));
+            write_response(
+                &mut stream,
+                &ControlResponse {
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    result: result as i32,
+                    diagnostic_code: code.into(),
+                    private_storage_remote_detail: Some(PrivateStorageRemoteDetail {
+                        stage: PrivateStorageRemoteStage::ControlSelection as i32,
+                        ..Default::default()
+                    }),
+                    payload: Some(Payload::Ack(Empty {})),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
+            listener
+        });
+        let error = transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
+            .await
+            .unwrap_err();
+        let listener = server.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::ZERO, listener.accept())
+                .await
+                .is_err()
+        );
+        assert!(retained.journal.reserve_unsent());
+        let mut diagnostics = Diagnostics::default();
+        diagnostics.push(
+            0,
+            &error,
+            Boundary::new(StorageOperation::Reserve { expires_at }, Stage::Unknown),
+        );
+        let report = serde_json::to_value(diagnostics).unwrap();
+        let failure = &report["failures"][0];
+        assert_eq!(failure["stage"], "agent_ready");
+        assert_eq!(failure["agent_code"], code);
+        assert_eq!(failure["agent_detail"]["stage"], "control_selection");
+        assert!(failure["agent_detail"]["tls_failure"].is_null());
+        assert!(failure["agent_outcome"].is_null());
+    }
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "One bounded real SQLite/Unix IPC lifecycle proves lost-terminal resume and two non-consuming restores together."
