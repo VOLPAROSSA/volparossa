@@ -57,6 +57,22 @@ records the local RustSec database commit. See `third_party/rust/README.md` for
 the narrowly scoped local backports, single-backend Yamux hardening, and
 scanner exemptions.
 
+The required `Unprivileged quality gates` check runs the complete workspace
+suite for code, packaged documentation, dependencies, workflows and pushes to
+`main`. A one-commit PR can instead validate the nine original JSON receipts
+from one Storage trial and an optional linked status entry. The classifier
+uses the protected base version of the checker, compares both the authored
+change and GitHub's actual merge tree, and checks every proposed receipt byte
+against the original Actions ZIP and its SHA-256. If either tree cannot be
+identified or the artifact has expired, the full suite runs. A receipt that
+differs from the authenticated original fails the required check.
+
+In a 24-PR sample on 19 November 2026, six changes limited to the overview and
+retained evidence spent 194.5 runner-minutes in the workspace suite. Three met
+the narrower Storage criteria. Their original jobs took 88.3 minutes in total,
+including setup. Replaying their actual Git trees verified all 27 original
+receipts. These times measure the former jobs. [PR 407 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44438863788) · [PR 416 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44446300077) · [PR 426 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44453957736)
+
 The read-only `RustSec pin review` workflow compares the Quality pin with official
 RustSec `main` weekly and on manual dispatch. It cross-checks Git and GitHub API
 commit identities and reports dates, API signature metadata and a candidate patch
