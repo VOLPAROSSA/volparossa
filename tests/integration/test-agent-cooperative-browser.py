@@ -83,6 +83,25 @@ def discovered_fixture():
     check = runpy.run_path(str(HERE / "agent-cooperative-browser.py"))
     check["select_trial"]("discovered-360m")
     value = fixture()
+    sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+    selected = value["path"]["selected_route"]
+    peers, layout = value["peers"], value["layout"]
+    coverage = sampler["Coverage"](100, check["route_policy"](peers))
+    events = b"99\tlevel=1\tevent=STARTED\tsession=\tpath=-\n"
+    status = json.dumps({"control_relay_peer_id": layout["control_relay_peer_id"]}).encode()
+    for ordinal, context in enumerate((layout["route_context_id"], "b" * 32)):
+        selected.update(route_context_id=context, exact_selected_exit=peers["exit"],
+                        exact_selected_relays=[p["relay_peer_id"] for p in selected["paths"]])
+        for path, slot in zip(selected["paths"], selected["benchmark_slots"]):
+            path.update(route_context_id=context, state=1)
+            slot["path_id"] = path["path_id"]
+        paths = "".join(f'context={context} path={p["path_id"]} relay={p["relay_peer_id"]} '
+            f'exit={peers["exit"]} state=1 rtt_us=0 bytes=0\n' for p in selected["paths"]).encode()
+        coverage.route(paths, status, paths)
+        for i in range(3):
+            events += f"{101 + ordinal * 3 + i}\tlevel=1\tevent=MPTCP_EXIT_FLOW_COMPLETED\tsession={context}\tpath=-\n".encode()
+        coverage.add(events)
+    value["path"]["gates"] = coverage.report(True)
     fields, profile = check["trial_fields"](), check["selected_model"]()
     for item in (value, value["input"], value["result"]):
         item.update(fields)
@@ -338,6 +357,17 @@ class CooperativeInventoryReadiness(unittest.TestCase):
         self.lines = [f"{peer}\troles={role}\treachability=0" for peer, role in self.expected.items()]
         self.complete = ("\n".join(self.lines) + "\n").encode()
 
+    def test_panel_observer_pin_only_changes_the_discovered_driver(self):
+        pins = CHECK["pins"]
+        with mock.patch.dict(pins.__globals__, TRIAL=None):
+            original = pins()
+        with mock.patch.dict(pins.__globals__, TRIAL="discovered-360m"):
+            discovered = pins()
+        self.assertNotEqual(original["revision"], discovered["revision"])
+        self.assertEqual(original["runtime"], discovered["runtime"])
+        changed = [name for name, record in original["files"].items() if record != discovered["files"][name]]
+        self.assertEqual(changed, ["scripts/smoke_cooperative_compute.py"])
+
     def test_inventory_requires_all_exact_roles_without_claiming_reachability(self):
         ready = self.check["inventory_ready"]
         self.assertTrue(ready(self.complete, self.expected))
@@ -485,6 +515,73 @@ benchmark_select_route() { printf 'connect\n'; }
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_worker_scan_groups_retained_handles_by_provider_and_keeps_live_identity_unique(self):
+        scan = CHECK["scan_workers"]
+        nodes = ["relay4", "relay5"]
+        layout = {"provider_nodes": nodes, "provider_keys": {node: node for node in nodes}}
+        brokers = dict.fromkeys(nodes, {"pid": 2})
+        calls, observed = [], {}
+        worker = {"pid": 20, "start_ticks": 300}
+        with tempfile.TemporaryDirectory() as directory:
+            doc = Path(directory)
+            for ordinal in range(24):
+                path = doc / f"part-{ordinal:04d}/attempt-0000/job-0.json"
+                path.parent.mkdir(parents=True)
+                # Two indistinguishable attempts for the first provider must
+                # never receive independent live-worker credit.
+                dataset = f"{1 if ordinal == 22 else ordinal + 1:064x}"
+                record = dict(binding=dict(job_id=f"{ordinal + 1:032x}", dataset_sha256=dataset),
+                    provider_key=nodes[ordinal % 2],
+                    capabilities=dict(public_inference_only=True, model=dict(base_weights=dict(sha256="a" * 64))))
+                path.write_text(json.dumps(record))
+            def snapshot(_work, node, broker, candidates):
+                self.assertEqual(broker, brokers[node])
+                calls.append((node, set(candidates)))
+                if node == nodes[1]:
+                    return None
+                self.assertNotIn(f"{1:064x}", candidates)
+                digest = min(candidates)
+                return dict(dataset_file=dict(sha256=digest), dataset_json='{"version":2}',
+                            worker=worker, owned_processes=[broker, worker], broker=broker)
+            with mock.patch.dict(scan.__globals__["JOBS"], worker_snapshot_for_datasets=snapshot,
+                                 alive=lambda _: True):
+                scan(doc, doc, layout, brokers, observed)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(observed), 1)
+                scan(doc, doc, layout, brokers, observed)
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(observed), 1)
+
+    def test_long_fetch_joins_every_exit_flow_to_the_observed_physical_route(self):
+        check, evidence = discovered_fixture()
+        sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+        phase, layout, peers = evidence["path"], evidence["layout"], evidence["peers"]
+        gates = phase["gates"]
+        validate = lambda value: check["validate_sampled_routes"](sampler, peers, layout,
+            phase["selected_route"], value)
+        validate(gates)
+        # The unmodified short-phase contract still requires its original context.
+        with self.assertRaises(ValueError):
+            CHECK["JOBS"]["CUSTODY"]["validate_path"](phase, peers, layout, "fetch", payload_minimum=1)
+        for mutation in ("initial_count", "unknown_flow", "missing_binding", "different_control", "overlap"):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(gates)
+                if mutation == "initial_count":
+                    changed["exit_flow_contexts"][0]["completed"] = 0
+                    changed["exit_flow_contexts"][1]["completed"] = 6
+                if mutation == "unknown_flow":
+                    changed["exit_flow_contexts"][0]["route_context_id"] = "1" * 32
+                if mutation == "missing_binding":
+                    del changed["observed_context_routes"][0]
+                if mutation == "different_control":
+                    route = changed["observed_context_routes"][0]
+                    route["control_relay_peer_id"] = peers["relay0"]
+                    route["scope"]["paths"][0]["relay_peer_id"] = peers["relay2"]
+                if mutation == "overlap":
+                    changed["exit_log_overlap_verified"] = False
+                with self.assertRaises(ValueError):
+                    validate(changed)
+
     def test_discovered_synthesis_requires_exact_nondefault_serialized_profile(self):
         # DerivedDataset serializes Smol360 explicitly; omission belongs only to
         # the historical 135M schema. Keep exact equality, not a subset check.
@@ -938,6 +1035,7 @@ class CooperativeBrowserProof(unittest.TestCase):
             path.write_text(event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'))
             self.assertFalse(parse()['window_covers_baseline'])
             self.assertEqual(CHECK['closed_rpc_events'](path, 100, 1), dict(state='query_failed'))
+
             for invalid in ('PRIVATE_DATA', event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') + event(100, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'),
                             event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') * 1001, 'x' * 262145):
                 path.write_text(invalid)
@@ -948,6 +1046,48 @@ class CooperativeBrowserProof(unittest.TestCase):
         shell = (HERE / 'agent-cooperative-browser.sh').read_text()
         self.assertLess(shell.index('logs --limit 1000'), shell.index('diagnostic "$WORK"'))
         self.assertNotIn('agent-cooperative-browser-rpc-events.private', CHECK['EXPORT_NAMES'])
+
+    def test_failure_samples_only_the_selected_relay_and_enrolled_providers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            (work / "a01-expected-peers.json").write_text(json.dumps(
+                {f"relay{i}": f"peer-{i}" for i in range(6)}))
+            layout = dict(control_relay_peer_id="peer-1", provider_nodes=["relay4", "relay5"])
+            (work / "agent-jobs-layout.json").write_text(json.dumps(layout))
+            observed = []
+            def query(argv, *, stdin, stdout, stderr, timeout):
+                node = Path(argv[2]).parents[1].name.removeprefix("runtime-")
+                observed.append(node)
+                self.assertEqual(argv[3:], ["logs", "--limit", "1000"])
+                self.assertEqual(timeout, 3)
+                if node == "relay5":
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                code = "CONTENT_PROVIDER_SERVICE_EMPTY" if node == "relay1" else "CONTENT_PROVIDER_WITHDRAWN"
+                stdout.write(f"99\tlevel=1\tevent={code}\tsession=\tpath=-\n"
+                             f"101\tlevel=1\tevent={code}\tsession=\tpath=-\n"
+                             "102\tlevel=1\tevent=PRIVATE_UNKNOWN\tsession=\tpath=-\n".encode())
+                if node == "relay1":
+                    for reason in ("CONTENT_DISCOVERY_RELAY_QUEUE_FULL", "CONTENT_LOOKUP_RESPONSE_AUTHORIZED",
+                                   "CONTENT_LOOKUP_REPLY_EMPTY", "CONTENT_EXACT_COLLECTION_EXPIRED"):
+                        stdout.write(f"103\tlevel=1\tevent={reason}\tsession=\tpath=-\n".encode())
+                stdout.flush()
+                return subprocess.CompletedProcess(argv, 0)
+            with mock.patch.object(subprocess, "run", side_effect=query):
+                result = CHECK["peer_event_windows"](work, 100)
+            self.assertEqual(observed, ["relay1", "relay4", "relay5"])
+            self.assertEqual(result["windows"]["relay1"]["counts"], {
+                "CONTENT_PROVIDER_SERVICE_EMPTY": 1, "CONTENT_DISCOVERY_RELAY_QUEUE_FULL": 1,
+                "CONTENT_LOOKUP_RESPONSE_AUTHORIZED": 1, "CONTENT_LOOKUP_REPLY_EMPTY": 1,
+                "CONTENT_EXACT_COLLECTION_EXPIRED": 1})
+            self.assertEqual(result["windows"]["relay4"]["counts"], {"CONTENT_PROVIDER_WITHDRAWN": 1})
+            self.assertEqual(result["windows"]["relay5"], {"state": "query_failed"})
+            self.assertNotIn("PRIVATE_UNKNOWN", repr(result))
+            self.assertFalse(list(work.glob("*.private")))
+            layout["provider_nodes"] = ["../outside", "relay5"]
+            (work / "agent-jobs-layout.json").write_text(json.dumps(layout))
+            with mock.patch.object(subprocess, "run") as run, self.assertRaises(ValueError):
+                CHECK["peer_event_windows"](work, 100)
+            run.assert_not_called()
 
     def test_discovery_diagnostic_keeps_expiry_connection_and_target_failures_distinct(self):
         # Synthetic producer events exercise the closed exporter, not a live lookup.
@@ -1004,6 +1144,36 @@ class CooperativeBrowserProof(unittest.TestCase):
             self.assertTrue(set(cases) <= CHECK['DISCOVERY_FAILURE_EVENT_CODES'])
             self.assertTrue(CHECK['DISCOVERY_FAILURE_EVENT_CODES'].isdisjoint(CHECK['RPC_EVENT_CODES']))
             self.assertTrue(CHECK['PROVIDER_LIFECYCLE_EVENT_CODES'].isdisjoint(CHECK['DISCOVERY_FAILURE_EVENT_CODES']))
+
+    def test_missing_original_attempts_join_the_exact_batch_and_lease_without_exporting_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            task = Path(temp)
+            finish = task / 'execution-diagnostic.json'
+            finish.write_text('{}')
+            os.utime(finish, (1000, 1000))
+            first = task / 'document/package-0000/attempt-0000'
+            second = task / 'document/refinement/leaf-0001/attempt-0002'
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            one = dict(binding=dict(job_id='a' * 32, expires_unix_seconds=990))
+            two = dict(binding=dict(job_id='b' * 32, expires_unix_seconds=1100))
+            (first / 'job-0.json').write_text(json.dumps(one))
+            (second / 'job-0.json').write_text(json.dumps(two))
+            receipt = dict(handle=one, status=dict(state='complete', binding=one['binding']))
+            (first / ('receipt-' + 'a' * 32 + '.json')).write_text(json.dumps(receipt))
+            rpc = dict(phase='poll', category='broker_rejected', code='missing')
+            result = dict(jobs=[dict(handle=two, state='unconfirmed', diagnostic=rpc)], outputs=['PRIVATE_TEXT'])
+            (second / 'result.json').write_text(json.dumps(result))
+            os.utime(second / 'result.json', (999, 999))
+            status = dict(receipts=dict(phase='missing_terminal', handles=2, terminal=1))
+            observed = CHECK['missing_attempts'](task, status)
+            self.assertEqual(observed, dict(state='valid', jobs=[dict(stage='refinement', attempt=2,
+                expired_at_cleanup=False, expired_at_batch_record=False, result='unconfirmed', rpc=rpc)]))
+            os.utime(finish, (1200, 1200))
+            self.assertTrue(CHECK['missing_attempts'](task, status)['jobs'][0]['expired_at_cleanup'])
+            rpc['code'] = 'PRIVATE_ERROR'
+            (second / 'result.json').write_text(json.dumps(result))
+            self.assertEqual(CHECK['missing_attempts'](task, status), dict(state='invalid'))
 
     def test_coordinator_diagnostic_retains_only_closed_stage_and_cleanup_facts(self):
         value = dict(version=1, phase='tokenization', execution_ok=False,

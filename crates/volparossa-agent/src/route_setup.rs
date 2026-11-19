@@ -1179,6 +1179,11 @@ pub(crate) enum ClientRouteConnectError {
 
 impl ClientRouteControl {
     #[cfg(test)]
+    pub(crate) async fn hold_route_owner_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn admission_closed_for_test(&self) -> bool {
         self.bootstrap.lock().await.is_closed()
     }
