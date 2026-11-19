@@ -2338,7 +2338,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
-          path: ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+            !${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/package/*.deb
           if-no-files-found: warn
           retention-days: 7
 
@@ -2566,6 +2568,20 @@ jobs:
           printf '%s  %s\n' "$tested_sha" "$name" > "$name.sha256"
           sha256sum --check --strict -- "$name.sha256"
 
+          version=$(dpkg-deb -f "$package" Version)
+          [[ "$version" =~ ^[0-9]+([.][0-9]+)*$ ]]
+          worker="volparossa-private-dns-worker_${version}_amd64.deb"
+          source_dir="$VOLPAROSSA_ALPHA_OUTPUT/package"
+          test -f "$source_dir/$worker" && test ! -L "$source_dir/$worker"
+          test -f "$source_dir/$worker.sha256" && test ! -L "$source_dir/$worker.sha256"
+          test "$(dpkg-deb -f "$source_dir/$worker" Package)" = volparossa-private-dns-worker
+          test "$(dpkg-deb -f "$source_dir/$worker" Architecture)" = amd64
+          test "$(dpkg-deb -f "$source_dir/$worker" Version)" = "$version"
+          (cd "$source_dir" && sha256sum -- "$worker") | cmp - "$source_dir/$worker.sha256"
+          install -m 0600 "$source_dir/$worker" "$source_dir/$worker.sha256" .
+          sha256sum --check --strict "$worker.sha256"
+          printf 'VOLPAROSSA_ALPHA_WORKER_PACKAGE=%s/%s\n' "$PWD" "$worker" >> "$GITHUB_ENV"
+
       - name: Upload the tested Debian Core package
         if: inputs.scenario == 'alpha'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -2574,6 +2590,8 @@ jobs:
           path: |
             ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}
             ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}.sha256
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}.sha256
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
