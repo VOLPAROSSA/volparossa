@@ -112,3 +112,25 @@ The [original guest report](../development/evidence/signal-mailbox-44538844389/s
 comes from [run 44538844389](https://github.com/VOLPAROSSA/volparossa/actions/runs/44538844389)
 at Core `59c6d6d2` and Chat `7fa73f61`. GitHub artifact 14539906183 contained
 18 files, 27,028 bytes, SHA-256 `e80da35af2d2cb95b084b6c6d369f0233fa743e8312d3542d8fd4a9750a1bef2`.
+
+## Testing paired Mail over a protected route
+
+The `paired-mail` topology scenario runs the ordinary Signal Mail sender, Core
+mailbox CLI and Stalwart owner importer. A UTF-8 multipart message is deposited
+at both signed providers while the recipient Mail process is offline. The
+topology disconnects the sender route, reopens one persistent provider store,
+and selects a fresh recipient route behind the same Client. The recipient has
+only its own keys and its new process has only loopback and the Core socket.
+
+The guest checks for zero provider acknowledgements before import, compares
+Stalwart’s exact raw MIME readback to the sent bytes, binds two signed
+acknowledgements to the same message and checks that a new fetch is empty.
+It saves the two route selections, five-role privacy captures, provider traffic,
+host snapshots and native artifact hashes. The app profiles, passwords, packets
+and database stay in the disposable guest.
+
+Select `paired-mail` in the Debian alpha topology workflow. The source pin
+identifies the original Mail QA archive, Stalwart build, Node and Linux
+libsignal binary. The producing Mail workflow retains the QA runtime for
+14 days. The local VM entry point also accepts a retained, verified transfer
+through `--paired-mail-bundle`.

@@ -1,0 +1,29 @@
+{
+  "actions": {
+    "artifact_id": 14543700485,
+    "attempt": 1,
+    "compiled_receipt_sha256": "753364103c42b68ad3d7dd773d5ae201c376574fa0a96651d689285273d49769",
+    "libsignal_sha256": "e24a9e4c701686327d602944de2fc383bccf1b93c371661dd5998f97d8aed7d4",
+    "peer_receipt_sha256": "780e48d11498173743470c0c9f37ac42f67862bf0c6366412542efb0a8ecde14",
+    "run_id": 44547309790,
+    "runtime_sha256": "cef77566e9bfc5b0e5da2b4b6f8f7c7b058e5f7b17f67d859a52ad55ebddf496",
+    "stalwart_sha256": "5300a78b6da8c8ae9c50f4fe72bb62f80d5c43832bd558aaa54857c539beaf5c",
+    "zip_bytes": 124735293,
+    "zip_sha256": "17128bb039a6427e27de11eef0798224228e1789aaa417d2c67820600ae0b72d"
+  },
+  "mail_revision": "30cc423a234d0452f11d4475c94d11dee9552407",
+  "source_files": {
+    "extensions/volparossa-mail-host/jmap.mjs": "5d62c788095e5f1623531c3ee2e43f9eee890e531e10ba6f3c69839211c12ed2",
+    "integration/peer-mail/accept.py": "7ce69eed1a2c95eb43b9528ebc157ef3ded30536c3fcefa9f4449e14623c8ed1",
+    "integration/peer-mail/import-mime.mjs": "a449ae478b4a17bda0f55580dc1ce942e9d30bb680bf922bc9cbf0f268b06cbb",
+    "integration/signal-mail/cli.mjs": "d7b31f62aa1b3dd031514588ad86ef6fbdcbcce3821f2c303c0d1388465b6af3",
+    "integration/signal-mail/deposit.py": "f82dc1750f7c7afc153d7b551ca718736a92d1e5d2d91bcd7854146eb5881a04",
+    "integration/signal-mail/files.mjs": "004b0510520c691f3193ab12d49ec0c2e0ec0852aefc5959b07d8055f4a0d8c6",
+    "integration/signal-mail/package-lock.json": "66de7226c70e13bfd0dbca5625d0b643304e49ca46896e3d8248c65fdb6ca97b",
+    "integration/signal-mail/package.json": "7d47a8c2978ebad5f7ab54f5285f64266edb38f1535e69ccdb40ff7a6c7104e9",
+    "integration/signal-mail/protocol.mjs": "b6efb78faf6759663bc8be4659830ab4945d5f7e09ef7147c19e8f3a31d46682",
+    "integration/signal-mail/route.mjs": "fc213744eea79c062f334a763169891f1ad955e7df76ec0a771e0963dca86fc3",
+    "packaging/systemd/initialize-owner.py": "12a8759f260dbaa678fb58e70d9c94d1f108d10e639c574c0ccb90f1c9550c4c",
+    "packaging/systemd/store.json": "ea4c16d6c2f060b8b6c49116583ae378d9aa773743aca4de61c0124f88cb32a2"
+  }
+}
