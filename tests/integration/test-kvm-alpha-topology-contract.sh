@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Cheap static contract for the manually or integration-PR dispatched KVM alpha runner.
+# Cheap static contract for the manually dispatched KVM alpha runner.
 # shellcheck disable=SC2016
 set -eu
 
@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
+events = workflow.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+assert re.findall(r"^  (\w+):", events, re.MULTILINE) == ["workflow_dispatch"]
 options = re.search(r"        options:\n((?:          - [a-z0-9-]+\n)+)", workflow)[1]
 dispatch = re.findall(r"          - ([a-z0-9-]+)", options)
 normalize = next(line for line in workflow.splitlines() if line.startswith("  VOLPAROSSA_ALPHA_SCENARIO:"))
@@ -31,7 +33,7 @@ aliases = dict(re.findall(r"inputs.scenario == '([^']+)' && '([^']+)'", normaliz
 canonical = {aliases.get(option, option) for option in dispatch}
 focused = json.loads(workflow.split("      FOCUSED_SCENARIOS: >-\n", 1)[1].split("\n\n", 1)[0])
 assert len(focused) == len(set(focused))
-assert set(focused) == canonical - {"alpha", "datapath", "image-immich"}
+assert set(focused) == canonical - {"alpha", "datapath", "image-immich", "browser-native-capacity"}
 assert "inputs.scenario || 'datapath'" in normalize
 assert "uses: ./.github/workflows/image-immich-peer.yml" in workflow
 guard = "!contains(fromJSON(env.FOCUSED_SCENARIOS), env.VOLPAROSSA_ALPHA_SCENARIO)"
@@ -539,10 +541,10 @@ assert scenario_selector == (
     "inputs.scenario == 'browser-native-source' && 'browser-network' || inputs.scenario || 'datapath' }}")
 topology_job = workflow.split('\n  alpha-topology:\n', 1)[1]
 # Capacity measurement and Immich each own a separate job on the public runner.
-dispatch = "(github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity')"
+dispatch = "if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'"
 assert dispatch in topology_job.split("runs-on:", 1)[0]
 for choice in ("image-immich", "browser-native-capacity"):
-    assert f"if: github.event_name == 'workflow_dispatch' && inputs.scenario == '{choice}'" in workflow
+    assert f"if: inputs.scenario == '{choice}'" in workflow
 timeout_line = next(line.strip() for line in topology_job.splitlines() if line.strip().startswith('timeout-minutes:'))
 # Preserve independent outer limits for the offline builds and Cloud maintenance.
 # Both Signal scenarios retain their 150-minute window alongside maintenance.
@@ -587,12 +589,6 @@ for line in workflow.splitlines():
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation' in line
 PYTHON_AUTONOMOUS_AGGREGATION
-grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
-grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
-grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
-    >/dev/null
-grep -F "github.head_ref == 'feature/alpha-vertical-runtime'" "$WORKFLOW" >/dev/null
-if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
 grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
     >/dev/null
 grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null
