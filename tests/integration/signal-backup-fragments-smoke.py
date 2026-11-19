@@ -201,14 +201,17 @@ def restore(root, binary, client):
     output = root / "second-restore.signal"
     result = FRAGMENTS["restore_invoke"](binary, client,
         ["storage", "fragments", "restore", *existing(root), "--output", output], deadline=900)
-    FRAGMENTS["validate_restore_result"](result, keys)
+    # The failed third fragment also contacted A. C subsequently confirms its
+    # own copy. All three A copies must remain charged as uncertain.
+    FRAGMENTS["validate_restore_result"](result, keys, uncertain_first_provider=(0, 2, 3))
     require(private_file(output).st_size == value["ciphertextBytes"]
         and NATIVE["digest"](output) == value["ciphertextSha256"], "second restoration differs")
     same_identity(root)
     output.unlink()
     return dict(second_core_restore=True, native_import_already_completed=True,
         fragment_provider_indexes=[1, 1, 2, 1], whole_archive_sha256_verified=True,
-        reads_nonconsuming=True, retained_identity_unchanged=True, ciphertext_removed=True)
+        reads_nonconsuming=True, retained_identity_unchanged=True, ciphertext_removed=True,
+        unavailable_provider_uncertain_bytes=result["uncertain_payload_bytes"])
 
 
 def finish(root, binary, client):
@@ -247,7 +250,8 @@ def validate_evidence(value, revision=None):
         cli_exit=1, output_absent=True, original_state_retained=True), "two-provider loss did not refuse publication")
     require(value["restore"] == dict(second_core_restore=True, native_import_already_completed=True,
         fragment_provider_indexes=[1, 1, 2, 1], whole_archive_sha256_verified=True, reads_nonconsuming=True,
-        retained_identity_unchanged=True, ciphertext_removed=True), "survivor-only repeat restore missing")
+        retained_identity_unchanged=True, ciphertext_removed=True,
+        unavailable_provider_uncertain_bytes=charges[0]), "survivor-only repeat restore missing")
     require(value["finish"] == dict(logical_ciphertext_bytes=size, all_eight_fragment_copies_deleted=True,
         final_payload_charge=0), "all-copy retirement missing")
     usage = [dict(reserved_bytes=0, committed_bytes=charge, leases=count) for count, charge in zip(counts, charges)]
@@ -336,6 +340,7 @@ if __name__ == "__main__":
         state = NATIVE["run_native"].__globals__
         print(json.dumps(dict(success=False, failure_stage=state["STAGE"],
             native_exit_status=state["NATIVE_EXIT"], error=NATIVE["closed_error"](error),
-            native_diagnostic=state["NATIVE_DIAGNOSTIC"])))
+            native_diagnostic=state["NATIVE_DIAGNOSTIC"],
+            restore_diagnostic=FRAGMENTS["restore_failure"](error) if sys.argv[1:2] == ["restore"] else None)))
         print("native Signal fragment trial failed; private diagnostics withheld", file=sys.stderr)
         sys.exit(1)
