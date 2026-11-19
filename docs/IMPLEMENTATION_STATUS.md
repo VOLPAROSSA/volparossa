@@ -802,6 +802,16 @@ bytes. Guest host-state digests matched. The combined repair and cold
 restoration still need a completed joint run.
 [Original archive, SHA-256 `0f4afc3c…19c0f23`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44455715673/artifacts/14499901605) · [Original application and cleanup reports](development/evidence/storage-maintenance-44455715673)
 
+The separate upload-continuation VM on the same Core revision also stopped
+during shared Image publication. Its only failed operation was APPEND for
+fragment 3, copy 1. The agent returned `CONTENT_UNAVAILABLE` during control
+selection, before READY. The owner confirmed Image deletion. Cloud had no
+archive, and the upload continuation did not start. The independent Core test
+deleted all eleven copies with zero payload charge. The guest removed its
+owned fixtures and its before/after network digests matched. This run has no
+consumer provider-usage snapshot for the failed Image deposit.
+[Original 81,532-byte archive, SHA-256 `8e6123b1…ce80bc75`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44514676250/artifacts/14527619866) · [Original reports](development/evidence/storage-maintenance-44514676250)
+
 
 #### Automatic upload integration candidate
 

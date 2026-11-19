@@ -375,11 +375,60 @@ fn peer_id(key: &ed25519_dalek::VerifyingKey) -> String {
         .to_string()
 }
 
+#[derive(Clone, Copy)]
+enum BeforeReadyRejection {
+    Tls(PrivateStorageTlsFailure),
+    MissingControl,
+    ControlPolicy,
+}
+
+impl BeforeReadyRejection {
+    fn response(self, request_id: Vec<u8>) -> volparossa_local_control::ControlResponse {
+        use volparossa_local_control::{
+            CONTROL_PROTOCOL_VERSION, ControlResponse, ControlResult, Empty,
+            PrivateStorageRemoteDetail, PrivateStorageRemoteStage as Stage,
+            control_response::Payload,
+        };
+        let (result, code, stage, tls_failure) = match self {
+            Self::Tls(failure) => (
+                ControlResult::Unavailable,
+                "CONTENT_UNAVAILABLE",
+                Stage::TlsHandshake,
+                Some(failure as i32),
+            ),
+            Self::MissingControl => (
+                ControlResult::Unavailable,
+                "CONTENT_UNAVAILABLE",
+                Stage::ControlSelection,
+                None,
+            ),
+            Self::ControlPolicy => (
+                ControlResult::Policy,
+                "CONTENT_POLICY",
+                Stage::ControlSelection,
+                None,
+            ),
+        };
+        ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id,
+            result: result as i32,
+            diagnostic_code: code.into(),
+            private_storage_remote_detail: Some(PrivateStorageRemoteDetail {
+                stage: stage as i32,
+                tls_failure,
+                ..Default::default()
+            }),
+            payload: Some(Payload::Ack(Empty {})),
+        }
+    }
+}
+
 async fn fake_agent(
     listener: tokio::net::UnixListener,
     service: Arc<StorageService>,
     grant: VerifiedStorageGrant,
-    mut tls_failures: tokio::sync::mpsc::UnboundedReceiver<Option<PrivateStorageTlsFailure>>,
+    mut rejections: tokio::sync::mpsc::UnboundedReceiver<Option<BeforeReadyRejection>>,
 ) {
     use volparossa_content::{
         provider::{PublicationRegistry, serve_publication},
@@ -390,8 +439,8 @@ async fn fake_agent(
         control_request::Operation, control_response::Payload, read_request, write_response,
     };
     let mut index = 0;
-    // Twelve deposit attempts, eleven restore attempts, one renewal and two deletes.
-    while index < 26 {
+    // Seventeen deposit attempts, eleven restore attempts, one renewal and two deletes.
+    while index < 31 {
         let (mut local, _) = listener.accept().await.unwrap();
         let request = read_request(&mut local).await.unwrap();
         if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
@@ -405,27 +454,16 @@ async fn fake_agent(
         index += 1;
         assert_eq!(requested.provider_key, grant.provider_key().as_bytes());
         assert_eq!(requested.grant, grant.signed().encode());
-        if let Ok(Some(failure)) = tls_failures.try_recv() {
-            write_response(
-                &mut local,
-                &ControlResponse {
-                    protocol_version: CONTROL_PROTOCOL_VERSION,
-                    request_id: request.request_id,
-                    result: volparossa_local_control::ControlResult::Unavailable as i32,
-                    diagnostic_code: "CONTENT_UNAVAILABLE".into(),
-                    private_storage_remote_detail: Some(
-                        volparossa_local_control::PrivateStorageRemoteDetail {
-                            stage: volparossa_local_control::PrivateStorageRemoteStage::TlsHandshake
-                                as i32,
-                            tls_failure: Some(failure as i32),
-                            ..Default::default()
-                        },
-                    ),
-                    payload: Some(Payload::Ack(volparossa_local_control::Empty {})),
-                },
-            )
-            .await
-            .unwrap();
+        if let Ok(Some(failure)) = rejections.try_recv() {
+            write_response(&mut local, &failure.response(request.request_id))
+                .await
+                .unwrap();
+            assert_eq!(
+                tokio::io::AsyncReadExt::read(&mut local, &mut [0; 1])
+                    .await
+                    .unwrap(),
+                0
+            );
             continue;
         }
         let (mut remote, mut provider) = tokio::io::duplex(4096);
@@ -603,11 +641,17 @@ async fn peer_ipc_requires_terminal_and_streams_resumable_private_copy() {
             .is_err()
     );
     assert!(retained.journal.lease.is_none());
-    let timeout = Some(PrivateStorageTlsFailure::HandshakeDeadline);
-    let authentication = Some(PrivateStorageTlsFailure::Authentication);
+    let timeout = Some(BeforeReadyRejection::Tls(
+        PrivateStorageTlsFailure::HandshakeDeadline,
+    ));
+    let authentication = Some(BeforeReadyRejection::Tls(
+        PrivateStorageTlsFailure::Authentication,
+    ));
+    let missing_control = Some(BeforeReadyRejection::MissingControl);
+    let policy = Some(BeforeReadyRejection::ControlPolicy);
     // Reconcile Reserve, reopen the first Append before sending its bytes, then
-    // retain the acknowledged prefix when the next chunk cannot open its TLS session.
-    for event in [None, timeout, None, timeout] {
+    // retain the acknowledged prefix when the next chunk loses its control route.
+    for event in [None, timeout, None, missing_control] {
         inject.send(event).unwrap();
     }
     assert!(
@@ -620,7 +664,12 @@ async fn peer_ipc_requires_terminal_and_streams_resumable_private_copy() {
     assert_eq!(target.archive_id, archive);
     drop(retained);
     let mut retained = LockedJournal::open(&path).unwrap();
-    for (failure, background) in [(authentication, false), (timeout, true)] {
+    for (failure, background) in [
+        (authentication, false),
+        (timeout, true),
+        (policy, false),
+        (missing_control, true),
+    ] {
         inject.send(None).unwrap(); // Progress returns the original lease and prefix.
         inject.send(failure).unwrap();
         let attempt =
@@ -637,6 +686,11 @@ async fn peer_ipc_requires_terminal_and_streams_resumable_private_copy() {
                 .is_some()
         );
         assert_eq!(retained.journal.last_stored_bytes, CHUNK_BYTES as u64);
+    }
+    // Progress reopens the durable prefix. The next Append can select a fresh
+    // route before READY while retaining the original lease and signed bytes.
+    for event in [None, missing_control, None] {
+        inject.send(event).unwrap();
     }
     transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
         .await
