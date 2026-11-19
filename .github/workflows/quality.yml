@@ -406,9 +406,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  quality:
-    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
-    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+  storage-evidence:
+    name: Verify original Storage trial receipts
+    if: github.event_name == 'pull_request' && github.event.pull_request.commits == 1 && (github.event.pull_request.changed_files == 9 || github.event.pull_request.changed_files == 10)
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - id: classify
+        name: Compare both source trees and the authenticated artifact
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          route=full
+          checker="$RUNNER_TEMP/check-storage-evidence-pr.py"
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && git show "$BASE_SHA:scripts/check-storage-evidence-pr.py" > "$checker"; then
+            route=$(python3 -I -B "$checker") || route=full
+          fi
+          case "$route" in full|verified|invalid) ;; *) route=full ;; esac
+          printf 'route=%s\n' "$route" >> "$GITHUB_OUTPUT"
+
+  quality-build:
+    name: Full unprivileged workspace suite
+    needs: storage-evidence
+    if: ${{ always() && !cancelled() && (needs.storage-evidence.result != 'success' || needs.storage-evidence.outputs.route != 'verified') && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -417,6 +448,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Test Storage evidence routing and archive verification
+        run: python3 -B scripts/test-check-storage-evidence-pr.py
 
       - name: Verify complete committed goal preservation and fresh-export controls
         run: |
@@ -823,3 +857,25 @@ jobs:
           # helper enforces a closed inventory and a 128 MiB payload limit.
           path: ${{ steps.audit-cache.outputs.path }}
           key: ${{ steps.audit-cache.outputs.key }}
+
+  quality:
+    name: ${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && 'Quality gates skipped for opt-in proof' || 'Unprivileged quality gates' }}
+    needs: [storage-evidence, quality-build]
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require a complete workspace suite or verified original evidence
+        env:
+          EVENT: ${{ github.event_name }}
+          CLASSIFIER: ${{ needs.storage-evidence.result }}
+          ROUTE: ${{ needs.storage-evidence.outputs.route }}
+          BUILD: ${{ needs.quality-build.result }}
+        run: |
+          set -euo pipefail
+          test "$ROUTE" != invalid
+          if [[ "$ROUTE/$CLASSIFIER" == verified/success ]]; then
+            test "$EVENT/$BUILD" = 'pull_request/skipped'
+          else
+            test "$BUILD" = success
+          fi
