@@ -30,7 +30,7 @@ def run(mode, binary, socket, argument, cache=None):
         def cli(*args):
             result = subprocess.run([binary, '--control-socket', socket, *args], cwd=work,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, timeout=115, check=True)
-            return json.loads(result.stdout)
+            return result.stdout
 
         if mode == 'publish':
             credential = work / 'passphrase'
@@ -38,18 +38,18 @@ def run(mode, binary, socket, argument, cache=None):
                 password.write(secrets.token_urlsafe(40))
             unlock = ['--identity', work / 'identity', '--passphrase-file', credential]
             cli('init', *unlock)
-            key = cli('content', 'recipient-key', *unlock)['identity_public_key_hex']
-            result = cli('content', 'publish', '--contribute', '--input', argument, '--expected-input-sha256', DIGEST,
+            key = json.loads(cli('content', 'recipient-key', *unlock))['identity_public_key_hex']
+            result = json.loads(cli('content', 'publish', '--contribute', '--input', argument, '--expected-input-sha256', DIGEST,
                          '--expected-publisher-key', key, '--name', NAME, '--revision', '1', '--content-type',
-                         'application/zip', '--manifest', work / 'manifest', '--cache', work / 'cache', *unlock)
+                         'application/zip', '--manifest', work / 'manifest', '--cache', work / 'cache', *unlock))
             require(result['operation'] == 'content_publish' and result['network_publication'] is True
                     and result['serving'] is True and result['publisher_key_hex'] == key
                     and result['bytes'] == SIZE and result['chunks'] == 1, 'public proof contribution incomplete')
             return {'publisher_key': key, 'publication': result, 'namespace': os.readlink('/proc/self/ns/net')}
         require(mode == 'receive' and cache, 'reader cache path required')
         path = work / 'public-referenda.zip'
-        result = cli('content', 'fetch-name', '--publisher-key', argument, '--name', NAME,
-                     '--min-revision', '1', '--cache', cache, '--local-output', path)
+        result = json.loads(cli('content', 'fetch-name', '--publisher-key', argument, '--name', NAME,
+                     '--min-revision', '1', '--cache', cache, '--local-output', path))
         require(path.stat().st_size == SIZE and stat.S_IMODE(path.stat().st_mode) == 0o600, 'unexpected reader output')
         received = path.read_bytes()
         require(hashlib.sha256(received).hexdigest() == result['sha256'] == DIGEST and result['bytes'] == SIZE
