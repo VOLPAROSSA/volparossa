@@ -823,6 +823,17 @@ leases, reserved bytes and committed bytes. The eleven-copy Core lifecycle and
 guest cleanup completed. The guest's before/after host-state digests matched.
 [Original 81,981-byte archive, SHA-256 `cfb1313c…8bb5e46`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44516433050/artifacts/14529597943) · [Original reports](development/evidence/storage-maintenance-44516433050)
 
+The shared trial on `200d58c5` published Image using `21988efc` and reached
+Cloud using `08be9711`. Cloud FINALIZE for fragment 1, copy 1 was its sole
+reported failure. The agent returned `CONTENT_UNAVAILABLE` during control
+selection, before READY. Both owners confirmed deletion. The independent Core
+lifecycle deleted all eleven copies, and its three providers reported zero
+leases, reserved bytes and committed bytes. An independent usage reading
+for the failed application deposits is absent. The guest removed its owned
+objects and its before/after network digests matched. Shared repair, cold
+restore and the separate finite upload lifecycle remain open.
+[Original 81,883-byte archive, SHA-256 `c90eb64a…c01ae792`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44537092652/artifacts/14539650755) · [Original reports](development/evidence/storage-maintenance-44537092652)
+
 
 #### Automatic upload integration candidate
 
