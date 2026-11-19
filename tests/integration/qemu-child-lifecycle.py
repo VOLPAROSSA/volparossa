@@ -26,12 +26,11 @@ def positive(value):
     return int(value)
 
 
-def identity(pid):
+def process_stat(pid):
     # procfs is local kernel state, not a caller-chosen path. Bound its read and
     # parse after the final ')' because process comm may itself contain spaces.
     with (Path('/proc') / str(pid) / 'stat').open('rb') as source:
-        if os.fstat(source.fileno()).st_uid != os.geteuid():
-            raise ValueError('owner')
+        owned = os.fstat(source.fileno()).st_uid == os.geteuid()
         raw = source.read(4097)
     if len(raw) > 4096:
         raise ValueError('identity')
@@ -39,7 +38,14 @@ def identity(pid):
     fields = tail.split()
     if not separator or not prefix.startswith(str(pid).encode() + b' (') or len(fields) < 20:
         raise ValueError('identity')
-    return int(fields[1]), int(fields[19])
+    return (int(fields[1]), int(fields[19])), owned
+
+
+def identity(pid):
+    observed, owned = process_stat(pid)
+    if not owned:
+        raise ValueError('owner')
+    return observed
 
 
 def preflight():
@@ -113,20 +119,27 @@ def exited(descriptor, seconds):
 def stop(pid, parent, started, *, graceful):
     expected = parent, started
     try:
-        if identity(pid) != expected:
-            raise ValueError('changed_identity')
+        before, owned_before = process_stat(pid)
+    except (ProcessLookupError, FileNotFoundError):
+        return True
+    if before != expected:
+        raise ValueError('changed_identity')
+    try:
         descriptor = os.pidfd_open(pid)
-    except ProcessLookupError:
-        return True
-    except FileNotFoundError:
-        return True
+    except (ProcessLookupError, FileNotFoundError):
+        return owned_before
     try:
         # Bind the opened descriptor and the earlier private birth token. Even
         # if the original child exits here, no recycled/foreign PID is signalled.
         try:
-            if identity(pid) != expected:
-                raise ValueError('changed_identity')
+            after, owned_after = process_stat(pid)
         except (ProcessLookupError, FileNotFoundError):
+            return exited(descriptor, KILL_SECONDS)
+        if after != expected:
+            raise ValueError('changed_identity')
+        # procfs may change inode ownership during exit, even before state Z.
+        # Either unverified observation permits only polling this bound pidfd.
+        if not (owned_before and owned_after):
             return exited(descriptor, KILL_SECONDS)
         if exited(descriptor, GRACE_SECONDS if graceful else 0):
             return True

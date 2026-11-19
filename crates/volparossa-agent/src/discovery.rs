@@ -17150,6 +17150,12 @@ mod tests {
         (fixture.runtime, fixture.state, fixture.directory)
     }
 
+    pub(super) fn client_only_runtime_fixture()
+    -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, TempDir) {
+        let fixture = fixture(test_client_roles());
+        (fixture.runtime, fixture.state, fixture.directory)
+    }
+
     pub(super) fn retirement_runtime_fixture()
     -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, TempDir) {
         let fixture = fixture(RolesConfig {

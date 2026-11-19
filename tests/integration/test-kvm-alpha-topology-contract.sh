@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Cheap static contract for the manually or integration-PR dispatched KVM alpha runner.
+# Cheap static contract for the manually dispatched KVM alpha runner.
 # shellcheck disable=SC2016
 set -eu
 
@@ -15,6 +15,34 @@ RECIPROCITY=$HERE/reciprocity-smoke.sh
 RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
 # Pure decisions and preview wiring only: never run a runner network probe here.
+# Every canonical single-purpose scenario uses its own gate. Both full-suite
+# checks must still run for the default, explicit alpha and unclassified inputs.
+python3 -B - "$WORKFLOW" <<'ACCEPTANCE_SCENARIOS'
+import json
+import re
+import sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text()
+events = workflow.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+assert re.findall(r"^  (\w+):", events, re.MULTILINE) == ["workflow_dispatch"]
+options = re.search(r"        options:\n((?:          - [a-z0-9-]+\n)+)", workflow)[1]
+dispatch = re.findall(r"          - ([a-z0-9-]+)", options)
+normalize = next(line for line in workflow.splitlines() if line.startswith("  VOLPAROSSA_ALPHA_SCENARIO:"))
+aliases = dict(re.findall(r"inputs.scenario == '([^']+)' && '([^']+)'", normalize))
+canonical = {aliases.get(option, option) for option in dispatch}
+focused = json.loads(workflow.split("      FOCUSED_SCENARIOS: >-\n", 1)[1].split("\n\n", 1)[0])
+assert len(focused) == len(set(focused))
+assert set(focused) == canonical - {"alpha", "datapath", "image-immich", "browser-native-capacity"}
+assert "inputs.scenario || 'datapath'" in normalize
+assert "uses: ./.github/workflows/image-immich-peer.yml" in workflow
+guard = "!contains(fromJSON(env.FOCUSED_SCENARIOS), env.VOLPAROSSA_ALPHA_SCENARIO)"
+for name, prefix in (("Validate normative acceptance report before upload", "always() && "),
+                     ("Require successful A01-A15 evidence", "")):
+    step = workflow.split("      - name: " + name + "\n", 1)[1]
+    assert step.splitlines()[0].strip() == "if: ${{ " + prefix + guard + " }}"
+ACCEPTANCE_SCENARIOS
+
 python3 -B "$HERE/test-qemu-outer-uplink.py"
 python3 -B "$HERE/test-protected-quote-route.py"
 python3 -B "$HERE/test-protected-quote-route-wiring.py"
@@ -438,8 +466,6 @@ for line in guest.splitlines():
     if line.startswith('if [ "$agent_model_planning" = yes ]') or line.startswith('if [ "$agent_model_task_graph" = yes ]'):
         assert "agent_active_recovery" not in line, "135M recovery must not stage 360M/decoder"
 for line in workflow.splitlines():
-    if "VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving'" in line:
-        assert "VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery'" in line
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-successor-serving' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery' in line
 for line in host.splitlines():
@@ -483,8 +509,6 @@ stop = jobs[jobs.index('agent_jobs_stop() {'):jobs.index('agent_jobs_cleanup() {
 assert stop.index('agent_jobs_stop_unit "$jobs_stop_unit"') < stop.index('agent_adapter_aggregation_python cleanup-workers "$WORK"')
 assert '[ "${agent_active_recovery:-no}" = yes ] || return 1' in jobs
 for line in workflow.splitlines():
-    if "VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery'" in line:
-        assert "VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation'" in line
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line
 PYTHON_ADAPTER_AGGREGATION
@@ -517,10 +541,10 @@ assert scenario_selector == (
     "inputs.scenario == 'browser-native-source' && 'browser-network' || inputs.scenario || 'datapath' }}")
 topology_job = workflow.split('\n  alpha-topology:\n', 1)[1]
 # Capacity measurement and Immich each own a separate job on the public runner.
-dispatch = "(github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity')"
+dispatch = "if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'"
 assert dispatch in topology_job.split("runs-on:", 1)[0]
 for choice in ("image-immich", "browser-native-capacity"):
-    assert f"if: github.event_name == 'workflow_dispatch' && inputs.scenario == '{choice}'" in workflow
+    assert f"if: inputs.scenario == '{choice}'" in workflow
 timeout_line = next(line.strip() for line in topology_job.splitlines() if line.strip().startswith('timeout-minutes:'))
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
@@ -562,17 +586,9 @@ for line in guest.splitlines():
     if '[ "$node" = relay5 ]' in line:
         assert "agent_autonomous_aggregation" not in line
 for line in workflow.splitlines():
-    if "VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation'" in line:
-        assert "VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation'" in line
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation' in line
 PYTHON_AUTONOMOUS_AGGREGATION
-grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
-grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
-grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
-    >/dev/null
-grep -F "github.head_ref == 'feature/alpha-vertical-runtime'" "$WORKFLOW" >/dev/null
-if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
 grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
     >/dev/null
 grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null

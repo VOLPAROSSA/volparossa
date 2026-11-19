@@ -1,0 +1,23 @@
+{
+  "source_build": {
+    "browser_revision": "9e0861687a7ef2a032155edeebcb19bf0fef0712",
+    "controller_sha256": "b80de09365cbf7cab9eb829982ea3e2cc169b84997e01d49e3dcd9a8b3be7e67",
+    "firefox_revision": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+    "firefox_tree": "4a1d6e73d48bc5888e4da37d655b360a14db18db",
+    "kind": "native-firefox-source-build",
+    "native_patch_sha256": "6d87eb3a00275caad042f10e8ebfe14c579a45bb40dab6f4461822cf5e5dffc1",
+    "outputs": {
+      "obj/dist/bin/firefox": "9e8b92c76b7a588afc944e68db9df1adaa8ff567d779567cdca1184113b72982",
+      "obj/dist/bin/libxul.so": "026057a6fdd6d72b5d632fe561a5a3e410b8c19d86a7f63e5098cd9b3c7b105d",
+      "obj/dist/bin/xpcshell": "65a020e4cec07e43cf5053edff3a92b36f6ec7cf79986d4ef4f7ebe5a3ea6d7d"
+    },
+    "overlay_sha256": "4e667e72e2136c59d75e669e71765ac83612d3dc601cb1f4c205430e11fb4b76",
+    "plugin_container_sha256": "79d7e0fe39636987ea15b50876c5e748e72c436c42bd4530597b21ee74ad85c2",
+    "receipt_sha256": "0e8c5b9d4798bc1751bec135d74e418c1ea12c278f586b0e4f6dd751870fe777",
+    "rust_report_sha256": "f994b853cae209236bd522735903f66a4a01f5cc8c04632d36aa45449ca367ac",
+    "tab_chrome_patch_sha256": "af2d52a78bd3f93a584a438ed0d82381265c91e3d2bb8b12d2c01deb4b9b35d5"
+  },
+  "core_revision": "25c73b4fcc7832e2d7f7ede95ff14d8de8c40fff",
+  "bundle_sha256": "954af28fb042e15ba43ec248ba5d6b26074d46ea04f15aaa2472f7a3e091bf3d",
+  "archive_sha256": "e8f57519767c9e6bd9cbcbbc353c59ed7e2a8c1c87859f9587640ef3843c805a"
+}

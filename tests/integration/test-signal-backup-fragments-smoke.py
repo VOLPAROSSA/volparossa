@@ -33,7 +33,11 @@ def fixture():
         native_export_rendezvous_observed=True)
     value["restore"] = dict(second_core_restore=True, native_import_already_completed=True,
         fragment_provider_indexes=[1, 1, 2, 1], whole_archive_sha256_verified=True, reads_nonconsuming=True,
-        retained_identity_unchanged=True, ciphertext_removed=True)
+        retained_identity_unchanged=True, ciphertext_removed=True, unavailable_provider_uncertain_bytes=charges[0])
+    value["refusal"] = dict(completed_fragments=2, unavailable_fragment=2, serving_provider_index=1,
+        cli_exit=1, output_absent=True, original_state_retained=True)
+    value["network"]["restore"]["gates"]["exit_mptcp_tls_completed"] = 20
+    value["network"]["restore"]["privacy"]["exit"]["provider_application"]["relay5"]["response_payload_bytes"] += 2 * lengths[0]
     value["finish"] = dict(logical_ciphertext_bytes=size, all_eight_fragment_copies_deleted=True, final_payload_charge=0)
     value["withdrawal"] = dict(first_provider_stopped_before_confirmation=True,
         native_ready_provider_matches_first=True, first_store_retained=True, other_two_providers_serving=True,
@@ -61,6 +65,9 @@ class SignalFragmentEvidence(unittest.TestCase):
             lambda v: v["withdrawal"].update(native_ready_provider_matches_first=False),
             lambda v: v["restore"].update(fragment_provider_indexes=[1, 1, 1, 1]),
             lambda v: v["restore"].update(retained_identity_unchanged=False),
+            lambda v: v["restore"].update(unavailable_provider_uncertain_bytes=0),
+            lambda v: v["refusal"].update(output_absent=False),
+            lambda v: v["refusal"].update(unavailable_fragment=0),
             lambda v: v["restored_usage"][0].update(committed_bytes=0),
             lambda v: v["deleted_usage"][2].update(leases=1),
             lambda v: v["network"].pop("upload"),

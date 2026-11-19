@@ -7,7 +7,6 @@ archive's phase has ended may the disposable supervisor replace its three owned
 control links with nine UDP-only links. All production selection/authority is
 unchanged. This helper is intentionally not a network operator.
 """
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -32,21 +31,6 @@ def pair(broker, provider):
 
 
 PAIRS = tuple(pair(b, p) for b in BROKERS for p in PROVIDERS)
-
-
-def filter_rules(value, name, interface, local, remote):
-    """Reuse the exact historical eight-rule validator, not a wider nft grammar."""
-    keys(value, ('nftables',))
-    require(type(value['nftables']) is list, 'consumer_control_nft_rows')
-    projected = copy.deepcopy(value)
-    for row in projected['nftables']:
-        require(type(row) is dict and len(row) == 1, 'consumer_control_nft_row')
-        for kind, field in (('table', 'name'), ('chain', 'table'), ('rule', 'table')):
-            if kind in row:
-                require(type(row[kind]) is dict and row[kind].get(field) == name,
-                    'consumer_control_nft_name')
-                row[kind][field] = 'vpa_content_control_adaptive_0'
-    OLD['control_filter'](projected, 0, interface, local, remote)
 
 
 def snapshot(value, *, detached=False):
@@ -87,7 +71,8 @@ def snapshot(value, *, detached=False):
                     prefsrc=p['subnet'] + f'.{local}', scope='link', protocol='kernel'),
                 dict(dst=addresses[other], dev=device, gateway=p['subnet'] + f'.{remote}',
                     prefsrc=addresses[node], scope=None, protocol='boot')])
-            filter_rules(raw['tables'][p['table']], p['table'], device, addresses[node], addresses[other])
+            OLD['validate_control_table'](raw['tables'][p['table']], p['table'], device,
+                addresses[node], addresses[other])
         routes = []
         for route in raw['routes']:
             keys(route, ('dst', 'dev', 'gateway', 'prefsrc', 'scope', 'protocol'))

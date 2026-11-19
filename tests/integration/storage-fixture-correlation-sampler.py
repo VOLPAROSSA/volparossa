@@ -39,10 +39,12 @@ PROVIDER_PHASES = ('tls_handshake', 'registry_snapshot', 'selector_read', 'stora
     'storage_challenge_write_flush', 'storage_request_read_verify', 'storage_operation', 'other_protocol', 'closing')
 TERMINALS = ('active', 'complete', 'tls_timeout', 'tls_error', 'operation_error', 'cancelled')
 MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete', 'unmatchable')
+KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out',
+    'mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
+    'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out', 'mptcp_connect_operation_deadline')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
-    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete',
-    'mptcp_connect_poll_timed_out')
+    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS
 HELPER_REASONS = ('helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
     'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
     'helper_validation', 'helper_authority', 'helper_correlation', 'helper_runtime_changed')
@@ -120,7 +122,7 @@ def acquire_summary(value, phase, terminal):
         code = failure['helper_diagnostic']
         require(code is None or (type(code) is str and code in HELPER_DIAGNOSTICS
             and failure['stage'] == 'helper_acquire' and failure['reason'] in HELPER_REASONS[:6]))
-        require(code != 'mptcp_connect_poll_timed_out' or failure['reason'] == 'helper_kernel')
+        require(code not in KERNEL_DIAGNOSTICS or failure['reason'] == 'helper_kernel')
 
 
 def reply(value, action, fingerprints, version=1):

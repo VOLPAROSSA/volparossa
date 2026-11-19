@@ -97,29 +97,75 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
 }
 
 #[test]
-fn fixture_mptcp_connect_poll_timeout_is_only_a_kernel_acquire_failure() {
+fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
     use crate::{
         PrivateStorageFlowAcquireReason as Reason, PrivateStorageFlowAcquireStage as Stage,
     };
 
-    let mut value = acquire_summary();
-    value.rounds = 2;
-    let first = value.first.as_mut().unwrap();
-    first.helper_diagnostic = Some(StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut as i32);
-    first.failure.as_mut().unwrap().reason = Reason::HelperKernel as i32;
-    value.validate().unwrap();
-    assert_eq!(
-        StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
-        value
-    );
-    for reason in [
-        Reason::HelperCapacity,
-        Reason::HelperUnavailable,
-        Reason::HelperNotFound,
-        Reason::HelperCleanupIncomplete,
-        Reason::HelperOtherRejection,
-        Reason::HelperTimeout,
+    use StorageFixtureHelperDiagnostic as Code;
+
+    for (code, number, label) in [
+        (
+            Code::MptcpConnectPollTimedOut,
+            9,
+            "mptcp_connect_poll_timed_out",
+        ),
+        (
+            Code::MptcpConnectSocketRefused,
+            20,
+            "mptcp_connect_socket_refused",
+        ),
+        (
+            Code::MptcpConnectSocketNetworkUnreachable,
+            21,
+            "mptcp_connect_socket_network_unreachable",
+        ),
+        (
+            Code::MptcpConnectSocketHostUnreachable,
+            22,
+            "mptcp_connect_socket_host_unreachable",
+        ),
+        (
+            Code::MptcpConnectSocketTimedOut,
+            23,
+            "mptcp_connect_socket_timed_out",
+        ),
+        (
+            Code::MptcpConnectOperationDeadline,
+            24,
+            "mptcp_connect_operation_deadline",
+        ),
     ] {
+        assert_eq!(code as i32, number);
+        let mut value = acquire_summary();
+        value.rounds = 2;
+        let first = value.first.as_mut().unwrap();
+        first.helper_diagnostic = Some(code as i32);
+        first.failure.as_mut().unwrap().reason = Reason::HelperKernel as i32;
+        value.validate().unwrap();
+        assert_eq!(
+            StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        for reason in [
+            Reason::HelperCapacity,
+            Reason::HelperUnavailable,
+            Reason::HelperNotFound,
+            Reason::HelperCleanupIncomplete,
+            Reason::HelperOtherRejection,
+            Reason::HelperTimeout,
+        ] {
+            let mut wrong = value;
+            wrong
+                .first
+                .as_mut()
+                .unwrap()
+                .failure
+                .as_mut()
+                .unwrap()
+                .reason = reason as i32;
+            assert!(wrong.validate().is_err());
+        }
         let mut wrong = value;
         wrong
             .first
@@ -128,23 +174,10 @@ fn fixture_mptcp_connect_poll_timeout_is_only_a_kernel_acquire_failure() {
             .failure
             .as_mut()
             .unwrap()
-            .reason = reason as i32;
+            .stage = Stage::RetirementDrain as i32;
         assert!(wrong.validate().is_err());
+        assert_eq!(serde_json::to_value(code).unwrap(), label);
     }
-    let mut wrong = value;
-    wrong
-        .first
-        .as_mut()
-        .unwrap()
-        .failure
-        .as_mut()
-        .unwrap()
-        .stage = Stage::RetirementDrain as i32;
-    assert!(wrong.validate().is_err());
-    assert_eq!(
-        serde_json::to_string(&StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut).unwrap(),
-        "\"mptcp_connect_poll_timed_out\""
-    );
 }
 
 #[test]

@@ -269,6 +269,23 @@ The trial supplies both scoped grants through the privileged driver. Interaction
 with a visible tab menu, raw ECH wire evidence and browser-wide traffic policy
 have separate verification boundaries.
 
+### Native tab routing through the Firefox menu
+
+On 19 November 2026, Core `25c73b4f` built Firefox 157.0.1 offline at Browser
+`9e086168` in 86 minutes 51 seconds. The KVM drove the visible tab menu and
+GTK file chooser. Cancelling the first hostname-and-port confirmation left the
+tab unbound. The two subsequent approvals established independent routes.
+Each ordinary tab rendered and verified 33,554,432 bytes over TLS 1.3. The
+second transfer survived release of the first route. Both explicit releases
+succeeded. Kernel samples confirmed two carrying MPTCP subflows on distinct
+WireGuard paths. The guest removed all owned network objects and reproduced the
+original host network-state digest.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44515290413)
+· [Browser receipt](../development/evidence/browser-native-44515290413/browser-network-browser.json)
+· [Source-build receipt](../development/evidence/browser-native-44515290413/expected.json)
+· [Topology and kernel evidence](../development/evidence/browser-native-44515290413/browser-network-smoke.json)
+· [Driver and origin observations](../development/evidence/browser-native-44515290413/browser-network-driver.json)
+
 ## Build the native browser and run the ordinary-tab proof
 
 The manually selected `browser-native-source` scenario in the Alpha production-helper

@@ -61,6 +61,30 @@ complete captures and unchanged guest state. Earlier attempts failed, and this m
 one configured passing topology does not establish repeatable gain or a general speed guarantee.
 The diagnostic-only change does not prove a causal scheduler repair; detailed source-scoped
 results are centralized in [implementation status](../IMPLEMENTATION_STATUS.md).
+On 19 November 2026, the [protected-source comparison at `a155a415`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44517187229)
+delivered both 32-MiB responses with matching application hashes. WAN alone measured 6.489 Mbps
+and LAN+WAN 6.307 Mbps (0.97190x), below the required 1.25x. The client received 2,843,136
+outer WireGuard bytes from the LAN relay and 36,648,112 from the WAN relay during the combined
+response window. All eight privacy captures drained and the before/after guest snapshots matched.
+The [original comparison](../development/evidence/mixed-link-44517187229/mixed-link-bandwidth.json)
+and [guest result](../development/evidence/mixed-link-44517187229/mixed-link-smoke.json) come from artifact
+`14526584654` (148,982 bytes, SHA-256 `ccca4dafad44eb55819c4ae8c0ea38d40c8dff9c14fbd1bed38b2b5a749de5d6`).
+The earlier gain has therefore not repeated on this source. The Exit's original 10–20 second
+scheduler samples cover only part of the connection and do not establish the cause.
+
+The [instrumented trial at `81ef1035`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44527488065)
+measured 6.519 Mbps on WAN and 9.367 Mbps on LAN+WAN, a 1.43698x gain. Each real
+32-MiB HTTP/3 response matched its destination hash and completed endpoint drain. During
+the aggregate response, both capped links carried incoming WireGuard data in all four
+measured quarters. The client observed 27,184,736 bytes from the LAN relay and
+12,933,872 bytes from the WAN relay after release. All eight privacy captures passed,
+the host snapshots matched and cleanup left zero owned objects. The
+[guest report](../development/evidence/mixed-link-44527488065/mixed-link-smoke.json) and
+[response observations](../development/evidence/mixed-link-44527488065/mixed-link-response-windows.json)
+come from artifact 14534115481 (SHA-256
+`ce7be56a0be6f9afd1ec2a8f7575e103744ffbc417c88b50788fbabe9531a9fb`).
+The two November trials show that the measured gain varies under the same two link caps.
+
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
 public-IP fallback is used.
