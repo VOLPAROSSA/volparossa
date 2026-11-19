@@ -450,7 +450,7 @@ is removed; behavioral tests and production paths are unchanged.
 
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
-| Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
+| Network | Core `9072cce8` passed A01–A15 and the install, upgrade and removal of the Debian 13 amd64 package pair. Mixed-link performance and the expanded DICN scenarios remain open. [Acceptance and packages](#network-baseline-and-remaining-proof) |
 | Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
@@ -1009,6 +1009,27 @@ the forced crash. The outer host snapshots matched. The acceptance gate
 withheld the downloadable package.
 [Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447116925) ·
 [Guest package error](development/evidence/alpha-package-44447116925/package-apt.stderr)
+
+On 19 November 2026, Core `9072cce87c77ea8e421b1261cb5e5ade80e758a7` passed
+all 15 v1 cases in the twelve-node Debian 13 KVM topology. After the forced
+crashes, the guest counted zero remaining owned objects and the before/after
+host snapshots matched. The `alpha` workflow built the Core package twice on
+one Ubuntu runner and obtained identical bytes. In Debian 13 amd64, the package
+trial installed Core 0.1.0 with its matching private DNS worker, started both
+Core services, ran `doctor` before and after upgrading, and removed Core. The
+upgrade preserved the identity and restarted the active services. Removal
+preserved the identity and configuration. The network snapshots matched.
+[Acceptance report and original case evidence](development/evidence/alpha-package-44453914133/acceptance-report.json) ·
+[Package lifecycle](development/evidence/alpha-package-44453914133/package-lifecycle.json) ·
+[Workflow run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44453914133)
+
+The installable QA candidate has a GitHub Actions expiry date of 26 November 2026.
+The ZIP SHA-256 is `573554dd00c7b946bfd030524293fc1e9615db177047771f25d7647a32d1892d`.
+The repository retains both package checksums and the original acceptance evidence.
+[Candidate package pair](https://github.com/VOLPAROSSA/volparossa/actions/runs/44453914133/artifacts/14499490074) ·
+[Core checksum](development/evidence/alpha-package-44453914133/volparossa_0.1.0_amd64.deb.sha256) ·
+[Worker checksum](development/evidence/alpha-package-44453914133/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) ·
+[Installation instructions](../packaging/README.md)
 
 ## Fixed alpha v1 scorecard
 
