@@ -153,7 +153,6 @@ class Wiring(unittest.TestCase):
         self.assertNotIn('check-report-v6', gate)
         self.assertNotIn('report-consumer-v7', gate)
         self.assertNotIn('report-consumer-v8', gate)
-        self.assertEqual(WORKFLOW.count("&& env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-upload-maintenance'"), 2)
         for suite in ('provision', 'smoke', 'evidence', 'shell', 'vm-wiring'):
             self.assertIn(f'python3 -B tests/integration/test-cloud-upload-maintenance-{suite}.py', WORKFLOW)
         self.assertIn("if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-maintenance'", WORKFLOW)
