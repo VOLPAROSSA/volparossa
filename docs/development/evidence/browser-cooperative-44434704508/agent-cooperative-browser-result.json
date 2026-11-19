@@ -1,0 +1,40 @@
+{
+  "source_sha256": "bf48d5b2fb66f851cf43e3a314f2fdd3503ea58861b129820b6318b380d85fc2",
+  "source_manifest_id": "e122a80df91755206991b3d370a755a4526d13f28ac438b312f40712f48a9cab",
+  "context_bytes": 4096,
+  "total_parts": 2,
+  "package_count": 1,
+  "synthesis_levels": 2,
+  "provider_keys": [
+    "103dfe194c18af5b894eb2c72325e3a3fdf536c44294fd4f74f7feaad0deb944",
+    "b7527506596c1689dbaa2056b4940ff50b483673e95048468e8b108c8b5719e5"
+  ],
+  "jobs": 21,
+  "output_sha256": "7bd31fe03457d1c888d8d1fce1d3e43c64120b61eb10ce1a9fe53f61f3988e1e",
+  "execution_complete": true,
+  "answer_complete": true,
+  "semantic_completeness_proven": false,
+  "exact_native_receipts_verified": true,
+  "selected_provider_keys": [
+    "103dfe194c18af5b894eb2c72325e3a3fdf536c44294fd4f74f7feaad0deb944",
+    "b7527506596c1689dbaa2056b4940ff50b483673e95048468e8b108c8b5719e5"
+  ],
+  "model_fingerprint": "b39c343bb867dc6b12ec15fb6b7332569209398cf8c188986cdb69c5a1142592",
+  "refinement": {
+    "version": 2,
+    "enabled": true,
+    "applied": true,
+    "original_parts": 2,
+    "refined_leaves": 2,
+    "effective_parts": 10,
+    "original_token_limited_outputs": 2,
+    "exact_frontier_verified": true,
+    "retained_splits": 8,
+    "deepest_level": 4,
+    "intermediate_token_limited_outputs": 6
+  },
+  "trial_contract": "discovered-360m",
+  "scenario": "agent-cooperative-browser-discovered",
+  "model_profile": "smollm2-360m-v1",
+  "provider_selection": "protected_provider_eligibility_discovery"
+}
