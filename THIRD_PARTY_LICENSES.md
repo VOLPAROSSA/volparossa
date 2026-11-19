@@ -624,7 +624,7 @@ existing Apache-2.0 upstream files preserve their upstream license and
 notices.
 
 The additional GPL-3.0-only `patches/volparossa-xquic-edt.patch`
-(`21472637e2b8e48c16af835a10137a67f450e07b565bb87241aa3f8895452a80`)
+(`de7ba38caf20335f7ac2af7d448be638b76b88b6509cac6097bccb3f59b07b33`)
 retains bounded initial exploration (2 MiB ACKed per path, at most 8 MiB attempt
 debt plus one packet), then selects by live delivery cost and congestion.
 It does not continuously equalise historical path bytes. Outstanding bytes
