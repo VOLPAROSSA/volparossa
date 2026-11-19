@@ -40,6 +40,7 @@ on:
           - private-storage-fragments
           - private-storage-maintenance
           - image-snapshot
+          - image-immich
           - cloud-private-file
           - cloud-private-upload
           - cloud-private-upload-resume
@@ -82,6 +83,10 @@ on:
           - agent-adapter-aggregation
           - agent-autonomous-aggregation
           - agent-policy-assessment
+      image_revision:
+        description: Exact reviewed VOLPAROSSA Image commit for image-immich
+        type: string
+        default: ''
   pull_request:
     branches:
       - main
@@ -102,11 +107,17 @@ env:
   VOLPAROSSA_CLOUD_UPLOAD_PROFILE: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'retained-owner' || 'ordinary' }}
 
 jobs:
+  image-immich:
+    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'image-immich'
+    uses: ./.github/workflows/image-immich-peer.yml
+    with:
+      image_revision: ${{ inputs.image_revision }}
+
   alpha-topology:
     name: ${{ inputs.scenario == 'transaction-abci' && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'feature/alpha-vertical-runtime')
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
