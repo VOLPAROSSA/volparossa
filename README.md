@@ -111,12 +111,10 @@ automatic software updates also remain in development. The
 tracks the current blockers and next usable milestones without treating feature branches
 as released functionality.
 
-These results belong to their recorded revisions and test conditions. The original
-[A01–A15 transport acceptance run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
-is a historical checkpoint, not certification of every later change.
-[Detailed status and evidence](docs/IMPLEMENTATION_STATUS.md) keeps passing results,
-failed trials and remaining work together. An open feature branch is not automatically
-part of `main`.
+The November Debian 13 amd64 candidate at `9072cce8` passed all 15 transport
+acceptance cases. A Debian 13 virtual machine installed Core with its private
+DNS worker and verified Core startup, upgrade and removal.
+[Candidate results and package download](docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof)
 
 <a id="four-layers-one-network"></a>
 
