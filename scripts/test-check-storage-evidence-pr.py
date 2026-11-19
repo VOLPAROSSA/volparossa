@@ -126,6 +126,7 @@ class EvidenceChanges(unittest.TestCase):
             ('pull_request', 'success', 'full', 'skipped', False),
             ('pull_request', 'success', 'invalid', 'success', False),
             ('pull_request', 'cancelled', 'verified', 'skipped', False),
+            ('pull_request', 'failure', 'verified', 'success', True),
             ('push', 'success', 'verified', 'skipped', False),
         ):
             with self.subTest(event=event, route=route, build=build):
