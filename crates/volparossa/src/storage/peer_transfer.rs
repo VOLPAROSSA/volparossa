@@ -23,8 +23,8 @@ use volparossa_content::{
     },
 };
 use volparossa_local_control::{
-    ContentReceipt, PrivateStorageRemoteRequest, PrivateStorageTlsFailure,
-    control_request::Operation, control_response::Payload,
+    ContentReceipt, PrivateStorageRemoteRequest, control_request::Operation,
+    control_response::Payload,
 };
 
 use super::{
@@ -330,7 +330,7 @@ pub(super) async fn restore_retained(
     Ok(())
 }
 
-// A foreground deposit or restore can reopen one TLS handshake per copy. At
+// A foreground deposit or restore can reopen one transient connection per copy. At
 // AgentReady the owner has sent neither the signed operation nor any payload.
 // Both attempts use the same grant, operation, bytes and exchange deadline.
 async fn exchange_before_ready(
@@ -345,19 +345,13 @@ async fn exchange_before_ready(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
     let first = remote(socket, grant, signer, target, operation, payload).await;
     let Err(error) = first else { return first };
-    let handshake_timeout = error
+    let can_reopen = error
         .downcast_ref::<crate::control::AgentRejected>()
-        .and_then(|rejected| rejected.private_storage_remote_detail)
-        .is_some_and(|detail| {
-            detail.tls_failure == Some(PrivateStorageTlsFailure::HandshakeDeadline as i32)
-        });
+        .is_some_and(crate::control::AgentRejected::can_reopen_storage_connection);
     let before_ready = error
         .downcast_ref::<Boundary>()
         .is_some_and(|boundary| matches!(boundary.stage, Stage::AgentReady));
-    if !*retry_available
-        || !before_ready
-        || !handshake_timeout
-        || tokio::time::Instant::now() >= deadline
+    if !*retry_available || !before_ready || !can_reopen || tokio::time::Instant::now() >= deadline
     {
         return Err(error);
     }

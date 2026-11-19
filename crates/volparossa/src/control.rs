@@ -19,6 +19,23 @@ pub(crate) struct AgentRejected {
     result: ControlResult,
 }
 
+impl AgentRejected {
+    pub(crate) fn can_reopen_storage_connection(&self) -> bool {
+        use volparossa_local_control::{PrivateStorageRemoteStage, PrivateStorageTlsFailure};
+        let Some(detail) = self.private_storage_remote_detail else {
+            return false;
+        };
+        detail.tls_failure == Some(PrivateStorageTlsFailure::HandshakeDeadline as i32)
+            || (self.result == ControlResult::Unavailable
+                && self.diagnostic_code == "CONTENT_UNAVAILABLE"
+                && detail
+                    == PrivateStorageRemoteDetail {
+                        stage: PrivateStorageRemoteStage::ControlSelection as i32,
+                        ..Default::default()
+                    })
+    }
+}
+
 impl std::fmt::Display for AgentRejected {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
