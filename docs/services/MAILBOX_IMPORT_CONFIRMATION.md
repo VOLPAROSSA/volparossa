@@ -134,3 +134,20 @@ identifies the original Mail QA archive, Stalwart build, Node and Linux
 libsignal binary. The producing Mail workflow retains the QA runtime for
 14 days. The local VM entry point also accepts a retained, verified transfer
 through `--paired-mail-bundle`.
+
+On 19 November 2026, the Debian 13 twelve-node guest delivered the 90,139-byte
+message on two successive MPTCP routes. Sender custody took six Exit TLS flows
+and six exact provider lookups. After the sender exited and the second provider
+reopened the same store, pickup, native import, confirmation and the final empty
+fetch took seven flows and seven lookups. All ten physical-role captures passed.
+The two original Ed25519 acknowledgements verified against the independently
+selected provider keys. The host snapshots matched and cleanup found zero
+owned objects. The applications shared one Client agent. The separate native
+Mail producer exercised the ordinary Thunderbird Inbox.
+
+Core revision `b9c01e976b49d94af4b88c033a08f15ca032178f` used Mail revision
+`30cc423a234d0452f11d4475c94d11dee9552407`. The original 27-file guest ZIP had
+SHA-256 `3f4cc66aeee04d1ad992eb5ac7eaba36fc561b142a9fdb4b0b99d93ec87c53e2`.
+[Guest run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44553382181) ·
+[Original report](../development/evidence/paired-mail-44553382181/paired-mail-smoke.json) ·
+[Native Mail producer](https://github.com/VOLPAROSSA/volparossa-mail/actions/runs/44547309790)
