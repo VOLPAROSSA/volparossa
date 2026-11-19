@@ -10,6 +10,7 @@ from pathlib import Path
 import runpy
 import selectors
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -24,6 +25,17 @@ OLD = runpy.run_path(str(HERE / "test-browser-network-smoke.py"))
 
 
 class NativeBrowserTests(unittest.TestCase):
+    def test_preconsent_socket_observer_detects_a_closed_connection(self):
+        observer = runpy.run_path(str(HERE / "browser-native-ui.py"))["observe_uncontacted_public_socket"]
+        with tempfile.TemporaryDirectory() as root:
+            with observer(root) as path:
+                self.assertTrue(Path(path).is_socket())
+            self.assertFalse(Path(path).exists())
+            with self.assertRaisesRegex(ValueError, "contacted before consent"):
+                with observer(root) as path, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(path)
+            self.assertFalse(Path(path).exists())
+
     def test_vm_bundle_arguments_are_bound_to_their_exact_scenario(self):
         source = (HERE / "run-alpha-topology-vm.sh").read_text()
         driver = source.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split("\nGUEST_DRIVER_SCRIPT\n", 1)[0]
@@ -349,7 +361,7 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
             controls = dict(physical_tab_menu=True, native_file_picker=True, verified_authority_confirmations=3,
                             cancelled_without_binding=True, owner_approved_tabs=2, explicit_releases=2)
             provider = dict(physical_provider_changes=2, native_ask_prefill=True,
-                public_rights_and_consent_clear=True, public_license_empty=True, public_submit_disabled=True, sidebar_closed=True)
+                public_rights_and_consent_clear=True, public_license_empty=True, public_submit_disabled=True, sidebar_closed=True, public_socket_contacts=0)
             current["browser"].update(browser_revision=pins["revision"], tab_controls=controls,
                                       provider_selector=provider)
             current["provision"].update(browser_revision=pins["revision"],
@@ -363,6 +375,8 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
                                      ("browser", "provider_selector", dict(provider, public_submit_disabled=False)),
                                      ("browser", "provider_selector", dict(provider, physical_provider_changes=True)),
                                      ("browser", "provider_selector", dict(provider, native_ask_prefill=1)),
+                                     ("browser", "provider_selector", dict(provider, public_socket_contacts=False)),
+                                     ("browser", "provider_selector", dict(provider, public_socket_contacts=1)),
                                      ("provision", "tab_controls_driver_sha256", "0" * 64),
                                      ("provision", "source_build", fresh)):
                 changed = copy.deepcopy(current)

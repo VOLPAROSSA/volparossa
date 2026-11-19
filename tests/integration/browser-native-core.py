@@ -350,7 +350,10 @@ def inside(args, work, provision):
             ui["release_tabs"](client, work)
             report["tab_controls"]["explicit_releases"] = 2
             tab_phase = None
-            ui["exercise_provider_selector"](client, report)
+            with ui["observe_uncontacted_public_socket"](work) as endpoint:
+                ui["exercise_provider_selector"](client, report, endpoint)
+            report["provider_selector"]["public_socket_contacts"] = 0
+            del report["provider_selector_phase"]
         client.command("Marionette:SetContext", {"value": "content"})
         handles = window_handles(client) - initial_tabs
         require(len(handles) == 2)

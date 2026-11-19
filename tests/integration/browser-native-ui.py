@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Exercise the visible Firefox tab menu and GTK chooser on the fixture's private X display."""
+from contextlib import contextmanager
 import ctypes as ct
 import json
 import os
 from pathlib import Path
 import re
+import select
+import socket
 import subprocess
 import time
 
@@ -288,7 +291,23 @@ return {
 """
 
 
-def exercise_provider_selector(client, report):
+@contextmanager
+def observe_uncontacted_public_socket(work):
+    """Keep attempted public connections observable even if a caller immediately disconnects."""
+    path = Path(work) / "pre-consent.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        try:
+            path.chmod(0o600)
+            listener.listen(1)
+            yield str(path)
+            if select.select([listener], [], [], 0)[0]:
+                raise ValueError("public compute socket contacted before consent")
+        finally:
+            path.unlink()
+
+
+def exercise_provider_selector(client, report, public_socket):
     """Move the built-in selector with physical input and follow Firefox's public Ask entry point."""
     def view():
         return client.script(PROVIDER_VIEW)
@@ -314,6 +333,7 @@ def exercise_provider_selector(client, report):
 
     report["provider_selector_phase"] = "sidebar"
     client.script(SIDEBAR + """
+      Services.prefs.setStringPref("browser.volparossa.compute.public_socket", arguments[0]);
       Services.prefs.setBoolPref("browser.ml.chat.enabled", true);
       Services.prefs.setStringPref("browser.ml.chat.provider", "volparossa:private");
       return (async () => {
@@ -325,7 +345,7 @@ def exercise_provider_selector(client, report):
           throw new Error("provider_sidebar_document");
         }
       })();
-    """)
+    """, [public_socket])
     display = Display()
     try:
         private = view()
@@ -356,4 +376,4 @@ def exercise_provider_selector(client, report):
     report["provider_selector"] = dict(physical_provider_changes=2, native_ask_prefill=True,
         public_rights_and_consent_clear=True, public_license_empty=True, public_submit_disabled=True,
         sidebar_closed=True)
-    del report["provider_selector_phase"]
+    report["provider_selector_phase"] = "public-socket-check"

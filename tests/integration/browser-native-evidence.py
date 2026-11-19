@@ -51,9 +51,11 @@ def validate_browser(evidence):
             owner_approved_tabs=2, explicit_releases=2))
         provider = browser["provider_selector"]
         require(set(provider) == {"physical_provider_changes", "native_ask_prefill",
-            "public_rights_and_consent_clear", "public_license_empty", "public_submit_disabled", "sidebar_closed"}
+            "public_rights_and_consent_clear", "public_license_empty", "public_submit_disabled", "sidebar_closed",
+            "public_socket_contacts"}
             and type(provider["physical_provider_changes"]) is int and provider["physical_provider_changes"] == 2
-            and all(provider[key] is True for key in provider if key != "physical_provider_changes"))
+            and type(provider["public_socket_contacts"]) is int and provider["public_socket_contacts"] == 0
+            and all(provider[key] is True for key in provider if key not in ("public_socket_contacts", "physical_provider_changes")))
     if provision["kind"] == "source-built-native-firefox":
         record = provision["source_build"]
         source["validate_record"](record)
