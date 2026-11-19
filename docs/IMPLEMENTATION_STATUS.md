@@ -438,7 +438,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial stopped at an Image reservation. All three providers reported zero usage after cleanup. The owner could not confirm every deletion. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -726,6 +726,24 @@ not reached. The 82,243-byte Actions ZIP has SHA-256
 `12cfd2f78bce34895487d6fb9e116eef7f33adc4c86b8e3f6891928ec8838b56`.
 [Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44419915713)
 · [Original failure, usage and cleanup reports](development/evidence/storage-maintenance-44419915713)
+
+The twelve-node trial on `9335306b` completed the separate Core lifecycle and
+deleted all eleven Core copies. The consumer phase prepared two encrypted inputs
+of 799,146 bytes each and passed Image enrollment. Cloud stopped during deposit.
+Its fragment 0 FINALIZE (copy 0) and RESERVE (copy 1) each made eight attempts
+to acquire a protected stream before READY. Both reported `helper_kernel` on
+the first and last attempt. A separate RESERVE on fragment 1, copy 0 returned
+`CONTENT_POLICY`. The helper logged one MPTCP poll timeout. The phase observer also recorded a
+generic transport-unavailable response. Neither observation identified a fragment or copy.
+
+During failure cleanup, the owner confirmed deletion for both Image and Cloud.
+Before the private journals were removed, all three providers independently
+reported zero leases, reserved bytes and committed bytes. The disposable guest
+removed its fixture state and both host snapshots matched byte for byte.
+Cloud publication stopped before joint repair, cold restore and the final
+acceptance checks. The 82,290-byte ZIP has SHA-256
+`a3870f4a6ab880537cb1e8752f3d64c569579f71e5cdb7415378ce1f2c0590e8`.
+[Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44430761553) · [Original application, route and cleanup receipts](development/evidence/storage-maintenance-44430761553)
 
 #### Automatic upload integration candidate
 
