@@ -286,6 +286,22 @@ original host network-state digest.
 · [Topology and kernel evidence](../development/evidence/browser-native-44515290413/browser-network-smoke.json)
 · [Driver and origin observations](../development/evidence/browser-native-44515290413/browser-network-driver.json)
 
+### Firefox provider selection before public sharing
+
+On 19 November 2026, Core `eb9b22c1` built Firefox 157.0.1 at Browser
+`9e086168` in 87 minutes and one second. In the Debian KVM, mouse and
+keyboard input switched the native sidebar from the private provider to the
+cooperative provider and back. Firefox's built-in Ask action filled the public
+review form with the selected test text. The license stayed empty, the rights
+and consent controls stayed unchecked, and the submit button stayed disabled.
+The separate public Unix-socket listener recorded zero connections. Both
+ordinary tabs verified 33,554,432 bytes over TLS 1.3, with two carrying MPTCP
+subflows on distinct WireGuard paths. The guest restored its initial network
+state and removed every owned topology object.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44533016980)
+· [Original source-build archive](../development/evidence/browser-native-44533016980/source.zip)
+· [Original topology archive](../development/evidence/browser-native-44533016980/topology.zip)
+
 ## Build the native browser and run the ordinary-tab proof
 
 The manually selected `browser-native-source` scenario in the Alpha production-helper

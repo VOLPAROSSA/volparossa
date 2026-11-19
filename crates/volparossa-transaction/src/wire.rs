@@ -4,7 +4,7 @@ use prost::Message;
 use sha2::{Digest as _, Sha256};
 use volparossa_protocol::{decode_canonical, encode_canonical};
 
-use crate::{Action, Command, Error, LedgerId, MAX_UNITS, Mode, TEST_UNIT};
+use crate::{AccountId, Action, Command, Error, LedgerId, MAX_UNITS, Mode, TEST_UNIT};
 
 const DOMAIN: &[u8] = b"volparossa/transaction/test-unit-command/v1\0";
 const ORDERED_DOMAIN: &[u8] = b"volparossa/transaction/ordered-test-unit-command/v2\0";
@@ -51,6 +51,28 @@ struct Envelope {
     signature: Vec<u8>,
 }
 
+/// Ed25519 authorization for fictional TEST commands. The signer keeps the private key.
+pub trait CommandSigner {
+    /// Independently enrolled financial test public key, in its standard 32-byte encoding.
+    fn public_key(&self) -> AccountId;
+
+    /// Sign the exact domain-separated command preimage supplied by Core.
+    ///
+    /// # Errors
+    /// May refuse signing when the key or its owner's approval is unavailable.
+    fn sign_ed25519(&self, preimage: &[u8]) -> Result<[u8; 64], Error>;
+}
+
+impl CommandSigner for SigningKey {
+    fn public_key(&self) -> AccountId {
+        self.verifying_key().to_bytes()
+    }
+
+    fn sign_ed25519(&self, preimage: &[u8]) -> Result<[u8; 64], Error> {
+        Ok(self.sign(preimage).to_bytes())
+    }
+}
+
 /// Original signed bytes, not evidence of account enrollment or accepted mutation.
 #[derive(Clone, Debug)]
 pub struct SignedCommand(Vec<u8>);
@@ -65,6 +87,22 @@ impl SignedCommand {
     pub fn sign(
         ledger: LedgerId,
         key: &SigningKey,
+        command: Command,
+        valid_from: u64,
+        expires: u64,
+        nonce: [u8; 32],
+    ) -> Result<Self, Error> {
+        Self::sign_with(ledger, key, command, valid_from, expires, nonce)
+    }
+
+    /// Authorize a local TEST command using an external Ed25519 signer.
+    /// Core verifies the returned signature against the payer and the exact terms.
+    ///
+    /// # Errors
+    /// Rejects invalid terms, signer refusal, or an incorrect public key or signature.
+    pub fn sign_with(
+        ledger: LedgerId,
+        key: &dyn CommandSigner,
         command: Command,
         valid_from: u64,
         expires: u64,
@@ -95,6 +133,22 @@ impl SignedCommand {
         expires: u64,
         nonce: [u8; 32],
     ) -> Result<Self, Error> {
+        Self::sign_ordered_with(ledger, key, command, valid_from, expires, nonce)
+    }
+
+    /// Authorize a ordered TEST command using an external Ed25519 signer.
+    /// Core verifies the returned signature against the payer and the exact terms.
+    ///
+    /// # Errors
+    /// Rejects invalid terms, signer refusal, or an incorrect public key or signature.
+    pub fn sign_ordered_with(
+        ledger: LedgerId,
+        key: &dyn CommandSigner,
+        command: Command,
+        valid_from: u64,
+        expires: u64,
+        nonce: [u8; 32],
+    ) -> Result<Self, Error> {
         Self::sign_mode(
             ledger,
             key,
@@ -108,13 +162,17 @@ impl SignedCommand {
 
     fn sign_mode(
         ledger: LedgerId,
-        key: &SigningKey,
+        key: &dyn CommandSigner,
         command: Command,
         valid_from: u64,
         expires: u64,
         nonce: [u8; 32],
         mode: Mode,
     ) -> Result<Self, Error> {
+        let public_key = key.public_key();
+        if public_key != command.payer {
+            return Err(Error::Unauthorized);
+        }
         let version = if mode == Mode::Local { 1 } else { 2 };
         let (kind, target, units) = match command.action {
             Action::Reserve { recipient, units } => (1, recipient, units),
@@ -134,7 +192,7 @@ impl SignedCommand {
         let payload = encode_canonical(&body, MAX_BYTES).map_err(|_| Error::Invalid)?;
         let mut envelope = Envelope {
             version,
-            sender: key.verifying_key().to_bytes().to_vec(),
+            sender: public_key.to_vec(),
             valid_from,
             expires,
             nonce: nonce.to_vec(),
@@ -142,7 +200,7 @@ impl SignedCommand {
             payload,
             signature: Vec::new(),
         };
-        envelope.signature = key.sign(&signing_bytes(&envelope)?).to_bytes().to_vec();
+        envelope.signature = key.sign_ed25519(&signing_bytes(&envelope)?)?.to_vec();
         let bytes = encode_canonical(&envelope, MAX_BYTES).map_err(|_| Error::Invalid)?;
         verify_mode(&bytes, ledger, mode)?;
         Ok(Self(bytes))

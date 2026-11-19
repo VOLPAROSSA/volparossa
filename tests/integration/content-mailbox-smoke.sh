@@ -284,6 +284,7 @@ content_mailbox_run() {
         no_manifest_or_message_id_argument:true,agent_mount_positive_control:true,
         agent_cannot_read_user_state:true,client_cannot_read_provider_stores:true}' \
         "$WORK/content-mailbox-output-raw.json" >"$WORK/content-mailbox-output.json"
+    if [ "${signal_mailbox:-no}" = yes ]; then signal_mailbox_run; fi
     for mailbox_node in "$provider_node_a" "$provider_node_b"; do
         [ "$(stat -Lc '%a:%u:%g' "$WORK/state-$mailbox_node/mailbox-cache")" = "700:$AGENT_UID:$AGENT_GID" ] \
             || fail MAILBOX_PROVIDER_STORE_MODE_INVALID

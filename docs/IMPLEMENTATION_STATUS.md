@@ -450,17 +450,17 @@ is removed; behavioral tests and production paths are unchanged.
 
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
-| Network | Core `9072cce8` passed A01–A15 and the install, upgrade and removal of the Debian 13 amd64 package pair. Mixed-link performance and the expanded DICN scenarios remain open. [Acceptance and packages](#network-baseline-and-remaining-proof) |
+| Network | Two independent runners built identical Core and DNS worker packages at `428e2899`. Both passed A01–A15 and the Debian 13 install, upgrade and removal trial. One 32 MiB mixed-link transfer measured 1.437× the WAN-only throughput. The earlier trial measured 0.972×. [Acceptance and packages](#network-baseline-and-remaining-proof) · [Both mixed-link runs](https://github.com/VOLPAROSSA/volparossa/pull/439) |
 | Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
-| Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
-| DPS / Map | The Linux desktop used 719 synthetic signed traffic advisories with the real Monaco road graph. The selected driving route changed from 1,083.24 m to 3,746.96 m and returned to its original distance on expiry. Field accuracy and joined mobile peer routing remain open. [Native route and rendering trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44514448577) |
-| Cache / Weather | The installed Android 16 app removed an expired ECMWF value, displayed the first refresh failure, and displayed 8.973 °C after a second request acquired the signed revision. The NOAA values stayed the same. Three independent Overmorrow release builds matched. Physical-device and iOS expiry remain open. [Android receipts](https://github.com/VOLPAROSSA/volparossa-weather/tree/3d1e6384a2ced86e3239598cac2173c5ff0696b8/docs/evidence/android-44514675704) |
+| Studio | The native Silex desktop saved a page with a unique visible edit, reopened it in two fresh processes and quit normally on protected Studio main. In a separate trial, Firefox rendered the signed Silex export from a holder while the publisher was offline. Joining the native desktop export to that hosting path remains open. [Native desktop](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/44547586924) · [Independent hosting](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952) |
+| DPS / Map | On the real Monaco graph, synthetic signed traffic advisories changed a driving route from 1,083.24 m to 3,746.96 m. Expiry and replacement each restored the original geometry. The native desktop compared 1,489 expiry frames and 15 removal frames. Field positioning accuracy and mobile peer routing remain open. [Native traffic trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44539811197) |
+| Cache / Weather | The Android 16 emulator and iPhone 16 Pro Max simulator each hid the expired ECMWF forecast, displayed a failed refresh and recovered after a second request. On iOS the source temperature was 7.115 °C. The four screenshots record the original display precision. NOAA remained available through the cycle. Physical-device validation remains open. [Android receipts](https://github.com/VOLPAROSSA/volparossa-weather/tree/3d1e6384a2ced86e3239598cac2173c5ff0696b8/docs/evidence/android-44514675704) · [iPhone trial and screenshots](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44542699817) |
 | Code / Browser AI | Two tabs in a source-built Firefox each downloaded 32 MiB over protected connections. Detaching one preserved the other. The coding, cooperative job and protected inference trials have separate acceptance criteria. [Native browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054) |
 | Transactions / Bank | Four validators preserved 100 TEST units across partitions, restart and replay. In a separate signed auction, independent readers can recalculate the indicative price from a frozen roster and fictitious limit orders. Full finality coverage, funding and external settlement remain open. [Validators](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Auction reader](https://github.com/VOLPAROSSA/volparossa-bank/blob/6e234caf6d13eb37b58e192e57d52d2cc6c49fee/docs/PAPER_AUCTION.md) |
-| Mail | Stalwart received a 267-byte SMTP message while Thunderbird was closed. After a server crash and SQLite reopen, a fresh Thunderbird profile opened the delivered subject and body over implicit TLS. External reception and peer mail delivery remain open. [Native inbox receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/f59e6e5d31d84ffb72bcc62be05fd0cab4ca9890/third_party/thunderbird-stalwart-native-inbox) |
-| Chat | Two standalone Signal Desktops exchanged an encrypted message through two local Core mailbox providers. The recipient reopened its SQLCipher profile and the sender saw Delivered after returning online. The providers operated through local sockets. Protected multi-node delivery is a separate trial. [Native receipt](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44521164389/attempts/2) |
-| Citizen | Belenios verified three fictional referenda against their independently retained setups. Citizen also replays a signed ZIP from existing Core caches offline. Real-person eligibility and recognized deployment remain open. [Native Belenios checks](https://github.com/VOLPAROSSA/volparossa-citizen/actions/runs/44516645835) · [Offline Core reader](https://github.com/VOLPAROSSA/volparossa-citizen/pull/11) |
+| Mail | The ordinary paired sender delivered 429 MIME bytes through two independent local provider stores. Stalwart lost its import reply and restarted. A retry found the same email and verified every byte before both providers acknowledged. A fresh Thunderbird profile opened its subject and body over implicit TLS. Public Internet receipt and protected multi-node Mail transport require separate trials. [Peer and Inbox receipt](development/evidence/mail-owner-44547309790/peer-mail.json) · [Complete Mail trial](https://github.com/VOLPAROSSA/volparossa-mail/actions/runs/44547309790) |
+| Chat | Two standalone Signal Desktops exchanged a message while each correspondent was offline in turn. One Core client carried their traffic through the protected twelve-node topology to two independent providers. The recipient reopened its SQLCipher profile, the sender observed Delivered and both provider inboxes emptied. Separately, automatic delivery survived a worker restart on local provider sockets. [Protected transport and captures](https://github.com/VOLPAROSSA/volparossa/actions/runs/44538844389) · [Automatic delivery](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44548794182) |
+| Citizen | An independent protected client received all 28,782 public referendum bytes from a peer with zero origin bytes. Citizen ran Belenios 3.3.0 offline on that exact ZIP and independently retained setups. The three fictional proposals were adopted, indeterminate and rejected. Real-person eligibility and recognized deployment remain open. [Peer retrieval and ballot replay](https://github.com/VOLPAROSSA/volparossa/actions/runs/44525516565) |
 | Other applications / maintenance | Continue every agreed integration and organization-wide work; component/source checks do not complete consumer scenarios. |
 
 ### Execution priorities and next milestones
@@ -823,6 +823,17 @@ leases, reserved bytes and committed bytes. The eleven-copy Core lifecycle and
 guest cleanup completed. The guest's before/after host-state digests matched.
 [Original 81,981-byte archive, SHA-256 `cfb1313c…8bb5e46`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44516433050/artifacts/14529597943) · [Original reports](development/evidence/storage-maintenance-44516433050)
 
+The shared trial on `200d58c5` published Image using `21988efc` and reached
+Cloud using `08be9711`. Cloud FINALIZE for fragment 1, copy 1 was its sole
+reported failure. The agent returned `CONTENT_UNAVAILABLE` during control
+selection, before READY. Both owners confirmed deletion. The independent Core
+lifecycle deleted all eleven copies, and its three providers reported zero
+leases, reserved bytes and committed bytes. An independent usage reading
+for the failed application deposits is absent. The guest removed its owned
+objects and its before/after network digests matched. Shared repair, cold
+restore and the separate finite upload lifecycle remain open.
+[Original 81,883-byte archive, SHA-256 `c90eb64a…c01ae792`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44537092652/artifacts/14539650755) · [Original reports](development/evidence/storage-maintenance-44537092652)
+
 
 #### Automatic upload integration candidate
 
@@ -1051,6 +1062,25 @@ The repository retains both package checksums and the original acceptance eviden
 [Core checksum](development/evidence/alpha-package-44453914133/volparossa_0.1.0_amd64.deb.sha256) ·
 [Worker checksum](development/evidence/alpha-package-44453914133/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) ·
 [Installation instructions](../packaging/README.md)
+
+On 19 November 2026, two independent hosted runners each built the Debian
+amd64 packages twice from Core `428e28999768f274e61c0267e34db4f671677b2f`.
+The Core package (26,104,956 bytes) and private DNS worker (52,796 bytes)
+each matched byte for byte across the two downloads. The package builder now
+calculates Installed-Size from logical file sizes, so filesystem block allocation
+does not change the binary archive. Both Debian 13 KVM runs passed A01–A15,
+installed the package pair, preserved the identity across the upgrade and
+removed the package. Each guest counted zero remaining test objects and its
+before/after host snapshots matched.
+[First acceptance](development/evidence/alpha-package-44530318378/acceptance-report.json) ·
+[Second acceptance](development/evidence/alpha-package-44530323130/acceptance-report.json) ·
+[First package lifecycle](development/evidence/alpha-package-44530318378/package-lifecycle.json) ·
+[Second package lifecycle](development/evidence/alpha-package-44530323130/package-lifecycle.json) ·
+[Core SHA-256](development/evidence/alpha-package-44530323130/volparossa_0.1.0_amd64.deb.sha256) ·
+[Worker SHA-256](development/evidence/alpha-package-44530323130/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) ·
+[First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530318378) ·
+[Second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130) ·
+[Download the tested packages](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130/artifacts/14537641263)
 
 ## Fixed alpha v1 scorecard
 

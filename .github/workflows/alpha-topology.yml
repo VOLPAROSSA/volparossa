@@ -38,6 +38,7 @@ on:
           - private-storage-replicas
           - signal-backup
           - signal-backup-fragments
+          - signal-mailbox
           - private-storage-handoff
           - private-storage-fragments
           - private-storage-maintenance
@@ -141,7 +142,7 @@ jobs:
     name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
+    timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'signal-mailbox' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
 
     env:
       # These scenarios validate their own reports. Unlisted scenarios require full A01–A15 evidence.
@@ -152,7 +153,7 @@ jobs:
           "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "content", "content-message",
           "content-https", "content-provider", "protected-quote", "content-custody",
           "private-storage-peer", "private-storage-replicas", "signal-backup",
-          "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments",
+          "signal-backup-fragments", "signal-mailbox", "private-storage-handoff", "private-storage-fragments",
           "private-storage-maintenance", "image-snapshot", "cloud-private-file",
           "cloud-private-upload", "content-repair", "content-replication", "content-mailbox",
           "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel",
@@ -219,6 +220,8 @@ jobs:
           python3 -B tests/integration/test-signal-backup-smoke.py
           python3 -B tests/integration/test-signal-backup-fragments-smoke.py
           sh -n tests/integration/signal-backup-fragments-smoke.sh
+          sh -n tests/integration/signal-mailbox-smoke.sh
+          python3 -B tests/integration/test-signal-mailbox-smoke.py
           sh -n tests/integration/private-storage-handoff-smoke.sh
           python3 -B tests/integration/test-private-storage-handoff-smoke.py
           python3 -B tests/integration/test-private-storage-handoff-wiring.py
@@ -363,11 +366,14 @@ jobs:
           python3 -B tests/integration/test-reciprocity-private-dns-capture.py
           python3 -B tests/packaging/test-private-dns-package-proof.py
 
+      - name: Prepare the signed Ubuntu archive
+        id: ubuntu_archive
+        uses: VOLPAROSSA/.github/actions/ubuntu-archive@0b26926c9893b01713aded0d331efb1333ddf0c0
+
       - name: Install official Ubuntu VM tools
         run: |
           set -euo pipefail
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install \
             --yes --no-install-recommends \
             build-essential cmake git libevent-dev pkg-config \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
@@ -387,7 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e /opt/volparossa-native-browser-build && test ! -L /opt/volparossa-native-browser-build
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             apparmor bubblewrap zstd make perl unzip pkg-config libarchive-tools
           # The guarded cleanup can also remove an empty directory if acquisition
           # stops before the producer writes its ownership marker.
@@ -427,7 +433,7 @@ jobs:
           test ! -e /opt/volparossa-native-coding-build
           test ! -L /opt/volparossa-native-coding-build
           df -h /opt
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             python3 apparmor bubblewrap patch clang libssl-dev libclang-dev protobuf-compiler binutils
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /opt/volparossa-native-coding-build
           bash tests/integration/native-coding-apparmor.sh "$GITHUB_SHA"
@@ -458,7 +464,7 @@ jobs:
           VMP_RUN_TESTS: no
         run: |
           set -euo pipefail
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4
           protoc --version
           cargo fetch --locked
@@ -527,6 +533,8 @@ jobs:
       - name: Build the exact offline Bank TEST authorizer
         if: inputs.scenario == 'transaction-abci-bank'
         id: bank
+        env:
+          UBUNTU_ARCHIVE_CONFIG: ${{ steps.ubuntu_archive.outputs.config }}
         run: bash tests/integration/transaction-abci-bank-build.sh
 
       - name: Run disposable production-helper topology
@@ -707,7 +715,7 @@ jobs:
             fi
             exit 0
           fi
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup-fragments; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup-fragments || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-mailbox; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/$VOLPAROSSA_ALPHA_SCENARIO-smoke.json"
             if test -f "$report"; then
               jq '{report_kind,success,phase,observed_blocker,scope,cleanup,host_state}' \
@@ -1357,6 +1365,21 @@ jobs:
             "$(jq -r '.host_state.after_sha256' "$report")"
 
 
+      - name: Verify two native Signal Desktops over protected signed mailbox providers
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'signal-mailbox'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/signal-mailbox-smoke.json"
+          python3 -B tests/integration/signal-mailbox-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+
       - name: Require verified private replica handoff, retained charge and independent restores
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-handoff'
         env:
@@ -1945,6 +1968,27 @@ jobs:
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Obtain the Citizen verifier for the received public referendum
+        if: success() && inputs.scenario == 'content-replication'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VOLPAROSSA/volparossa-citizen
+          ref: 30f1fa9c99f751dbf0a93489fa86d305b02a3021
+          path: citizen-verifier
+          persist-credentials: false
+      - name: Replay the peer-delivered proof with Belenios and the retained setup
+        if: success() && inputs.scenario == 'content-replication'
+        run: |
+          set -euo pipefail
+          test "$(git -C citizen-verifier rev-parse HEAD)" = 30f1fa9c99f751dbf0a93489fa86d305b02a3021
+          citizen_input=tests/integration/citizen-referendum
+          python3 -B "$citizen_input/peer.py" verify "$VOLPAROSSA_ALPHA_OUTPUT" "$RUNNER_TEMP/citizen-received.zip"
+          python3 -B citizen-verifier/integrations/belenios/prepare.py "$RUNNER_TEMP/citizen-belenios"
+          sudo -n unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
+            python3 -B citizen-verifier/citizen.py belenios-replay "$RUNNER_TEMP/citizen-received.zip" \
+            --setup-pin "$citizen_input/public-setup.json" --tool "$RUNNER_TEMP/citizen-belenios/belenios-tool" \
+            | tee "$VOLPAROSSA_ALPHA_OUTPUT/content-replication-citizen-belenios.txt"
 
       - name: Require genuine protected upstream peer and local DNS cache evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'dns-cache'
