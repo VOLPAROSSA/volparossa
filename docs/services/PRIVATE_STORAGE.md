@@ -449,7 +449,10 @@ rejects a connection before READY because its selected control route has
 become unavailable. The owner repeats the connection with the same grant,
 target, operation, data and deadline. The first connection carried no signed
 storage request or payload. TLS handshake timeouts use the same single
-allowance. An explicit control-policy refusal ends the attempt.
+allowance. This also applies to FINALIZE before READY when the provider has
+the full uncommitted prefix. Once FINALIZE was sent, only the signed PROGRESS
+check described above can recover a lost response. An explicit control-policy
+refusal ends the attempt.
 
 The shared consumer VM and its Cloud upload continuation stage Image
 `21988efc1ba112a9840e0f052f4e4d0dc56a9d63` and Cloud
