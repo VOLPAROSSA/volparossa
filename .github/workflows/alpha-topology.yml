@@ -383,6 +383,9 @@ jobs:
           VMP_RUN_TESTS: no
         run: |
           set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4
+          protoc --version
           cargo fetch --locked
           source_date_epoch=$(git log -1 --format=%ct)
           SOURCE_DATE_EPOCH="$source_date_epoch" \
