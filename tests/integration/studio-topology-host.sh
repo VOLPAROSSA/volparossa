@@ -53,6 +53,10 @@ consume)
     jq -e --arg rev "$STUDIO_CORE_REVISION" '.source_revision == $rev and .qemu_started and .qemu_joined and .private_guest_state_removed' \
         "$output/studio-vm-cleanup.json" >/dev/null
     python3 -B tests/integration/content-repair-smoke.py report-studio "$report" "$STUDIO_CORE_REVISION"
+    if [ "$GITHUB_REPOSITORY" = VOLPAROSSA/volparossa-studio ]; then
+        jq -e '.repair.offline_site.viewer | .recipient_browser_reopen.profile_removed == true
+          and .recipient_browser_reopen == .recipient_browser' "$report" >/dev/null
+    fi
     jq -e --slurpfile producer "$projection" '.repair.offline_site.input == $producer[0]' "$report" >/dev/null
     for phase in before after; do
         test "$(sha256sum "$output/host-state-$phase.json" | cut -d' ' -f1)" = \

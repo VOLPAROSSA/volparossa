@@ -121,11 +121,14 @@ class StudioInput(unittest.TestCase):
         def verify(candidate):
             repair["CHECK"]["validate_offline_site"](candidate, fixture["expected_peers"], fixture["holder_offline"])
 
+        verify(site)  # The original single-reader receipt remains readable.
+        viewer["recipient_browser_reopen"] = dict(viewer["recipient_browser"])
         verify(site)
         for location, leaf, value in ((("publish",), "original_signature_reused", False),
                                      (("publish",), "manifest_id", "6"*64),
                                      (("acquire",), "peer_bytes", size - 1),
                                      (("viewer", "recipient_browser"), "chart_decoded", False),
+                                     (("viewer", "recipient_browser_reopen"), "browser_closed", False),
                                      (("viewer", "ready"), "peer_bytes", 0),
                                      (("viewer", "assets", MODULE["CHART"]), "sha256", "7"*64),
                                      (("view", "captures", "exit"), "provider_response_payload_bytes", size-1),
