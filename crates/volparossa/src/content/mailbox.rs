@@ -53,6 +53,8 @@ pub(crate) enum Command {
     Fetch(Receive),
     /// Explicitly attest durable consumer import, then acknowledge the exact message at both providers.
     ConfirmImport(import::Confirm),
+    /// Verify both retained provider acknowledgements locally against the original invitation.
+    VerifyImportAcks(import::VerifyAcks),
     /// Explicitly start the agent's durable mailbox service; content stop stops it again.
     Serve(Serve),
 }
@@ -159,6 +161,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Receive(args) => receive(&args, socket).await?,
         Command::Fetch(args) => import::fetch(&args, socket).await?,
         Command::ConfirmImport(args) => import::confirm(&args, socket).await?,
+        Command::VerifyImportAcks(args) => import::verify_acks(&args)?,
         Command::Serve(args) => {
             let request = MailboxServeRequest {
                 bind_address: args.bind.to_string(),
