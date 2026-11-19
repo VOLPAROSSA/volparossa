@@ -2586,6 +2586,9 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
+if [ "$scenario" = browser-network ] && [ -n "$browser_source_manifest" ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends xvfb xauth x11-utils libxtst6
+fi
 if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         bubblewrap xvfb xauth libgtk-3-0t64 libnss3 libnspr4 libgbm1 libasound2t64 \

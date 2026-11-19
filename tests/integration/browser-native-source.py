@@ -14,6 +14,8 @@ import tempfile
 
 
 CORE_PINS = Path(__file__).with_name('browser-native-pins.json')
+TAB_PINS = Path(__file__).with_name('browser-native-tab-pins.json')
+TAB_BROWSER = '9e0861687a7ef2a032155edeebcb19bf0fef0712'
 BROWSER = 'c3311ebedcc02dc45ff9c9822cee62f091609f86'
 FIREFOX = '47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1'
 TREE = '4a1d6e73d48bc5888e4da37d655b360a14db18db'
@@ -60,11 +62,31 @@ def changed_paths(root):
     return set(filter(None, os.fsdecode(result).split('\0')))
 
 
+def profile(revision):
+    require(revision in (BROWSER, TAB_BROWSER), 'unknown Browser source revision')
+    pins = json.loads((TAB_PINS if revision == TAB_BROWSER else CORE_PINS).read_bytes())
+    require(pins['revision'] == revision, 'Core Browser pin')
+    return pins
+
+
+def modules(revision):
+    if revision == TAB_BROWSER:
+        return (*MODULES, 'VolparossaCooperativeCompute.sys.mjs',
+                'VolparossaCooperativePanel.sys.mjs', 'VolparossaTabRoutes.sys.mjs')
+    return MODULES
+
+
 def validate_record(record):
     """Validate the portable, path-free provenance returned by validate_build."""
-    fixed = dict(kind='native-firefox-source-build', browser_revision=BROWSER, firefox_revision=FIREFOX,
+    require(isinstance(record, dict), 'record object')
+    revision = record.get('browser_revision')
+    pins = profile(revision)
+    fixed = dict(kind='native-firefox-source-build', browser_revision=revision, firefox_revision=FIREFOX,
                  firefox_tree=TREE, native_patch_sha256=PATCH, rust_report_sha256=RUST_REPORT,
-                 controller_sha256=CONTROLLER_SHA)
+                 controller_sha256=(pins['files']['integration/' + CONTROLLER]['sha256']
+                                    if revision == TAB_BROWSER else CONTROLLER_SHA))
+    if revision == TAB_BROWSER:
+        fixed['tab_chrome_patch_sha256'] = pins['files']['patches/0004-tab-route-controls.patch']['sha256']
     hashes = ('receipt_sha256', 'overlay_sha256', 'plugin_container_sha256')
     require(isinstance(record, dict) and set(record) == set(fixed) | set(hashes) | {'outputs'}
             and all(record[key] == value for key, value in fixed.items()), 'record identity')
@@ -75,19 +97,25 @@ def validate_record(record):
     return record
 
 
-def expected_overlay(browser, source):
+def expected_overlay(browser, source, revision=BROWSER):
     """Replay the pinned offline producer transformations on exact pristine Git objects."""
     with tempfile.TemporaryDirectory() as temp:
         pristine = Path(temp)
+        originals = {}
         for name in ('firefox-source.json', 'firefox-network-ech.json'):
             original = json.loads((browser / 'patches' / name).read_bytes())
             require(original['upstream_revision'] == FIREFOX, 'overlay upstream')
-            for relative, expected in original['upstream_sha256'].items():
-                data = git(source, 'cat-file', 'blob', f'{FIREFOX}:{relative}')
-                require(sha(data) == expected, 'upstream input digest')
-                destination = pristine / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(data)
+            originals.update(original['upstream_sha256'])
+        if revision == TAB_BROWSER:
+            menu = json.loads((browser / 'patches/firefox-tab-route-controls.json').read_bytes())
+            require(menu['revision'] == FIREFOX, 'tab chrome upstream')
+            originals.update({name: item['upstream'] for name, item in menu['files'].items()})
+        for relative, expected in originals.items():
+            data = git(source, 'cat-file', 'blob', f'{FIREFOX}:{relative}')
+            require(sha(data) == expected, 'upstream input digest')
+            destination = pristine / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
         # A fresh isolated interpreter imports only from the pinned producer and its reviewed dependencies.
         command = ('import hashlib, json, pathlib, sys; sys.path.insert(0, sys.argv[1]); '
                    'import native_build; print(json.dumps({k: hashlib.sha256(v).hexdigest() '
@@ -97,19 +125,18 @@ def expected_overlay(browser, source):
     return json.loads(result)
 
 
-def validate_checkout(browser, source):
-    require(git(browser, 'rev-parse', 'HEAD').decode().strip() == BROWSER and not changed_paths(browser),
+def validate_checkout(browser, source, revision=BROWSER):
+    require(git(browser, 'rev-parse', 'HEAD').decode().strip() == revision and not changed_paths(browser),
             'Browser checkout')
     require(git(source, 'rev-parse', 'HEAD', 'HEAD^{tree}').decode().splitlines() == [FIREFOX, TREE],
             'Firefox commit and tree')
-    pins = json.loads(CORE_PINS.read_bytes())
-    require(pins['revision'] == BROWSER, 'Core Browser pin')
+    pins = profile(revision)
     for name, record in pins['files'].items():
         path = regular(browser / name)
         require(path.stat().st_size == record['bytes'] and sha_file(path) == record['sha256'], 'Browser input')
     integration = {}
-    for name in ASSETS:
-        data = git(browser, 'cat-file', 'blob', f'{BROWSER}:integration/{name}')
+    for name in (*modules(revision), 'volparossa-compute.css'):
+        data = git(browser, 'cat-file', 'blob', f'{revision}:integration/{name}')
         require(regular(browser / 'integration' / name).read_bytes() == data, 'Browser integration input')
         integration[name] = sha(data)
     return integration
@@ -131,7 +158,8 @@ def validate_build(browser, build):
     source = build / 'source'
     require(all(path.is_dir() and path == path.resolve(strict=True) for path in (browser, build, source))
             and (browser / 'build') in build.parents, 'build root')
-    integration = validate_checkout(browser, source)
+    revision = git(browser, 'rev-parse', 'HEAD').decode().strip()
+    integration = validate_checkout(browser, source, revision)
     native_pins = json.loads(regular(browser / 'patches/firefox-native-build.json').read_bytes())
     require(native_pins['source']['revision'] == FIREFOX and native_pins['source']['tree'] == TREE
             and native_pins['reused_rust']['report_sha256'] == RUST_REPORT, 'compiler or upstream pins')
@@ -147,13 +175,13 @@ def validate_build(browser, build):
             and report['system_installation'] is False and report['output'] == str(build), 'producer receipt')
 
     overlay = regular(build / 'overlay.json').read_bytes()
-    transformed = expected_overlay(browser, source)
+    transformed = expected_overlay(browser, source, revision)
     require(report['overlay'] == json.loads(overlay) == dict(revision=FIREFOX, native_patch_sha256=PATCH,
             files=transformed, integration=integration), 'complete reviewed source transformations')
     require(changed_paths(source) == set(transformed), 'unexpected modified Firefox source')
     for name, expected in transformed.items():
         require(sha_file(regular(source / name)) == expected, 'transformed source bytes')
-    for name in MODULES:
+    for name in modules(revision):
         installed = build / 'obj/dist/bin/browser/modules' / name
         original = source / SOURCE_PREFIX / name
         require(installed.resolve(strict=True) == original and transformed[SOURCE_PREFIX + name] == integration[name],
@@ -162,7 +190,10 @@ def validate_build(browser, build):
     require(isinstance(report['outputs'], dict) and set(report['outputs']) == OUTPUTS, 'compiled output inventory')
     outputs = {name: binary_digest(build, name) for name in sorted(OUTPUTS)}
     require(outputs == report['outputs'], 'compiled output digest')
-    return validate_record(dict(kind='native-firefox-source-build', browser_revision=BROWSER,
+    extra = {}
+    if revision == TAB_BROWSER:
+        extra['tab_chrome_patch_sha256'] = sha_file(regular(browser / 'patches/0004-tab-route-controls.patch'))
+    return validate_record(dict(kind='native-firefox-source-build', browser_revision=revision,
         firefox_revision=FIREFOX, firefox_tree=TREE, native_patch_sha256=PATCH, rust_report_sha256=RUST_REPORT,
         receipt_sha256=sha(receipt), overlay_sha256=sha(overlay), controller_sha256=integration[CONTROLLER],
-        outputs=outputs, plugin_container_sha256=binary_digest(build, 'obj/dist/bin/plugin-container')))
+        outputs=outputs, plugin_container_sha256=binary_digest(build, 'obj/dist/bin/plugin-container'), **extra))
