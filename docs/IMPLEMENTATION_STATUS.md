@@ -361,6 +361,19 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   observed lifetime countdown. Its raw snapshots differed.
   [Four-validator run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Original build, consensus and cleanup receipts](development/evidence/bank-validators-44426288636)
 
+### Native Firefox ordinary tabs
+
+Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
+Both ordinary tabs verified the same 32 MiB body over two carrying MPTCP
+subflows on distinct WireGuard paths. Releasing the first route at both ends
+left the second transfer active. The origin observed the Exit address with no
+proxy credentials. Firefox exited, its private profile was removed, the guest
+network state matched and zero owned objects remained. Grant assignment in
+this run used the privileged test driver. The preceding attempt stopped after
+the first complete body.
+[Passing build and KVM](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054)
+· [Both trials and original receipts](applications/BROWSER_NETWORK.md#two-complete-native-firefox-navigations)
+
 ### Core project website — 2026-10-30
 
 The bounded Golden Harbour introduction lives in `website/`, with an isolated

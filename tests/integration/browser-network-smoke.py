@@ -30,7 +30,7 @@ PHASES = ("first", "second")
 EXPORT_NAMES = (
     f"{PREFIX}-smoke.json", f"{PREFIX}-evidence.json", f"{PREFIX}-provision.json",
     f"{PREFIX}-browser.json", f"{PREFIX}-origin.json", f"{PREFIX}-isolation.json",
-    f"{PREFIX}-driver.json",
+    f"{PREFIX}-driver.json", f"{PREFIX}-readiness.json",
     f"{PREFIX}-detach.json", f"{PREFIX}-private-cleanup.json",
     *(f"{PREFIX}-{phase}-{part}.json" for phase in PHASES for part in ("baseline", "progress")),
     *(f"{PREFIX}-{phase}-privacy-{role}.json" for phase in PHASES for role in ROLES),
@@ -52,7 +52,10 @@ ROUTE_ERRORS = frozenset(("Busy", "InvalidProfile", "PreselectionUnavailable", "
     "NativeProofUnavailable", "NativeSamplerRetirementUnavailable", "NativeRemoteRetirementUnavailable",
     "NativeTransportIdentityUnavailable", "RouteAdmissionUnavailable", "MptcpExitListenerSignalUnavailable",
     "TransportRuntimeUnavailable", "UdpExitSessionSignalUnavailable", "UdpIngressUnavailable"))
+PRESELECTION_ERRORS = frozenset(("Busy", "Closed", "Timeout", "InvalidParameters", "NoEligiblePaths",
+    "Unavailable", "Invalidated", "Transport"))
 GATEWAY_CODES = {
+    "preselection": PRESELECTION_ERRORS,
     "attachment_route": ROUTE_ERRORS | {"preparing", "ready", "timeout", "revoked", "shutdown"},
     "connect_header": frozenset(("received", "timeout", "invalid", "accepted")),
     "policy_before_route": frozenset(("denied",)),
@@ -67,7 +70,77 @@ EXIT_CODES = {"egress": frozenset(("encrypted_client_hello", "missing_server_nam
 ORIGIN_PHASES = frozenset(("setup", "accept-first", "accept-second", "tls-handshake", "request",
     "wait-release", "transfer", "wait-continue", "complete"))
 ORIGIN_ERRORS = frozenset(("timeout", "tls", "io", "request_rejected", "other"))
+MAX_NATIVE_AUXILIARY_CONNECTIONS = 4
+NATIVE_ORIGIN_ERRORS = frozenset(("empty_request", "incomplete_header", "header_bounds", "header_format",
+    "authority", "proxy_header", "unexpected_target", "auxiliary_limit"))
 ORIGIN_INITIAL_ACCEPT_SECONDS = 270  # 40s browser launch + two 90s route admissions + fixture margin.
+READINESS_ROLES = ("client", *(f"relay{i}" for i in range(6)), "exit", "exit2")
+READINESS_CODES = frozenset((
+    "PRESELECTION_OWNER_BUSY", "PRESELECTION_SNAPSHOT_INVALID_LIMIT", "PRESELECTION_SNAPSHOT_UNAVAILABLE",
+    "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_NO_EXIT",
+    "PRESELECTION_SNAPSHOT_TIME", "PRESELECTION_SNAPSHOT_POLICY", "PRESELECTION_SNAPSHOT_RELAY_COUNT",
+    "PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT", "PRESELECTION_SNAPSHOT_CANDIDATE_BOUND",
+    "PRESELECTION_SNAPSHOT_SUBJECT_SET", "PRESELECTION_SNAPSHOT_DIRECT_BINDING", "PRESELECTION_SNAPSHOT_FORWARDED_BINDING",
+    "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS", "PRESELECTION_SAMPLE_ENTROPY", "PRESELECTION_GATE_BEGIN_FAILED",
+    "PRESELECTION_INITIAL_DISPATCH_FAILED", "PRESELECTION_RESPONSE_REJECTED", "PRESELECTION_CLOCK_UNAVAILABLE",
+    "PRESELECTION_REDISPATCH_FAILED", "PRESELECTION_ATTEMPT_TERMINATED", "PRESELECTION_FINISH_FAILED",
+    "PRESELECTION_EXACT_SET_JOIN_FAILED", "PRESELECTION_FRESH_EVIDENCE_REJECTED",
+    "PRESELECTION_OUTBOUND_DIAL_FAILED", "PRESELECTION_OUTBOUND_TIMED_OUT", "PRESELECTION_OUTBOUND_CONNECTION_CLOSED",
+    "ADVERTISEMENT_PUBLISH_FAILED", "ADVERTISEMENT_PROVIDER_FAILED", "ADVERTISEMENT_PROVENANCE_MISMATCH",
+    "ADVERTISEMENT_PEER_MISMATCH", "ADVERTISEMENT_SIGNATURE_VERIFY_FAILED", "ADVERTISEMENT_CORE_REJECTED",
+    "ADVERTISEMENT_STORE_REJECTED", "ADVERTISEMENT_FORWARDED_REPLAY_REJECTED", "ADVERTISEMENT_DIRECT_REPLAY_REJECTED",
+    "ADVERTISEMENT_PROVENANCE_CAPACITY", "PEERSTORE_PRUNE_FAILED", "DISCOVERY_CONNECTION_FAILED",
+    "EXIT_FORWARD_CLIENT_RESPONSE_INVALID", "EXIT_FORWARD_CLIENT_INGEST_REJECTED", "EXIT_FORWARD_CLIENT_COMPLETED",
+    "EXIT_FORWARD_RELAY_FRAME_REJECTED", "EXIT_FORWARD_RELAY_LOCAL_ADVERTISEMENT_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_SCOPE_REJECTED", "EXIT_FORWARD_RELAY_PROVIDER_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_EXIT_AUTHORITY_UNAVAILABLE", "EXIT_FORWARD_RELAY_RETRY_CONFLICT",
+    "EXIT_FORWARD_RELAY_RETRY_EXHAUSTED", "EXIT_FORWARD_RELAY_CONTROL_AUTHORITY_UNAVAILABLE",
+    "EXIT_FORWARD_RELAY_CAPACITY", "EXIT_FORWARD_RELAY_RETIREMENT_SCOPE_REJECTED",
+    "EXIT_FORWARD_RELAY_TRANSPORT_UNAVAILABLE", "EXIT_FORWARD_RELAY_DISPATCHED",
+    "EXIT_FORWARD_RELAY_RESPONSE_INVALID", "EXIT_FORWARD_RELAY_COMPLETED",
+    "EXIT_FORWARD_EXIT_FRAME_REJECTED", "EXIT_FORWARD_EXIT_RETIRED_CONTEXT", "EXIT_FORWARD_EXIT_SCOPE_REJECTED",
+    "EXIT_FORWARD_EXIT_RESPONDED", "EXIT_FORWARD_EXIT_RESPONSE_UNAVAILABLE",
+))
+
+
+def readiness_diagnostic(root):
+    """Project existing bounded CLI rings/statuses; never export timestamps, IDs or raw lines."""
+    result = dict(version=1, scope="actor-status-and-last-400-events-not-route-readiness-proof", nodes={})
+    fields = {"active peers": "active_peers", "candidate pool": "candidate_pool",
+              "active contexts": "active_contexts", "MPTCP subflows": "mptcp_subflows", "MPQUIC paths": "mpquic_paths"}
+    for role in READINESS_ROLES:
+        node = dict(events_available=False, events_truncated=False, unknown_event=False, counts={}, status=None)
+        log = root / f"logs-{role}.txt"
+        if log.is_file() and not log.is_symlink():
+            with log.open("rb") as source:
+                raw = source.read(65537)
+            rows = raw[:65536].splitlines()
+            node.update(events_available=True, events_truncated=len(raw) > 65536 or len(rows) >= 400)
+            for row in rows[:400]:
+                match = re.fullmatch(rb"[0-9]{1,20}\tlevel=[0-9]{1,2}\tevent=([A-Z0-9_]{1,100})\tsession=[a-f0-9]*\tpath=(?:-|[0-9]+)", row)
+                if not match:
+                    node["unknown_event"] = True
+                    continue
+                code = match[1].decode("ascii")
+                if code in READINESS_CODES:
+                    node["counts"][code] = node["counts"].get(code, 0) + 1
+                elif code.startswith(("PRESELECTION_", "ADVERTISEMENT_", "EXIT_FORWARD_")):
+                    node["unknown_event"] = True
+        status = root / f"status-{role}.txt"
+        if status.is_file() and not status.is_symlink():
+            with status.open("rb") as source:
+                rows = source.read(1025)
+            if len(rows) <= 1024:
+                values = {}
+                for row in rows.splitlines():
+                    for label, key in fields.items():
+                        match = re.fullmatch(re.escape(label.encode()) + rb": ([0-9]{1,10})", row)
+                        if match and key not in values:
+                            values[key] = int(match[1])
+                if set(values) == set(fields.values()):
+                    node["status"] = values
+        result["nodes"][role] = node
+    return result
 
 
 def validate_request(value):
@@ -124,15 +197,27 @@ def origin_diagnostic(path):
         return None
     require(path.stat().st_size <= 2048, "origin diagnostic exceeds bound")
     value = read(path)
-    require(type(value) is dict and set(value) == {"version", "kind", "phase", "status", "error",
-        "accepted_connections", "tls_completed", "requests_ready", "initial_accept_seconds"}
-        and value["version"] == 1 and value["kind"] == "browser-network-origin-diagnostic"
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] in (1, 2),
+        "origin diagnostic version")
+    native = value["version"] == 2
+    fields = {"version", "kind", "phase", "status", "error", "accepted_connections",
+        "tls_completed", "requests_ready", "initial_accept_seconds"}
+    auxiliary = 0
+    if native:
+        fields.update(("empty_connections", "favicon_requests"))
+        require(all(type(value.get(key)) is int and 0 <= value[key] <= MAX_NATIVE_AUXILIARY_CONNECTIONS
+            for key in ("empty_connections", "favicon_requests")), "origin auxiliary counts")
+        auxiliary = value["empty_connections"] + value["favicon_requests"]
+    limit = len(PHASES) + (MAX_NATIVE_AUXILIARY_CONNECTIONS if native else 0)
+    errors = ORIGIN_ERRORS | NATIVE_ORIGIN_ERRORS if native else ORIGIN_ERRORS
+    require(set(value) == fields and value["kind"] == "browser-network-origin-diagnostic"
         and value["phase"] in ORIGIN_PHASES and value["status"] in ("running", "failed", "complete")
-        and (value["error"] is None or value["error"] in ORIGIN_ERRORS)
+        and (value["error"] is None or value["error"] in errors)
         and value["initial_accept_seconds"] == ORIGIN_INITIAL_ACCEPT_SECONDS
-        and all(type(value[key]) is int and 0 <= value[key] <= 2
+        and all(type(value[key]) is int and 0 <= value[key] <= limit
             for key in ("accepted_connections", "tls_completed", "requests_ready"))
-        and value["requests_ready"] <= value["tls_completed"] <= value["accepted_connections"],
+        and value["requests_ready"] <= len(PHASES) and auxiliary <= MAX_NATIVE_AUXILIARY_CONNECTIONS
+        and value["requests_ready"] + auxiliary <= value["tls_completed"] <= value["accepted_connections"],
         "origin diagnostic is not closed metadata")
     return value
 
@@ -259,14 +344,16 @@ def driver_diagnostic(status, stderr, home=None, work=None, gateway_log=None, ex
     return result
 
 
-def block(run_id):
+def block(run_id, *, native_tabs=False):
     require(re.fullmatch(r"[a-f0-9]{32}", run_id), "invalid synthetic run identity")
-    seed = b"volparossa-browser-network:" + bytes.fromhex(run_id)
+    # Ordinary tabs need genuine text. Random decoded bytes may contain NUL/control bytes;
+    # Firefox correctly sniffs those as binary even when mislabeled text/plain.
+    seed = b"volparossa-browser-network:" + (run_id.encode("ascii") + b"\n" if native_tabs else bytes.fromhex(run_id))
     return (seed * (65536 // len(seed) + 1))[:65536]
 
 
-def body_hash(run_id):
-    return hashlib.sha256(block(run_id) * (BODY_BYTES // 65536)).hexdigest()
+def body_hash(run_id, *, native_tabs=False):
+    return hashlib.sha256(block(run_id, native_tabs=native_tabs) * (BODY_BYTES // 65536)).hexdigest()
 
 
 def wait_file(path, seconds=60):
@@ -278,7 +365,7 @@ def wait_file(path, seconds=60):
             "invalid fixture gate")
 
 
-def seed(root, run_id):
+def seed(root, run_id, *, native_tabs=False):
     require(not root.exists() and not root.is_symlink(), "fixture origin already exists")
     root.mkdir(mode=0o700)
     # Test trust exists only in the disposable browser profile; never disable TLS verification.
@@ -294,12 +381,14 @@ def seed(root, run_id):
     subprocess.run(["openssl", "x509", "-req", "-in", str(root / "origin.csr"), "-CA", str(root / "ca.pem"),
         "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(root / "extensions"),
         "-out", str(root / "origin.pem")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-    write(root / "object.json", dict(bytes=BODY_BYTES, sha256=body_hash(run_id), run_id=run_id))
+    write(root / "object.json", dict(bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs), run_id=run_id))
 
 
-def origin(root, gates, run_id, report):
+def origin(root, gates, run_id, report, *, native_tabs=False):
     status = dict(version=1, kind="browser-network-origin-diagnostic", phase="setup", status="running", error=None,
         accepted_connections=0, tls_completed=0, requests_ready=0, initial_accept_seconds=ORIGIN_INITIAL_ACCEPT_SECONDS)
+    if native_tabs:
+        status.update(version=2, empty_connections=0, favicon_requests=0)
     diagnostic = report.with_name("origin-diagnostic.json")
     def observe(phase):
         status["phase"] = phase
@@ -307,19 +396,68 @@ def origin(root, gates, run_id, report):
         write(diagnostic, status)
     observe("setup")
     try:
-        origin_transfer(root, gates, run_id, report, status, observe)
+        origin_transfer(root, gates, run_id, report, status, observe, native_tabs=native_tabs)
         status.update(status="complete", phase="complete")
     except Exception as error:
         code = ("timeout" if isinstance(error, TimeoutError) else "tls" if isinstance(error, ssl.SSLError)
                 else "io" if isinstance(error, OSError) else "request_rejected" if isinstance(error, ValueError)
                 else "other")
+        if native_tabs and isinstance(error, OriginRequestError):
+            code = error.args[0]
         status.update(status="failed", error=code)
         raise
     finally:
         write(diagnostic, status)
 
 
-def origin_transfer(root, gates, run_id, report, status, observe):
+class OriginRequestError(ValueError):
+    """Only fixed categories from NATIVE_ORIGIN_ERRORS may leave this local fixture."""
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError("origin phase deadline")
+    return seconds
+
+
+def origin_request(stream, phase, native_tabs, deadline):
+    header = bytearray()
+    while not header.endswith(b"\r\n\r\n"):
+        if len(header) >= 8192:
+            raise OriginRequestError("header_bounds")
+        stream.settimeout(remaining(deadline))
+        chunk = stream.recv(8192 - len(header))
+        if not chunk:
+            if not header and native_tabs:
+                return "empty_connections"
+            raise OriginRequestError("incomplete_header" if header else "empty_request")
+        header.extend(chunk)
+        if b"\r\n\r\n" in header and not header.endswith(b"\r\n\r\n"):
+            raise OriginRequestError("header_format")
+    try:
+        lines = header[:-4].decode("ascii").split("\r\n")
+    except UnicodeDecodeError:
+        raise OriginRequestError("header_format") from None
+    hosts = []
+    for field in lines[1:]:
+        key, sep, value = field.partition(":")
+        if not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+            raise OriginRequestError("header_format")
+        if key.lower() == "host":
+            hosts.append(value.strip())
+        if key.lower() in ("proxy-authorization", "proxy-connection") or "bearer " in value.lower():
+            raise OriginRequestError("proxy_header")
+    if hosts != [f"{HOST}:{PORT}"]:
+        raise OriginRequestError("authority")
+    if lines[0] == f"GET /{phase}.bin HTTP/1.1":
+        return "object"
+    if native_tabs and lines[0] == "GET /favicon.ico HTTP/1.1":
+        return "favicon_requests"
+    raise OriginRequestError("unexpected_target")
+
+
+def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_3
     tls.load_cert_chain(root / "origin.pem", root / "origin.key")
@@ -329,54 +467,57 @@ def origin_transfer(root, gates, run_id, report, status, observe):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("47.163.4.2", PORT))
         listener.listen(2)
-        listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)
+        deadline = time.monotonic() + ORIGIN_INITIAL_ACCEPT_SECONDS
         write(gates / "origin.ready", dict(version=1, ready=True))
-        for phase in PHASES:
+        while len(requests) < len(PHASES):
+            phase = PHASES[len(requests)]
             observe("accept-" + phase)
+            listener.settimeout(remaining(deadline))
             accepted, address = listener.accept()
             status["accepted_connections"] += 1
-            listener.settimeout(90)
-            require(address[0] == "47.163.4.1", "origin did not observe selected Exit only")
-            # Bound handshake itself, not only reads after wrap_socket returns.
-            accepted.settimeout(30)
-            observe("tls-handshake")
-            with tls.wrap_socket(accepted, server_side=True) as stream:
-                status["tls_completed"] += 1
-                observe("request")
-                stream.settimeout(30)
-                header = bytearray()
-                while not header.endswith(b"\r\n\r\n") and len(header) < 8192:
-                    chunk = stream.recv(1)
-                    require(chunk, "origin request incomplete")
-                    header.extend(chunk)
-                lines = header.decode("ascii").split("\r\n")
-                require(lines[0] == f"GET /{phase}.bin HTTP/1.1", "unexpected origin request")
-                fields = [line.split(":", 1) for line in lines[1:] if line]
-                require(all(len(row) == 2 for row in fields), "invalid origin headers")
-                headers = {key.lower(): value.strip() for key, value in fields}
-                require(headers.get("host") == f"{HOST}:{PORT}"
-                    and not any(key in headers for key in ("proxy-authorization", "proxy-connection"))
-                    and not any("bearer " in value.lower() for value in headers.values()),
-                    "proxy capability escaped to origin")
-                write(gates / f"{phase}.ready", dict(version=1, ready=True))
-                status["requests_ready"] += 1
-                observe("wait-release")
-                wait_file(gates / f"{phase}.release")
-                observe("transfer")
-                stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
-                    "Content-Type: application/octet-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
-                data = block(run_id)
-                for index in range(BODY_BYTES // len(data)):
-                    stream.sendall(data)
-                    if index + 1 == BODY_BYTES // len(data) // 2:
-                        write(gates / f"{phase}.progress-ready", dict(version=1, ready=True))
-                        observe("wait-continue")
-                        wait_file(gates / f"{phase}.continue")
-                        observe("transfer")
-                requests.append(dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id),
-                    peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
-                    alpn=stream.selected_alpn_protocol()))
-                write(report, dict(version=1, run_id=run_id, complete=len(requests) == 2, requests=requests))
+            with accepted:
+                require(address[0] == "47.163.4.1", "origin did not observe selected Exit only")
+                # Each ordinary tab can trigger ancillary sessions on the same destination.
+                # None supplies payload evidence or restarts the current phase's deadline.
+                accepted.settimeout(min(30, remaining(deadline)))
+                observe("tls-handshake")
+                with tls.wrap_socket(accepted, server_side=True) as stream:
+                    status["tls_completed"] += 1
+                    observe("request")
+                    kind = origin_request(stream, phase, native_tabs, min(deadline, time.monotonic() + 30))
+                    if kind != "object":
+                        if status["empty_connections"] + status["favicon_requests"] >= MAX_NATIVE_AUXILIARY_CONNECTIONS:
+                            raise OriginRequestError("auxiliary_limit")
+                        if kind == "favicon_requests":
+                            stream.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        status[kind] += 1
+                        continue
+                    stream.settimeout(30)
+                    write(gates / f"{phase}.ready", dict(version=1, ready=True))
+                    status["requests_ready"] += 1
+                    requests.append(serve_origin_object(stream, gates, run_id, phase, observe, native_tabs))
+                    write(report, dict(version=1, run_id=run_id, complete=len(requests) == len(PHASES), requests=requests))
+            deadline = time.monotonic() + 90
+
+
+def serve_origin_object(stream, gates, run_id, phase, observe, native_tabs):
+    observe("wait-release")
+    wait_file(gates / f"{phase}.release")
+    observe("transfer")
+    content_type = "text/plain; charset=utf-8" if native_tabs else "application/octet-stream"
+    stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
+        f"Content-Type: {content_type}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
+    data = block(run_id, native_tabs=native_tabs)
+    for index in range(BODY_BYTES // len(data)):
+        stream.sendall(data)
+        if index + 1 == BODY_BYTES // len(data) // 2:
+            write(gates / f"{phase}.progress-ready", dict(version=1, ready=True))
+            observe("wait-continue")
+            wait_file(gates / f"{phase}.continue")
+            observe("transfer")
+    return dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs),
+        peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
+        alpn=stream.selected_alpn_protocol())
 
 
 def helper_members(role):
@@ -401,9 +542,38 @@ def helper_members(role):
     return result
 
 
-def native_owner(role, diagnostics=None):
+def exact_flow_raw(raw, expected):
+    """Select the baseline socket, never a concurrent browser connection's counters."""
+    states = ("ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+              "TIME-WAIT", "CLOSE-WAIT", "LAST-ACK", "CLOSING")
+    metas = []
+    for row in MPTCP["socket_rows"](raw["meta"], states):
+        token = re.search(r"\btoken:([0-9a-f]+)(?:\s|$)", row["line"])
+        if (row["cookie"] == expected["cookie"] and list(row["local"]) == expected["local"]
+                and list(row["remote"]) == expected["remote"] and token is not None
+                and int(token[1], 16) == int(expected["token"], 16)):
+            metas.append(row["line"])
+    require(len(metas) == 1, "exact baseline MPTCP meta socket missing or ambiguous")
+    subflows = []
+    for row in MPTCP["socket_rows"](raw["tcp"], states):
+        token = re.search(r"tcp-ulp-mptcp\s+flags:\S+\s+token:[0-9a-f]+\(id:\d+\)/"
+                          r"([0-9a-f]+)\(id:\d+\)", row["line"])
+        if token is not None and int(token[1], 16) == int(expected["token"], 16):
+            subflows.append(row["line"])
+    # kernel_sample still requires established subflows, their exact path set and genuine
+    # MPTCP. The independent progress checker also pins every subflow cookie/tuple/ID.
+    return dict(meta=metas[0] + "\n", tcp="\n".join(subflows) + "\n")
+
+
+def native_owner(role, diagnostics=None, expected=None, observation=None):
+    observation = {} if observation is None else observation
+    observation["stage"] = "worker-selection"
     matches = []
     for owner in helper_members(role):
+        if expected is not None and any(owner[key] != expected["owner"][key]
+                for key in ("unit", "pid", "start_ticks", "netns")):
+            continue
+        observation["stage"] = "socket-readback"
         prefix = ["nsenter", "-t", str(owner["pid"]), "-n"]
         selector = "( sport = :44443 )" if role == "exit" else "( dport = :44443 )"
         raw = dict(meta=command([*prefix, "ss", "-HOnMie", selector]),
@@ -414,10 +584,15 @@ def native_owner(role, diagnostics=None):
             # Fixed synthetic-network socket metadata only; never application/grant bytes.
             diagnostics.append(dict(owner=dict(owner), raw={key: text[:4096] for key, text in raw.items()},
                 diagnostic_only=True, raw_truncated=any(len(text) > 4096 for text in raw.values())))
+        observed_raw = raw
+        observation["stage"] = "flow-selection"
+        if expected is not None:
+            raw = exact_flow_raw(raw, expected["kernel"])
         metas = MPTCP["socket_rows"](raw["meta"], ("ESTAB", "FIN-WAIT-1", "FIN-WAIT-2", "CLOSE-WAIT", "LAST-ACK"))
         if not any(row["state"] == "ESTAB" for row in metas):
             continue
         require(len(MPTCP["socket_rows"](raw["meta"])) == 1, "ambiguous app flow in worker")
+        observation["stage"] = "path-bindings"
         links = json.loads(command([*prefix, "ip", "-j", "-6", "address", "show"]))
         layout, paths = [], []
         for row in MPTCP["socket_rows"](raw["tcp"]):
@@ -442,21 +617,36 @@ def native_owner(role, diagnostics=None):
                 f"{role}_address": str(local), f"{role}_interface": link["ifname"],
                 f"{'client' if role == 'exit' else 'exit'}_address": str(remote)}))
         owner["paths"] = sorted(paths, key=lambda row: row["path_id"])
-        matches.append(dict(owner=owner, raw=raw, kernel=MPTCP["kernel_sample"](raw, dict(paths=layout), role)))
+        observation["stage"] = "worker-lifetime"
+        require(expected is None or owner == expected["owner"], "original worker/path ownership changed")
+        observation["stage"] = "kernel-projection"
+        matches.append(dict(owner=owner, raw=observed_raw, kernel=MPTCP["kernel_sample"](raw, dict(paths=layout), role)))
     require(len(matches) == 1, "one attributable active app worker required")
     return matches[0]
 
 
-def sample(output=None):
+def sample(output=None, before=None):
+    if before is not None:
+        validate_sample(before)
     value = dict(started_monotonic_ns=time.monotonic_ns())
     for role in ("client", "exit"):
-        diagnostics = []
+        diagnostics, observation = [], {}
         try:
-            value[role] = native_owner(role, diagnostics)
+            value[role] = native_owner(role, diagnostics, None if before is None else before[role], observation)
         except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
             if output is not None:
-                write(output, dict(observation_complete=False, failed_role=role,
-                    fixed_error="native_owner_not_verified", candidates=diagnostics))
+                failure = dict(observation_complete=False, failed_role=role,
+                    fixed_error="native_owner_not_verified", failed_stage=observation["stage"],
+                    started_monotonic_ns=value["started_monotonic_ns"], observed_monotonic_ns=time.monotonic_ns(),
+                    candidates=diagnostics)
+                # Preserve the first failed observation when later retries see closed sockets.
+                # This remains bounded synthetic socket metadata, not browser/request content.
+                first = dict(failure)
+                if output.is_file() and not output.is_symlink() and output.stat().st_size <= 65536:
+                    previous = read(output)
+                    if previous.get("observation_complete") is False:
+                        first = previous.get("first_failure", previous)
+                write(output, failure | dict(first_failure=first))
             raise
     value["observed_monotonic_ns"] = time.monotonic_ns()
     validate_sample(value)
@@ -486,7 +676,7 @@ def validate_sample(value):
             f"{role}_interface": next(path["interface"] for path in paths if path["path_id"] == row["path_id"]),
             f"{'client' if role == 'exit' else 'exit'}_address": row["remote"][0]})
             for row in entry["kernel"]["subflows"]]
-        require(entry["kernel"] == MPTCP["kernel_sample"](entry["raw"], dict(paths=layout), role),
+        require(entry["kernel"] == MPTCP["kernel_sample"](exact_flow_raw(entry["raw"], entry["kernel"]), dict(paths=layout), role),
             "raw kernel data disagrees with projection")
         bindings.append({row["path_id"]: row["relay_node"] for row in paths})
     require(bindings[0] == bindings[1], "Client/Exit used different physical relays")
@@ -539,6 +729,9 @@ def evidence(root):
 
 
 def validate_browser(evidence):
+    if evidence["browser"].get("kind") == "native-firefox-core-ordinary-tabs":
+        runpy.run_path(str(HERE / "browser-native-evidence.py"))["validate_browser"](evidence)
+        return
     provision = runpy.run_path(str(HERE / "browser-network-provision.py"))["pins"]()
     require(evidence["provision"] == provision, "browser source provenance differs")
     browser = evidence["browser"]
@@ -653,7 +846,8 @@ def validate_report(path, revision):
         "two real TLS origin transfers missing")
     for request in rebuilt["origin"]["requests"]:
         require(request["bytes"] == BODY_BYTES and request["peer_is_exit"] is True
-            and request["sha256"] == body_hash(rebuilt["origin"]["run_id"])
+            and request["sha256"] == body_hash(rebuilt["origin"]["run_id"],
+                native_tabs=rebuilt["browser"]["kind"] == "native-firefox-core-ordinary-tabs")
             and request["proxy_credentials_absent"] is True and request["tls_version"] == "TLSv1.3"
             and request["alpn"] == "http/1.1", "origin TLS or secret boundary failed")
     require([row["phase"] for row in rebuilt["origin"]["requests"]] == list(PHASES), "origin phase ordering differs")
@@ -666,15 +860,20 @@ def main():
     action = sys.argv[1]
     if action == "export-names":
         print("\n".join(EXPORT_NAMES))
-    elif action == "hash":
-        print(body_hash(sys.argv[2]))
-    elif action == "seed":
-        seed(Path(sys.argv[2]), sys.argv[3])
-    elif action == "origin":
-        origin(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5]))
+    elif action in ("hash", "hash-native"):
+        print(body_hash(sys.argv[2], native_tabs=action == "hash-native"))
+    elif action in ("seed", "seed-native"):
+        seed(Path(sys.argv[2]), sys.argv[3], native_tabs=action == "seed-native")
+    elif action in ("origin", "origin-native"):
+        origin(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5]), native_tabs=action == "origin-native")
+    elif action == "native-provision":
+        value = runpy.run_path(str(HERE / "browser-native-evidence.py"))["provision_summary"](Path(sys.argv[2]))
+        write(Path(sys.argv[3]), value)
     elif action == "sample":
         output = Path(sys.argv[2])
-        write(output, sample(output))
+        require(len(sys.argv) in (3, 4), "unexpected sample arguments")
+        before = read(Path(sys.argv[3])) if len(sys.argv) == 4 else None
+        write(output, sample(output, before))
     elif action == "progress":
         before, after = read(Path(sys.argv[2])), read(Path(sys.argv[3]))
         validate_sample(before); validate_sample(after); MPTCP["progress"](before, after, 2)
@@ -689,6 +888,8 @@ def main():
         require(len(sys.argv) in (5, 7, 8, 10), "driver diagnostic arguments differ")
         locations = list(map(Path, sys.argv[5:]))
         write(Path(sys.argv[4]), driver_diagnostic(Path(sys.argv[2]), Path(sys.argv[3]), *locations))
+    elif action == "readiness-diagnostic":
+        write(Path(sys.argv[3]), readiness_diagnostic(Path(sys.argv[2])))
     elif action == "evidence":
         write(Path(sys.argv[3]), evidence(Path(sys.argv[2])))
     elif action == "report":

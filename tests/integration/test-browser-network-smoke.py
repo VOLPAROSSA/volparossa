@@ -92,6 +92,142 @@ def fixture(root):
 
 
 class BrowserNetworkEvidence(unittest.TestCase):
+    def test_progress_pins_original_worker_and_flow_despite_concurrent_browser_connection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = fixture(Path(temporary))
+            phase = report["network"]["phases"][0]
+            before, after = phase["baseline"], copy.deepcopy(phase["progress"])
+            for role in ("client", "exit"):
+                expected = before[role]
+                entry = after[role]
+                # Same worker, different meta/token/cookies/ports; place the new connection
+                # first so a first-socket shortcut would select the wrong application flow.
+                own = entry["kernel"]["token"]
+                extra = {key: raw.replace(own, "fedcba").replace("sk:a1", "sk:c1")
+                    .replace("sk:b1", "sk:d1").replace(":40001", ":41001").replace(":40002", ":41002")
+                    for key, raw in entry["raw"].items()}
+                entry["raw"] = {key: extra[key] + raw for key, raw in entry["raw"].items()}
+                self.assertEqual(len(CHECK["MPTCP"]["socket_rows"](entry["raw"]["meta"])), 2)
+                links = [dict(ifname=path["interface"], ifindex=path["ifindex"],
+                    addr_info=[dict(local=row["local"][0])])
+                    for path, row in zip(entry["owner"]["paths"], entry["kernel"]["subflows"], strict=True)]
+                owner = {key: entry["owner"][key] for key in ("unit", "pid", "start_ticks", "netns")}
+                def command(args):
+                    if "ss" in args:
+                        return entry["raw"]["meta" if "-HOnMie" in args else "tcp"]
+                    if "ip" in args:
+                        return json.dumps(links)
+                    interface = args[-2]
+                    endpoint = next(path["endpoint"] for path in entry["owner"]["paths"] if path["interface"] == interface)
+                    return "not-exported-wg-key " + endpoint + "\n"
+                with patch.dict(CHECK["native_owner"].__globals__,
+                        command=command, helper_members=lambda _role: [dict(owner)]):
+                    # Reproduces the old global-one-flow observer failure, without traffic.
+                    with self.assertRaisesRegex(ValueError, "ambiguous app flow"):
+                        CHECK["native_owner"](role)
+                    self.assertEqual(CHECK["native_owner"](role, expected=expected), entry)
+                    for field in ("pid", "start_ticks", "netns"):
+                        invalid = copy.deepcopy(expected)
+                        invalid["owner"][field] = 999 if field == "pid" else "999"
+                        with self.assertRaises(ValueError):
+                            CHECK["native_owner"](role, expected=invalid)
+                # A different meta lifetime, token or tuple cannot replace the original.
+                for field, replacement in (("cookie", "ffff"), ("token", "ffffff"),
+                        ("local", [expected["kernel"]["local"][0], 54321])):
+                    with self.assertRaises(ValueError):
+                        CHECK["exact_flow_raw"](entry["raw"], expected["kernel"] | {field: replacement})
+                duplicate = dict(entry["raw"])
+                duplicate["meta"] += duplicate["meta"].splitlines()[-1] + "\n"
+                with self.assertRaises(ValueError):
+                    CHECK["exact_flow_raw"](duplicate, expected["kernel"])
+            CHECK["validate_sample"](after)
+            CHECK["MPTCP"]["progress"](before, after, 2)
+            # Fresh counters from the extra connection cannot satisfy an idle selected path.
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["bytes_received"] = 1000
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+            invalid = copy.deepcopy(after)
+            invalid["client"]["kernel"]["subflows"][1]["cookie"] = "ffff"
+            with self.assertRaises(ValueError):
+                CHECK["MPTCP"]["progress"](before, invalid, 2)
+
+    def test_first_owner_failure_survives_later_missing_socket_observations(self):
+        def failure(role, diagnostics, expected, observation):
+            observation["stage"] = "flow-selection"
+            diagnostics.append(dict(diagnostic_only=True, attempt=1))
+            raise ValueError("raw private exception must not escape")
+        def later_failure(role, diagnostics, expected, observation):
+            observation["stage"] = "worker-selection"
+            raise ValueError("raw private exception must not escape")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "progress.json"
+            for failing in (failure, later_failure, later_failure):
+                with patch.dict(CHECK["sample"].__globals__, native_owner=failing), self.assertRaises(ValueError):
+                    CHECK["sample"](output)
+            value = CHECK["read"](output)
+            self.assertEqual(value["failed_stage"], "worker-selection")
+            self.assertEqual(value["candidates"], [])
+            first = value["first_failure"]
+            self.assertEqual(first["failed_stage"], "flow-selection")
+            self.assertEqual(first["candidates"], [dict(diagnostic_only=True, attempt=1)])
+            self.assertLessEqual(first["observed_monotonic_ns"], value["started_monotonic_ns"])
+            self.assertNotIn("first_failure", first)
+            self.assertNotIn("private", json.dumps(value))
+
+    def test_native_text_payload_keeps_size_full_hash_and_historical_binary_contract(self):
+        # This ID guarantees control bytes in the historical binary body, rather than relying
+        # on random luck. The native body is printable UTF-8 for genuine ordinary-tab rendering.
+        run_id = "000102030405060708090a0b0c0d0e0f"
+        old_seed = b"volparossa-browser-network:" + bytes.fromhex(run_id)
+        self.assertEqual(CHECK["block"](run_id), (old_seed * (65536 // len(old_seed) + 1))[:65536])
+        native = CHECK["block"](run_id, native_tabs=True)
+        self.assertEqual(len(native), 65536)
+        self.assertTrue(all(byte == 10 or 32 <= byte <= 126 for byte in native))
+        self.assertTrue(native.decode("utf-8").startswith("volparossa-browser-network:"))
+        body = native * 512
+        self.assertEqual(len(body), 33554432)
+        self.assertEqual(hashlib.sha256(body).hexdigest(), CHECK["body_hash"](run_id, native_tabs=True))
+        self.assertNotEqual(CHECK["body_hash"](run_id), CHECK["body_hash"](run_id, native_tabs=True))
+        shell = (HERE / "browser-network-smoke.sh").read_text()
+        for action in ("bn_seed_action=seed-native", "bn_hash_action=hash-native", "bn_origin_action=origin-native"):
+            self.assertIn(action, shell)
+
+    def test_readiness_exports_only_existing_ring_codes_counts_and_status_before_cleanup(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        source += (HERE.parents[1] / "crates/volparossa-agent/src/discovery/preselection_sampler.rs").read_text()
+        for code in CHECK["READINESS_CODES"]:
+            self.assertIn('"' + code + '"', source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def row(code):
+                return f"1790882077582\tlevel=1\tevent={code}\tsession=abcdef\tpath=123\n"
+            log = root / "logs-client.txt"
+            log.write_text(row("PRESELECTION_SAMPLE_INVALID_SNAPSHOT") * 2
+                + row("PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT")
+                + row("ADVERTISEMENT_STORE_REJECTED") + row("PRESELECTION_PRIVATE_CANARY") + "private-canary raw line\n")
+            (root / "status-client.txt").write_text("connected: false\nactive peers: 6\ncandidate pool: 8\n"
+                "active contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\nprivate-canary hostname\n")
+            value = CHECK["readiness_diagnostic"](root)
+            client = value["nodes"]["client"]
+            self.assertEqual(client["counts"], dict(PRESELECTION_SAMPLE_INVALID_SNAPSHOT=2,
+                PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT=1, ADVERTISEMENT_STORE_REJECTED=1))
+            self.assertTrue(client["unknown_event"])
+            self.assertFalse(client["events_truncated"])
+            self.assertEqual(client["status"], dict(active_peers=6, candidate_pool=8, active_contexts=0, mptcp_subflows=0, mpquic_paths=0))
+            self.assertFalse(value["nodes"]["exit"]["events_available"])
+            for secret in ("1790882077582", "abcdef", "123", "CANARY", "private-canary", "hostname"):
+                self.assertNotIn(secret, json.dumps(value))
+            log.write_text(row("PRESELECTION_OWNER_BUSY") * 500)
+            value = CHECK["readiness_diagnostic"](root)["nodes"]["client"]
+            self.assertTrue(value["events_truncated"])
+            self.assertEqual(value["counts"], dict(PRESELECTION_OWNER_BUSY=400))
+            (root / "logs-exit.txt").symlink_to(log)
+            self.assertFalse(CHECK["readiness_diagnostic"](root)["nodes"]["exit"]["events_available"])
+        shell = (HERE / "browser-network-smoke.sh").read_text().split("browser_network_cleanup() {", 1)[1]
+        self.assertLess(shell.index("logs --limit 400"), shell.index("readiness-diagnostic"))
+        self.assertLess(shell.index("readiness-diagnostic"), shell.index('browser_network_check cleanup "$WORK"'))
+
     def test_exit_export_has_only_allowlisted_egress_codes_not_raw_errors(self):
         def event(code, **extra):
             return json.dumps(dict(target="volparossa_agent::mptcp_flow_runtime", fields=dict(
@@ -108,9 +244,120 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertNotIn("private", json.dumps(result))
             self.assertNotIn("secret", json.dumps(result))
 
+    def test_native_origin_classifies_only_complete_bound_requests(self):
+        from io import BytesIO
+        import time
+
+        class Request(BytesIO):
+            recv = BytesIO.read
+
+            def settimeout(self, seconds):
+                self.timeout = seconds
+
+        def classify(wire, native=True, duration=10):
+            return CHECK["origin_request"](Request(wire), "second", native, time.monotonic() + duration)
+
+        host = b"Host: destination.volparossa.test:18443\r\n"
+        def get(target, headers=host):
+            return b"GET /" + target + b" HTTP/1.1\r\n" + headers + b"\r\n"
+
+        self.assertEqual(classify(get(b"second.bin")), "object")
+        self.assertEqual(classify(get(b"favicon.ico")), "favicon_requests")
+        self.assertEqual(classify(b""), "empty_connections")
+        for request, native, reason in (
+                (b"", False, "empty_request"), (get(b"favicon.ico"), False, "unexpected_target"),
+                (get(b"first.bin"), True, "unexpected_target"), (get(b"other"), True, "unexpected_target"),
+                (get(b"favicon.ico", host + b"Proxy-Authorization: private\r\n"), True, "proxy_header"),
+                (get(b"favicon.ico", host + b"X: Bearer private\r\nX: public\r\n"), True, "proxy_header"),
+                (get(b"favicon.ico", host + host), True, "authority"),
+                (get(b"favicon.ico", b"Host: elsewhere\r\n"), True, "authority"),
+                (b"G", True, "incomplete_header"), (b"X" * 8192, True, "header_bounds"),
+                (get(b"second.bin", host + b"broken\r\n"), True, "header_format"),
+                (get(b"second.bin") + b"body", True, "header_format")):
+            with self.subTest(reason=reason, native=native), self.assertRaisesRegex(ValueError, "^"+reason+"$"):
+                classify(request, native)
+        with self.assertRaises(TimeoutError):
+            classify(get(b"second.bin"), duration=-1)
+
+    def test_native_origin_interleaves_tls_without_counting_auxiliary_connections_as_payload(self):
+        # Anonymous local socket pairs exercise the real TLS origin. The listener only models accept/address.
+        import socket
+        import ssl
+        from concurrent.futures import ThreadPoolExecutor
+        from http.client import HTTPResponse
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "origin"
+            run_id = "1" * 32
+            context = CHECK["origin"].__globals__
+            with patch.dict(context, BODY_BYTES=65536):
+                CHECK["seed"](root, run_id, native_tabs=True)
+                tls = ssl.create_default_context(cafile=str(root / "ca.pem"))
+                tls.minimum_version = ssl.TLSVersion.TLSv1_3
+                tls.set_alpn_protocols(["http/1.1"])
+                for phase in CHECK["PHASES"]:
+                    for gate in ("release", "continue"):
+                        (root / f"{phase}.{gate}").touch()
+                def exchange(targets, expect_failure=False):
+                    pairs = [socket.socketpair() for _ in targets]
+                    listener = Mock()
+                    listener.accept.side_effect = [(a, ("47.163.4.1", 1)) for a, _ in pairs]
+                    manager = Mock()
+                    manager.__enter__ = Mock(return_value=listener)
+                    manager.__exit__ = Mock(return_value=False)
+                    network = SimpleNamespace(socket=lambda *args: manager, AF_INET=socket.AF_INET,
+                        SOCK_STREAM=socket.SOCK_STREAM, SOL_SOCKET=socket.SOL_SOCKET, SO_REUSEADDR=socket.SO_REUSEADDR)
+                    report = root / "origin.json"
+                    report.unlink(missing_ok=True)
+                    try:
+                        with patch.dict(context, socket=network), ThreadPoolExecutor(max_workers=1) as pool:
+                            task = pool.submit(CHECK["origin"], root, root, run_id, report, native_tabs=True)
+                            replies = []
+                            for target, (_, client) in zip(targets, pairs):
+                                client.settimeout(5)
+                                with tls.wrap_socket(client, server_hostname=CHECK["HOST"]) as stream:
+                                    if target is None:
+                                        try:
+                                            stream.unwrap().close()
+                                        except (ssl.SSLEOFError, ConnectionResetError):
+                                            pass
+                                        continue
+                                    request = f"GET /{target} HTTP/1.1\r\nHost: {CHECK['HOST']}:{CHECK['PORT']}\r\n\r\n"
+                                    stream.sendall(request.encode("ascii"))
+                                    response = HTTPResponse(stream)
+                                    response.begin()
+                                    replies.append((response.status, response.read()))
+                                    response.close()
+                            if expect_failure:
+                                with self.assertRaisesRegex(ValueError, "^auxiliary_limit$"):
+                                    task.result(timeout=5)
+                            else:
+                                task.result(timeout=5)
+                        diag = CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
+                        return replies, diag, CHECK["read"](report) if report.exists() else None
+                    finally:
+                        for endpoints in pairs:
+                            for endpoint in endpoints:
+                                endpoint.close()
+                replies, diag, report = exchange(("first.bin", "favicon.ico", None, "second.bin"))
+                self.assertEqual((diag["accepted_connections"], diag["tls_completed"], diag["requests_ready"]), (4, 4, 2))
+                self.assertEqual((diag["favicon_requests"], diag["empty_connections"], diag["status"]), (1, 1, "complete"))
+                self.assertEqual([status for status, _ in replies], [200, 404, 200])
+                self.assertEqual(replies[1][1], b"")
+                expected = CHECK["body_hash"](run_id, native_tabs=True)
+                self.assertEqual([hashlib.sha256(r[1]).hexdigest() for r in (replies[0], replies[2])],
+                                 [expected, expected])
+                self.assertTrue(report["complete"])
+                self.assertEqual([r["phase"] for r in report["requests"]], ["first", "second"])
+                _, diag, report = exchange([None] * (CHECK["MAX_NATIVE_AUXILIARY_CONNECTIONS"] + 1), expect_failure=True)
+                self.assertEqual((diag["error"], diag["requests_ready"]), ("auxiliary_limit", 0))
+                self.assertIsNone(report)
+
     def test_origin_failure_retains_closed_stage_and_longer_initial_accept_budget(self):
         # No sockets/traffic: the fixture's exception-to-closed-metadata contract only.
-        def failing_transfer(root, gates, run_id, report, status, observe):
+        def failing_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
             status["accepted_connections"] = 1
             observe("tls-handshake")
             raise TimeoutError("private origin address and request must not escape")
@@ -133,8 +380,8 @@ class BrowserNetworkEvidence(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
         source = (HERE / "browser-network-smoke.py").read_text()
-        self.assertIn("listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)", source)
-        self.assertLess(source.index("accepted.settimeout(30)"), source.index("with tls.wrap_socket"))
+        self.assertIn("deadline = time.monotonic() + ORIGIN_INITIAL_ACCEPT_SECONDS", source)
+        self.assertLess(source.index("accepted.settimeout(min(30, remaining(deadline)))"), source.index("with tls.wrap_socket"))
 
     def test_request_codes_are_closed_and_preserved(self):
         detail = dict(stage="stream-stop", nsresult=0x804B000D, proxy_status=502,
@@ -184,6 +431,23 @@ class BrowserNetworkEvidence(unittest.TestCase):
         route_source = (HERE.parents[1] / "crates/volparossa-agent/src/route_setup.rs").read_text()
         body = route_source.split("pub(crate) enum ClientRouteConnectError {", 1)[1].split("}", 1)[0]
         self.assertEqual(set(re.findall(r"^\s*([A-Za-z]+),", body, re.M)), CHECK["ROUTE_ERRORS"])
+
+    def test_preselection_diagnostic_retains_only_the_exact_inner_enum(self):
+        source = (HERE.parents[1] / "crates/volparossa-agent/src/discovery.rs").read_text()
+        body = source.split("pub(crate) enum ClientPreselectionError {", 1)[1].split("}", 1)[0]
+        variants = set(re.findall(r"^\s*([A-Za-z]+),", body, re.M))
+        self.assertEqual(variants, CHECK["PRESELECTION_ERRORS"])
+        def event(code):
+            return json.dumps(dict(target="volparossa_agent::browser_gateway::connect", fields=dict(
+                message="browser_gateway_observation", stage="preselection", code=code,
+                private_field="private-canary"))) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "private.log"
+            path.write_text("".join(event(code) for code in sorted(variants)) + event("private-canary"))
+            result = CHECK["gateway_diagnostic"](path)
+            self.assertEqual(result["events"], [dict(stage="preselection", code=code) for code in sorted(variants)])
+            self.assertTrue(result["unknown_event"])
+            self.assertNotIn("private", json.dumps(result))
 
     def test_attachment_substage_and_nsresult_are_closed_original_facts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -236,6 +500,28 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertEqual(CHECK["read"](output), dict(observation_complete=False,
                 failed_stage="guard_validation", process_boundary_verified=True,
                 fixture_loopback_only_uid_guard=False))
+
+    def test_failure_report_identifies_selected_runtime_without_completed_network(self):
+        shell = """
+            . "$1"
+            WORK=$2 output_directory=$2 bn_stage=$3
+            expected_commit=$4 PHASE=browser-network-second OBSERVED_BLOCKER=TEST_FAILURE
+            CLEANUP_COMPLETE=true REMAINING_OWNED_OBJECTS=0
+            optional_json_evidence() { echo null; }
+            browser_network_check() { return 0; }
+            browser_network_finalize_report 1
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "browser-network-smoke.json"
+            for stage, scope in [("firefox-native", "Native Firefox ordinary-tab"),
+                                 ("firefox-esr", "Two explicitly scoped Gecko"),
+                                 ("", "Browser network fixture stopped")]:
+                subprocess.run(["sh", "-eu", "-c", shell, "test", HERE / "browser-network-smoke.sh",
+                                temporary, stage, REVISION], check=True)
+                report = CHECK["read"](path)
+                self.assertFalse(report["success"])
+                self.assertIsNone(report["network"])
+                self.assertTrue(report["scope"].startswith(scope))
 
     def test_two_independent_native_owners_source_hash_and_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,7 +588,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
 
     def test_fixture_pin_and_closed_names_do_not_allow_secret_files(self):
         names = CHECK["EXPORT_NAMES"]
-        self.assertEqual(len(set(names)), 23)
+        self.assertEqual(len(set(names)), 24)
         self.assertTrue(all(name.startswith("browser-network-") and name.endswith(".json") for name in names))
         self.assertFalse(any(word in name for name in names for word in ("grant", "key", "profile", ".log")))
         with tempfile.TemporaryDirectory() as temporary:

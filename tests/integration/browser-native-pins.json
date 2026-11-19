@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
+  "revision": "c3311ebedcc02dc45ff9c9822cee62f091609f86",
+  "files": {
+    "scripts/smoke_network_core.py": {"bytes":27511,"sha256":"cef0d6b132cc83171ce0dacb6e226d93839ede08604cbb575f15410189e4d2e0"},
+    "scripts/smoke_network.py": {"bytes":30311,"sha256":"cf69f0e78be244eec38e50b3fa0a20f9ed50c4585499089a6c58005853506918"},
+    "scripts/smoke_browser_startup.py": {"bytes":11504,"sha256":"5193fe4b95bd49416c5a2cb1e0a19db9ebef0d3cf63467ad11a31646a5a930e3"},
+    "scripts/smoke_compute_model.py": {"bytes":29389,"sha256":"70b8a944ba6322d46690eafa74247526ac3fc13e92ae9870717e8ed7c63f5c1b"},
+    "scripts/smoke_privacy.py": {"bytes":15728,"sha256":"917d66faaeb6f80890c557ae3904bfee96b5fabc94e428776d83d1dc08fba283"},
+    "scripts/stage_firefox.py": {"bytes":9281,"sha256":"5d54e0e35662fae6b19d5f497d68469b0757fe754601c3e016f6fda773375203"},
+    "integration/VolparossaNetwork.sys.mjs": {"bytes":21189,"sha256":"00f56ffe02a71820b61109f7ddedf6f857488aec6cd63b7dc850c82492848997"},
+    "integration/VolparossaBrowserNetwork.sys.mjs": {"bytes":8844,"sha256":"fcc7eb622a1ff54e13e7ed40d5625e44f155c03b71fc0af9867bca6334379228"},
+    "defaults/privacy.json": {"bytes":987,"sha256":"f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"},
+    "scripts/smoke_network_native.py": {"bytes":11302,"sha256":"954be6c1b24c6092dcf5781666e7184ed43d90baacac52d5ae63cc2ab415e65a"},
+    "scripts/native_build.py": {"bytes":18048,"sha256":"94556e8216ff932b0a28bbe84a197d4211f8ee2e95495e6b25c55507e69bc58a"},
+    "scripts/prepare_compute_source.py": {"bytes":6672,"sha256":"3b838f719e8ed7e6bb2f0bc6bb83d5b7574ee6974f1b9ac883d853a78eed5a25"},
+    "scripts/prepare_network_source.py": {"bytes":2423,"sha256":"cbe6955284478cb3ca6a467e4ec5597ec96af167cd4d6c4dd7d2684745351f1c"},
+    "scripts/prepare_network_ech.py": {"bytes":11587,"sha256":"0f9c0137d12db6980b7b8a94fc23c3e64de475cf6bdca39c4128de81c2fc89a3"},
+    "patches/0002-channel-ech.patch": {"bytes":13252,"sha256":"6d87eb3a00275caad042f10e8ebfe14c579a45bb40dab6f4461822cf5e5dffc1"},
+    "patches/firefox-native-build.json": {"bytes":5371,"sha256":"f31b7413d7942f38e9a4b8754c89ea20ab212656ce3bbb7f025c8d2e8c260aa4"},
+    "patches/firefox-network-ech.json": {"bytes":1688,"sha256":"8eaf590b958c53247696b39edf0b0911de9ddd9a179d1c089704d1ad003735bb"},
+    "patches/firefox-source.json": {"bytes":815,"sha256":"3bb5a24da17df3b70115642e2fdbf8c4ff7b35d734bd8445efbadeba9fa10e99"},
+    "LICENSE": {"bytes":35149,"sha256":"3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"},
+    "THIRD_PARTY_LICENSES.md": {"bytes":1617,"sha256":"44fbb7f2ffd2e9b3b483ed4d389902ea2b35396a5c891ea747981ff934f030e4"}
+  }
+}

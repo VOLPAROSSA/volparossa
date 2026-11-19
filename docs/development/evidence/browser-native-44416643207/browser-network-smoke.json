@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "report_kind": "volparossa-browser-network",
+  "source_revision": "669e73eab7ea3e19faeb8f6caef8ef726bdbbb2a",
+  "phase": "browser-network-second",
+  "runner_exit_status": 1,
+  "network": null,
+  "observed_blocker": "BROWSER_NETWORK_HTTPS_REQUEST_UNAVAILABLE",
+  "success": false,
+  "cleanup": {
+    "complete": true,
+    "remaining_owned_objects": 0
+  },
+  "host_state": {
+    "after_sha256": "01f1e8fd4a814d440dc75319a458e3ca3c40ca51b13fa06341c407d2f30b1608",
+    "before_sha256": "01f1e8fd4a814d440dc75319a458e3ca3c40ca51b13fa06341c407d2f30b1608",
+    "compared": [
+      "links",
+      "addresses",
+      "routes",
+      "rules",
+      "DNS",
+      "nftables",
+      "WireGuard/VPN state",
+      "relevant forwarding sysctls",
+      "pre-existing named network namespaces"
+    ],
+    "schema_version": 1,
+    "scope": "disposable KVM guest root network namespace outside owned namespaces",
+    "success": true,
+    "unchanged": true
+  },
+  "full_browser_killswitch_claimed": false,
+  "http3_claimed": false,
+  "direct_fallback": false,
+  "scope": "two explicit privileged Gecko HTTPS channels through app-scoped real MPTCP; not general browsing interception"
+}

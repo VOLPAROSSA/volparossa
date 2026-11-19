@@ -1,0 +1,2043 @@
+{
+  "schema_version": 1,
+  "report_kind": "volparossa-browser-network",
+  "source_revision": "50b92f8acf4debb7b5a3e117fd14c7f5f8e26a39",
+  "phase": "browser-network-complete",
+  "runner_exit_status": 0,
+  "network": {
+    "browser": {
+      "browser_revision": "c3311ebedcc02dc45ff9c9822cee62f091609f86",
+      "cleanup": {
+        "browser_exited": true,
+        "profile_removed": true
+      },
+      "control_namespace": {
+        "grant_unmodified": true,
+        "original_parent_inode_preserved": true,
+        "original_socket_inode_preserved": true,
+        "read_only": true,
+        "scope": "client-control-directory"
+      },
+      "core_revision": "50b92f8acf4debb7b5a3e117fd14c7f5f8e26a39",
+      "expected_bytes": 33554432,
+      "expected_sha256": "3d8f7855a909ad05676127faddb8ebdb4d68e0a9404c353407630805d89d50b5",
+      "full_browser_killswitch": false,
+      "javascript_overlay": null,
+      "kind": "native-firefox-core-ordinary-tabs",
+      "namespace": "net:[4026532277]",
+      "native_bundle_sha256": "1e648f89043ad61edf1fbda9decf5351f12a28d8da177f269a2d5be4bf3a0a0c",
+      "native_ech_wire_proven": false,
+      "ordinary_tab_bodies_verified": 2,
+      "original_build_receipt_sha256": "3392952d2937740b2b5104e7429a0196e43de782cafcae39c6950624866bf70f",
+      "overlay_kernel_proof_external": true,
+      "passed": true,
+      "profile_ech_grease_disabled": false,
+      "result": {
+        "a": {
+          "bytes": 33554432,
+          "sha256_verified": true
+        },
+        "a_detached": true,
+        "b": {
+          "bytes": 33554432,
+          "sha256_verified": true
+        },
+        "b_survives_a_detach": true,
+        "builtin_modules": true,
+        "independent_attachments": true,
+        "native_ech_abi": true,
+        "ordinary_tabs": true,
+        "wrong_scope_blocked": true
+      },
+      "runtime_source_stamp": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+      "runtime_version": "157.0.1",
+      "socket_access": {
+        "capability_sent": false,
+        "path_type_verified": true,
+        "peer_uid_matches_socket": true,
+        "socket_parent_owner_group_match": true,
+        "unix_connect_verified": true
+      },
+      "startup": {
+        "firefox_exit_after_cleanup": 0,
+        "firefox_exit_before_cleanup": 0,
+        "initial_window_count": 2,
+        "marionette_connected": true,
+        "phase": "ready",
+        "session_created": true,
+        "stderr": {
+          "captured_bytes": 38,
+          "captured_sha256": "d37095890e41abeb8aa1cae77e628c525ff001e33622b496422c431b4a24aaaf",
+          "eof": true,
+          "observed": {
+            "crash_indicator": false,
+            "display_unavailable": false,
+            "marionette_listening": false,
+            "permission_denied": false,
+            "profile_unavailable": false,
+            "read_only_filesystem": false,
+            "shared_library_load": false,
+            "user_namespace_warning": false,
+            "xpcom_initialization": false
+          },
+          "total_bytes": 38,
+          "truncated": false,
+          "unclassified_output": true
+        },
+        "stderr_collection_failed": false
+      },
+      "version": 1
+    },
+    "detach": {
+      "client": true,
+      "exit": true,
+      "independent": true,
+      "version": 1
+    },
+    "isolation": {
+      "all_capabilities_dropped": true,
+      "client_namespace": true,
+      "control_gid": 987,
+      "fixture_loopback_only_uid_guard": true,
+      "netns": "net:[4026532277]",
+      "no_new_privileges": true,
+      "outside_parent_namespace": true,
+      "user_gid": 985,
+      "user_uid": 985
+    },
+    "origin": {
+      "complete": true,
+      "requests": [
+        {
+          "alpn": "http/1.1",
+          "bytes": 33554432,
+          "peer_is_exit": true,
+          "phase": "first",
+          "proxy_credentials_absent": true,
+          "sha256": "3d8f7855a909ad05676127faddb8ebdb4d68e0a9404c353407630805d89d50b5",
+          "tls_version": "TLSv1.3"
+        },
+        {
+          "alpn": "http/1.1",
+          "bytes": 33554432,
+          "peer_is_exit": true,
+          "phase": "second",
+          "proxy_credentials_absent": true,
+          "sha256": "3d8f7855a909ad05676127faddb8ebdb4d68e0a9404c353407630805d89d50b5",
+          "tls_version": "TLSv1.3"
+        }
+      ],
+      "run_id": "1420b34355f846c3b74eb6571c2b9170",
+      "version": 1
+    },
+    "phases": [
+      {
+        "baseline": {
+          "client": {
+            "kernel": {
+              "cookie": "2001",
+              "local": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                57313
+              ],
+              "remote": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                44443
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 916,
+                  "bytes_received": 4066,
+                  "cookie": "2002",
+                  "data_segs_out": 4,
+                  "flags": "Mmec",
+                  "local": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                    57313
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                    44443
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 2172,
+                  "bytes_received": 0,
+                  "cookie": "2003",
+                  "data_segs_out": 3,
+                  "flags": "Jjec",
+                  "local": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:1",
+                    33437
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:4",
+                    44443
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "832d49dc",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "7a389db4"
+            },
+            "owner": {
+              "netns": "4026533820",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:59309",
+                  "ifindex": 1172003549,
+                  "interface": "vpc1dbfad30c",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:47432",
+                  "ifindex": 1262474788,
+                  "interface": "vpc2dbfad30c",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31196,
+              "start_ticks": "35599",
+              "unit": "volparossa-alpha-helper@client.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:45509 sk:2001 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:7a389db4 write_seq:15734158076236895516 snd_una:15734158076236895516 rcv_nxt:3968348472860175287 local_addr_used:1 bytes_sent:3086 bytes_received:4066 bytes_acked:3086 subflows_total:2 last_data_sent:11428 last_data_recv:11428 last_ack_recv:11428\n",
+              "tcp": "ESTAB 0      0                   [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:45509 sk:2002 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.476/7.681 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:915 bytes_acked:916 bytes_received:4066 segs_out:13 segs_in:11 data_segs_out:4 data_segs_in:6 send 24092940bps lastsnd:11432 lastrcv:11432 lastack:11432 pacing_rate 48179152bps delivery_rate 9138976bps delivered:5 busy:44ms rcv_rtt:65 rcv_space:13480 rcv_ssthresh:72164 minrtt:0.268 snd_wnd:62464 rcv_wnd:65536 tcp-ulp-mptcp flags:Mmec token:0000(id:0)/7a389db4(id:0) seq:3968348472860174723 sfseq:3503 ssnoff:4237101845 maplen:564\nESTAB 0      0      [fd76:6f6c:7061:b912:c183:2:c38e:1]%vpc2dbfad30c:33437 [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 uid:985 ino:45509 sk:2003 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.452/0.236 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:2171 bytes_acked:2172 segs_out:5 segs_in:4 data_segs_out:3 send 238584071bps lastsnd:11432 lastrcv:11988 lastack:11432 pacing_rate 476904360bps delivery_rate 41160304bps delivered:4 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.262 snd_wnd:62464 rcv_wnd:65536 tcp-ulp-mptcp flags:Jjec token:832d49dc(id:2)/7a389db4(id:2) seq:3968348472860171955 sfseq:0 ssnoff:1520727154 maplen:0                                                              \n"
+            }
+          },
+          "exit": {
+            "kernel": {
+              "cookie": "3002",
+              "local": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                44443
+              ],
+              "remote": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                57313
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 4066,
+                  "bytes_received": 915,
+                  "cookie": "2004",
+                  "data_segs_out": 6,
+                  "flags": "Mec",
+                  "local": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                    44443
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                    57313
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 0,
+                  "bytes_received": 2171,
+                  "cookie": "2005",
+                  "data_segs_out": 0,
+                  "flags": "Jec",
+                  "local": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:4",
+                    44443
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:1",
+                    33437
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "832d49dc"
+            },
+            "owner": {
+              "netns": "4026533879",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:53908",
+                  "ifindex": 1305333782,
+                  "interface": "vpe1dbfad30c",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:49432",
+                  "ifindex": 1986002332,
+                  "interface": "vpe2dbfad30c",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31202,
+              "start_ticks": "35624",
+              "unit": "volparossa-alpha-helper@exit.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 uid:987 ino:42839 sk:3002 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:832d49dc write_seq:3968348472860175287 snd_una:3968348472860175287 rcv_nxt:15734158076236895516 bytes_sent:4066 bytes_received:3086 bytes_acked:4066 subflows_total:2 last_data_sent:11472 last_data_recv:11472 last_ack_recv:11428\n",
+              "tcp": "ESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 uid:987 ino:42839 sk:2004 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:212 rtt:8.721/14.263 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:4066 bytes_acked:4066 bytes_received:915 segs_out:10 segs_in:13 data_segs_out:6 data_segs_in:4 send 12365554bps lastsnd:11480 lastrcv:11480 lastack:11436 pacing_rate 24729688bps delivery_rate 260480bps delivered:7 busy:92ms rcv_space:13480 rcv_ssthresh:64188 minrtt:0.259 snd_wnd:65536 rcv_wnd:62469 tcp-ulp-mptcp flags:Mec token:0000(id:0)/832d49dc(id:0) seq:15734158076236894881 sfseq:814 ssnoff:1195617630 maplen:102\nESTAB 0      0      [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 [fd76:6f6c:7061:b912:c183:2:c38e:1]:33437 uid:987 ino:42839 sk:2005 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:1/0.5 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_received:2171 segs_out:3 segs_in:5 data_segs_in:3 send 107840000bps lastsnd:12036 lastrcv:11480 lastack:11480 pacing_rate 215680000bps delivered:1 app_limited rcv_space:13480 rcv_ssthresh:64188 minrtt:1 snd_wnd:65536 rcv_wnd:62469 tcp-ulp-mptcp flags:Jec token:0000(id:2)/832d49dc(id:2) seq:15734158076236894983 sfseq:1639 ssnoff:63481361 maplen:533                                                                                 \n"
+            }
+          },
+          "observed_monotonic_ns": 401612928880,
+          "started_monotonic_ns": 401516072323
+        },
+        "phase": "first",
+        "privacy": {
+          "client": {
+            "capture_role": "client",
+            "client_leg_packets": 0,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 13912,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 443,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 0,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "cb1": {
+                "intake_stopped": true,
+                "observed_frames": 346,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 346,
+                "receive_buffer_bytes": 8388608
+              },
+              "cb2": {
+                "intake_stopped": true,
+                "observed_frames": 170,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 170,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr0": {
+                "intake_stopped": true,
+                "observed_frames": 457,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 457,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr1": {
+                "intake_stopped": true,
+                "observed_frames": 5914,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5914,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr2": {
+                "intake_stopped": true,
+                "observed_frames": 5904,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5904,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr3": {
+                "intake_stopped": true,
+                "observed_frames": 402,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 402,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr4": {
+                "intake_stopped": true,
+                "observed_frames": 430,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 430,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr5": {
+                "intake_stopped": true,
+                "observed_frames": 465,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 465,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 3,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 3,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "cr0",
+              "cr1",
+              "cr2",
+              "cr3",
+              "cr4",
+              "cr5",
+              "cb1",
+              "cb2",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 13980,
+            "observed_frames": 14091,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 5203,
+            "relay2_wireguard_data_datagrams": 5150,
+            "routed_transport_packets": 13971,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "exit": {
+            "capture_role": "exit",
+            "client_leg_packets": 0,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 0,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 0,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 199,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 199,
+                "receive_buffer_bytes": 8388608
+              },
+              "xd": {
+                "intake_stopped": true,
+                "observed_frames": 765,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 765,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr0": {
+                "intake_stopped": true,
+                "observed_frames": 1024,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 1024,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr1": {
+                "intake_stopped": true,
+                "observed_frames": 6401,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6401,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr2": {
+                "intake_stopped": true,
+                "observed_frames": 6454,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6454,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr3": {
+                "intake_stopped": true,
+                "observed_frames": 273,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 273,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr4": {
+                "intake_stopped": true,
+                "observed_frames": 260,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 260,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr5": {
+                "intake_stopped": true,
+                "observed_frames": 266,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 266,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "xr0",
+              "xr1",
+              "xr2",
+              "xr3",
+              "xr4",
+              "xr5",
+              "xd",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 747,
+            "ipv4_frames": 15539,
+            "observed_frames": 15642,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 5591,
+            "relay2_wireguard_data_datagrams": 5615,
+            "routed_transport_packets": 15086,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay0": {
+            "capture_role": "relay0",
+            "client_leg_packets": 443,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 432,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 1012,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r0c": {
+                "intake_stopped": true,
+                "observed_frames": 457,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 457,
+                "receive_buffer_bytes": 8388608
+              },
+              "r0x": {
+                "intake_stopped": true,
+                "observed_frames": 1024,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 1024,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 305,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 305,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r0c",
+              "r0x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 1757,
+            "observed_frames": 1786,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 0,
+            "relay2_wireguard_data_datagrams": 0,
+            "routed_transport_packets": 1757,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay1": {
+            "capture_role": "relay1",
+            "client_leg_packets": 5900,
+            "client_leg_wireguard_data_datagrams": 5203,
+            "client_public_packets": 5896,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 6387,
+            "exit_leg_wireguard_data_datagrams": 5591,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r1c": {
+                "intake_stopped": true,
+                "observed_frames": 5914,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5914,
+                "receive_buffer_bytes": 8388608
+              },
+              "r1x": {
+                "intake_stopped": true,
+                "observed_frames": 6401,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6401,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 310,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 310,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r1c",
+              "r1x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 12594,
+            "observed_frames": 12625,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 10794,
+            "relay2_wireguard_data_datagrams": 0,
+            "routed_transport_packets": 12547,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay2": {
+            "capture_role": "relay2",
+            "client_leg_packets": 5890,
+            "client_leg_wireguard_data_datagrams": 5150,
+            "client_public_packets": 5866,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 6436,
+            "exit_leg_wireguard_data_datagrams": 5615,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r2c": {
+                "intake_stopped": true,
+                "observed_frames": 5904,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5904,
+                "receive_buffer_bytes": 8388608
+              },
+              "r2x": {
+                "intake_stopped": true,
+                "observed_frames": 6454,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6454,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 302,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 302,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r2c",
+              "r2x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 12625,
+            "observed_frames": 12660,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 0,
+            "relay2_wireguard_data_datagrams": 10765,
+            "routed_transport_packets": 12576,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          }
+        },
+        "progress": {
+          "client": {
+            "kernel": {
+              "cookie": "2001",
+              "local": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                57313
+              ],
+              "remote": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                44443
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 916,
+                  "bytes_received": 4447628,
+                  "cookie": "2002",
+                  "data_segs_out": 4,
+                  "flags": "Mmec",
+                  "local": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                    57313
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                    44443
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 2172,
+                  "bytes_received": 4484586,
+                  "cookie": "2003",
+                  "data_segs_out": 3,
+                  "flags": "Jjecv",
+                  "local": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:1",
+                    33437
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:4",
+                    44443
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "832d49dc",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "7a389db4"
+            },
+            "owner": {
+              "netns": "4026533820",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:59309",
+                  "ifindex": 1172003549,
+                  "interface": "vpc1dbfad30c",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:47432",
+                  "ifindex": 1262474788,
+                  "interface": "vpc2dbfad30c",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31196,
+              "start_ticks": "35599",
+              "unit": "volparossa-alpha-helper@client.service"
+            },
+            "raw": {
+              "meta": "ESTAB 205056 0      [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:45509 sk:2001 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:7a389db4 write_seq:15734158076236895516 snd_una:15734158076236895516 rcv_nxt:3968348472867955109 local_addr_used:1 bytes_sent:3086 bytes_received:7783888 bytes_acked:3086 subflows_total:2 last_data_sent:15324 last_data_recv:152 last_ack_recv:152\nESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:1]:54076 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:48682 sk:2007 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:9f9f8e86 write_seq:7788624783800768296 snd_una:7788624783800768296 rcv_nxt:4349541341886796669 local_addr_used:1 bytes_sent:2734 bytes_received:917 bytes_acked:2734 subflows_total:2 last_data_sent:2368 last_data_recv:2328 last_ack_recv:2328     \n",
+              "tcp": "ESTAB 0      0                   [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:45509 sk:2002 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.476/7.681 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:915 bytes_acked:916 bytes_received:4447628 segs_out:1451 segs_in:3447 data_segs_out:4 data_segs_in:3442 send 24092940bps lastsnd:15332 lastrcv:168 lastack:168 pacing_rate 48179152bps delivery_rate 9138976bps delivered:5 busy:44ms rcv_rtt:1 rcv_space:13480 rcv_ssthresh:3588096 minrtt:0.268 rcv_ooopack:33 snd_wnd:62464 rcv_wnd:3464256 tcp-ulp-mptcp flags:Mmec token:0000(id:0)/7a389db4(id:0) seq:3968348472868228981 sfseq:4446853 ssnoff:4237101845 maplen:776     \nESTAB 0      0                   [fd76:6f6c:7061:1094:24a1:1:17a6:1]:54076 [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 uid:985 ino:48682 sk:1002 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:5.033/9.208 ato:40 mss:1348 pmtu:1420 rcvmss:606 advmss:1348 cwnd:10 bytes_sent:379 bytes_acked:380 bytes_received:917 segs_out:9 segs_in:8 data_segs_out:3 data_segs_in:3 send 21426585bps lastsnd:2340 lastrcv:2336 lastack:2336 pacing_rate 42848912bps delivery_rate 21874232bps delivered:4 busy:44ms rcv_rtt:2 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.47 snd_wnd:61824 rcv_wnd:63466 tcp-ulp-mptcp flags:Mmec token:0000(id:0)/9f9f8e86(id:0) seq:4349541341886796485 sfseq:734 ssnoff:1826983272 maplen:184                                         \nESTAB 0      0      [fd76:6f6c:7061:b912:c183:2:c38e:1]%vpc2dbfad30c:33437 [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 uid:985 ino:45509 sk:2003 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.452/0.236 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:2171 bytes_acked:2172 bytes_received:4484586 segs_out:1437 segs_in:3462 data_segs_out:3 data_segs_in:3458 send 238584071bps lastsnd:15332 lastrcv:160 lastack:160 pacing_rate 476904360bps delivery_rate 41160304bps delivered:4 rcv_rtt:1.75 rcv_space:13480 rcv_ssthresh:3588096 minrtt:0.262 rcv_ooopack:43 snd_wnd:62464 rcv_wnd:3469952 tcp-ulp-mptcp flags:Jjecv token:832d49dc(id:2)/7a389db4(id:2) seq:3968348472867933989 sfseq:4463467 ssnoff:1520727154 maplen:34322\nESTAB 0      0      [fd76:6f6c:7061:b912:c183:2:c38e:1]%vpc2dbfad30c:34403 [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 uid:985 ino:48682 sk:1003 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.344/0.139 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:2355 bytes_acked:2356 segs_out:5 segs_in:4 data_segs_out:3 send 313488372bps lastsnd:2376 lastrcv:2380 lastack:2376 pacing_rate 625612760bps delivery_rate 76212008bps delivered:4 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.266 snd_wnd:64256 rcv_wnd:63650 tcp-ulp-mptcp flags:Jjec token:cd0b3190(id:2)/9f9f8e86(id:2) seq:4349541341886796485 sfseq:0 ssnoff:2461044067 maplen:0                                                                                                 \n"
+            }
+          },
+          "exit": {
+            "kernel": {
+              "cookie": "3002",
+              "local": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                44443
+              ],
+              "remote": [
+                "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                57313
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 4447628,
+                  "bytes_received": 915,
+                  "cookie": "2004",
+                  "data_segs_out": 3796,
+                  "flags": "Mec",
+                  "local": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:4",
+                    44443
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:1094:24a1:1:17a6:1",
+                    57313
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 354
+                },
+                {
+                  "bytes_acked": 4484586,
+                  "bytes_received": 2171,
+                  "cookie": "2005",
+                  "data_segs_out": 3889,
+                  "flags": "Jec",
+                  "local": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:4",
+                    44443
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:b912:c183:2:c38e:1",
+                    33437
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "0000",
+                  "total_retrans": 413
+                }
+              ],
+              "token": "832d49dc"
+            },
+            "owner": {
+              "netns": "4026533879",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:53908",
+                  "ifindex": 1305333782,
+                  "interface": "vpe1dbfad30c",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:49432",
+                  "ifindex": 1986002332,
+                  "interface": "vpe2dbfad30c",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31202,
+              "start_ticks": "35624",
+              "unit": "volparossa-alpha-helper@exit.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:54076 uid:987 ino:49402 sk:1004 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:cd0b3190 write_seq:4349541341886796669 snd_una:4349541341886796669 rcv_nxt:7788624783800768296 bytes_sent:917 bytes_received:2734 bytes_acked:917 subflows_total:2 last_data_sent:2360 last_data_recv:2360 last_ack_recv:2356\nESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 uid:987 ino:42839 sk:3002 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:832d49dc write_seq:3968348472868262485 snd_una:3968348472867955109 rcv_nxt:15734158076236895516 bytes_retrans:62952 bytes_sent:8091264 bytes_received:3086 bytes_acked:7783888 subflows_total:2 last_data_sent:192 last_data_recv:15352 last_ack_recv:180\n",
+              "tcp": "ESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:57313 uid:987 ino:42839 sk:2004 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:1.748/2.021 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:26 ssthresh:16 bytes_sent:4907318 bytes_retrans:459690 bytes_acked:4447628 bytes_received:915 segs_out:3800 segs_in:1451 data_segs_out:3796 data_segs_in:4 send 160402746bps lastsnd:200 lastrcv:15360 lastack:196 pacing_rate 192400736bps delivery_rate 160595680bps delivered:3443 busy:3208ms sndbuf_limited:72ms(2.2%) retrans:0/354 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.141 snd_wnd:3464192 rcv_wnd:62469 rehash:13 tcp-ulp-mptcp flags:Mec token:0000(id:0)/832d49dc(id:0) seq:15734158076236894881 sfseq:814 ssnoff:1195617630 maplen:102\nESTAB 0      0      [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 [fd76:6f6c:7061:b912:c183:2:c38e:1]:34403 uid:987 ino:49402 sk:2008 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:1/0.5 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_received:2355 segs_out:3 segs_in:5 data_segs_in:3 send 107840000bps lastsnd:2408 lastrcv:2404 lastack:2404 pacing_rate 215680000bps delivered:1 app_limited rcv_space:13480 rcv_ssthresh:64188 minrtt:1 snd_wnd:63616 rcv_wnd:64256 tcp-ulp-mptcp flags:Jec token:0000(id:2)/cd0b3190(id:2) seq:7788624783800766375 sfseq:435 ssnoff:3133888579 maplen:1921                                                                                                                                                                                          \nESTAB 0      0      [fd76:6f6c:7061:1094:24a1:1:17a6:4]:44443 [fd76:6f6c:7061:1094:24a1:1:17a6:1]:54076 uid:987 ino:49402 sk:2009 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:208 rtt:5.355/8.691 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:917 bytes_acked:917 bytes_received:379 segs_out:7 segs_in:9 data_segs_out:3 data_segs_in:3 send 20138189bps lastsnd:2368 lastrcv:2368 lastack:2364 pacing_rate 40274496bps delivery_rate 3354272bps delivered:4 busy:48ms rcv_space:13480 rcv_ssthresh:64188 minrtt:0.318 snd_wnd:63360 rcv_wnd:61827 tcp-ulp-mptcp flags:Mec token:0000(id:0)/cd0b3190(id:0) seq:7788624783800765867 sfseq:306 ssnoff:3661820771 maplen:74                                                                                                                \nESTAB 0      192702 [fd76:6f6c:7061:b912:c183:2:c38e:4]:44443 [fd76:6f6c:7061:b912:c183:2:c38e:1]:33437 timer:(on,016ms,0) uid:987 ino:42839 sk:2005 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.809/0.274 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:5 ssthresh:15 bytes_sent:5047024 bytes_retrans:538676 bytes_acked:4484586 bytes_received:2171 segs_out:3892 segs_in:1437 data_segs_out:3889 data_segs_in:3 send 66650185bps lastsnd:188 lastrcv:15360 lastack:188 pacing_rate 506384920bps delivery_rate 70025968bps delivered:3459 busy:3788ms sndbuf_limited:248ms(6.5%) unacked:19 retrans:5/413 lost:18 sacked:1 rcv_space:13480 rcv_ssthresh:64188 notsent:168940 minrtt:0.137 snd_wnd:3469952 rcv_wnd:62469 rehash:16 tcp-ulp-mptcp flags:Jec token:0000(id:2)/832d49dc(id:2) seq:15734158076236894983 sfseq:1639 ssnoff:63481361 maplen:533\n"
+            }
+          },
+          "observed_monotonic_ns": 405483949129,
+          "started_monotonic_ns": 405428862551
+        }
+      },
+      {
+        "baseline": {
+          "client": {
+            "kernel": {
+              "cookie": "2",
+              "local": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                54813
+              ],
+              "remote": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                44443
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 916,
+                  "bytes_received": 3795,
+                  "cookie": "3",
+                  "data_segs_out": 4,
+                  "flags": "Mmec",
+                  "local": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                    54813
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                    44443
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 2173,
+                  "bytes_received": 293,
+                  "cookie": "4",
+                  "data_segs_out": 3,
+                  "flags": "Jjec",
+                  "local": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:1",
+                    50683
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:4",
+                    44443
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "f2409d68",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "9610a22b"
+            },
+            "owner": {
+              "netns": "4026534056",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:33975",
+                  "ifindex": 1823828013,
+                  "interface": "vpc1dfd61726",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:36077",
+                  "ifindex": 1623243552,
+                  "interface": "vpc2dfd61726",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31551,
+              "start_ticks": "38625",
+              "unit": "volparossa-alpha-helper@client.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:47980 sk:2 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:9610a22b write_seq:16891115560786868828 snd_una:16891115560786868828 rcv_nxt:5146212030940700733 local_addr_used:1 bytes_sent:3087 bytes_received:4088 bytes_acked:3087 subflows_total:2 last_data_sent:144 last_data_recv:100 last_ack_recv:100\n",
+              "tcp": "ESTAB 0      0                   [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:47980 sk:3 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.265/7.697 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:915 bytes_acked:916 bytes_received:3795 segs_out:13 segs_in:11 data_segs_out:4 data_segs_in:6 send 25284877bps lastsnd:152 lastrcv:152 lastack:152 pacing_rate 50568264bps delivery_rate 11521360bps delivered:5 busy:44ms rcv_rtt:60.125 rcv_space:13480 rcv_ssthresh:72164 minrtt:0.189 snd_wnd:64384 rcv_wnd:65536 tcp-ulp-mptcp flags:Mmec token:0000(id:0)/9610a22b(id:0) seq:5146212030940700147 sfseq:3503 ssnoff:2361564534 maplen:293\nESTAB 0      0      [fd76:6f6c:7061:6b4d:78df:2:4992:1]%vpc2dfd61726:50683 [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 uid:985 ino:47980 sk:4 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.552/0.163 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:2172 bytes_acked:2173 bytes_received:293 segs_out:6 segs_in:6 data_segs_out:3 data_segs_in:1 send 195362319bps lastsnd:152 lastrcv:108 lastack:108 pacing_rate 390547752bps delivery_rate 22235048bps delivered:4 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.485 snd_wnd:65536 rcv_wnd:65243 tcp-ulp-mptcp flags:Jjec token:f2409d68(id:2)/9610a22b(id:2) seq:5146212030940700440 sfseq:1 ssnoff:3583411316 maplen:293                        \n"
+            }
+          },
+          "exit": {
+            "kernel": {
+              "cookie": "200a",
+              "local": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                44443
+              ],
+              "remote": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                54813
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 3795,
+                  "bytes_received": 915,
+                  "cookie": "6",
+                  "data_segs_out": 6,
+                  "flags": "Mec",
+                  "local": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                    44443
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                    54813
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 293,
+                  "bytes_received": 2172,
+                  "cookie": "5",
+                  "data_segs_out": 1,
+                  "flags": "Jec",
+                  "local": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:4",
+                    44443
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:1",
+                    50683
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "f2409d68"
+            },
+            "owner": {
+              "netns": "4026534115",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:48398",
+                  "ifindex": 1509358254,
+                  "interface": "vpe1dfd61726",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:36705",
+                  "ifindex": 2024815510,
+                  "interface": "vpe2dfd61726",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31557,
+              "start_ticks": "38648",
+              "unit": "volparossa-alpha-helper@exit.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 uid:987 ino:46900 sk:200a cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:f2409d68 write_seq:5146212030940700733 snd_una:5146212030940700733 rcv_nxt:16891115560786868828 bytes_sent:4088 bytes_received:3087 bytes_acked:4088 subflows_total:2 last_data_sent:144 last_data_recv:188 last_ack_recv:144\n",
+              "tcp": "ESTAB 0      0      [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 [fd76:6f6c:7061:6b4d:78df:2:4992:1]:50683 uid:987 ino:46900 sk:5 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.965/0.443 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:293 bytes_acked:293 bytes_received:2172 segs_out:5 segs_in:6 data_segs_out:1 data_segs_in:3 send 111751295bps lastsnd:152 lastrcv:196 lastack:152 pacing_rate 223329016bps delivery_rate 14853992bps delivered:2 app_limited rcv_rtt:1 rcv_space:13480 rcv_ssthresh:72164 minrtt:0.726 snd_wnd:65152 rcv_wnd:65536 tcp-ulp-mptcp flags:Jec token:0000(id:2)/f2409d68(id:2) seq:16891115560786868294 sfseq:1639 ssnoff:177005213 maplen:534\nESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 uid:987 ino:46900 sk:6 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:212 rtt:9.434/15.952 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:3795 bytes_acked:3795 bytes_received:915 segs_out:10 segs_in:13 data_segs_out:6 data_segs_in:4 send 11430994bps lastsnd:196 lastrcv:196 lastack:152 pacing_rate 22861680bps delivery_rate 248552bps delivered:7 busy:88ms rcv_space:13480 rcv_ssthresh:64188 minrtt:0.185 snd_wnd:65536 rcv_wnd:64384 tcp-ulp-mptcp flags:Mec token:0000(id:0)/f2409d68(id:0) seq:16891115560786868192 sfseq:814 ssnoff:3441884380 maplen:102             \n"
+            }
+          },
+          "observed_monotonic_ns": 420862086012,
+          "started_monotonic_ns": 420768114185
+        },
+        "phase": "second",
+        "privacy": {
+          "client": {
+            "capture_role": "client",
+            "client_leg_packets": 0,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 11981,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 29,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 0,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "cb1": {
+                "intake_stopped": true,
+                "observed_frames": 14,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 14,
+                "receive_buffer_bytes": 8388608
+              },
+              "cb2": {
+                "intake_stopped": true,
+                "observed_frames": 6,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr0": {
+                "intake_stopped": true,
+                "observed_frames": 32,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 32,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr1": {
+                "intake_stopped": true,
+                "observed_frames": 5753,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5753,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr2": {
+                "intake_stopped": true,
+                "observed_frames": 6161,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6161,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr3": {
+                "intake_stopped": true,
+                "observed_frames": 20,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 20,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr4": {
+                "intake_stopped": true,
+                "observed_frames": 5,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5,
+                "receive_buffer_bytes": 8388608
+              },
+              "cr5": {
+                "intake_stopped": true,
+                "observed_frames": 11,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 11,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 0,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 0,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "cr0",
+              "cr1",
+              "cr2",
+              "cr3",
+              "cr4",
+              "cr5",
+              "cb1",
+              "cb2",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 11987,
+            "observed_frames": 12002,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 5715,
+            "relay2_wireguard_data_datagrams": 6118,
+            "routed_transport_packets": 11987,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "exit": {
+            "capture_role": "exit",
+            "client_leg_packets": 0,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 0,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 0,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 12,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 12,
+                "receive_buffer_bytes": 8388608
+              },
+              "xd": {
+                "intake_stopped": true,
+                "observed_frames": 676,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 676,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr0": {
+                "intake_stopped": true,
+                "observed_frames": 76,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 76,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr1": {
+                "intake_stopped": true,
+                "observed_frames": 6291,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6291,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr2": {
+                "intake_stopped": true,
+                "observed_frames": 6713,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6713,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr3": {
+                "intake_stopped": true,
+                "observed_frames": 20,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 20,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr4": {
+                "intake_stopped": true,
+                "observed_frames": 23,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 23,
+                "receive_buffer_bytes": 8388608
+              },
+              "xr5": {
+                "intake_stopped": true,
+                "observed_frames": 23,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 23,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "xr0",
+              "xr1",
+              "xr2",
+              "xr3",
+              "xr4",
+              "xr5",
+              "xd",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 674,
+            "ipv4_frames": 13830,
+            "observed_frames": 13834,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 6210,
+            "relay2_wireguard_data_datagrams": 6622,
+            "routed_transport_packets": 13798,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay0": {
+            "capture_role": "relay0",
+            "client_leg_packets": 29,
+            "client_leg_wireguard_data_datagrams": 0,
+            "client_public_packets": 28,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 76,
+            "exit_leg_wireguard_data_datagrams": 0,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r0c": {
+                "intake_stopped": true,
+                "observed_frames": 32,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 32,
+                "receive_buffer_bytes": 8388608
+              },
+              "r0x": {
+                "intake_stopped": true,
+                "observed_frames": 76,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 76,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 19,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 19,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r0c",
+              "r0x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 124,
+            "observed_frames": 127,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 0,
+            "relay2_wireguard_data_datagrams": 0,
+            "routed_transport_packets": 124,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay1": {
+            "capture_role": "relay1",
+            "client_leg_packets": 5752,
+            "client_leg_wireguard_data_datagrams": 5715,
+            "client_public_packets": 5751,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 6291,
+            "exit_leg_wireguard_data_datagrams": 6210,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r1c": {
+                "intake_stopped": true,
+                "observed_frames": 5753,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 5753,
+                "receive_buffer_bytes": 8388608
+              },
+              "r1x": {
+                "intake_stopped": true,
+                "observed_frames": 6291,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6291,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 17,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 17,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r1c",
+              "r1x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 12059,
+            "observed_frames": 12061,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 11925,
+            "relay2_wireguard_data_datagrams": 0,
+            "routed_transport_packets": 12058,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          },
+          "relay2": {
+            "capture_role": "relay2",
+            "client_leg_packets": 6159,
+            "client_leg_wireguard_data_datagrams": 6118,
+            "client_public_packets": 6158,
+            "content_control_packets": {},
+            "content_control_pairs": {},
+            "content_provider_mode": false,
+            "control_relay_packets": 0,
+            "direct_client_exit_packets": 0,
+            "exit_leg_packets": 6709,
+            "exit_leg_wireguard_data_datagrams": 6622,
+            "expected_link_down_interfaces": {},
+            "expected_link_down_notifications": 0,
+            "interface_statistics": {
+              "r2c": {
+                "intake_stopped": true,
+                "observed_frames": 6160,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6160,
+                "receive_buffer_bytes": 8388608
+              },
+              "r2x": {
+                "intake_stopped": true,
+                "observed_frames": 6713,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 6713,
+                "receive_buffer_bytes": 8388608
+              },
+              "underlay": {
+                "intake_stopped": true,
+                "observed_frames": 22,
+                "packet_socket_drops": 0,
+                "packet_socket_packets": 22,
+                "receive_buffer_bytes": 8388608
+              }
+            },
+            "interfaces": [
+              "r2c",
+              "r2x",
+              "underlay"
+            ],
+            "internet_destination_outer_packets": 0,
+            "ipv4_frames": 12890,
+            "observed_frames": 12895,
+            "outbound_client_discovery_attempt_packets": 0,
+            "packet_socket_drops": 0,
+            "provider_application": {
+              "relay3": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay4": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              },
+              "relay5": {
+                "request_packets": 0,
+                "response_packets": 0,
+                "response_payload_bytes": 0
+              }
+            },
+            "provider_payload_timing": {
+              "clock": "linux-so-timestampns-new",
+              "enabled": false,
+              "errors": 0,
+              "milestones_bytes": [
+                65536,
+                983040
+              ],
+              "providers": {
+                "relay3": [
+                  0,
+                  0
+                ],
+                "relay4": [
+                  0,
+                  0
+                ],
+                "relay5": [
+                  0,
+                  0
+                ]
+              }
+            },
+            "relay0_wireguard_data_datagrams": 0,
+            "relay1_wireguard_data_datagrams": 0,
+            "relay2_wireguard_data_datagrams": 12740,
+            "routed_transport_packets": 12890,
+            "schema_version": 1,
+            "truncated": false,
+            "unexpected_outer_packets": 0,
+            "unexpected_outer_tuple_overflow_packets": 0,
+            "unexpected_outer_tuples": [],
+            "unexpected_provider_application_packets": 0,
+            "unexpected_provider_control_packets": 0
+          }
+        },
+        "progress": {
+          "client": {
+            "kernel": {
+              "cookie": "2",
+              "local": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                54813
+              ],
+              "remote": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                44443
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 916,
+                  "bytes_received": 5218032,
+                  "cookie": "3",
+                  "data_segs_out": 4,
+                  "flags": "Mmecv",
+                  "local": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                    54813
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                    44443
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 0
+                },
+                {
+                  "bytes_acked": 2173,
+                  "bytes_received": 5113242,
+                  "cookie": "4",
+                  "data_segs_out": 3,
+                  "flags": "Jjecv",
+                  "local": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:1",
+                    50683
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:4",
+                    44443
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "f2409d68",
+                  "total_retrans": 0
+                }
+              ],
+              "token": "9610a22b"
+            },
+            "owner": {
+              "netns": "4026534056",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:33975",
+                  "ifindex": 1823828013,
+                  "interface": "vpc1dfd61726",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:36077",
+                  "ifindex": 1623243552,
+                  "interface": "vpc2dfd61726",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31551,
+              "start_ticks": "38625",
+              "unit": "volparossa-alpha-helper@client.service"
+            },
+            "raw": {
+              "meta": "ESTAB 43776  0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:47980 sk:2 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:9610a22b write_seq:16891115560786868828 snd_una:16891115560786868828 rcv_nxt:5146212030949228263 local_addr_used:1 bytes_sent:3087 bytes_received:8531618 bytes_acked:3087 subflows_total:2 last_data_sent:5460 last_data_recv:120 last_ack_recv:104\nESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:59540 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:48124 sk:1005 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> subflows:1 remote_key token:fa13cc0a write_seq:12534733978568835410 snd_una:12534733978568835410 rcv_nxt:4817089013130142716 local_addr_used:1 bytes_sent:2734 bytes_received:918 bytes_acked:2734 subflows_total:2 last_data_sent:3068 last_data_recv:3028 last_ack_recv:3028\n",
+              "tcp": "ESTAB 0      0                   [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:47980 sk:3 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.265/7.697 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:915 bytes_acked:916 bytes_received:5218032 segs_out:1475 segs_in:4016 data_segs_out:4 data_segs_in:4011 send 25284877bps lastsnd:5468 lastrcv:112 lastack:112 pacing_rate 50568264bps delivery_rate 11521360bps delivered:5 busy:44ms rcv_rtt:1.875 rcv_space:13480 rcv_ssthresh:3588096 minrtt:0.189 rcv_ooopack:58 snd_wnd:65536 rcv_wnd:3573760 tcp-ulp-mptcp flags:Mmecv token:0000(id:0)/9610a22b(id:0) seq:5146212030949301985 sfseq:5192953 ssnoff:2361564534 maplen:64680\nESTAB 0      0      [fd76:6f6c:7061:6b4d:78df:2:4992:1]%vpc2dfd61726:45457 [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 uid:985 ino:48124 sk:200b cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.396/0.314 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:2355 bytes_acked:2356 segs_out:5 segs_in:4 data_segs_out:3 send 272323232bps lastsnd:3076 lastrcv:3076 lastack:3076 pacing_rate 544474592bps delivery_rate 71181512bps delivered:4 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.268 snd_wnd:64256 rcv_wnd:63649 tcp-ulp-mptcp flags:Jjec token:f78ff6e(id:2)/fa13cc0a(id:2) seq:4817089013130142532 sfseq:0 ssnoff:1179764008 maplen:0                                                                                                 \nESTAB 0      0      [fd76:6f6c:7061:6b4d:78df:2:4992:1]%vpc2dfd61726:50683 [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 uid:985 ino:47980 sk:4 cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.552/0.163 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_sent:2172 bytes_acked:2173 bytes_received:5113242 segs_out:1901 segs_in:3929 data_segs_out:3 data_segs_in:3924 send 195362319bps lastsnd:5468 pacing_rate 390547752bps delivery_rate 22235048bps delivered:4 rcv_rtt:26.875 rcv_space:13480 rcv_ssthresh:3588096 minrtt:0.485 rcv_ooopack:43 snd_wnd:65536 rcv_wnd:3572440 tcp-ulp-mptcp flags:Jjecv token:f2409d68(id:2)/9610a22b(id:2) seq:5146212030949182063 sfseq:5065723 ssnoff:3583411316 maplen:64680                         \nESTAB 0      0                   [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:59540 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 uid:985 ino:48124 sk:200c cgroup:/system.slice/volparossa-alpha-helper@client.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.88/9.153 ato:40 mss:1348 pmtu:1420 rcvmss:607 advmss:1348 cwnd:10 bytes_sent:379 bytes_acked:380 bytes_received:918 segs_out:9 segs_in:8 data_segs_out:3 data_segs_in:3 send 22098361bps lastsnd:3036 lastrcv:3036 lastack:3036 pacing_rate 44193320bps delivery_rate 33283944bps delivered:4 busy:44ms rcv_rtt:1 rcv_space:13480 rcv_ssthresh:64188 minrtt:0.324 snd_wnd:61824 rcv_wnd:63465 tcp-ulp-mptcp flags:Mmec token:0000(id:0)/fa13cc0a(id:0) seq:4817089013130142532 sfseq:735 ssnoff:286961071 maplen:184                                         \n"
+            }
+          },
+          "exit": {
+            "kernel": {
+              "cookie": "200a",
+              "local": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                44443
+              ],
+              "remote": [
+                "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                54813
+              ],
+              "subflows": [
+                {
+                  "bytes_acked": 5218032,
+                  "bytes_received": 915,
+                  "cookie": "6",
+                  "data_segs_out": 4480,
+                  "flags": "Mec",
+                  "local": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4",
+                    44443
+                  ],
+                  "local_id": 0,
+                  "path_id": 1,
+                  "remote": [
+                    "fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1",
+                    54813
+                  ],
+                  "remote_id": 0,
+                  "remote_token": "0000",
+                  "total_retrans": 456
+                },
+                {
+                  "bytes_acked": 5326884,
+                  "bytes_received": 2172,
+                  "cookie": "5",
+                  "data_segs_out": 4564,
+                  "flags": "Jec",
+                  "local": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:4",
+                    44443
+                  ],
+                  "local_id": 2,
+                  "path_id": 2,
+                  "remote": [
+                    "fd76:6f6c:7061:6b4d:78df:2:4992:1",
+                    50683
+                  ],
+                  "remote_id": 2,
+                  "remote_token": "0000",
+                  "total_retrans": 468
+                }
+              ],
+              "token": "f2409d68"
+            },
+            "owner": {
+              "netns": "4026534115",
+              "paths": [
+                {
+                  "endpoint": "44.160.1.1:48398",
+                  "ifindex": 1509358254,
+                  "interface": "vpe1dfd61726",
+                  "path_id": 1,
+                  "relay_node": "relay1"
+                },
+                {
+                  "endpoint": "45.161.2.1:36705",
+                  "ifindex": 2024815510,
+                  "interface": "vpe2dfd61726",
+                  "path_id": 2,
+                  "relay_node": "relay2"
+                }
+              ],
+              "pid": 31557,
+              "start_ticks": "38648",
+              "unit": "volparossa-alpha-helper@exit.service"
+            },
+            "raw": {
+              "meta": "ESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 uid:987 ino:46900 sk:200a cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:f2409d68 write_seq:5146212030950073067 snd_una:5146212030949327065 rcv_nxt:16891115560786868828 bytes_retrans:9288 bytes_sent:9260824 bytes_received:3087 bytes_acked:8630420 subflows_total:2 last_data_sent:20 last_data_recv:5492 last_ack_recv:12\nESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:59540 uid:987 ino:48868 sk:3004 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> subflows:1 add_addr_signal:1 subflows_max:2 add_addr_signal_max:1 add_addr_accepted_max:2 remote_key token:f78ff6e write_seq:4817089013130142716 snd_una:4817089013130142716 rcv_nxt:12534733978568835410 bytes_sent:918 bytes_received:2734 bytes_acked:918 subflows_total:2 last_data_sent:3060 last_data_recv:3060 last_ack_recv:3060                        \n",
+              "tcp": "ESTAB 0      0      [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 [fd76:6f6c:7061:6b4d:78df:2:4992:1]:45457 uid:987 ino:48868 sk:7 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:1/0.5 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:10 bytes_received:2355 segs_out:3 segs_in:5 data_segs_in:3 send 107840000bps lastsnd:3108 lastrcv:3108 lastack:3108 pacing_rate 215680000bps delivered:1 app_limited rcv_rtt:1 rcv_space:13480 rcv_ssthresh:64188 minrtt:1 snd_wnd:63616 rcv_wnd:64256 tcp-ulp-mptcp flags:Jec token:0000(id:2)/f78ff6e(id:2) seq:12534733978568833489 sfseq:435 ssnoff:4142609363 maplen:1921                                                                                                                                                                                                                                             \nESTAB 0      0      [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:59540 uid:987 ino:48868 sk:8 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:208 rtt:4.895/9.244 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:10 bytes_sent:918 bytes_acked:918 bytes_received:379 segs_out:7 segs_in:9 data_segs_out:3 data_segs_in:3 send 22030644bps lastsnd:3068 lastrcv:3068 lastack:3068 pacing_rate 44055656bps delivery_rate 42793648bps delivered:4 busy:44ms rcv_space:13480 rcv_ssthresh:64188 minrtt:0.252 snd_wnd:63360 rcv_wnd:61827 tcp-ulp-mptcp flags:Mec token:0000(id:0)/f78ff6e(id:0) seq:12534733978568832981 sfseq:306 ssnoff:1536324652 maplen:74                                                                                                                                                                            \nESTAB 0      284728 [fd76:6f6c:7061:6b4d:78df:2:4992:4]:44443 [fd76:6f6c:7061:6b4d:78df:2:4992:1]:50683 timer:(on,184ms,0) uid:987 ino:46900 sk:5 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:0.554/0.421 ato:40 mss:1348 pmtu:1420 rcvmss:1320 advmss:1348 cwnd:4 ssthresh:14 bytes_sent:5964114 bytes_retrans:616110 bytes_acked:5326884 bytes_received:2172 segs_out:4568 segs_in:1968 data_segs_out:4564 data_segs_in:3 send 77862816bps lastsnd:20 lastrcv:5500 lastack:20 pacing_rate 621920248bps delivery_rate 73360544bps delivered:4081 busy:4368ms sndbuf_limited:524ms(12.0%) unacked:16 retrans:4/468 lost:16 rcv_rtt:1 rcv_space:13480 rcv_ssthresh:72164 notsent:263608 minrtt:0.141 snd_wnd:3572352 rcv_wnd:65536 rehash:18 tcp-ulp-mptcp flags:Jec token:0000(id:2)/f2409d68(id:2) seq:16891115560786868294 sfseq:1639 ssnoff:177005213 maplen:534\nESTAB 0      204436 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:4]:44443 [fd76:6f6c:7061:ed4d:5cb0:1:e4a3:1]:54813 timer:(on,060ms,0) uid:987 ino:46900 sk:6 cgroup:/system.slice/volparossa-alpha-helper@exit.service <-> ts sack cubic wscale:7,7 rto:204 rtt:1.012/0.176 ato:40 mss:1348 pmtu:1420 rcvmss:536 advmss:1348 cwnd:8 ssthresh:15 bytes_sent:5833426 bytes_retrans:596914 bytes_acked:5218032 bytes_received:915 segs_out:4484 segs_in:1475 data_segs_out:4480 data_segs_in:4 send 85249012bps lastsnd:144 lastrcv:5500 lastack:144 pacing_rate 178912424bps delivery_rate 123598848bps delivered:4012 busy:4636ms sndbuf_limited:244ms(5.3%) unacked:14 retrans:8/456 lost:13 sacked:1 rcv_space:13480 rcv_ssthresh:64188 notsent:185956 minrtt:0.123 snd_wnd:3573760 rcv_wnd:65536 rehash:18 tcp-ulp-mptcp flags:Mec token:0000(id:0)/f2409d68(id:0) seq:16891115560786868192 sfseq:814 ssnoff:3441884380 maplen:102 \n"
+            }
+          },
+          "observed_monotonic_ns": 426167363674,
+          "started_monotonic_ns": 426106078300
+        }
+      }
+    ],
+    "provision": {
+      "browser_revision": "c3311ebedcc02dc45ff9c9822cee62f091609f86",
+      "javascript_overlay": null,
+      "kind": "source-built-native-firefox",
+      "local_disposable_only": true,
+      "native_bundle_sha256": "1e648f89043ad61edf1fbda9decf5351f12a28d8da177f269a2d5be4bf3a0a0c",
+      "native_driver_sha256": "c1ead52c7ffb9550595f45a951205bcbfccd3cf80f4c06c0339b601632a1a86d",
+      "original_build_receipt_sha256": "3392952d2937740b2b5104e7429a0196e43de782cafcae39c6950624866bf70f",
+      "runtime_source_stamp": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+      "runtime_version": "157.0.1",
+      "source_build": {
+        "browser_revision": "c3311ebedcc02dc45ff9c9822cee62f091609f86",
+        "controller_sha256": "fcc7eb622a1ff54e13e7ed40d5625e44f155c03b71fc0af9867bca6334379228",
+        "firefox_revision": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+        "firefox_tree": "4a1d6e73d48bc5888e4da37d655b360a14db18db",
+        "kind": "native-firefox-source-build",
+        "native_patch_sha256": "6d87eb3a00275caad042f10e8ebfe14c579a45bb40dab6f4461822cf5e5dffc1",
+        "outputs": {
+          "obj/dist/bin/firefox": "c8d0ea1fe5ecd29a65c2208c5535c5267ac995f1712ef5bba88f986dd4bfd429",
+          "obj/dist/bin/libxul.so": "5a84a586b16b0b1212757ad0ac74ae54ee68fa4c92d9acf70c2c5ebe3dc97103",
+          "obj/dist/bin/xpcshell": "65a020e4cec07e43cf5053edff3a92b36f6ec7cf79986d4ef4f7ebe5a3ea6d7d"
+        },
+        "overlay_sha256": "7f15bcad4b7fcf1c6015714425b4af5601db4366d6ed52668cffef48f344e625",
+        "plugin_container_sha256": "79d7e0fe39636987ea15b50876c5e748e72c436c42bd4530597b21ee74ad85c2",
+        "receipt_sha256": "3392952d2937740b2b5104e7429a0196e43de782cafcae39c6950624866bf70f",
+        "rust_report_sha256": "f994b853cae209236bd522735903f66a4a01f5cc8c04632d36aa45449ca367ac"
+      },
+      "version": 2
+    },
+    "version": 1
+  },
+  "observed_blocker": null,
+  "success": true,
+  "cleanup": {
+    "complete": true,
+    "remaining_owned_objects": 0
+  },
+  "host_state": {
+    "after_sha256": "74a8e4e8092cf204a1b389e13c923b236e34ac09fc2f4a77efcb92d841afaac3",
+    "before_sha256": "74a8e4e8092cf204a1b389e13c923b236e34ac09fc2f4a77efcb92d841afaac3",
+    "compared": [
+      "links",
+      "addresses",
+      "routes",
+      "rules",
+      "DNS",
+      "nftables",
+      "WireGuard/VPN state",
+      "relevant forwarding sysctls",
+      "pre-existing named network namespaces"
+    ],
+    "schema_version": 1,
+    "scope": "disposable KVM guest root network namespace outside owned namespaces",
+    "success": true,
+    "unchanged": true
+  },
+  "full_browser_killswitch_claimed": false,
+  "http3_claimed": false,
+  "direct_fallback": false,
+  "scope": "Native Firefox ordinary-tab test with two separately scoped WireGuard/MPTCP routes."
+}
