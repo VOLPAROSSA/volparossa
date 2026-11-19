@@ -323,6 +323,15 @@ jq() { return 83; }
             item = manifest(); item["files"][name][key] = value
             with self.assertRaises(ValueError): C["bundle_manifest"](item)
 
+    def test_planner_receipt_needs_distinct_local_workers_before_and_after_the_actual_peer(self):
+        value = dict(version=1, model_profile=C["PROFILE"], weights_sha256=C["MODEL"]["base_weights"]["sha256"],
+            observed_workers=4, before_public_task=2, after_peer_receipt=2, observed_workers_ended=True)
+        C["validate_planner"](value)
+        for change in (dict(observed_workers=3), dict(before_public_task=0), dict(after_peer_receipt=0),
+                       dict(observed_workers_ended=False), dict(weights_sha256="f" * 64), dict(unapproved_field=True)):
+            with self.assertRaises(ValueError):
+                C["validate_planner"]({**value, **change})
+
     def test_root_owned_workbench_parents_are_traversable_under_the_topology_private_umask(self):
         helper = runpy.run_path(str(HERE / "agent-cooperative-workbench.py"))
         with tempfile.TemporaryDirectory() as tmp:

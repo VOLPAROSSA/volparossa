@@ -1527,7 +1527,7 @@ COOPERATIVE_CODE_NAMES = {name.replace("agent-cooperative-browser-", "agent-coop
                           for name in COOPERATIVE_BROWSER_NAMES
                           if name != "agent-cooperative-browser-panel.json"} | {"agent-cooperative-code-driver.json"}
 COOPERATIVE_CODE_PROPOSAL_NAMES = {f"agent-cooperative-code-proposal-{name}.json" for name in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor")
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor", "planner")
 } | {name for name in COOPERATIVE_BROWSER_NAMES if not name.startswith("agent-cooperative-browser-")}
 COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",

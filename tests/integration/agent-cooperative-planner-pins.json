@@ -1,0 +1,21 @@
+{
+  "code_revision": "1b1cd335326b66eb565e6ceb8005fa7b385857d1",
+  "files": {
+    "code/scripts/public_peer_editor_ui.cjs": {
+      "bytes": 15522,
+      "sha256": "1eaffcfb80b9a33caeedc380d74ff3bc42c03de0802381c97b25c600e95959a5"
+    },
+    "code/scripts/public_peer_planner_ui.cjs": {
+      "bytes": 4789,
+      "sha256": "121f474213bb889f9fcc76ac0eef4103fde8c5321dbd04d3d00833fdaccc6eef"
+    },
+    "code/src/cooperative-tool-server.cjs": {
+      "bytes": 4499,
+      "sha256": "e1f8beefd86e3df466fa2f30f4f78fb76210674904e940d5f70199e1a04c5373"
+    },
+    "code/src/extension.cjs": {
+      "bytes": 25019,
+      "sha256": "2a76dea0ce226b4a3ddb6ab36585877d0e80c49bd920cc0b2ae66bb60ff5d73f"
+    }
+  }
+}
