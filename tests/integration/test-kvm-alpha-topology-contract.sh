@@ -511,7 +511,8 @@ assert guest.count("agent_autonomous_aggregation=no") == 2
 scenario_selector = next(line.strip() for line in workflow.splitlines()
     if line.strip().startswith("VOLPAROSSA_ALPHA_SCENARIO:"))
 assert scenario_selector == (
-    "VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || "
+    "VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || "
+    "inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || "
     "inputs.scenario == 'browser-native-source' && 'browser-network' || inputs.scenario || 'datapath' }}")
 topology_job = workflow.split('\n  alpha-topology:\n', 1)[1]
 # Capacity measurement and Immich each own a separate job on the public runner.

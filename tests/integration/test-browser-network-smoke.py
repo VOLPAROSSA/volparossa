@@ -295,6 +295,7 @@ class BrowserNetworkEvidence(unittest.TestCase):
             with patch.dict(context, BODY_BYTES=65536):
                 CHECK["seed"](root, run_id, native_tabs=True)
                 tls = ssl.create_default_context(cafile=str(root / "ca.pem"))
+                tls.minimum_version = ssl.TLSVersion.TLSv1_3
                 tls.set_alpn_protocols(["http/1.1"])
                 for phase in CHECK["PHASES"]:
                     for gate in ("release", "continue"):
