@@ -1,7 +1,6 @@
 //! Real `SQLite` and Ed25519 tests with fictional units and inert child processes.
 use crate::*;
 use ed25519_dalek::SigningKey;
-use rand_core::{OsRng, RngCore as _};
 use std::{
     fs,
     io::{Read as _, Write as _},
@@ -10,6 +9,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use volparossa_protocol::generate_nonce;
 
 fn key(byte: u8) -> SigningKey {
     SigningKey::from_bytes(&[byte; 32])
@@ -39,10 +39,7 @@ fn store(root: &Path) -> Store {
     .unwrap()
 }
 fn signed(id: u8, action: Action) -> Vec<u8> {
-    signed_with_nonce(id, action, random_nonce())
-}
-fn random_nonce() -> [u8; 32] {
-    std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
+    signed_with_nonce(id, action, generate_nonce())
 }
 fn signed_with_nonce(id: u8, action: Action, nonce: [u8; 32]) -> Vec<u8> {
     SignedCommand::sign(
@@ -68,6 +65,70 @@ fn reserve(id: u8, units: u64) -> Vec<u8> {
             units,
         },
     )
+}
+
+#[test]
+fn external_signer_returns_only_a_public_key_and_signature() {
+    use std::cell::Cell;
+
+    struct External {
+        reported: AccountId,
+        key: Option<SigningKey>,
+        calls: Cell<usize>,
+    }
+    impl CommandSigner for External {
+        fn public_key(&self) -> AccountId {
+            self.reported
+        }
+        fn sign_ed25519(&self, preimage: &[u8]) -> Result<[u8; 64], Error> {
+            self.calls.set(self.calls.get() + 1);
+            self.key
+                .as_ref()
+                .ok_or(Error::Unauthorized)?
+                .sign_ed25519(preimage)
+        }
+    }
+
+    let command = Command {
+        operation_id: [6; 32],
+        payer: owner(1),
+        action: Action::Reserve {
+            recipient: owner(2),
+            units: 7,
+        },
+    };
+    let nonce = generate_nonce();
+    let local = |signer: &dyn CommandSigner| {
+        SignedCommand::sign_with([9; 32], signer, command, 100, 200, nonce)
+    };
+    let ordered = |signer: &dyn CommandSigner| {
+        SignedCommand::sign_ordered_with([9; 32], signer, command, 100, 200, nonce)
+    };
+    let mut external = External {
+        reported: owner(1),
+        key: Some(key(1)),
+        calls: Cell::new(0),
+    };
+    assert_eq!(
+        local(&external).unwrap().encode(),
+        local(&key(1)).unwrap().encode()
+    );
+    assert_eq!(
+        ordered(&external).unwrap().encode(),
+        ordered(&key(1)).unwrap().encode()
+    );
+    assert_ne!(
+        local(&external).unwrap().encode(),
+        ordered(&external).unwrap().encode()
+    );
+    external.key = Some(key(2));
+    assert!(matches!(local(&external), Err(Error::Unauthorized)));
+    external.key = None;
+    assert!(matches!(ordered(&external), Err(Error::Unauthorized)));
+    external.reported = owner(2);
+    let calls = external.calls.get();
+    assert!(matches!(local(&external), Err(Error::Unauthorized)));
+    assert_eq!(external.calls.get(), calls);
 }
 
 #[test]
@@ -99,7 +160,7 @@ fn inspection_verifies_terms_without_admission_or_mutation() {
     );
     assert!(ledger.operation([1; 32]).unwrap().is_none());
     assert!(ledger.operation([2; 32]).unwrap().is_none());
-    let cross = SignedCommand::sign([8; 32], &key(1), terms, 100, 200, random_nonce())
+    let cross = SignedCommand::sign([8; 32], &key(1), terms, 100, 200, generate_nonce())
         .unwrap()
         .encode();
     assert!(matches!(ledger.inspect(&cross), Err(Error::WrongLedger)));
@@ -112,7 +173,7 @@ fn inspection_verifies_terms_without_admission_or_mutation() {
         },
         100,
         200,
-        random_nonce(),
+        generate_nonce(),
     )
     .unwrap()
     .encode();
@@ -256,7 +317,7 @@ fn forged_signer_wrong_domain_changed_bytes_and_unsupported_encoding_are_rejecte
         },
         100,
         200,
-        random_nonce(),
+        generate_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -276,7 +337,7 @@ fn forged_signer_wrong_domain_changed_bytes_and_unsupported_encoding_are_rejecte
         },
         100,
         200,
-        random_nonce(),
+        generate_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -294,7 +355,7 @@ fn durable_nonce_and_identifier_conflicts_do_not_change_balances() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ledger");
     let mut ledger = store(&path);
-    let nonce = random_nonce();
+    let nonce = generate_nonce();
     let original = signed_with_nonce(
         1,
         Action::Reserve {
@@ -344,7 +405,7 @@ fn durable_nonce_and_identifier_conflicts_do_not_change_balances() {
         },
         100,
         200,
-        random_nonce(),
+        generate_nonce(),
     )
     .unwrap();
     assert!(matches!(
@@ -436,7 +497,7 @@ fn exact_integer_supply_and_new_store_bounds_do_not_adopt_existing_data() {
             },
             100,
             200,
-            random_nonce()
+            generate_nonce()
         )
         .is_err()
     );
@@ -531,7 +592,7 @@ fn full_operation_budget_keeps_all_admitted_completions_and_expired_replays() {
             },
             100,
             200,
-            random_nonce(),
+            generate_nonce(),
         )
         .unwrap()
         .encode()
