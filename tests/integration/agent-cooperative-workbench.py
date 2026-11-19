@@ -47,13 +47,16 @@ def service(root, code, release, owner_socket):
     # The root-owned topology runs with umask 077. The ordinary editor must
     # traverse the empty system mount parents. The staged data and private
     # socket retain their same-owner access modes on their own bind mounts.
-    for name in (".", "usr", "etc", "etc/fonts", "proc", "sys", "dev", "run", "tmp", "workbench",
+    for name in (".", "usr", "etc", "etc/fonts", "proc", "sys", "dev", "run", "tmp", "var", "var/lib", "workbench",
                  "opt", "opt/volparossa-editor", "opt/volparossa-code"):
         directory = root / name
         directory.mkdir(exist_ok=True)
         directory.chmod(0o755)
     for name in ("bin", "sbin", "lib", "lib64"):
         (root / name).symlink_to("usr/" + name)
+    # The driver and extension verify that a project is distinct from the
+    # canonical account home. Both see the same session-owned private home.
+    (root / "var/lib/volparossa").symlink_to("/workbench/session/home")
     for name in ("etc/passwd", "etc/group", "etc/ld.so.cache", "opt/volparossa-node"):
         (root / name).touch()
     (code / "projects/public.sock").touch(mode=0o600, exist_ok=False)

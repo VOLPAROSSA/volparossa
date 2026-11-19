@@ -335,8 +335,9 @@ jq() { return 83; }
                 command = helper["service"](staging / "root", account, staging / "editor", staging / "public.sock")
             finally:
                 os.umask(original)
-            for name in (".", "opt", "etc", "usr", "workbench"):
+            for name in (".", "opt", "etc", "usr", "var", "var/lib", "workbench"):
                 self.assertEqual((staging / "root" / name).stat().st_mode & 0o777, 0o755)
+            self.assertEqual((staging / "root/var/lib/volparossa").readlink(), Path("/workbench/session/home"))
             self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
             self.assertEqual(projects.stat().st_mode & 0o777, 0o700)
             self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
