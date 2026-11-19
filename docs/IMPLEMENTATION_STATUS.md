@@ -970,6 +970,16 @@ follow. Local-only configuration alone does not prove offline private-endpoint
 routing. All newer shared-service, application and update requirements remain
 part of completion.
 
+The full Core candidate at `43b71ac3` produced two identical release packages
+on the Ubuntu runner, SHA-256 `0973864d3fdf348fe31f932921400e219aeebba5f85ab17488a44f95379e1d19`.
+In Debian 13, the suite no longer indexed the pinned Unbound packages and the
+private DNS companion was unavailable to apt. The independent network trial
+passed A01–A13 and A15. A14 counted eleven remaining runtime sockets after
+the forced crash. The outer host snapshots matched. The acceptance gate
+withheld the downloadable package.
+[Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447116925) ·
+[Guest package error](development/evidence/alpha-package-44447116925/package-apt.stderr)
+
 ## Fixed alpha v1 scorecard
 
 The frozen original twenty-row, 100-point criteria and AV1/A01–A15 definitions
