@@ -147,7 +147,7 @@ class Wiring(unittest.TestCase):
         for required in ("if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'cloud-upload-maintenance'",
                 'test "$TOPOLOGY_EXIT_CODE" = 0',
                 'cloud-upload-maintenance-evidence.py check-report-v8 "$report" "$GITHUB_SHA"',
-                'private-storage-maintenance-smoke.py report-consumer-v10 "$original" "$GITHUB_SHA"',
+                'private-storage-maintenance-smoke.py report-core-matrix "$original" "$GITHUB_SHA"',
                 'host-state-before.json', 'host-state-after.json'):
             self.assertIn(required, gate)
         self.assertNotIn('check-report-v5', gate)
@@ -165,8 +165,8 @@ class Wiring(unittest.TestCase):
         self.assertEqual(set(old['EXPORT_NAMES']), module['MAINTENANCE_NAMES'])
         self.assertEqual(set(old['EXPORT_NAMES']) | set(new['EXPORT_NAMES'])
             | set(new['CURRENT_EXPORT_NAMES']), module['CLOUD_UPLOAD_NAMES'])
-        self.assertEqual(len(module['MAINTENANCE_NAMES']), 117)
-        self.assertEqual(len(module['CLOUD_UPLOAD_NAMES']), 172)
+        self.assertEqual(len(module['MAINTENANCE_NAMES']), 121)
+        self.assertEqual(len(module['CLOUD_UPLOAD_NAMES']), 176)
         self.assertIn('private-storage-provider-activity.json', module['CLOUD_UPLOAD_NAMES'])
         self.assertTrue(set(SIDECAR_HELPERS) <= module['CLOUD_UPLOAD_NAMES'])
         recovery = {'guest-phase.txt', 'current-phase', 'guest-exit-status', 'host-state-before.json', 'host-state-after.json'}
@@ -208,7 +208,7 @@ class Wiring(unittest.TestCase):
             archive = collect(module, home, opt, SCENARIO)
             with tarfile.open(archive, 'r:gz') as bundle:
                 summary = json.load(bundle.extractfile('vm-incomplete.json'))
-                self.assertEqual(len(summary['diagnostics']['files']), 177)
+                self.assertEqual(len(summary['diagnostics']['files']), 181)
                 self.assertFalse(summary['success'])
                 self.assertFalse(summary['cleanup']['verified'])
                 self.assertTrue(all(not item['truncated'] for item in summary['diagnostics']['files']))
@@ -414,7 +414,7 @@ export_name=$1
             with tarfile.open(archive, 'r:gz') as bundle:
                 names = bundle.getnames()
                 summary = json.load(bundle.extractfile('vm-incomplete.json'))
-                self.assertLessEqual(len(summary['diagnostics']['files']), 177)
+                self.assertLessEqual(len(summary['diagnostics']['files']), 181)
                 self.assertLessEqual(summary['diagnostics']['captured_bytes'], 8388608)
                 for label in ('published', *(f'work-{i}' for i in range(1, 5))):
                     for name in ('cloud-upload-maintenance-smoke.json', 'cloud-upload-finish.json',

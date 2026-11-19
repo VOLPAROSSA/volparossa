@@ -4,6 +4,7 @@
 from pathlib import Path
 from contextlib import contextmanager
 import copy
+import hashlib
 import io
 import json
 import os
@@ -1754,7 +1755,7 @@ class MaintenanceEvidence(unittest.TestCase):
             for path in root.iterdir(): path.chmod(0o600)
             self.assertEqual(CHECK['evidence'](root), value)
             consumer_only = set(CHECK['CONSUMERS']['EXPORT_NAMES']) - set(CHECK['F']['EXPORT_NAMES'])
-            self.assertEqual(set(CHECK['EXPORT_NAMES']) - consumer_only - {
+            self.assertEqual(set(CHECK['EXPORT_NAMES']) - consumer_only - set(CHECK['CORE_READBACKS']) - {
                 'private-storage-maintenance-smoke.json', 'private-storage-maintenance-evidence.json',
                 'private-storage-maintenance-lifecycle-failure.json', 'private-storage-maintenance-route-diagnostic.json',
             'private-storage-maintenance-provider-events.json',
@@ -1766,6 +1767,66 @@ class MaintenanceEvidence(unittest.TestCase):
             (root / 'private-storage-fragments-restored_usage.json').write_text('{}')
             with self.assertRaises(ValueError):
                 CHECK['evidence'](root)
+
+    def test_core_provider_withdrawal_tracks_rotating_routes_and_all_four_kernel_readbacks(self):
+        value = fixture()
+        network = runpy.run_path(str(HERE / 'test-storage-consumer-network.py'))
+        consumers = network['fixture'](10)
+        value['control_underlay'] = consumers['control_underlay']
+        canonical = CHECK['matrix_network']()['canonical']
+        snapshot = canonical(value['control_underlay']['after'])
+        digest = hashlib.sha256(snapshot).hexdigest()
+        for name, consumer_phase in (('restore', 'exercise'), ('finish', 'finish')):
+            phase = copy.deepcopy(consumers['network'][consumer_phase])
+            # At the exact minimum, saturating one survivor cannot hide a short read from the other.
+            if name == 'restore':
+                first, second = (2 * (2 * CHECK['CHUNK'] + CHECK['LENGTHS'][-1]), 2 * CHECK['CHUNK'])
+                for node, amount in zip(CHECK['F']['NODES'][1:], (first, second), strict=True):
+                    phase['privacy']['exit']['provider_application'][node]['response_payload_bytes'] = amount
+            for moment in ('before', 'after'):
+                self.assertEqual(phase.pop(f'control_{moment}'), value['control_underlay']['after'])
+                phase[f'control_{moment}_sha256'] = digest
+            value['network'][name] = phase
+
+        current = dict(report(value), schema_version=10, consumers=consumers)
+        CHECK['validate_report'](current, '1' * 40, close_profile=True)
+        self.assertLess(len(canonical(current)), 1024 * 1024)
+        for mutate in (
+                lambda v: v.update(schema_version=9),
+                lambda v: v['maintenance']['network'].__setitem__('finish', fixture()['network']['finish']),
+                lambda v: v['maintenance']['network']['restore'].update(control_after_sha256='0' * 64),
+                lambda v: v['maintenance']['network']['restore']['gates']['observed_context_routes'].pop(),
+                lambda v: v['maintenance']['network']['restore']['control_privacy'].pop('relay2'),
+                lambda v: v['maintenance']['network']['restore']['privacy']['exit']['provider_application']['relay4'].update(response_payload_bytes=1),
+                lambda v: v['maintenance']['network']['restore']['privacy']['exit']['provider_application']['relay5'].update(response_payload_bytes=first - 1),
+                lambda v: v['maintenance']['network']['restore']['privacy']['exit']['provider_application']['relay3'].update(response_payload_bytes=second - 1)):
+            changed = copy.deepcopy(current); mutate(changed)
+            with self.assertRaises((ValueError, KeyError)):
+                CHECK['validate_report'](changed, '1' * 40, close_profile=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            OLD['write_evidence'](root, value)
+            (root / 'private-storage-fragments-layout.json').write_bytes(CHECK['CONSUMERS']['encoded'](value['layout']))
+            (root / CHECK['CONSUMERS']['TRANSITION_NAME']).write_bytes(canonical(value['control_transition']))
+            (root / CHECK['matrix_network']()['U']['NAME']).write_bytes(canonical(value['control_underlay']))
+            for name, phase in value['network'].items():
+                (root / f'private-storage-fragments-{name}-layout.json').write_bytes(canonical(phase['layout']))
+            (root / 'private-storage-maintenance-lifecycle.json').write_bytes(canonical(value['lifecycle']))
+            for name in CHECK['CORE_READBACKS']:
+                (root / name).write_bytes(snapshot)
+            for path in root.iterdir(): path.chmod(0o600)
+            self.assertEqual(CHECK['evidence'](root, matrix=True), value)
+            report_path = root / 'private-storage-maintenance-smoke.json'
+            report_path.write_bytes(canonical(current))
+            CHECK['main'](['report-core-matrix', str(report_path), '1' * 40])
+            for name in CHECK['CORE_READBACKS']:
+                (root / name).unlink()
+                with self.assertRaises(FileNotFoundError): CHECK['evidence'](root, matrix=True)
+                (root / name).write_bytes(snapshot + b' ')
+                with self.assertRaises(ValueError): CHECK['evidence'](root, matrix=True)
+                (root / name).write_bytes(snapshot)
+            with self.assertRaises((ValueError, KeyError)): CHECK['evidence'](root)
 
     def test_current_report_requires_both_proofs_from_the_same_topology(self):
         consumers = runpy.run_path(str(HERE / 'test-storage-consumer-maintenance-evidence.py'))['fixture']()

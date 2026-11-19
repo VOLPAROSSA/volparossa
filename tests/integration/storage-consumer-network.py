@@ -43,7 +43,7 @@ def worker_flow(work, path):
     work, path = Path(work), Path(path)
     parent = work / 'client-fixtures/private-storage-user'
     allowed = {f'flow-consumer-{n}.json' for n in PHASES} | {
-        f'flow-cloud-upload-{n}.json' for n in CLOUD_PHASES}
+        f'flow-cloud-upload-{n}.json' for n in CLOUD_PHASES} | {'flow-restore.json', 'flow-finish.json'}
     require(path.parent == parent and path.name in allowed
         and parent.resolve(strict=True) == parent, 'consumer_worker_flow_path')
     isolation = OLD['read'](work / 'private-storage-fragments-isolation.json', maximum=8192)[0]
@@ -75,11 +75,13 @@ def worker_flow(work, path):
         parse_constant=lambda _: require(False, 'consumer_nonfinite_flow'))
 
 
-def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay, *, minimum=None):
+def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay, *, minimum=None, core=False):
     # Cloud's separate continuation has different flow and cold-read bounds.
     # Its caller validates those exact application bounds; original consumers
     # retain their fixed minima and never infer a profile from evidence fields.
-    if minimum is None:
+    if core:
+        require(name in ('restore', 'finish') and minimum == 16, 'core_matrix_phase')
+    elif minimum is None:
         require(name in PHASES, 'consumer_network_phase')
         minimum = PHASES[name]
     else:
@@ -121,14 +123,19 @@ def validate_network(phase, peers, original_layout, name, total, repair_reads, u
         require(privacy[node]['client_leg_wireguard_data_datagrams'] > 16
             and privacy[node]['exit_leg_wireguard_data_datagrams'] > 16, 'consumer_two_leg_traffic')
     application = privacy['exit']['provider_application']
-    for node in OLD['NODES'][1:] if name == 'exercise' else OLD['NODES']:
+    withdrawn = name in ('exercise', 'restore')
+    for node in OLD['NODES'][1:] if withdrawn else OLD['NODES']:
         require(application[node]['request_packets'] > 0 and application[node]['response_packets'] > 0,
             'consumer_active_provider_traffic')
-    if name == 'exercise':
+    if withdrawn:
         require(application[OLD['NODES'][0]]['response_payload_bytes'] == 0, 'consumer_withdrawn_provider_responded')
         amounts = [application[node]['response_payload_bytes'] for node in OLD['NODES'][1:]]
-        require(all(n >= repair_reads for n in amounts) and sum(amounts) >= 2 * repair_reads + total,
-            'consumer_survivor_payload')
+        if core:
+            # Two full reconstructions have the original asymmetric B/C fragment bounds.
+            require(all(n >= lower for n, lower in zip(amounts, repair_reads, strict=True)), 'core_survivor_payload')
+        else:
+            require(all(n >= repair_reads for n in amounts) and sum(amounts) >= 2 * repair_reads + total,
+                'consumer_survivor_payload')
     keys(phase['control_privacy'], BROKERS)
     for broker, control in phase['control_privacy'].items():
         b = BROKERS.index(broker)
