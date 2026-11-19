@@ -43,13 +43,14 @@ class SchemaContracts(unittest.TestCase):
         expected = ('socket_create', 'ipv6_only_set', 'bind', 'connect', 'poll',
             'connect_socket_error', 'socket_domain', 'socket_type', 'socket_protocol',
             'local_address', 'listener_state', 'socket_error', 'ipv6_only_get',
-            'descriptor_flags', 'status_flags', 'peer_address', 'mptcp_info', 'connect_readiness')
+            'descriptor_flags', 'status_flags', 'peer_address', 'mptcp_info', 'connect_readiness', 'connect_operation_deadline')
         self.assertEqual(M.OPERATIONS, expected)
         self.assertEqual(M.CLASSES, ('io', 'timed_out', 'ambiguous_readiness'))
-        for operation in range(1, 19):
+        for operation in range(1, 20):
             for kind in range(1, 4):
                 for errno in (None, 1, 110, 4095):
-                    valid = (operation == 18) == (kind == 3) and (kind != 3 or errno is None)
+                    valid = ((operation == 18) == (kind == 3) and (kind != 3 or errno is None)
+                             and (operation != 19 or (kind == 2 and errno is None)))
                     with self.subTest(operation=operation, kind=kind, errno=errno):
                         if valid:
                             value = M.record(operation, kind, errno)
@@ -60,7 +61,7 @@ class SchemaContracts(unittest.TestCase):
                             with self.assertRaises(ValueError): M.record(operation, kind, errno)
 
     def test_numeric_fields_reject_bool_float_zero_negative_oversize_and_text(self):
-        for value in (True, False, 1.0, 0, -1, 19, CANARY, [], None):
+        for value in (True, False, 1.0, 0, -1, 20, CANARY, [], None):
             with self.subTest(operation=value), self.assertRaises(ValueError):
                 M.record(value, 1, None)
         for value in (True, False, 1.0, 0, -1, 4, CANARY, [], None):

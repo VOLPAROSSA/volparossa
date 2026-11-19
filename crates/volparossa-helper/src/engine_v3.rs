@@ -668,6 +668,8 @@ pub(crate) enum BackendError {
     MptcpConnectSocketHostUnreachable,
     /// Credentialed client MPTCP connect socket status: connection timed out.
     MptcpConnectSocketTimedOut,
+    /// The worker exhausted its bounded MPTCP operation before descriptor transfer.
+    MptcpConnectOperationDeadline,
     CleanupIncomplete,
 }
 
@@ -4478,6 +4480,9 @@ impl HelperEngine {
                             BackendError::MptcpConnectSocketHostUnreachable => {
                                 "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE"
                             }
+                            BackendError::MptcpConnectOperationDeadline => {
+                                "MPTCP_CONNECT_OPERATION_DEADLINE"
+                            }
                             BackendError::MptcpConnectSocketTimedOut => {
                                 "MPTCP_CONNECT_SOCKET_TIMED_OUT"
                             }
@@ -6306,7 +6311,8 @@ fn backend_response(
         | BackendError::MptcpConnectSocketRefused
         | BackendError::MptcpConnectSocketNetworkUnreachable
         | BackendError::MptcpConnectSocketHostUnreachable
-        | BackendError::MptcpConnectSocketTimedOut => HelperResult::Kernel,
+        | BackendError::MptcpConnectSocketTimedOut
+        | BackendError::MptcpConnectOperationDeadline => HelperResult::Kernel,
         BackendError::CleanupIncomplete => HelperResult::CleanupIncomplete,
     };
     response(request, result, diagnostic, None)
@@ -9150,6 +9156,10 @@ mod tests {
                 "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE",
             ),
             (
+                BackendError::MptcpConnectOperationDeadline,
+                "MPTCP_CONNECT_OPERATION_DEADLINE",
+            ),
+            (
                 BackendError::MptcpConnectSocketTimedOut,
                 "MPTCP_CONNECT_SOCKET_TIMED_OUT",
             ),
@@ -9213,6 +9223,7 @@ mod tests {
             BackendError::MptcpConnectSocketNetworkUnreachable,
             BackendError::MptcpConnectSocketHostUnreachable,
             BackendError::MptcpConnectSocketTimedOut,
+            BackendError::MptcpConnectOperationDeadline,
         ] {
             let reply = backend_response(&original, error, "COMMIT_PROBE_FAILED");
             assert_eq!(reply.result, HelperResult::Kernel as i32);

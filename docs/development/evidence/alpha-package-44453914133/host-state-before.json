@@ -1,0 +1,431 @@
+{
+  "addresses": [
+    {
+      "addr_info": [
+        {
+          "broadcast": null,
+          "dynamic": null,
+          "family": "inet",
+          "label": "lo",
+          "local": "127.0.0.1",
+          "noprefixroute": null,
+          "prefixlen": 8,
+          "scope": "host",
+          "temporary": null
+        },
+        {
+          "broadcast": null,
+          "dynamic": null,
+          "family": "inet6",
+          "label": null,
+          "local": "::1",
+          "noprefixroute": true,
+          "prefixlen": 128,
+          "scope": "host",
+          "temporary": null
+        }
+      ],
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "flags": [
+        "LOOPBACK",
+        "UP",
+        "LOWER_UP"
+      ],
+      "group": "default",
+      "ifindex": 1,
+      "ifname": "lo",
+      "link_type": "loopback",
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "qdisc": "noqueue"
+    },
+    {
+      "addr_info": [
+        {
+          "broadcast": "10.0.2.255",
+          "dynamic": true,
+          "family": "inet",
+          "label": "enp0s3",
+          "local": "10.0.2.15",
+          "noprefixroute": null,
+          "prefixlen": 24,
+          "scope": "global",
+          "temporary": null
+        },
+        {
+          "broadcast": null,
+          "dynamic": true,
+          "family": "inet6",
+          "label": null,
+          "local": "fec0::5054:ff:fe12:3456",
+          "noprefixroute": true,
+          "prefixlen": 64,
+          "scope": "site",
+          "temporary": null
+        },
+        {
+          "broadcast": null,
+          "dynamic": null,
+          "family": "inet6",
+          "label": null,
+          "local": "fe80::5054:ff:fe12:3456",
+          "noprefixroute": null,
+          "prefixlen": 64,
+          "scope": "link",
+          "temporary": null
+        }
+      ],
+      "address": "52:54:00:12:34:56",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "flags": [
+        "BROADCAST",
+        "MULTICAST",
+        "UP",
+        "LOWER_UP"
+      ],
+      "group": "default",
+      "ifindex": 2,
+      "ifname": "enp0s3",
+      "link_type": "ether",
+      "mtu": 1500,
+      "operstate": "UP",
+      "qdisc": "fq_codel"
+    }
+  ],
+  "dns": {
+    "resolv_conf_path": "/run/systemd/resolve/stub-resolv.conf",
+    "resolv_conf_sha256": "ebdf560272a77357195c39e98340b77e18c8a8ce2025ee950e9e0c7b01467ab8"
+  },
+  "links": [
+    {
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "flags": [
+        "LOOPBACK",
+        "UP",
+        "LOWER_UP"
+      ],
+      "group": "default",
+      "ifindex": 1,
+      "ifname": "lo",
+      "info_kind": null,
+      "link_index": null,
+      "link_type": "loopback",
+      "linkmode": "DEFAULT",
+      "master": null,
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "qdisc": "noqueue"
+    },
+    {
+      "address": "52:54:00:12:34:56",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "flags": [
+        "BROADCAST",
+        "MULTICAST",
+        "UP",
+        "LOWER_UP"
+      ],
+      "group": "default",
+      "ifindex": 2,
+      "ifname": "enp0s3",
+      "info_kind": null,
+      "link_index": null,
+      "link_type": "ether",
+      "linkmode": "DEFAULT",
+      "master": null,
+      "mtu": 1500,
+      "operstate": "UP",
+      "qdisc": "fq_codel"
+    }
+  ],
+  "named_network_namespaces": "",
+  "nftables": {
+    "nftables": []
+  },
+  "routes": [
+    {
+      "dev": "enp0s3",
+      "dst": "10.0.2.0/24",
+      "flags": [],
+      "gateway": null,
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "kernel",
+      "scope": "link",
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "10.0.2.2",
+      "flags": [],
+      "gateway": null,
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "dhcp",
+      "scope": "link",
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "10.0.2.3",
+      "flags": [],
+      "gateway": null,
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "dhcp",
+      "scope": "link",
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "default",
+      "flags": [],
+      "gateway": "10.0.2.2",
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "dhcp",
+      "scope": null,
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "default",
+      "flags": [],
+      "gateway": "fe80::2",
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": 892435087,
+      "prefsrc": null,
+      "protocol": "ra",
+      "scope": null,
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "fe80::/64",
+      "flags": [],
+      "gateway": null,
+      "metric": 256,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "kernel",
+      "scope": null,
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "fec0::/64",
+      "flags": [],
+      "gateway": null,
+      "metric": 100,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "ra",
+      "scope": null,
+      "src": null,
+      "table": null,
+      "type": null
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "10.0.2.15",
+      "flags": [],
+      "gateway": null,
+      "metric": null,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "kernel",
+      "scope": "host",
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "10.0.2.255",
+      "flags": [],
+      "gateway": null,
+      "metric": null,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "10.0.2.15",
+      "protocol": "kernel",
+      "scope": "link",
+      "src": null,
+      "table": "local",
+      "type": "broadcast"
+    },
+    {
+      "dev": "lo",
+      "dst": "127.0.0.0/8",
+      "flags": [],
+      "gateway": null,
+      "metric": null,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "127.0.0.1",
+      "protocol": "kernel",
+      "scope": "host",
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "lo",
+      "dst": "127.0.0.1",
+      "flags": [],
+      "gateway": null,
+      "metric": null,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "127.0.0.1",
+      "protocol": "kernel",
+      "scope": "host",
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "lo",
+      "dst": "127.255.255.255",
+      "flags": [],
+      "gateway": null,
+      "metric": null,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": "127.0.0.1",
+      "protocol": "kernel",
+      "scope": "link",
+      "src": null,
+      "table": "local",
+      "type": "broadcast"
+    },
+    {
+      "dev": "lo",
+      "dst": "::1",
+      "flags": [],
+      "gateway": null,
+      "metric": 0,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "kernel",
+      "scope": null,
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "fe80::5054:ff:fe12:3456",
+      "flags": [],
+      "gateway": null,
+      "metric": 0,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "kernel",
+      "scope": null,
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "fec0::5054:ff:fe12:3456",
+      "flags": [],
+      "gateway": null,
+      "metric": 0,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "kernel",
+      "scope": null,
+      "src": null,
+      "table": "local",
+      "type": "local"
+    },
+    {
+      "dev": "enp0s3",
+      "dst": "ff00::/8",
+      "flags": [],
+      "gateway": null,
+      "metric": 256,
+      "mtu": null,
+      "nexthops": null,
+      "nhid": null,
+      "prefsrc": null,
+      "protocol": "kernel",
+      "scope": null,
+      "src": null,
+      "table": "local",
+      "type": "multicast"
+    }
+  ],
+  "rules": [
+    {
+      "priority": 0,
+      "src": "all",
+      "table": "local"
+    },
+    {
+      "priority": 32766,
+      "src": "all",
+      "table": "main"
+    },
+    {
+      "priority": 32767,
+      "src": "all",
+      "table": "default"
+    }
+  ],
+  "schema_version": 1,
+  "scope": "disposable KVM guest root network namespace",
+  "sysctls": {
+    "ipv4_all_forwarding": "0",
+    "ipv4_forward": "0",
+    "ipv4_src_valid_mark": "0",
+    "ipv6_all_forwarding": "0"
+  },
+  "wireguard_dump": ""
+}

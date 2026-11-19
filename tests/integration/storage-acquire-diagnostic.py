@@ -19,7 +19,7 @@ MAX_BYTES = 16384
 OPERATIONS = ('socket_create', 'ipv6_only_set', 'bind', 'connect', 'poll',
     'connect_socket_error', 'socket_domain', 'socket_type', 'socket_protocol',
     'local_address', 'listener_state', 'socket_error', 'ipv6_only_get',
-    'descriptor_flags', 'status_flags', 'peer_address', 'mptcp_info', 'connect_readiness')
+    'descriptor_flags', 'status_flags', 'peer_address', 'mptcp_info', 'connect_readiness', 'connect_operation_deadline')
 CLASSES = ('io', 'timed_out', 'ambiguous_readiness')
 FALSE_FLAGS = ('acceptance_evidence', 'causal_attribution', 'fragment_copy_binding',
                'remote_cleanup_proven', 'event_absence_proven')
@@ -50,6 +50,7 @@ def record(operation, kind, errno):
     require(errno is None or type(errno) is int and 1 <= errno <= 4095)
     require((operation == 18) == (kind == 3))
     require(kind != 3 or errno is None)
+    require(operation != 19 or (kind == 2 and errno is None))
     return dict(operation=OPERATIONS[operation - 1], failure_class=CLASSES[kind - 1], errno=errno)
 
 

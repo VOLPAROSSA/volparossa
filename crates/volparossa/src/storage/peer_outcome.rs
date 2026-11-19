@@ -201,6 +201,21 @@ impl AgentOutcome {
         }
     }
 
+    pub(super) fn interrupted_reading_receipt(&self) -> bool {
+        matches!(
+            (self.status, self.detail),
+            (
+                Status::Observed,
+                Some(Detail {
+                    phase: PrivateStorageOutcomePhase::RemoteReceiptRead,
+                    category: PrivateStorageOutcomeCategory::Io
+                        | PrivateStorageOutcomeCategory::Timeout,
+                    ..
+                })
+            )
+        )
+    }
+
     pub(super) fn has_append_timing(self) -> bool {
         self.append_timing.is_some()
     }
