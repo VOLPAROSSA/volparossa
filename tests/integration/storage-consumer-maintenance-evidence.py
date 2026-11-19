@@ -86,12 +86,16 @@ def optional_handle(value, required):
 
 
 def control_filter(value, slot, interface, local, remote):
+    validate_control_table(value, f'vpa_content_control_adaptive_{slot}', interface, local, remote)
+
+
+def validate_control_table(value, table_name, interface, local, remote):
     """Validate actual kernel nft JSON, including rule order and every verdict."""
     keys(value, ('nftables',))
     rows = value['nftables']
     require(type(rows) is list and len(rows) == 13
         and all(type(row) is dict and len(row) == 1 for row in rows), 'control_nft_objects')
-    meta, table_name = rows[0].get('metainfo'), f'vpa_content_control_adaptive_{slot}'
+    meta = rows[0].get('metainfo')
     keys(meta, ('version', 'release_name', 'json_schema_version'))
     require(type(meta['version']) is str and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', meta['version'])
         and type(meta['release_name']) is str and re.fullmatch(r'[A-Za-z0-9 ._()#-]{1,80}', meta['release_name'])
