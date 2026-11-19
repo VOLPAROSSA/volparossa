@@ -41,7 +41,7 @@ TERMINALS = ('active', 'complete', 'tls_timeout', 'tls_error', 'operation_error'
 MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete', 'unmatchable')
 KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out',
     'mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
-    'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out')
+    'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out', 'mptcp_connect_operation_deadline')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
     'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS

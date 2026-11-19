@@ -130,6 +130,11 @@ fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
             23,
             "mptcp_connect_socket_timed_out",
         ),
+        (
+            Code::MptcpConnectOperationDeadline,
+            24,
+            "mptcp_connect_operation_deadline",
+        ),
     ] {
         assert_eq!(code as i32, number);
         let mut value = acquire_summary();

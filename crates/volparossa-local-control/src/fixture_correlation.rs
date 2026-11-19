@@ -146,6 +146,8 @@ pub enum StorageFixtureHelperDiagnostic {
     MptcpConnectSocketHostUnreachable = 22,
     /// Client MPTCP connect socket status: connection timed out.
     MptcpConnectSocketTimedOut = 23,
+    /// The credentialed client exceeded its socket operation budget before handoff.
+    MptcpConnectOperationDeadline = 24,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -201,6 +203,7 @@ impl StorageFixtureAcquireSummary {
                             | StorageFixtureHelperDiagnostic::MptcpConnectSocketNetworkUnreachable
                             | StorageFixtureHelperDiagnostic::MptcpConnectSocketHostUnreachable
                             | StorageFixtureHelperDiagnostic::MptcpConnectSocketTimedOut
+                            | StorageFixtureHelperDiagnostic::MptcpConnectOperationDeadline
                     ) && failure.reason != Reason::HelperKernel as i32)
                     || !matches!(
                         Reason::try_from(failure.reason),
