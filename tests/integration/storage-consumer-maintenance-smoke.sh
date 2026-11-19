@@ -119,12 +119,15 @@ private_storage_consumer_usage_snapshot() {
 private_storage_consumer_cleanup() {
     [ "${consumer_private_cleanup_complete:-no}" != yes ] || return 0
     [ -n "${consumer_user:-}" ] || return 0
-    if [ "${storage_fixture_correlation:-no}" = yes ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
-        private_storage_consumer_usage_snapshot || true
-    fi
     set --
     if [ -n "${consumer_image_release:-}" ] && [ -n "${consumer_cloud_release:-}" ]; then
         set -- "$consumer_image_release" "$consumer_cloud_release"
+    fi
+    # Owner release results exist only after a failed shared publication.
+    # A healthy upload continuation still needs all three provider services.
+    if [ "${storage_consumer_profile_version:-7}" = 10 ] \
+        && { [ "${storage_fixture_correlation:-no}" = yes ] || [ "$#" -eq 2 ]; }; then
+        private_storage_consumer_usage_snapshot || true
     fi
     private_storage_consumer_private cleanup "$consumer_user" "$@" \
         >"$WORK/storage-consumer-private-cleanup.json" || return 1
