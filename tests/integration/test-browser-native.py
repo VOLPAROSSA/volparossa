@@ -159,7 +159,7 @@ class NativeBrowserTests(unittest.TestCase):
         tree = ast.parse((HERE / "browser-native-core.py").read_text())
         script = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
                       and any(isinstance(t, ast.Name) and t.id == "SCRIPT" for t in node.targets))
-        navigate = "const navigate=" + script.split("const navigate=", 1)[1].split("  try{\n    await checkpoint", 1)[0]
+        navigate = "const navigate=" + script.split("const navigate=", 1)[1].split("  try{\n    if (!fromUI)", 1)[0]
         harness = r'''
 const vm=require("node:vm"), assert=require("node:assert/strict");
 const navigate=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
@@ -344,6 +344,28 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
                 changed["browser"][field] = replacement
                 with self.subTest(field=field), self.assertRaises(ValueError):
                     EVIDENCE["validate_browser"](changed)
+            pins = checks["profile"](checks["TAB_BROWSER"])
+            current = copy.deepcopy(evidence)
+            controls = dict(physical_tab_menu=True, native_file_picker=True, verified_authority_confirmations=3,
+                            cancelled_without_binding=True, owner_approved_tabs=2, explicit_releases=2)
+            current["browser"].update(browser_revision=pins["revision"], tab_controls=controls)
+            current["provision"].update(browser_revision=pins["revision"],
+                tab_controls_driver_sha256=RUNTIME["digest"](HERE / "browser-native-ui.py"))
+            record = current["provision"]["source_build"]
+            record.update(browser_revision=pins["revision"],
+                controller_sha256=pins["files"]["integration/" + checks["CONTROLLER"]]["sha256"],
+                tab_chrome_patch_sha256=pins["files"]["patches/0004-tab-route-controls.patch"]["sha256"])
+            EVIDENCE["validate_browser"](current)
+            for group, name, bad in (("browser", "tab_controls", dict(controls, explicit_releases=1)),
+                                     ("provision", "tab_controls_driver_sha256", "0" * 64),
+                                     ("provision", "source_build", fresh)):
+                changed = copy.deepcopy(current)
+                changed[group][name] = bad
+                with self.assertRaises(ValueError):
+                    EVIDENCE["validate_browser"](changed)
+            del record["tab_chrome_patch_sha256"]
+            with self.assertRaises(ValueError):
+                EVIDENCE["validate_browser"](current)
 
     def test_native_does_not_replace_path_or_detach_proof(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -354,7 +376,6 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
                 changed["browser"]["result"][key] = False
                 with self.assertRaises(ValueError):
                     EVIDENCE["validate_browser"](changed)
-
     def test_native_driver_uses_builtin_controller_ordinary_navigation_and_forwards_bytes(self):
         source = (HERE / "browser-native-core.py").read_text()
         tree = ast.parse(source)
