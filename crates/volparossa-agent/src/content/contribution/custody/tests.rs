@@ -74,7 +74,10 @@ fn custody_agent_empty_receiver_serves_and_stop_restart_rejects_stale_owner() {
 async fn pinned_client_checks_require_a_live_unchanged_policy_and_client_role() {
     use crate::content::{ContentError, custody::checked_policy};
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
     let (context, stop, task) = context(directory.path());
     let original = context
         .state
