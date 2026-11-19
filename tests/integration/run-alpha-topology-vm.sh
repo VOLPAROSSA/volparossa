@@ -1034,6 +1034,17 @@ stop_qemu_child() {
     return 0
 }
 
+copy_vm_console() {
+    case $scenario in
+        signal-backup|signal-backup-fragments|signal-mailbox|paired-mail) return 0 ;;
+    esac
+    if [ "$decoder_mode" != historical-v1 ]; then
+        tail -c 131072 "$1" >"$output_directory/vm-console.log"
+    else
+        install -m 0600 "$1" "$output_directory/vm-console.log"
+    fi
+}
+
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
@@ -1060,11 +1071,7 @@ cleanup() {
         printf '%s\n' 'QEMU exit unconfirmed; private VM scratch retained' >&2
     fi
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
-        if [ "$decoder_mode" != historical-v1 ]; then
-            tail -c 131072 "$RUN_DIRECTORY/console.log" >"$output_directory/vm-console.log" 2>/dev/null || true
-        else
-            install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" 2>/dev/null || true
-        fi
+        copy_vm_console "$RUN_DIRECTORY/console.log" 2>/dev/null || true
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
         # Preserve startup failures too: there may not be a serial console yet.
@@ -3410,13 +3417,7 @@ if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"
     printf '%s\n' 'refusing topology output containing private-key material' >&2
     exit 1
 fi
-if [ "$scenario" != signal-backup ] && [ "$scenario" != signal-backup-fragments ] && [ "$scenario" != signal-mailbox ] && [ "$scenario" != paired-mail ]; then
-    if [ "$decoder_mode" != historical-v1 ]; then
-        tail -c 131072 "$CONSOLE" >"$output_directory/vm-console.log"
-    else
-        install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
-    fi
-fi
+copy_vm_console "$CONSOLE"
 ssh_bounded 15s sudo -n systemctl poweroff >/dev/null 2>&1 || true
 if ! stop_qemu_child normal; then
     [ "$GUEST_STATUS" -ne 0 ] || GUEST_STATUS=1

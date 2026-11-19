@@ -29,6 +29,25 @@ class PairedMailTests(unittest.TestCase):
             out = subprocess.check_output(["sh", HERE/name, "--preview","--scenario","paired-mail"],text=True)
             self.assertIn("Stalwart", out)
 
+    def test_early_and_normal_console_collection_exclude_private_native_scenarios(self):
+        script = (HERE/"run-alpha-topology-vm.sh").read_text()
+        function = script[script.index("copy_vm_console() {"):script.index("\ncleanup() {")]
+        self.assertIn('copy_vm_console "$RUN_DIRECTORY/console.log"', script)
+        self.assertIn('copy_vm_console "$CONSOLE"', script)
+        self.assertNotIn("vm-console.log", script.replace(function, ""))
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            console = out/"console"
+            console.write_bytes(b"private-serial-sentinel")
+            for scenario in ("signal-backup","signal-backup-fragments","signal-mailbox","paired-mail","content-mailbox"):
+                subprocess.run(["sh","-eu","-c",function+'\nscenario=$1; output_directory=$2; decoder_mode=historical-v1; copy_vm_console "$3"',
+                                "sh",scenario,out,console],check=True)
+                copy = out/"vm-console.log"
+                if scenario == "content-mailbox":
+                    self.assertEqual(copy.read_bytes(), console.read_bytes())
+                else:
+                    self.assertFalse(copy.exists())
+
     def test_receiver_cannot_mount_the_sender_or_the_provider_stores(self):
         bundle, private, cli, control = map(Path, ("/fixture/runtime","/worker","/immutable/cli","/run/control.sock"))
         for stage in ("send","receive"):
