@@ -1,0 +1,137 @@
+{
+  "records": {
+    "aggregate": {
+      "complete_unix_us": 1795093486465628,
+      "first_body_unix_us": 1795093457808601,
+      "observation_quarters": [
+        {
+          "end_unix_us": 1795093464972857,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093464239189,
+            "relay1_received_bytes": 5301504,
+            "relay2_received_bytes": 3139952,
+            "start_unix_us": 1795093458237540
+          },
+          "scheduler_samples": 4,
+          "selected_path_samples": {
+            "1": 4
+          },
+          "start_unix_us": 1795093457808601
+        },
+        {
+          "end_unix_us": 1795093472137114,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093471239987,
+            "relay1_received_bytes": 5812480,
+            "relay2_received_bytes": 2440640,
+            "start_unix_us": 1795093465239412
+          },
+          "scheduler_samples": 7,
+          "selected_path_samples": {
+            "0": 2,
+            "1": 5
+          },
+          "start_unix_us": 1795093464972857
+        },
+        {
+          "end_unix_us": 1795093479301371,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093479241011,
+            "relay1_received_bytes": 6792176,
+            "relay2_received_bytes": 2775520,
+            "start_unix_us": 1795093472240250
+          },
+          "scheduler_samples": 7,
+          "selected_path_samples": {
+            "0": 1,
+            "1": 6
+          },
+          "start_unix_us": 1795093472137114
+        },
+        {
+          "end_unix_us": 1795093486465628,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093486246744,
+            "relay1_received_bytes": 5618640,
+            "relay2_received_bytes": 2795968,
+            "start_unix_us": 1795093480241132
+          },
+          "scheduler_samples": 7,
+          "selected_path_samples": {
+            "0": 3,
+            "1": 4
+          },
+          "start_unix_us": 1795093479301371
+        }
+      ],
+      "response_duration_ns": 28657026787,
+      "scheduler_samples_in_response": 25
+    },
+    "single": {
+      "complete_unix_us": 1795093442037241,
+      "first_body_unix_us": 1795093400857561,
+      "observation_quarters": [
+        {
+          "end_unix_us": 1795093411152481,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093410367578,
+            "relay1_received_bytes": 0,
+            "relay2_received_bytes": 8687648,
+            "start_unix_us": 1795093401364139
+          },
+          "scheduler_samples": 10,
+          "selected_path_samples": {
+            "1": 10
+          },
+          "start_unix_us": 1795093400857561
+        },
+        {
+          "end_unix_us": 1795093421447401,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093421372705,
+            "relay1_received_bytes": 0,
+            "relay2_received_bytes": 9642816,
+            "start_unix_us": 1795093411367956
+          },
+          "scheduler_samples": 10,
+          "selected_path_samples": {
+            "1": 10
+          },
+          "start_unix_us": 1795093411152481
+        },
+        {
+          "end_unix_us": 1795093431742321,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093431375995,
+            "relay1_received_bytes": 0,
+            "relay2_received_bytes": 8678016,
+            "start_unix_us": 1795093422372746
+          },
+          "scheduler_samples": 11,
+          "selected_path_samples": {
+            "1": 11
+          },
+          "start_unix_us": 1795093421447401
+        },
+        {
+          "end_unix_us": 1795093442037241,
+          "observed_wire_bytes": {
+            "end_unix_us": 1795093441381267,
+            "relay1_received_bytes": 0,
+            "relay2_received_bytes": 8678048,
+            "start_unix_us": 1795093432376187
+          },
+          "scheduler_samples": 10,
+          "selected_path_samples": {
+            "1": 10
+          },
+          "start_unix_us": 1795093431742321
+        }
+      ],
+      "response_duration_ns": 41179679772,
+      "scheduler_samples_in_response": 41
+    }
+  },
+  "schema_version": 1,
+  "source": "guest HTTP/3 receive clock, Exit EDT and independently observed Client WireGuard bytes"
+}

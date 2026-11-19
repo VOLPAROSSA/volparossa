@@ -427,6 +427,30 @@ causal-attribution and event-absence claims. The candidate still needs hosted
 Rust verification and a fresh live consumer trial; it changes neither deadlines
 nor receipts, authorization, retry behavior or storage accounting.
 
+During a foreground deposit, the owner can use the copy's remaining recovery
+attempt to check a lost FINALIZE receipt. The agent must have observed an I/O
+failure or timeout while reading that receipt. If the grant includes PROGRESS,
+the owner sends one read-only request for the original archive and lease within
+the original deadline. A fresh provider-signed committed receipt and the
+protected transfer's completion confirm the deposit. A partial answer or a
+failed check preserves the original failure for explicit resume. Background
+maintenance retains its existing turn budget.
+
+If an unusable local route prevents the agent from opening the provider
+stream, a foreground operation can spend its existing pre-challenge
+replacement to reconnect within the original cutoff. The agent rechecks the
+same signed policy, pinned control relay, provider offer and storage grant
+before opening a stream. It keeps the original owner connection throughout.
+The recovery sends no additional signed RESERVE and grants no extra time or
+background attempts.
+
+A foreground copy can also use its existing recovery attempt when the agent
+rejects a connection before READY because its selected control route has
+become unavailable. The owner repeats the connection with the same grant,
+target, operation, data and deadline. The first connection carried no signed
+storage request or payload. TLS handshake timeouts use the same single
+allowance. An explicit control-policy refusal ends the attempt.
+
 ### Explicit usage
 
 The examples are templates: replace the uppercase key/hash placeholders with independently

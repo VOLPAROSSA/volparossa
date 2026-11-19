@@ -454,12 +454,13 @@ is removed; behavioral tests and production paths are unchanged.
 | Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
-| DPS / Map | The Linux adapter reopened a signed peer traffic dataset offline and refused it after expiry. Organic Maps independently calculated two walking routes offline on Android 35. Applying live peer traffic to the native routing engine and field accuracy remain open. [Map trials](#map-weather-and-application-evidence) |
-| Cache / Weather | Drizz.li refused an expired ECMWF forecast and displayed the refreshed revision. Three independent Overmorrow release builds produced identical files. Physical device and iOS expiry still need evidence. [Weather trials](#map-weather-and-application-evidence) |
+| DPS / Map | The Linux desktop used 719 synthetic signed traffic advisories with the real Monaco road graph. The selected driving route changed from 1,083.24 m to 3,746.96 m and returned to its original distance on expiry. Field accuracy and joined mobile peer routing remain open. [Native route and rendering trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44514448577) |
+| Cache / Weather | The installed Android 16 app removed an expired ECMWF value, displayed the first refresh failure, and displayed 8.973 °C after a second request acquired the signed revision. The NOAA values stayed the same. Three independent Overmorrow release builds matched. Physical-device and iOS expiry remain open. [Android receipts](https://github.com/VOLPAROSSA/volparossa-weather/tree/3d1e6384a2ced86e3239598cac2173c5ff0696b8/docs/evidence/android-44514675704) |
 | Code / Browser AI | Two tabs in a source-built Firefox each downloaded 32 MiB over protected connections. Detaching one preserved the other. The coding, cooperative job and protected inference trials have separate acceptance criteria. [Native browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054) |
-| Transactions / Bank | Four validators executed the retained Bank commands, preserved 100 TEST units across partitions, and returned the original receipts after restart and replay. Full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
-| Chat | Signal Desktop preserved delivery receipts across restart. A native encrypted backup recovered all four fragments after a provider returned. [Signal trials](#map-weather-and-application-evidence) |
-| Citizen | Public replay verified three fictional referenda with Belenios 3.3.0 and rejected altered results. Eligibility and deployment for an actual election remain open. [Referendum trial](#map-weather-and-application-evidence) |
+| Transactions / Bank | Four validators preserved 100 TEST units across partitions, restart and replay. In a separate signed auction, independent readers can recalculate the indicative price from a frozen roster and fictitious limit orders. Full finality coverage, funding and external settlement remain open. [Validators](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Auction reader](https://github.com/VOLPAROSSA/volparossa-bank/blob/6e234caf6d13eb37b58e192e57d52d2cc6c49fee/docs/PAPER_AUCTION.md) |
+| Mail | Stalwart received a 267-byte SMTP message while Thunderbird was closed. After a server crash and SQLite reopen, a fresh Thunderbird profile opened the delivered subject and body over implicit TLS. External reception and peer mail delivery remain open. [Native inbox receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/f59e6e5d31d84ffb72bcc62be05fd0cab4ca9890/third_party/thunderbird-stalwart-native-inbox) |
+| Chat | Two standalone Signal Desktops exchanged an encrypted message through two local Core mailbox providers. The recipient reopened its SQLCipher profile and the sender saw Delivered after returning online. The providers operated through local sockets. Protected multi-node delivery is a separate trial. [Native receipt](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44521164389/attempts/2) |
+| Citizen | Belenios verified three fictional referenda against their independently retained setups. Citizen also replays a signed ZIP from existing Core caches offline. Real-person eligibility and recognized deployment remain open. [Native Belenios checks](https://github.com/VOLPAROSSA/volparossa-citizen/actions/runs/44516645835) · [Offline Core reader](https://github.com/VOLPAROSSA/volparossa-citizen/pull/11) |
 | Other applications / maintenance | Continue every agreed integration and organization-wide work; component/source checks do not complete consumer scenarios. |
 
 ### Execution priorities and next milestones
@@ -789,6 +790,40 @@ stopped. The 82,262-byte archive (artifact `14496173050`) has SHA-256
 `95205102709774ce80e5a7df56fc85121e399b3aa4a2d00744ae8fc5c72a50dd`.
 [Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447515035) · [Original application, samples and cleanup receipts](development/evidence/storage-maintenance-44447515035)
 
+The next twelve-node trial on `cf93b5a2` completed the independent eleven-copy
+Core lifecycle. Image then reported one failed deposit operation, with zero
+omitted failures. Its owner submitted FINALIZE for fragment 2, copy 1. The
+agent reached the operation deadline while reading the provider receipt.
+The helper recorded zero acquire samples. Provider event sampling reported one
+request I/O failure before identifying an operation, with no fragment binding.
+The provider's state at the time of that timeout remains unknown.
+Image subsequently confirmed owner deletion, Cloud had no archive, and the
+three provider stores each showed zero leases and zero reserved and committed
+bytes. Guest host-state digests matched. The combined repair and cold
+restoration still need a completed joint run.
+[Original archive, SHA-256 `0f4afc3c…19c0f23`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44455715673/artifacts/14499901605) · [Original application and cleanup reports](development/evidence/storage-maintenance-44455715673)
+
+The separate upload-continuation VM on the same Core revision also stopped
+during shared Image publication. Its only failed operation was APPEND for
+fragment 3, copy 1. The agent returned `CONTENT_UNAVAILABLE` during control
+selection, before READY. The owner confirmed Image deletion. Cloud had no
+archive, and the upload continuation did not start. The independent Core test
+deleted all eleven copies with zero payload charge. The guest removed its
+owned fixtures and its before/after network digests matched. This run has no
+consumer provider-usage snapshot for the failed Image deposit.
+[Original 81,532-byte archive, SHA-256 `8e6123b1…ce80bc75`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44514676250/artifacts/14527619866) · [Original reports](development/evidence/storage-maintenance-44514676250)
+
+On `bb48e128` the shared publication reached Cloud. Its only failed operation
+was RESERVE for fragment 3, copy 0. The agent returned `CONTENT_UNAVAILABLE`
+during stream opening with local route state as its reason. The provider had
+received no signed reservation on this connection. A separate helper sample
+recorded a bind error (errno 98) without a matching request identity. Both
+owners confirmed deletion. Providers A, B and C independently reported zero
+leases, reserved bytes and committed bytes. The eleven-copy Core lifecycle and
+guest cleanup completed. The guest's before/after host-state digests matched.
+[Original 81,981-byte archive, SHA-256 `cfb1313c…8bb5e46`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44516433050/artifacts/14529597943) · [Original reports](development/evidence/storage-maintenance-44516433050)
+
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -929,7 +964,7 @@ and the [service contract](services/DPS.md) retain research and acceptance detai
 
 ### Map, Weather and application evidence
 
-On Core `8ca8522c` and Map `f965604d`, an independent provider delivered all 325 signed bytes to the Linux Map adapter. After disconnect, the owner reopened the same bytes with zero peer traffic. One second after signed expiry, the adapter refused a new handoff. The host snapshots matched. The road graph in this trial was synthetic. In a separate Android 35 emulator, two cold launches of the original Organic Maps app calculated walking routes of 390 m and 490 m using the Monaco map package in airplane mode. Native routing with the signed peer traffic feed remains open. [Peer traffic trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44438057954) · [Organic Maps trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44444481182)
+On Core `8ca8522c` and Map `f965604d`, an independent provider delivered all 325 signed bytes to the Linux Map adapter. After disconnect, the owner reopened the same bytes with zero peer traffic. One second after signed expiry, the adapter refused a new handoff. The host snapshots matched. The road graph in this trial was synthetic. In a separate Android 35 emulator, two cold launches of the original Organic Maps app calculated walking routes of 390 m and 490 m using the Monaco map package in airplane mode. The subsequent desktop trial used a separately seeded signed feed on the real Monaco graph. The joined mobile path remains open. [Peer traffic trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44438057954) · [Organic Maps trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44444481182)
 
 Two cold Drizz.li builds produced identical bytes for all 97 tracked files. In the browser trial, the expired ECMWF publication returned HTTP 503. Drizz.li then displayed 9 °C from signed revision 2. Overmorrow passed all 24 Flutter tests in three independent release builds. All 64 output files matched in relative path, mode and content, totalling 24,608,666 bytes. Physical devices and iOS remain open. [Drizz.li build comparison](https://github.com/VOLPAROSSA/volparossa-weather/pull/41) · [Forecast refresh](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44445914018) · [Overmorrow comparison](https://github.com/VOLPAROSSA/volparossa-weather/pull/44) · [Third build](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44447940253)
 

@@ -58,10 +58,10 @@ index c89a751..fe0e084 100644
          xqc_conn_send_ping;
 diff --git a/src/transport/scheduler/xqc_scheduler_volparossa_edt.c b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
 new file mode 100644
-index 0000000..d1f5eb7
+index 0000000..e0a84b4
 --- /dev/null
 +++ b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,497 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -108,9 +108,9 @@ index 0000000..d1f5eb7
 +#define VOLPAROSSA_EDT_EXPLORATION_FLOOR_BYTES (2ULL * 1024ULL * 1024ULL)
 +#define VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES \
 +    (8ULL * 1024ULL * 1024ULL)
-+#define VOLPAROSSA_EDT_TRACE_START_US 10000000ULL
-+#define VOLPAROSSA_EDT_TRACE_END_US 20000000ULL
-+#define VOLPAROSSA_EDT_TRACE_INTERVAL_US 156250ULL
++#define VOLPAROSSA_EDT_TRACE_START_US 1000000ULL
++#define VOLPAROSSA_EDT_TRACE_END_US 65000000ULL
++#define VOLPAROSSA_EDT_TRACE_INTERVAL_US 1000000ULL
 +#define VOLPAROSSA_EDT_TRACE_SAMPLE_CAP 64U
 +#define VOLPAROSSA_EDT_TRACE_PATH_CAP 8U
 +
@@ -329,7 +329,7 @@ index 0000000..d1f5eb7
 +}
 +
 +/* Disposable-fixture diagnostic only: no addresses, connection identities or
-+ * payloads, and no general xquic debug logging. The 10..20 second window is
++ * payloads, and no general xquic debug logging. The 1..65 second sampling window is
 + * relative to the first non-startup application selection, NOT an HTTP
 + * response boundary. At most eight eligible candidates and 64 sparse samples
 + * per connection are printed; selection and its metric inputs are untouched.
@@ -341,15 +341,18 @@ index 0000000..d1f5eb7
 +                          volparossa_edt_trace_path_t *paths,
 +                          size_t path_count, size_t eligible_count)
 +{
++    struct timeval wall;
++    if (gettimeofday(&wall, NULL) != 0) return;
++    uint64_t unix_us = (uint64_t)wall.tv_sec * 1000000ULL + wall.tv_usec;
 +    scheduler->trace_samples++;
 +    scheduler->trace_next_elapsed_us = elapsed_us
 +        + VOLPAROSSA_EDT_TRACE_INTERVAL_US;
 +    char line[4096];
 +    int used = snprintf(line, sizeof(line),
 +        "NATIVE_EDT_SAMPLE {\"sample\":%u,\"elapsed_us\":%" PRIu64
-+        ",\"selected_path\":%" PRIu64 ",\"has_selected\":%u,"
++        ",\"unix_us\":%" PRIu64 ",\"selected_path\":%" PRIu64 ",\"has_selected\":%u,"
 +        "\"startup\":%u,\"eligible_count\":%zu,\"candidates\":[",
-+        scheduler->trace_samples, elapsed_us,
++        scheduler->trace_samples, elapsed_us, unix_us,
 +        selected != NULL ? (uint64_t)selected->path_id : 0,
 +        selected != NULL, (unsigned)startup, eligible_count);
 +    if (used < 0 || (size_t)used >= sizeof(line)) return;
@@ -579,7 +582,7 @@ index 0000000..5e516a6
 +#endif /* _XQC_SCHEDULER_VOLPAROSSA_EDT_H_INCLUDED_ */
 diff --git a/tests/xqc_volparossa_edt_contract.c b/tests/xqc_volparossa_edt_contract.c
 new file mode 100644
-index 0000000..66882d1
+index 0000000..b8c1a54
 --- /dev/null
 +++ b/tests/xqc_volparossa_edt_contract.c
 @@ -0,0 +1,519 @@
@@ -893,10 +896,10 @@ index 0000000..66882d1
 +    const xqc_usec_t start = 106000000;
 +    edt_ack_age_test_now = start;
 +    if (edt_select(&fixture, NULL) != 10) goto done;
-+    edt_ack_age_test_now = start + 9999999;
++    edt_ack_age_test_now = start + 999999;
 +    if (edt_select(&fixture, NULL) != 10) goto done;
 +    for (unsigned i = 0; i < 68; ++i) {
-+        edt_ack_age_test_now = start + 10000000 + (uint64_t)i * 156250;
++        edt_ack_age_test_now = start + 1000000 + (uint64_t)i * 1000000;
 +        if (edt_select(&fixture, NULL) != 10) goto done;
 +        edt_ack_age_test_now++;
 +        if (edt_select(&fixture, NULL) != 10) goto done;
@@ -920,7 +923,7 @@ index 0000000..66882d1
 +        if (sscanf(line, "NATIVE_EDT_SAMPLE {\"sample\":%u,"
 +                   "\"elapsed_us\":%" SCNu64, &sample, &elapsed) != 2
 +            || sample != count + 1
-+            || elapsed != 10000000 + (uint64_t)count * 156250
++            || elapsed != 1000000 + (uint64_t)count * 1000000
 +            || strstr(line, "\"selected_path\":10,\"has_selected\":1,"
 +                      "\"startup\":0,\"eligible_count\":3,") == NULL
 +            || strstr(line, "\"path\":10,\"sendable\":1,\"cost_us\":6348,") == NULL

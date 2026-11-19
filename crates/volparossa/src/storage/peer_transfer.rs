@@ -23,8 +23,8 @@ use volparossa_content::{
     },
 };
 use volparossa_local_control::{
-    ContentReceipt, PrivateStorageRemoteRequest, PrivateStorageTlsFailure,
-    control_request::Operation, control_response::Payload,
+    ContentReceipt, PrivateStorageRemoteRequest, control_request::Operation,
+    control_response::Payload,
 };
 
 use super::{
@@ -177,15 +177,7 @@ pub(super) async fn deposit_retained(
             StorageOperation::Finalize,
             Stage::JournalOpen,
         ))?;
-        let reply = remote(
-            socket,
-            grant,
-            signer,
-            target,
-            StorageOperation::Finalize,
-            &[],
-        )
-        .await?;
+        let reply = finalize(socket, grant, signer, target, retry_available).await?;
         boundary = Boundary::new(StorageOperation::Finalize, Stage::ReceiptValidation);
         ensure!(
             reply.receipt.result().state == ReceiptState::Committed,
@@ -338,7 +330,7 @@ pub(super) async fn restore_retained(
     Ok(())
 }
 
-// A foreground deposit or restore can reopen one TLS handshake per copy. At
+// A foreground deposit or restore can reopen one transient connection per copy. At
 // AgentReady the owner has sent neither the signed operation nor any payload.
 // Both attempts use the same grant, operation, bytes and exchange deadline.
 async fn exchange_before_ready(
@@ -353,19 +345,13 @@ async fn exchange_before_ready(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
     let first = remote(socket, grant, signer, target, operation, payload).await;
     let Err(error) = first else { return first };
-    let handshake_timeout = error
+    let can_reopen = error
         .downcast_ref::<crate::control::AgentRejected>()
-        .and_then(|rejected| rejected.private_storage_remote_detail)
-        .is_some_and(|detail| {
-            detail.tls_failure == Some(PrivateStorageTlsFailure::HandshakeDeadline as i32)
-        });
+        .is_some_and(crate::control::AgentRejected::can_reopen_storage_connection);
     let before_ready = error
         .downcast_ref::<Boundary>()
         .is_some_and(|boundary| matches!(boundary.stage, Stage::AgentReady));
-    if !*retry_available
-        || !before_ready
-        || !handshake_timeout
-        || tokio::time::Instant::now() >= deadline
+    if !*retry_available || !before_ready || !can_reopen || tokio::time::Instant::now() >= deadline
     {
         return Err(error);
     }
@@ -376,6 +362,56 @@ async fn exchange_before_ready(
     )
     .await
     .context(Boundary::new(operation, Stage::Deadline))?
+}
+
+/// A lost final receipt can leave the original lease committed. One authorized, read-only
+/// Progress under the same deadline can establish that fact without replaying Finalize.
+async fn finalize(
+    socket: &Path,
+    grant: &VerifiedStorageGrant,
+    signer: &SigningKey,
+    target: StorageTarget,
+    can_observe: bool,
+) -> Result<StorageTransfer> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
+    let result = remote(
+        socket,
+        grant,
+        signer,
+        target,
+        StorageOperation::Finalize,
+        &[],
+    )
+    .await;
+    let Err(error) = result else { return result };
+    if can_observe
+        && target.lease_id.is_some()
+        && grant.limits().rights.allows(StorageOperation::Progress)
+        && error
+            .downcast_ref::<wire::WireError>()
+            .is_some_and(|failure| {
+                matches!(failure, wire::WireError::Io(_) | wire::WireError::Timeout)
+            })
+        && error
+            .downcast_ref::<super::outcome::AgentOutcome>()
+            .is_some_and(super::outcome::AgentOutcome::interrupted_reading_receipt)
+        && tokio::time::Instant::now() < deadline
+    {
+        let progress = remote(
+            socket,
+            grant,
+            signer,
+            target,
+            StorageOperation::Progress,
+            &[],
+        );
+        if let Ok(Ok(reply)) = tokio::time::timeout_at(deadline, progress).await
+            && reply.receipt.result().state == ReceiptState::Committed
+        {
+            return Ok(reply);
+        }
+    }
+    Err(error)
 }
 
 async fn observe_or_reserve(

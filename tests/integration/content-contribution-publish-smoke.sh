@@ -47,6 +47,36 @@ content_contribution_publish_snapshot() {
         "$ccp_cache" >"$WORK/content-replication-publication-cache-$1.json"
 }
 
+# The Citizen consumer receives only the owner's public key and the publication name.
+# Its temporary directory, process identity and control socket belong to the ordinary client.
+content_citizen_user() {
+    cc_namespace=$1; cc_node=$2; cc_mode=$3; shift 3
+    timeout --signal=TERM --kill-after=5s 130s ip netns exec "$cc_namespace" \
+        setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ccp_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/citizen-peer.py" "$cc_mode" "$binary_directory/volparossa" \
+        "$WORK/runtime-$cc_node/control/agent.sock" "$@"
+}
+
+content_citizen_fetch() {
+    PHASE=content-replication-citizen-publish
+    cc_input=$source_directory/tests/integration/citizen-referendum
+    install -m 0444 "$cc_input/peer.py" "$WORK/bin/citizen-peer.py" || fail CITIZEN_INPUT_UNAVAILABLE
+    install -m 0444 "$cc_input/public-referenda.zip" "$WORK/bin/citizen-public.zip" || fail CITIZEN_INPUT_UNAVAILABLE
+    content_citizen_user "$R4" relay4 publish "$WORK/bin/citizen-public.zip" \
+        >"$WORK/content-replication-citizen-publish.json" 2>"$WORK/content-replication-citizen-publish.err" || fail CITIZEN_PUBLICATION_FAILED
+    cc_key=$(jq -er '.publisher_key | select(test("^[0-9a-f]{64}$"))' "$WORK/content-replication-citizen-publish.json") || fail CITIZEN_PUBLISHER_INVALID
+    cc_cache=$WORK/state-client/content/citizen-proof-cache
+    [ ! -e "$cc_cache" ] && [ ! -L "$cc_cache" ] || fail CITIZEN_READER_CACHE_EXISTS
+    PHASE=content-replication-citizen-fetch
+    content_replication_capture reserve-fetch content-replication-citizen-fetch \
+        "$WORK/content-replication-publication-final-live-selection.json" || fail CITIZEN_CAPTURE_UNAVAILABLE
+    content_citizen_user "$CLIENT" client receive "$cc_key" "$cc_cache" \
+        >"$WORK/content-replication-citizen-receive.json" 2>"$WORK/content-replication-citizen-receive.err" || fail CITIZEN_FETCH_FAILED
+    content_replication_snapshot client content-replication-citizen-final-live || fail CITIZEN_ROUTE_MISSING
+    stop_privacy_observers || fail CITIZEN_CAPTURE_INCOMPLETE
+}
+
 content_contribution_publish_run() {
     PHASE=content-replication-publication-startup
     ccp_cache=$WORK/state-relay4/content/automatic-replicas
@@ -150,6 +180,7 @@ content_contribution_publish_run() {
         || fail CONTENT_PUBLICATION_DESTINATION_OWNERSHIP
     content_replication_snapshot client content-replication-publication-final-live || fail CONTENT_PUBLICATION_PATHS_MISSING
     stop_privacy_observers || fail CONTENT_PUBLICATION_CAPTURE_INCOMPLETE
+    content_citizen_fetch
     content_replication_disconnect client content-replication-publication-final || fail CONTENT_PUBLICATION_DISCONNECT_FAILED
     content_replication_cli relay4 content stop >"$WORK/content-replication-publication-stop.json" \
         2>"$WORK/content-replication-publication-stop.err" || fail CONTENT_PUBLICATION_STOP_FAILED

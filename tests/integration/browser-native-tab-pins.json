@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
+  "revision": "9e0861687a7ef2a032155edeebcb19bf0fef0712",
+  "files": {
+    "scripts/smoke_network_core.py": {
+      "bytes": 27511,
+      "sha256": "cef0d6b132cc83171ce0dacb6e226d93839ede08604cbb575f15410189e4d2e0"
+    },
+    "scripts/smoke_network.py": {
+      "bytes": 30311,
+      "sha256": "cf69f0e78be244eec38e50b3fa0a20f9ed50c4585499089a6c58005853506918"
+    },
+    "scripts/smoke_browser_startup.py": {
+      "bytes": 11504,
+      "sha256": "5193fe4b95bd49416c5a2cb1e0a19db9ebef0d3cf63467ad11a31646a5a930e3"
+    },
+    "scripts/smoke_compute_model.py": {
+      "bytes": 29389,
+      "sha256": "70b8a944ba6322d46690eafa74247526ac3fc13e92ae9870717e8ed7c63f5c1b"
+    },
+    "scripts/smoke_privacy.py": {
+      "bytes": 15932,
+      "sha256": "dd8bdc5b73071eb13d3cd80d305266c654be07ec6bdd74cb4c456b26147f9104"
+    },
+    "scripts/stage_firefox.py": {
+      "bytes": 9281,
+      "sha256": "5d54e0e35662fae6b19d5f497d68469b0757fe754601c3e016f6fda773375203"
+    },
+    "integration/VolparossaNetwork.sys.mjs": {
+      "bytes": 21189,
+      "sha256": "00f56ffe02a71820b61109f7ddedf6f857488aec6cd63b7dc850c82492848997"
+    },
+    "integration/VolparossaBrowserNetwork.sys.mjs": {
+      "bytes": 9649,
+      "sha256": "b80de09365cbf7cab9eb829982ea3e2cc169b84997e01d49e3dcd9a8b3be7e67"
+    },
+    "defaults/privacy.json": {
+      "bytes": 987,
+      "sha256": "f6594ebca20585479635522e562f2da26a6422774b9628a0a906b320311076a7"
+    },
+    "scripts/smoke_network_native.py": {
+      "bytes": 11526,
+      "sha256": "36d43b52ac36e1a0269a2477e9bedb6867f8ee885e5aee03fb64fc0b118c71a3"
+    },
+    "scripts/native_build.py": {
+      "bytes": 18886,
+      "sha256": "b68a6232c67c362118bbeabbd0c97eebcdbb42bcf185a805831bd2641df9a003"
+    },
+    "scripts/prepare_compute_source.py": {
+      "bytes": 9479,
+      "sha256": "b59c43c6892916eae4d45f2a38743f804f54eafb45d5ec8410a429ea9ea51346"
+    },
+    "scripts/prepare_network_source.py": {
+      "bytes": 2661,
+      "sha256": "cbed3b2da96cb3a97938f052e8754bcd4fce462e6869c7f689deb05f546c03e1"
+    },
+    "scripts/prepare_network_ech.py": {
+      "bytes": 11587,
+      "sha256": "0f9c0137d12db6980b7b8a94fc23c3e64de475cf6bdca39c4128de81c2fc89a3"
+    },
+    "patches/0002-channel-ech.patch": {
+      "bytes": 13252,
+      "sha256": "6d87eb3a00275caad042f10e8ebfe14c579a45bb40dab6f4461822cf5e5dffc1"
+    },
+    "patches/firefox-native-build.json": {
+      "bytes": 5371,
+      "sha256": "f31b7413d7942f38e9a4b8754c89ea20ab212656ce3bbb7f025c8d2e8c260aa4"
+    },
+    "patches/firefox-network-ech.json": {
+      "bytes": 1688,
+      "sha256": "8eaf590b958c53247696b39edf0b0911de9ddd9a179d1c089704d1ad003735bb"
+    },
+    "patches/firefox-source.json": {
+      "bytes": 815,
+      "sha256": "3bb5a24da17df3b70115642e2fdbf8c4ff7b35d734bd8445efbadeba9fa10e99"
+    },
+    "LICENSE": {
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "THIRD_PARTY_LICENSES.md": {
+      "bytes": 1617,
+      "sha256": "44fbb7f2ffd2e9b3b483ed4d389902ea2b35396a5c891ea747981ff934f030e4"
+    },
+    "integration/VolparossaCompute.sys.mjs": {
+      "bytes": 10594,
+      "sha256": "60c34936c0c0a3537e797dcd1c73be4f767c277aaad2c998fc39cbb5e958527b"
+    },
+    "integration/VolparossaComputePanel.sys.mjs": {
+      "bytes": 4843,
+      "sha256": "e3ca1653643e1d604bf21b0a78147b757f1482b855b174b1a351a35732c95ebf"
+    },
+    "integration/VolparossaCooperativeCompute.sys.mjs": {
+      "bytes": 13198,
+      "sha256": "00f10a3f7326f4fa6e9c54c732d848c9cbefeb5ba849e4c58e40905d6bb26484"
+    },
+    "integration/VolparossaCooperativePanel.sys.mjs": {
+      "bytes": 10063,
+      "sha256": "3c71636c8c9d4e6185bf4824ea6470452348896d90511dcb8c5abf5788848731"
+    },
+    "integration/VolparossaTabRoutes.sys.mjs": {
+      "bytes": 5030,
+      "sha256": "5564e3e5b51b4a00357f675c213df3c73b79cf255fcce68f2580ee945d2252b1"
+    },
+    "integration/VolparossaGrantFile.h": {
+      "bytes": 1958,
+      "sha256": "956752a262a0b34bc72d8aee791008b4891d985d8403956c7f192f61d0e38856"
+    },
+    "integration/volparossa-compute.css": {
+      "bytes": 968,
+      "sha256": "204fbdabb2e1d5ab359aa89663fabf94a68ad793c26118a3b14462dda66e6a2a"
+    },
+    "scripts/tab_route_overlay.py": {
+      "bytes": 2710,
+      "sha256": "462015d6a75e52ec2a20faac895f94948eef371c43e9681790acde89a111b84e"
+    },
+    "patches/firefox-tab-route-controls.json": {
+      "bytes": 1739,
+      "sha256": "af325a125c5f102008b865510a4e2b006e13528336a38733b0e6afc8d9bb1b0a"
+    },
+    "patches/0004-tab-route-controls.patch": {
+      "bytes": 4606,
+      "sha256": "af2d52a78bd3f93a584a438ed0d82381265c91e3d2bb8b12d2c01deb4b9b35d5"
+    },
+    "tests/fixtures/native-157-controller-fcc7eb62.sys.mjs": {
+      "bytes": 8844,
+      "sha256": "fcc7eb622a1ff54e13e7ed40d5625e44f155c03b71fc0af9867bca6334379228"
+    }
+  }
+}

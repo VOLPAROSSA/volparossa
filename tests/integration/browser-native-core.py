@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import selectors
 import signal
 import socket
@@ -104,8 +105,11 @@ const marker=async(name,value)=> {
   if (!("allowECH" in fresh) || fresh.allowECH !== true) throw new Error("native_abi_missing");
   Cc["@mozilla.org/security/x509certdb;1"].getService(Ci.nsIX509CertDB).addCertFromBase64(certificate,"C,,");
   const window=Services.wm.getMostRecentWindow("navigator:browser");
-  const tabs=grants.map(()=>window.gBrowser.addTab("about:blank",{triggeringPrincipal:principal}));
-  const owners=tabs.map(tab=>VolparossaBrowserNetwork.bind(tab.linkedBrowser));
+  const fromUI = grants === null;
+  const tabs=fromUI ? window.__volparossaTrialUI.tabs :
+    grants.map(()=>window.gBrowser.addTab("about:blank",{triggeringPrincipal:principal}));
+  const owners=fromUI ? window.__volparossaTrialUI.owners :
+    tabs.map(tab=>VolparossaBrowserNetwork.bind(tab.linkedBrowser));
   const attachment=owner=>[...owner._routes.values()][0]?.attachment;
   const result={native_ech_abi:true,builtin_modules:true,ordinary_tabs:true};
   // Observe original navigation bytes without replacing the native navigation:
@@ -177,8 +181,10 @@ const marker=async(name,value)=> {
     browser.loadURI(Services.io.newURI(url),{triggeringPrincipal:principal});
   });
   try{
-    await checkpoint("attach-a"); await owners[0].authorize(grants[0]);
-    await checkpoint("attach-b"); await owners[1].authorize(grants[1]);
+    if (!fromUI) {
+      await checkpoint("attach-a"); await owners[0].authorize(grants[0]);
+      await checkpoint("attach-b"); await owners[1].authorize(grants[1]);
+    }
     const a=attachment(owners[0]),b=attachment(owners[1]);
     result.independent_attachments=a.active&&b.active&&a._isolation!==b._isolation;
     await checkpoint("wrong-scope");
@@ -240,6 +246,10 @@ def initial_window_handles(client):
     return handles
 
 
+def tab_controls(provision):
+    return "tab_chrome_patch_sha256" in provision.get("source_build", {})
+
+
 def inside(args, work, provision):
     require = runtime.require
     core.guest_guard(args)
@@ -260,6 +270,20 @@ def inside(args, work, provision):
         MOZ_NO_REMOTE="1", MOZ_CRASHREPORTER_DISABLE="1", MOZ_UPLOAD_DIR=str(work / "upload"),
         XDG_CONFIG_HOME=str(work / "config"), XDG_CACHE_HOME=str(work / "cache"),
         XDG_RUNTIME_DIR=str(work / "runtime"), TMPDIR=str(work / "tmp"))
+    use_ui = tab_controls(provision)
+    if use_ui:
+        environment.update(DISPLAY=os.environ["DISPLAY"], XAUTHORITY=os.environ["XAUTHORITY"],
+                           GTK_USE_PORTAL="0", GDK_BACKEND="x11", MOZ_ENABLE_WAYLAND="0")
+        with (work / "profile/user.js").open("x") as prefs:
+            prefs.write('user_pref("widget.use-xdg-desktop-portal.file-picker", 0);\n'
+                        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+                        'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+                        'user_pref("browser.startup.firstrunSkipsHomepage", true);\n'
+                        'user_pref("browser.aboutwelcome.enabled", false);\n'
+                        'user_pref("termsofuse.bypassNotification", true);\n'
+                        'user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);\n'
+                        'user_pref("datareporting.healthreport.uploadEnabled", false);\n'
+                        'user_pref("toolkit.telemetry.enabled", false);\n')
     report = dict(version=1, kind="native-firefox-core-ordinary-tabs", passed=False,
         core_revision=args.core_revision, browser_revision=provision["browser_revision"],
         runtime_version="157.0.1", runtime_source_stamp=runtime.FIREFOX_REVISION,
@@ -275,9 +299,11 @@ def inside(args, work, provision):
                    firefox_exit_after_cleanup=None, stderr=None, stderr_collection_failed=False)
     report["startup"] = startup
     browser, client, stderr = None, None, None
+    tab_phase = None
     try:
         core.driver_status(work, "browser-start")
-        browser = subprocess.Popen([str(args.stage / "firefox"), "--headless", "--no-remote", "--new-instance",
+        flags = [] if use_ui else ["--headless"]
+        browser = subprocess.Popen([str(args.stage / "firefox"), *flags, "--no-remote", "--new-instance",
             "--profile", str(work / "profile"), "--marionette", "--remote-allow-system-access", "about:blank"],
             env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
         stderr = StartupStderr(browser.stderr)
@@ -297,7 +323,8 @@ def inside(args, work, provision):
         startup["marionette_connected"] = True
         startup["phase"] = "marionette-session"
         core.driver_status(work, "marionette-session")
-        client.command("WebDriver:NewSession", {"capabilities": {"alwaysMatch": {}}})
+        capabilities = {"unhandledPromptBehavior": "ignore"} if use_ui else {}
+        client.command("WebDriver:NewSession", {"capabilities": {"alwaysMatch": capabilities}})
         startup["session_created"] = True
         startup["phase"] = "window-handles"
         initial_tabs = initial_window_handles(client)
@@ -307,11 +334,22 @@ def inside(args, work, provision):
         client.command("WebDriver:SetTimeouts", {"script": 300000})
         startup["phase"] = "ready"
         core.driver_status(work, "script-start")
+        if use_ui:
+            ui = runpy.run_path(str(ROOT / "scripts/browser-native-ui.py"))
+            tab_phase = "grant"
+            report["tab_controls"] = ui["connect_tabs"](client, [args.grant_a, args.grant_b],
+                [grant["hostname"] + ":" + str(grant["port"]) for grant in grants], work)
+            tab_phase = None
         result = client.command("WebDriver:ExecuteAsyncScript", {"script": SCRIPT,
-            "args": [grants, [args.url_a, args.url_b], args.expected_sha256, args.expected_bytes, certificate, str(work)],
+            "args": [None if use_ui else grants, [args.url_a, args.url_b], args.expected_sha256, args.expected_bytes, certificate, str(work)],
             "newSandbox": True, "sandbox": "system"})["value"]
         report["result"] = result
         check_result(result, args.expected_bytes)
+        if use_ui:
+            tab_phase = "release"
+            ui["release_tabs"](client, work)
+            report["tab_controls"]["explicit_releases"] = 2
+            tab_phase = None
         client.command("Marionette:SetContext", {"value": "content"})
         handles = window_handles(client) - initial_tabs
         require(len(handles) == 2)
@@ -325,6 +363,12 @@ def inside(args, work, provision):
         require(browser.wait(timeout=20) == 0)
         report["passed"] = True
     finally:
+        if tab_phase is not None:
+            # Export only which reviewed, GUI-generated markers exist. Window
+            # titles, grant contents and raw Marionette replies stay private.
+            report["tab_controls_progress"] = dict(phase=tab_phase, markers=[
+                f"{tag}-{i}" for i in range(1, 8) for tag in ("menu", "item", "prompt", "ordinary")
+                if (work / f"ui-{tag}-{i}").is_file()])
         startup["firefox_exit_before_cleanup"] = browser.poll() if browser is not None else None
         if client is not None:
             client.socket.close()
@@ -382,12 +426,13 @@ def main():
         (work / "appdata" / name).mkdir(mode=0o700)
     home_mounts = ["--tmpfs", str(home), "--dir", str(home / ".mozilla"), "--bind", str(work / "appdata"),
                    str(home / ".mozilla"), "--remount-ro", str(home)]
+    display = ["/usr/bin/xvfb-run", "-a", "-s", "-screen 0 1280x960x24 -nolisten tcp"] if tab_controls(provision) else []
     try:
         subprocess.run(["/usr/bin/bwrap", "--die-with-parent", "--unshare-user", "--ro-bind", "/", "/",
             *core.isolated_runtime_parent(args.stage, work), *home_mounts,
             *core.control_namespace_mounts(args.control_directory), "--bind", str(work), str(work),
             "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--chdir", str(work), "--",
-            sys.executable, "-B", str(Path(__file__).resolve()), *sys.argv[1:], "--inside"],
+            *display, sys.executable, "-B", str(Path(__file__).resolve()), *sys.argv[1:], "--inside"],
             cwd=work, check=True, timeout=360)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         core.driver_status(work, "wrapper-launch", error)
