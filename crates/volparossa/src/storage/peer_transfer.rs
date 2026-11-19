@@ -465,15 +465,15 @@ pub(super) fn checked_input(path: &Path, expected: [u8; 32]) -> Result<(File, u6
     Ok((file, length))
 }
 
-pub(super) async fn remote(
-    socket: &Path,
-    grant: &VerifiedStorageGrant,
-    signer: &SigningKey,
+pub(super) fn remote<'a>(
+    socket: &'a Path,
+    grant: &'a VerifiedStorageGrant,
+    signer: &'a SigningKey,
     target: StorageTarget,
     operation: StorageOperation,
-    payload: &[u8],
-) -> Result<StorageTransfer> {
-    remote_with_journal(socket, grant, signer, target, operation, payload, None).await
+    payload: &'a [u8],
+) -> impl Future<Output = Result<StorageTransfer>> + 'a {
+    remote_with_journal(socket, grant, signer, target, operation, payload, None)
 }
 
 async fn remote_with_journal(
