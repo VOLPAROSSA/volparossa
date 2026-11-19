@@ -1,0 +1,12 @@
+{
+  "provider_nodes": [
+    "relay4",
+    "relay5"
+  ],
+  "route_context_id": "974ca711032f3c6177157c1a69091737",
+  "control_relay_peer_id": "12D3KooWGwijWvJP9K9R913WgpitinizaDCEmjvnFx7uHnaeQJcc",
+  "provider_keys": {
+    "relay4": "103dfe194c18af5b894eb2c72325e3a3fdf536c44294fd4f74f7feaad0deb944",
+    "relay5": "b7527506596c1689dbaa2056b4940ff50b483673e95048468e8b108c8b5719e5"
+  }
+}
