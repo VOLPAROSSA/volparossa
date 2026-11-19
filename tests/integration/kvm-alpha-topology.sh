@@ -4765,6 +4765,25 @@ def stop(*_unused):
     running = False
 
 
+# The mixed-link capture records received outer bytes independently of QUIC path
+# IDs. The guest wall clock joins the snapshots to the actual HTTP response.
+response_samples = []
+observe_response = role == "client" and os.path.basename(marker_path) in {
+    "mixed-link-single-response.marker", "mixed-link-aggregate-response.marker"}
+next_sample = 0.0
+
+
+def sample_received(now):
+    if observe_response and marker_observed and len(response_samples) < 202:
+        response_samples.append({
+            "unix_us": time.time_ns() // 1000,
+            "relay1_received_bytes": counters["relay1_received_wireguard_data_bytes"] - before_marker["relay1_received_wireguard_data_bytes"],
+            "relay2_received_bytes": counters["relay2_received_wireguard_data_bytes"] - before_marker["relay2_received_wireguard_data_bytes"],
+        })
+        return now + 1.0
+    return now
+
+
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 deadline = time.monotonic() + 300
@@ -4772,6 +4791,10 @@ while running and time.monotonic() < deadline:
     if marker_path != "-" and not marker_observed and os.path.exists(marker_path):
         before_marker = dict(counters)
         marker_observed = True
+    if observe_response and marker_observed:
+        now = time.monotonic()
+        if now >= next_sample and len(response_samples) < 201:
+            next_sample = sample_received(now)
     readable, _, _ = select.select(list(sockets), [], [], 0.2)
     for capture in readable:
         while True:
@@ -4875,6 +4898,8 @@ for capture in sockets:
     _, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
     packet_socket_drops += drops
     capture.close()
+if observe_response and marker_observed:
+    sample_received(time.monotonic())
 after_marker = None
 if before_marker is not None:
     after_marker = {key: counters[key] - before_marker[key] for key in counters}
@@ -4890,6 +4915,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "marker_observed": marker_observed,
             "before_marker": before_marker,
             "after_marker": after_marker,
+            **({"response_received_samples": response_samples} if observe_response else {}),
             "payload_samples": payload_samples,
             "packet_socket_drops": packet_socket_drops,
             **counters,

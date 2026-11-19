@@ -5,6 +5,7 @@
 import copy
 import json
 import os
+import runpy
 from pathlib import Path
 import socket
 import struct
@@ -63,12 +64,17 @@ class Capture:
         pass
 
 
-def capture(name, role, interfaces, frames, local):
+def capture(name, role, interfaces, frames, local, mixed_marker=False):
     with tempfile.TemporaryDirectory(prefix="volparossa-mixed-observer-") as directory:
         output = Path(directory) / "capture.json"
         args = [name, role, str(output), str(Path(directory) / "ready")]
         if name == "a06-observer.py":
-            args.append("-")
+            if mixed_marker:
+                marker = Path(directory) / "mixed-link-aggregate-response.marker"
+                marker.touch()
+                args.append(str(marker))
+            else:
+                args.append("-")
         if local:
             args.append("--direct-lan-relay1")
         args.extend(interfaces)
@@ -78,13 +84,44 @@ def capture(name, role, interfaces, frames, local):
             patch("socket.socket", side_effect=sockets),
             patch("select.select", return_value=(sockets, [], [])),
             patch("signal.signal"),
-            patch("time.monotonic", side_effect=[0, 1, 2000]),
+            patch("time.monotonic", side_effect=[0, 1, 1, 2000, 2000] if mixed_marker else [0, 1, 2000]),
         ):
             exec(compile(observer_source(name), name, "exec"), {})
         return json.loads(output.read_text(encoding="ascii"))
 
 
 class MixedLinkTests(unittest.TestCase):
+    def test_marker_samples_report_observed_client_directions(self):
+        cap = capture("a06-observer.py", "client", ["cr1","cr2"],
+                      [[wireguard_frame("10.241.11.2","10.241.11.1")], []], True, mixed_marker=True)
+        first, last = cap["response_received_samples"]
+        self.assertEqual((first["relay1_received_bytes"], first["relay2_received_bytes"]), (0, 0))
+        self.assertEqual(last["relay1_received_bytes"], cap["after_marker"]["relay1_received_wireguard_data_bytes"])
+        self.assertGreater(last["relay1_received_bytes"], 0)
+        self.assertEqual(last["relay2_received_bytes"], 0)
+
+    def test_only_samples_inside_the_measured_http_interval_are_joined(self):
+        record = runpy.run_path(str(HERE / "mixed-link-response-windows.py"))["record"]
+        values = [dict(unix_us=1000000 * t, relay1_received_bytes=10*t, relay2_received_bytes=20*t) for t in range(7)]
+        capture = dict(response_received_samples=values,
+                       after_marker=dict(relay1_received_wireguard_data_bytes=60,relay2_received_wireguard_data_bytes=120))
+        client = dict(case="mixed-single",response_bytes=33554432,response_sha256="a"*64,
+                      response_first_byte_unix_us=1000000,response_complete_unix_us=5000000,response_duration_ns=4000000000)
+        candidates = [dict(sample=t+1,unix_us=1000000*t,selected_path=2,has_selected=1) for t in range(7)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, value in (("client",client), ("destination",client), ("client-capture",capture)):
+                (root/f"mixed-link-single-{name}.json").write_text(json.dumps(value))
+            observed = record(root, "single", candidates)
+            self.assertEqual(observed["scheduler_samples_in_response"], 5)
+            quarters = observed["observation_quarters"]
+            self.assertEqual([q["scheduler_samples"] for q in quarters], [1,1,1,2])
+            self.assertEqual(quarters[-1]["observed_wire_bytes"]["relay2_received_bytes"], 20)
+            values[-1]["relay1_received_bytes"] = 61
+            (root/"mixed-link-single-client-capture.json").write_text(json.dumps(capture))
+            with self.assertRaisesRegex(ValueError, "counter discontinuity"):
+                record(root, "single", candidates)
+
     def test_failed_client_preserves_available_evidence_without_masking_status(self):
         script = HERE / "mixed-link-smoke.sh"
         source = script.read_text(encoding="utf-8")
