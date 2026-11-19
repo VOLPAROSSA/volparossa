@@ -123,9 +123,15 @@ def receive():
             return owner["request"](OWNER, password, method, {"accountId": account, **args})
         inbox, = (m["id"] for m in request("Mailbox/get", {"properties": ["id", "role"]})["list"] if m["role"] == "inbox")
         require(request("Email/query", {"limit": 2})["ids"] == [], "owner inbox not empty")
+        # The connection descriptor accepts only a pathname. The actual owner
+        # password is supplied to accept.py over stdin.
+        key_directory = PROVIDERS / "b"
+        key_path, credential_path = key_directory / "identity.key", key_directory / "passphrase"
+        require(recipient["identity"] == str(key_path) and recipient["passphrase"] == str(credential_path)
+                and key_path.is_file() and credential_path.is_file(), "unexpected recipient credential paths")
         destination = STATE / "owner.json"
         destination.write_text(json.dumps(dict(server="http://127.0.0.1:8080", username=OWNER, accountId=account,
-            mailboxId=inbox, controlSocket=recipient["socket"], identity=recipient["identity"], passphraseFile=recipient["passphrase"])))
+            mailboxId=inbox, controlSocket=recipient["socket"], identity=str(key_path), passphraseFile=str(credential_path))))
         accepted = command([sys.executable, "-B", ACCEPT, "--node", NODE, "--core", CORE, "--profile", STATE / "recipient",
             "--handoff", handoff, "--connection", destination, "--state-dir", receipts], "Stalwart accept", password.encode())
         require(accepted["message_id"] == handoff.name and accepted["signal_packet_sha256"] == packet_sha and
