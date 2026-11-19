@@ -509,6 +509,15 @@ class FixtureContracts(unittest.TestCase):
         with patch.object(FIXTURE, "query", side_effect=changed):
             self.assertFalse(trial.same_receipts(receipts))
 
+    def test_transient_rust_build_selects_the_verified_guest_distrib_and_public_cache(self):
+        shell = SOURCE.with_name("transaction-abci-vm-guest.sh").read_text()
+        unit_build = shell.split('if [ "$stage" = build ]; then', 1)[1].split("    exit 0", 1)[0]
+        used = unit_build.index("cargo build --locked -p volparossa-transaction-abci")
+        for binding in ("rust_bin=/home/vpci/.local/volparossa-rust-1.89.0/bin",
+                        'PATH="$rust_bin:/usr/bin:/bin"', "CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1",
+                        '$(command -v cargo)', "rustc 1.89.0 (29483883e 2025-08-04)", "GIT_ALLOW_PROTOCOL=https"):
+            self.assertLess(unit_build.index(binding), used)
+
     def test_guest_toolchain_remains_pinned_and_resource_bounded(self):
         shell = SOURCE.with_name("transaction-abci-vm-guest.sh").read_text()
         for expected in (FIXTURE.COMET_COMMIT, FIXTURE.GO_SHA256, FIXTURE.GO_LICENSE_SHA256,
