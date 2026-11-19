@@ -68,10 +68,11 @@ private_storage_consumer_cleanup
 . "$1"
 WORK=$2
 private_storage_maintenance=yes
+storage_consumer_profile_version=10
 WORKER_UID=123
 WORKER_GID=123
 jq() { return 0; }
-storage_consumer_control_prepare() { return 0; }
+storage_consumer_control_prepare() { exit 99; }
 fail() { echo "$1"; exit 1; }
 install() { echo "$consumer_longest_socket"; exit 0; }
 private_storage_consumer_run

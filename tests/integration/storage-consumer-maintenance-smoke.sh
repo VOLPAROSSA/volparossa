@@ -144,7 +144,9 @@ private_storage_consumer_run() {
     jq -e 'length == 3 and all(.[]; . == {reserved_bytes:0,committed_bytes:0,leases:0})' \
         "$WORK/private-storage-fragments-deleted_usage.json" >/dev/null \
         || fail CONSUMER_INITIAL_STORE_NOT_EMPTY
-    storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
+    if [ "${storage_consumer_profile_version:-7}" != 10 ]; then
+        storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
+    fi
     if [ -e "$WORK/u" ] || [ -L "$WORK/u" ]; then fail CONSUMER_OWNER_PARENT_NOT_NEW; fi
     consumer_user=$WORK/u/m
     # Without a per-user runtime directory, the pinned GPG agent binds inside

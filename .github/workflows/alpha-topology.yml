@@ -1445,7 +1445,7 @@ jobs:
           report="$VOLPAROSSA_ALPHA_OUTPUT/cloud-upload-maintenance-smoke.json"
           python3 -B tests/integration/cloud-upload-maintenance-evidence.py check-report-v8 "$report" "$GITHUB_SHA"
           original="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-maintenance-smoke.json"
-          python3 -B tests/integration/private-storage-maintenance-smoke.py report-consumer-v10 "$original" "$GITHUB_SHA"
+          python3 -B tests/integration/private-storage-maintenance-smoke.py report-core-matrix "$original" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$original")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -1459,7 +1459,7 @@ jobs:
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/private-storage-maintenance-smoke.json"
-          python3 -B tests/integration/private-storage-maintenance-smoke.py report-consumer-v10 "$report" "$GITHUB_SHA"
+          python3 -B tests/integration/private-storage-maintenance-smoke.py report-core-matrix "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

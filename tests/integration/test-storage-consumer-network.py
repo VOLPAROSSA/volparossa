@@ -284,6 +284,56 @@ class ConsumerNetwork(unittest.TestCase):
                     fixture()['layout'], 'publish', *M['OLD']['geometry'](fixture()['prepare']['node'])[::2], fixture()['control_underlay'])
                 spawn.assert_not_called(); execute.assert_not_called(); download.assert_not_called()
 
+    def test_core_restore_and_finish_write_disjoint_raw_captures_on_the_consumer_matrix(self):
+        script = '''
+. "$1"
+. "$2"
+WORK=$3; storage_user=$3; private_storage_maintenance=yes; storage_consumer_profile_version=10
+WORKER_UID=123; WORKER_GID=123; custody_control_gid=234
+storage_fixture_driver=private-storage-maintenance-smoke.py
+fail() { echo "$1" >&2; exit 9; }
+storage_consumer_readback() { printf '%s' "$1" >"$WORK/$consumer_control_prefix-control-$1.json"; }
+python3() { case $3 in
+ layout) echo '{"route_policy":{"tested":true},"control_underlay_sha256":"tested"}';;
+ route-check) [ "$5" = "$WORK/private-storage-fragments-$storage_phase-live-selection.json" ] \
+   && [ "$6" = "$storage_user/flow-$storage_phase.json" ];;
+ gates) [ "$5" = "$storage_user/flow-$storage_phase.json" ] && [ "$7" = 16 ] && echo '{}';;
+ *) return 2;; esac; }
+capture_product_logs() { :; }
+client_log_baseline_ms() { echo 1; }
+start_privacy_observers() { [ "$1" = "private-storage-fragments-$storage_phase-privacy" ]; }
+storage_consumer_start_captures() {
+ [ "$1" = "private-storage-core-$storage_phase" ] || return 1
+ for broker in relay0 relay1 relay2; do
+   printf '{"node":"%s"}' "$broker" >"$WORK/$1-control-$broker.json"
+ done
+}
+benchmark_capture_paths() { [ "$1" = "private-storage-fragments-$storage_phase-live" ] && [ "$2" = mptcp ]; }
+stop_privacy_observers() { :; }
+storage_consumer_stop_captures() { :; }
+timeout() {
+ [ "$STORAGE_PROOF_ROUTE_POLICY" = '{"tested":true}' ] || return 1
+ for arg do last=$arg; done
+ [ "$last" = --matrix-route ] || return 1
+}
+for phase in restore finish; do
+ private_storage_fragments_phase_start "$phase"
+ private_storage_fragments_private "$phase" "$WORK" /bin/core /client/sock key-a key-b key-c
+ private_storage_fragments_phase_finish 16
+done
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = subprocess.run(['sh', '-eu', '-c', script, 'fixture', str(HERE / 'private-storage-fragments-smoke.sh'),
+                str(HERE / 'storage-consumer-network.sh'), temp], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for phase in ('restore', 'finish'):
+                control = root / f'content-provider-adaptive-private-storage-fragments-{phase}-control.json'
+                self.assertEqual(json.loads(control.read_bytes()), {node: {'node': node} for node in M['BROKERS']})
+                for moment in ('before', 'after'):
+                    self.assertEqual((root / f'private-storage-core-{phase}-control-{moment}.json').read_text(), moment)
+            self.assertFalse(list(root.glob('storage-consumer-*.json')))
+
     def test_actual_phase_helpers_check_readbacks_route_join_then_both_capture_drains(self):
         script = '''
 . "$1"
@@ -344,7 +394,7 @@ content_provider_node() { provider_ns=$1; case $1 in
 ip() { exec "$PYTHON" -B "$CHILD" "$@"; }
 wait_observer() { for attempt in $(seq 1 200); do [ ! -f "$2" ] || break; sleep .01; done
   [ -f "$2" ] || return 1; case $2 in *relay1.ready) [ "$FAIL_SECOND" != yes ] || return 1;; esac; }
-status=0; storage_consumer_start_captures publish || status=$?
+status=0; storage_consumer_start_captures storage-consumer-publish || status=$?
 pids="$CONSUMER_CONTROL_0_PID $CONSUMER_CONTROL_1_PID $CONSUMER_CONTROL_2_PID"
 joined=0; storage_consumer_stop_captures || joined=$?
 for pid in $pids; do if kill -0 "$pid" 2>/dev/null; then exit 91; fi; done
