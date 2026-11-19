@@ -249,6 +249,8 @@ def consume(arguments, cache_only=False):
             require(not cache_only, "Studio browser requires a fresh peer-backed retrieval")
             renderer = runpy.run_path(str(HERE / "studio-recipient-browser.py"))
             browser["recipient_browser"] = renderer["verify_browser"](url, expected, directory)
+            # The first process and its profile have both been removed before the reader reopens.
+            browser["recipient_browser_reopen"] = renderer["verify_browser"](url, expected, directory)
         require(time.time() < ready["expires_unix_seconds"], "HTTP outlived native authority")
         process.send_signal(signal.SIGTERM)
         final = HTTPS["bounded_json_line"](process.stdout, min(deadline, time.monotonic() + 5))
@@ -435,6 +437,8 @@ def validate_application(evidence, app, manifests, cache_only):
                 and all(receipt[key] is True for key in required) and receipt["engine"] == "firefox-esr"
                 and receipt["version"] == "140.16.0" and receipt["chart_width"] == 1024 and receipt["chart_height"] == 768,
                 "fresh recipient browser failed to render and clean up the independently hosted page and chart")
+        if "recipient_browser_reopen" in app:
+            require(app["recipient_browser_reopen"] == receipt, "the fresh reader did not reproduce its first rendering")
     require(set(app["assets"]) == set(expected["assets"]), "site asset coverage incomplete")
     for path, value in app["assets"].items():
         require(value["status"] == 200 and value["security_headers_verified"] is True
