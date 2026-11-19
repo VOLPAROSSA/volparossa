@@ -91,16 +91,9 @@ on:
         description: Exact reviewed VOLPAROSSA Image commit for image-immich
         type: string
         default: ''
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read
-
-concurrency:
-  group: alpha-production-helper-topology-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}-${{ inputs.scenario || 'datapath' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 defaults:
   run:
@@ -114,7 +107,7 @@ env:
 jobs:
   native-browser-capacity:
     name: Measure Gecko workspace and unprivileged KVM
-    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'browser-native-capacity'
+    if: inputs.scenario == 'browser-native-capacity'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -139,17 +132,14 @@ jobs:
             /usr/bin/python3 -B tests/integration/browser-native-capacity.py "$GITHUB_WORKSPACE" "$GITHUB_SHA"
 
   image-immich:
-    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'image-immich'
+    if: inputs.scenario == 'image-immich'
     uses: ./.github/workflows/image-immich-peer.yml
     with:
       image_revision: ${{ inputs.image_revision }}
 
   alpha-topology:
     name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'feature/alpha-vertical-runtime')
+    if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
 
