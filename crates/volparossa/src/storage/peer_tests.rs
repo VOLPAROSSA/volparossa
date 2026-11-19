@@ -32,6 +32,9 @@ use super::{
 #[path = "peer_outcome_transfer_tests.rs"]
 mod outcome_transfer;
 
+#[path = "peer_finalize_recovery_tests.rs"]
+mod finalize_recovery;
+
 #[path = "peer_flow_acquire_tests.rs"]
 mod flow_acquire;
 

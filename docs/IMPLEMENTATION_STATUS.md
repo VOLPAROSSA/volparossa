@@ -789,6 +789,20 @@ stopped. The 82,262-byte archive (artifact `14496173050`) has SHA-256
 `95205102709774ce80e5a7df56fc85121e399b3aa4a2d00744ae8fc5c72a50dd`.
 [Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447515035) · [Original application, samples and cleanup receipts](development/evidence/storage-maintenance-44447515035)
 
+The next twelve-node trial on `cf93b5a2` completed the independent eleven-copy
+Core lifecycle. Image then reported one failed deposit operation, with zero
+omitted failures. Its owner submitted FINALIZE for fragment 2, copy 1. The
+agent reached the operation deadline while reading the provider receipt.
+The helper recorded zero acquire samples. Provider event sampling reported one
+request I/O failure before identifying an operation, with no fragment binding.
+The provider's state at the time of that timeout remains unknown.
+Image subsequently confirmed owner deletion, Cloud had no archive, and the
+three provider stores each showed zero leases and zero reserved and committed
+bytes. Guest host-state digests matched. The combined repair and cold
+restoration still need a completed joint run.
+[Original archive, SHA-256 `0f4afc3c…19c0f23`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44455715673/artifacts/14499901605) · [Original application and cleanup reports](development/evidence/storage-maintenance-44455715673)
+
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
