@@ -134,7 +134,8 @@ class Wiring(unittest.TestCase):
                 + '\nprintf "%s\\n" "$driver_time_bound"', 'inert', scenario],
                 text=True, capture_output=True, check=True, timeout=5)
             self.assertEqual(result.stdout, seconds + '\n')
-        line = next(line for line in WORKFLOW.splitlines() if 'timeout-minutes:' in line)
+        topology_job = WORKFLOW.split('\n  alpha-topology:\n', 1)[1].split('\n    steps:', 1)[0]
+        line = next(line for line in topology_job.splitlines() if line.startswith('    timeout-minutes:'))
         self.assertIn("inputs.scenario == 'cloud-upload-maintenance' && 270", line)
         self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150", line)
         self.assertNotIn('authorization-expires-at', GUEST)
