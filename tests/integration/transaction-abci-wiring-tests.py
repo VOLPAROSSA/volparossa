@@ -87,6 +87,46 @@ class TransactionWiring(unittest.TestCase):
         options.update(overrides)
         EVIDENCE.validate(*values, **options)
 
+    def test_bank_proof_binds_exact_source_authorizer_genesis_and_reopened_commands(self):
+        records = inert_receipts()
+        inner = records[1]
+        checks = inner["checkpoints"]
+        with self.assertRaises(ValueError):
+            self.validate(records, bank_sha256="1" * 64)
+        reserve, commit = "2" * 64, "3" * 64
+        checks["startup"]["bank_genesis_ledger"] = "f" * 64
+        checks["commit"]["bank_command_sha256"] = [reserve, commit]
+        checks["crash_replay"]["bank_command_sha256"] = [reserve, commit]
+        receipt = dict(source_revision=FIXTURE.bank.source_revision(), authorizer_sha256="1" * 64,
+                       genesis_ledger="f" * 64, seed_removed=True, reopened_without_seed=True,
+                       reserve_sha256=reserve, commit_sha256=commit)
+        inner["bank_authorizer"] = receipt
+        self.validate(records, bank_sha256="1" * 64)
+        with self.assertRaises(ValueError):
+            self.validate(records)
+        for field, wrong in (("source_revision", "e" * 40), ("authorizer_sha256", "e" * 64),
+                             ("genesis_ledger", "5" * 64), ("seed_removed", False),
+                             ("reserve_sha256", commit), ("reopened_without_seed", 1), ("extra", "debug")):
+            inner["bank_authorizer"] = receipt | {field: wrong}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.validate(records, bank_sha256="1" * 64)
+        inner["bank_authorizer"] = receipt
+        checks["crash_replay"]["bank_command_sha256"] = [commit, reserve]
+        with self.assertRaises(ValueError):
+            self.validate(records, bank_sha256="1" * 64)
+
+    def test_bank_selector_requires_execution_of_this_transaction_scenario(self):
+        for args in (["--preview", "--scenario", "transaction-abci"],
+                     ["--execute", "--yes", "--scenario", "wifi-mesh"]):
+            child = subprocess.run(["sh", str(VM), *args, "--bank-authorizer-sha256", "1" * 64],
+                                   capture_output=True)
+            self.assertEqual(child.returncode, 64)
+        helper = workflow_step("Build the exact offline Bank TEST authorizer")
+        self.assertIn("if: inputs.scenario == 'transaction-abci-bank'", helper)
+        verify = workflow_step("Require real isolated four-validator TEST evidence")
+        self.assertIn("BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}", verify)
+        self.assertIn('--bank-authorizer-sha256 "$BANK_AUTHORIZER_SHA256"', verify)
+
     def test_new_preview_is_inert_and_uses_unchanged_envelope(self):
         result = subprocess.run(["sh", str(VM), "--preview", "--scenario", "transaction-abci"],
                                 capture_output=True, text=True, check=True)

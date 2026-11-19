@@ -29,6 +29,7 @@ code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
+bank_sha256=
 weather_client_bundle=
 weather_client_manifest_sha256=
 weather_android_source=
@@ -77,6 +78,7 @@ usage() {
         '       content-repair optionally accepts --studio-handoff DIRECTORY --studio-evidence-sha256 SHA256.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
+        '       transaction-abci optionally accepts --bank-authorizer-sha256 SHA256 for the same-run source-built TEST authorizer.' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
         '       weather-decoder-abi defaults to historical-v1 with --decoder-abi-inputs DIRECTORY.' \
         '       --decoder-mode source-input-inventory requires --decoder-source DIRECTORY (fixed reviewed Weather source only).' \
@@ -597,6 +599,12 @@ while [ "$#" -gt 0 ]; do
             code_bundle=$2
             shift
             ;;
+        --bank-authorizer-sha256)
+            [ "$#" -ge 2 ] && [ -z "$bank_sha256" ] || exit 64
+            bank_sha256=$2
+            case $bank_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+            [ "${#bank_sha256}" -eq 64 ] || exit 64
+            shift ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -694,6 +702,9 @@ done
 if [ "$cloud_owner_resume" = yes ] && [ "$scenario" != cloud-private-upload ]; then
     usage >&2
     exit 64
+fi
+if [ -n "$bank_sha256" ]; then
+    [ "$mode" = execute ] && [ "$scenario" = transaction-abci ] || exit 64
 fi
 if [ "$mode" = preview ]; then
     [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
@@ -2195,6 +2206,7 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+bank_sha256=
 code_archive_sha256=none
 code_manifest_sha256=none
 browser_filter_archive_sha256=none
@@ -2209,6 +2221,15 @@ image_handoff_sha256=
 image_receipt_sha256=
 image_revision=
 case $scenario in
+    transaction-abci)
+        if [ "$#" -eq 6 ]; then
+            bank_sha256=$6
+            case $bank_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+            [ "${#bank_sha256}" -eq 64 ] || exit 64
+        else
+            [ "$#" -eq 5 ] || exit 64
+        fi
+        ;;
     image-snapshot)
         case $# in
             5) ;;
@@ -2482,7 +2503,7 @@ if [ "$scenario" = transaction-abci ]; then
     tar -xzf source.tar.gz
     cd source
     prepare_current_compiler
-    exec sh tests/integration/transaction-abci-vm-guest.sh "$expected_commit"
+    exec sh tests/integration/transaction-abci-vm-guest.sh "$expected_commit" trial "$bank_sha256"
 fi
 if [ "$scenario" = wifi-mesh ]; then
     guest_phase wifi-mesh-backend
@@ -3143,6 +3164,14 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ -n "$bank_sha256" ]; then
+    bank_binary=$(dirname -- "$image_path")/bank-ordered-authorizer
+    [ -f "$bank_binary" ] && [ ! -L "$bank_binary" ] || exit 1
+    [ "$(stat -c '%u:%a:%h' -- "$bank_binary")" = "$(id -u):500:1" ] || exit 1
+    [ "$(stat -c '%s' -- "$bank_binary")" -le 33554432 ] || exit 1
+    [ "$(sha256sum <"$bank_binary" | cut -d' ' -f1)" = "$bank_sha256" ] || exit 1
+    scp_to "$bank_binary" /home/vpci/bank-ordered-authorizer
+fi
 if [ -n "$image_handoff" ]; then
     ssh_base mkdir -m 0700 /home/vpci/image-peer-handoff
     for image_file in snapshot.pgp receipt.json; do
@@ -3219,6 +3248,12 @@ driver_time_bound=2400s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
 [ "$scenario" != signal-backup-fragments ] || driver_time_bound=7200s
 case $scenario in
+    transaction-abci)
+        set --
+        [ -z "$bank_sha256" ] || set -- "$bank_sha256"
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
+        ;;
     weather-decoder-abi)
         if [ "$decoder_mode" != historical-v1 ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \

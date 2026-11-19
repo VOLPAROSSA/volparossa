@@ -43,7 +43,7 @@ class Upstream(unittest.TestCase):
     def test_wrong_root_lock_or_corrupt_original_archive_fail(self):
         for lock in ({'package':[]},{'package':[dict(name='zbus',version='5',checksum=H['SHA'])]}):
             with self.assertRaises(ValueError):H['original_files'](b'corrupt',lock)
-        with self.assertRaises(ValueError):H['original_files'](b'corrupt',{'package':[dict(name='zbus',version='6.1.0',checksum=H['SHA'])]})
+        with self.assertRaises(ValueError):H['original_files'](b'corrupt',{'package':[dict(name='zbus',version=H['VERSION'],checksum=H['SHA'])]})
 
 
 if __name__=='__main__':unittest.main()

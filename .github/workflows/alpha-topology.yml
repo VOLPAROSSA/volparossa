@@ -1,5 +1,5 @@
 name: Alpha production-helper topology
-run-name: ${{ inputs.scenario || 'datapath' }} — ${{ inputs.scenario == 'transaction-abci' && 'isolated transaction TEST proof' || 'production-helper proof' }}
+run-name: ${{ inputs.scenario || 'datapath' }} — ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'isolated transaction TEST proof' || 'production-helper proof' }}
 
 on:
   workflow_dispatch:
@@ -24,6 +24,7 @@ on:
           - download-sharing
           - wifi-mesh
           - transaction-abci
+          - transaction-abci-bank
           - wifi-link
           - uplink-link
           - content
@@ -104,7 +105,7 @@ defaults:
     shell: bash
 
 env:
-  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario || 'datapath' }}
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario || 'datapath' }}
   VOLPAROSSA_CLOUD_UPLOAD_PROFILE: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'retained-owner' || 'ordinary' }}
 
 jobs:
@@ -115,7 +116,7 @@ jobs:
       image_revision: ${{ inputs.image_revision }}
 
   alpha-topology:
-    name: ${{ inputs.scenario == 'transaction-abci' && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
+    name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich') ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
@@ -444,8 +445,16 @@ jobs:
             | sha512sum --check --strict -
           printf 'VOLPAROSSA_ALPHA_IMAGE=%s\n' "$image" >>"$GITHUB_ENV"
 
+      - name: Build the exact offline Bank TEST authorizer
+        if: inputs.scenario == 'transaction-abci-bank'
+        id: bank
+        run: bash tests/integration/transaction-abci-bank-build.sh
+
       - name: Run disposable production-helper topology
         id: topology
+        env:
+          BANK_REQUESTED: ${{ inputs.scenario == 'transaction-abci-bank' }}
+          BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}
         run: |
           set -euo pipefail
           runner_uid=$(id -u)
@@ -453,6 +462,11 @@ jobs:
           package_args=()
           native_args=()
           coding_args=()
+          bank_args=()
+          if [[ $BANK_REQUESTED == true ]]; then
+            [[ $BANK_AUTHORIZER_SHA256 =~ ^[0-9a-f]{64}$ ]]
+            bank_args=(--bank-authorizer-sha256 "$BANK_AUTHORIZER_SHA256")
+          fi
           cloud_args=()
           if test "$VOLPAROSSA_CLOUD_UPLOAD_PROFILE" = retained-owner; then
             cloud_args=(--cloud-owner-resume)
@@ -482,7 +496,7 @@ jobs:
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             "${native_args[@]}" \
             "${coding_args[@]}" \
-            "${cloud_args[@]}" \
+            "${cloud_args[@]}" "${bank_args[@]}" \
             "${package_args[@]}" \
             --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
@@ -2221,6 +2235,8 @@ jobs:
       - name: Require real isolated four-validator TEST evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'transaction-abci'
         env:
+          BANK_REQUESTED: ${{ inputs.scenario == 'transaction-abci-bank' }}
+          BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
@@ -2228,9 +2244,14 @@ jobs:
             printf '%s\n' 'Transaction TEST runtime evidence is absent: output or driver exit receipt was not produced. The original failure remains authoritative.' >&2
             exit 1
           fi
+          bank_args=()
+          if [[ $BANK_REQUESTED == true ]]; then
+            [[ $BANK_AUTHORIZER_SHA256 =~ ^[0-9a-f]{64}$ ]]
+            bank_args=(--bank-authorizer-sha256 "$BANK_AUTHORIZER_SHA256")
+          fi
           python3 -B tests/integration/transaction-abci-evidence.py \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" --expected-commit "$GITHUB_SHA" \
-            --driver-exit-code "$TOPOLOGY_EXIT_CODE"
+            --driver-exit-code "$TOPOLOGY_EXIT_CODE" "${bank_args[@]}"
 
       - name: Upload closed transaction TEST evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'transaction-abci' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
