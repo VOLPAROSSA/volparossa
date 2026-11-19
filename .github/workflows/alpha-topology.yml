@@ -31,6 +31,7 @@ on:
           - content-message
           - content-https
           - content-provider
+          - content-provider-map
           - protected-quote
           - content-custody
           - private-storage-peer
@@ -104,7 +105,7 @@ defaults:
     shell: bash
 
 env:
-  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario || 'datapath' }}
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario == 'content-provider-map' && 'content-provider' || inputs.scenario || 'datapath' }}
   VOLPAROSSA_CLOUD_UPLOAD_PROFILE: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'retained-owner' || 'ordinary' }}
 
 jobs:
@@ -447,10 +448,13 @@ jobs:
         env:
           BANK_REQUESTED: ${{ inputs.scenario == 'transaction-abci-bank' }}
           BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}
+          MAP_TRAFFIC: ${{ inputs.scenario == 'content-provider-map' }}
         run: |
           set -euo pipefail
           runner_uid=$(id -u)
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          map_args=()
+          if [[ $MAP_TRAFFIC == true ]]; then map_args=(--map-traffic); fi
           package_args=()
           native_args=()
           coding_args=()
@@ -488,7 +492,7 @@ jobs:
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             "${native_args[@]}" \
             "${coding_args[@]}" \
-            "${cloud_args[@]}" "${bank_args[@]}" \
+            "${cloud_args[@]}" "${bank_args[@]}" "${map_args[@]}" \
             "${package_args[@]}" \
             --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
@@ -1152,6 +1156,20 @@ jobs:
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Verify signed Map peer receipt and disconnected expiry
+        if: always() && inputs.scenario == 'content-provider-map'
+        run: |
+          set -euo pipefail
+          jq -e --arg core "$GITHUB_SHA" '
+            .schema == 1 and .core_revision == $core and .map_revision == "f965604d365f87612caa6686e50b3705313a0ddc" and
+            .cold.providers == 1 and .cold.peer_bytes > 0 and .cold.peer_bytes == .cold.verified_payload_bytes and
+            .warm.providers == 0 and .warm.peer_bytes == 0 and .warm.verified_payload_bytes == .cold.peer_bytes and
+            .cold.synthetic_dataset_sha256 == .warm.synthetic_dataset_sha256 and .cold.synthetic_dataset_sha256 == .expired.synthetic_dataset_sha256 and
+            .expired.expired_publication_refused and .expired.no_new_handoff and .expired.observed_at >= .expired.signed_expiry and
+            .cold.owner_file_mode == "0600" and .warm.owner_file_mode == "0600" and .publisher_originals_removed and
+            .distinct_publisher_and_client and .provider_cache_isolated and .route_disconnected and .owner_cleanup
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/content-provider-map-traffic.json" >/dev/null
 
       - name: Require actual private storage upload, reopen, non-consuming restore and delete
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-peer'
