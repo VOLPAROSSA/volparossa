@@ -9,11 +9,13 @@ use std::{
 
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use volparossa_content::{
     mailbox::{
-        import::{MAX_IMPORT_RECEIPT_BYTES, SignedImportReceipt},
-        wire::MailboxOperation,
+        MAX_GRANT_BYTES, MailboxError,
+        import::{MAX_IMPORT_RECEIPT_BYTES, SignedImportReceipt, VerifiedImportReceipt},
+        wire::{MailboxOperation, MailboxReceipt},
     },
     private_message::RecipientKeyPair,
 };
@@ -35,6 +37,26 @@ pub(crate) struct Confirm {
     imported_sha256: [u8; 32],
     #[command(flatten)]
     unlock: Unlock,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VerifyAcks {
+    #[command(flatten)]
+    handoff: Confirm,
+    /// Original recipient invitation independently selected for this delivery.
+    #[arg(long)]
+    invitation: PathBuf,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AckObservation {
+    version: u32,
+    message_id: String,
+    provider_key: String,
+    receipt: String,
+    observed_unix_seconds: u64,
+    original_expires_unix_seconds: u64,
 }
 
 fn parse_digest(value: &str) -> std::result::Result<[u8; 32], String> {
@@ -152,8 +174,10 @@ fn replace_progress(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json::Value> {
-    let signer = args.unlock.signer()?;
+fn verified_handoff(
+    args: &Confirm,
+    verify: impl FnOnce(&SignedImportReceipt) -> Result<VerifiedImportReceipt, MailboxError>,
+) -> Result<(PathBuf, VerifiedImportReceipt)> {
     let root = owned_directory(output_parent(&args.pending))?;
     ensure!(
         args.pending
@@ -168,8 +192,7 @@ pub(super) async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json:
         "confirmation must use the exact handoff receipt and token"
     );
     let bytes = private_read(&args.pending, MAX_IMPORT_RECEIPT_BYTES as u64)?;
-    let checked =
-        SignedImportReceipt::decode(&bytes)?.verify(&signer.verifying_key(), now_seconds()?)?;
+    let checked = verify(&SignedImportReceipt::decode(&bytes)?)?;
     let token = Zeroizing::new(private_read(&args.import_token_file, 32)?);
     let token: &[u8; 32] = token
         .as_slice()
@@ -192,7 +215,68 @@ pub(super) async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json:
             && Sha256::digest(payload.as_slice()).as_slice() == checked.plaintext_sha256(),
         "local handoff payload differs from signed original bytes"
     );
-    drop(payload);
+    Ok((root, checked))
+}
+
+pub(super) fn verify_acks(args: &VerifyAcks) -> Result<serde_json::Value> {
+    let owner = args.handoff.unlock.signer()?.verifying_key();
+    let now = now_seconds()?;
+    let (root, checked) = verified_handoff(&args.handoff, |signed| {
+        signed.verify_at_issuance(&owner, now)
+    })?;
+    ensure!(
+        private_read(&args.invitation, MAX_GRANT_BYTES as u64)?
+            == checked.grant().signed().encode(),
+        "handoff belongs to a different original invitation"
+    );
+    let id = hex::encode(checked.message_id());
+    let mut receipts = Vec::new();
+    for provider in checked.grant().provider_keys() {
+        let key = hex::encode(provider);
+        let original = private_read(&root.join(format!("ack-{key}.json")), 32768)?;
+        let observation: AckObservation = serde_json::from_slice(&original)?;
+        ensure!(
+            observation.version == 1
+                && observation.provider_key == key
+                && observation.message_id == id
+                && observation.original_expires_unix_seconds == checked.expires()
+                && observation.observed_unix_seconds <= now,
+            "acknowledgement metadata differs from the original handoff"
+        );
+        let bytes = hex::decode(&observation.receipt)?;
+        ensure!(
+            observation.receipt == hex::encode(&bytes),
+            "noncanonical receipt"
+        );
+        MailboxReceipt::verify_stored_ack(
+            &bytes,
+            &checked,
+            provider,
+            observation.observed_unix_seconds,
+        )?;
+        receipts.push(observation);
+    }
+    let receipts = serde_json::to_value(receipts)?;
+    let aggregate = root.join("confirmed.json");
+    if aggregate.is_symlink() || aggregate.try_exists()? {
+        let original: serde_json::Value =
+            serde_json::from_slice(&private_read(&aggregate, 32768)?)?;
+        ensure!(
+            original == confirmation(&checked, &receipts),
+            "aggregate confirmation differs from its original acknowledgements"
+        );
+    }
+    Ok(
+        serde_json::json!({"operation":"mailbox_verify_import_acks", "message_id":id,
+        "acknowledged_providers":2, "acknowledgement_receipts":receipts, "network_used":false}),
+    )
+}
+
+pub(super) async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json::Value> {
+    let signer = args.unlock.signer()?;
+    let now = now_seconds()?;
+    let (root, checked) =
+        verified_handoff(args, |signed| signed.verify(&signer.verifying_key(), now))?;
     let command = super::simple(MailboxOperation::Acknowledge, Some(*checked.message_id()));
     let mut receipts = Vec::new();
     for provider in checked.grant().provider_keys() {
@@ -205,20 +289,29 @@ pub(super) async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json:
             reply.receipt.acknowledged(),
             "provider did not acknowledge exact message"
         );
-        let observation = serde_json::json!({"version":1, "message_id":hex::encode(checked.message_id()),
-            "provider_key":hex::encode(provider), "receipt":hex::encode(reply.receipt.encode()),
-            "observed_unix_seconds":now_seconds()?, "original_expires_unix_seconds":checked.expires()});
+        let observation = serde_json::to_value(AckObservation {
+            version: 1,
+            message_id: hex::encode(checked.message_id()),
+            provider_key: hex::encode(provider),
+            receipt: hex::encode(reply.receipt.encode()),
+            observed_unix_seconds: now_seconds()?,
+            original_expires_unix_seconds: checked.expires(),
+        })?;
         replace_progress(
             &root.join(format!("ack-{}.json", hex::encode(provider))),
             &observation,
         )?;
         receipts.push(observation);
     }
-    let report = serde_json::json!({"operation":"mailbox_confirm_import", "message_id":hex::encode(checked.message_id()),
+    let report = confirmation(&checked, &receipts);
+    replace_progress(&root.join("confirmed.json"), &report)?;
+    Ok(report)
+}
+
+fn confirmation(checked: &VerifiedImportReceipt, receipts: &impl Serialize) -> serde_json::Value {
+    serde_json::json!({"operation":"mailbox_confirm_import", "message_id":hex::encode(checked.message_id()),
         "consumer_import_attested":true, "application_import_proven":false,
         "acknowledged_providers":2, "acknowledgement_receipts":receipts,
         "original_expires_unix_seconds":checked.expires(), "local_handoff_retained":true,
-        "global_peer_erasure_claimed":false});
-    replace_progress(&root.join("confirmed.json"), &report)?;
-    Ok(report)
+        "global_peer_erasure_claimed":false})
 }
