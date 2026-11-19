@@ -36,9 +36,10 @@ SOURCE = f"git+{GIT}?rev={REVISION}#{REVISION}"
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 RSA_CHECKSUM = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
 SNP = Path("crates/volparossa-content/src/provider/compute/attestation/snp.rs")
-SNP_CHECKSUM = "fa9d0aa97897c4bce02f8b7e4afd06901b5bc04880d5b51b0542c753fb79981c"
+# Public verification keeps the authenticated Milan chain for collateral checks.
+SNP_CHECKSUM = "48bb1e3ffb17b9746f12d6ccbe17201ddff6adb66ba01ba086b5b74949f3e809"
 COLLATERAL = SNP.with_name("collateral.rs")
-COLLATERAL_CHECKSUM = "c718d3fb5f1d58795ede17ad3e7e34871d3cb95331e39994e1744fc924b78b24"
+COLLATERAL_CHECKSUM = "db420703a7470720dcfa93b4999376ee6a1f8aa06a87fd517201d6ba85655914"
 GUEST = SNP.parent.parent / "guest.rs"
 # Reviewed change: one fixed HPKE random probe under the existing live guest key.
 # Fixed Firmware::open/get_report calls and public-only advisory scope are unchanged.
