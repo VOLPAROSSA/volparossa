@@ -24,7 +24,7 @@ SOURCE = (HERE / 'run-alpha-topology-vm.sh').read_text()
 
 class SyntheticLifecycle(unittest.TestCase):
     def setUp(self):
-        for name, value in [('identity', (11, 22)), ('exited', False)]:
+        for name, value in [('process_stat', ((11, 22), True)), ('exited', False)]:
             patcher = mock.patch.object(M, name, return_value=value)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
@@ -62,37 +62,68 @@ class SyntheticLifecycle(unittest.TestCase):
         self.close.assert_called_once_with(99)
 
     def test_reused_pid_or_wrong_parent_never_receives_signal(self):
-        for value in [(11, 23), (12, 22)]:
-            with self.subTest(value=value):
-                self.identity.return_value = value
-                with self.assertRaises(ValueError):
-                    M.stop(10, 11, 22, graceful=False)
-                self.pidfd_open.assert_not_called()
-                self.send.assert_not_called()
+        for identity in [(11, 23), (12, 22)]:
+            for owned in (True, False):
+                with self.subTest(identity=identity, owned=owned):
+                    self.process_stat.return_value = identity, owned
+                    with self.assertRaisesRegex(ValueError, 'changed_identity'):
+                        M.stop(10, 11, 22, graceful=False)
+                    self.pidfd_open.assert_not_called()
+                    self.exited.assert_not_called()
+                    self.send.assert_not_called()
 
     def test_reuse_between_identity_and_pidfd_is_rejected(self):
-        self.identity.side_effect = [(11, 22), (11, 23)]
-        with self.assertRaises(ValueError):
-            M.stop(10, 11, 22, graceful=False)
+        for identity in [(11, 23), (12, 22)]:
+            for before, after in [(True, True), (False, True), (True, False), (False, False)]:
+                with self.subTest(identity=identity, before=before, after=after):
+                    self.process_stat.side_effect = [((11, 22), before), (identity, after)]
+                    with self.assertRaisesRegex(ValueError, 'changed_identity'):
+                        M.stop(10, 11, 22, graceful=False)
+                    self.exited.assert_not_called()
+                    self.send.assert_not_called()
+                    self.close.assert_called_once_with(99)
+                    self.close.reset_mock()
+
+    def test_unverified_ownership_can_only_observe_the_original_pidfd(self):
+        for owners in [(False, True), (True, False), (False, False)]:
+            for dead in (True, False):
+                with self.subTest(owners=owners, dead=dead):
+                    self.process_stat.side_effect = [((11, 22), owned) for owned in owners]
+                    self.exited.return_value = dead
+                    self.assertEqual(M.stop(10, 11, 22, graceful=False), dead)
+                    self.exited.assert_called_once_with(99, M.KILL_SECONDS)
+                    self.send.assert_not_called()
+                    self.close.assert_called_once_with(99)
+                    self.exited.reset_mock()
+                    self.close.reset_mock()
+
+    def test_unverified_ownership_cannot_confirm_exit_without_a_pidfd(self):
+        self.process_stat.return_value = (11, 22), False
+        self.pidfd_open.side_effect = ProcessLookupError()
+        self.assertFalse(M.stop(10, 11, 22, graceful=True))
+        self.exited.assert_not_called()
         self.send.assert_not_called()
-        self.close.assert_called_once_with(99)
 
     def test_exit_races_are_observed_not_signalled_by_pid(self):
-        self.identity.side_effect = FileNotFoundError()
+        self.process_stat.side_effect = FileNotFoundError()
         self.assertTrue(M.stop(10, 11, 22, graceful=False))
         self.send.assert_not_called()
-        self.identity.side_effect = [(11, 22), FileNotFoundError()]
-        self.exited.return_value = True
-        self.assertTrue(M.stop(10, 11, 22, graceful=False))
-        self.exited.assert_called_once_with(99, 5)
-        self.send.assert_not_called()
+        for owned in (True, False):
+            for dead in (True, False):
+                with self.subTest(owned=owned, dead=dead):
+                    self.process_stat.side_effect = [((11, 22), owned), FileNotFoundError()]
+                    self.exited.return_value = dead
+                    self.assertEqual(M.stop(10, 11, 22, graceful=False), dead)
+                    self.exited.assert_called_once_with(99, M.KILL_SECONDS)
+                    self.send.assert_not_called()
+                    self.exited.reset_mock()
 
     def test_unavailable_observer_does_not_signal(self):
-        self.identity.side_effect = PermissionError()
+        self.process_stat.side_effect = PermissionError()
         with self.assertRaises(PermissionError):
             M.stop(10, 11, 22, graceful=True)
         self.send.assert_not_called()
-        self.identity.side_effect = None
+        self.process_stat.side_effect = None
         self.pidfd_open.side_effect = OSError()
         with self.assertRaises(OSError):
             M.stop(10, 11, 22, graceful=True)
@@ -102,12 +133,19 @@ class SyntheticLifecycle(unittest.TestCase):
         with mock.patch.object(M, 'qemu_command') as command:
             self.assertEqual(M.birth(10, 11), 22)
             command.assert_called_once_with(10)
-            self.identity.side_effect = [(11, 22), (11, 23)]
+            self.process_stat.side_effect = [((11, 22), True), ((11, 23), True)]
             with self.assertRaises(ValueError):
                 M.birth(10, 11)
-            self.identity.side_effect = [(12, 22)]
+            self.process_stat.side_effect = [((12, 22), True)]
             with self.assertRaises(ValueError):
                 M.birth(10, 11)
+
+    def test_birth_requires_verified_owner_at_every_observation(self):
+        for stage in range(3):
+            with self.subTest(stage=stage), mock.patch.object(M, 'qemu_command'):
+                self.process_stat.side_effect = [((11, 22), True)] * stage + [((11, 22), False)]
+                with self.assertRaisesRegex(ValueError, 'owner'):
+                    M.birth(10, 11)
 
     def test_birth_waits_for_delayed_exec_without_changing_identity(self):
         with mock.patch.object(M, 'qemu_command', side_effect=[ValueError('command'), None]) as command, \
@@ -115,12 +153,12 @@ class SyntheticLifecycle(unittest.TestCase):
                 mock.patch.object(M.time, 'sleep') as sleep:
             self.assertEqual(M.birth(10, 11), 22)
             self.assertEqual(command.call_args_list, [mock.call(10), mock.call(10)])
-            self.assertEqual(self.identity.call_count, 5)
+            self.assertEqual(self.process_stat.call_count, 5)
             sleep.assert_called_once_with(.01)
             self.send.assert_not_called()
 
     def test_birth_identity_change_during_exec_wait_fails_closed(self):
-        self.identity.side_effect = [(11, 22), (11, 22), (11, 22), (11, 23)]
+        self.process_stat.side_effect = [((11, 22), True)] * 3 + [((11, 23), True)]
         with mock.patch.object(M, 'qemu_command', side_effect=ValueError('command')) as command, \
                 mock.patch.object(M.time, 'monotonic', return_value=0), \
                 mock.patch.object(M.time, 'sleep'):
@@ -209,6 +247,24 @@ class HarmlessRealChildren(unittest.TestCase):
         child.stdin.flush()
         self.assertTrue(M.stop(child.pid, os.getpid(), started, graceful=True))
         self.assertEqual(child.wait(timeout=1), 0)
+
+    def test_actual_unreaped_child_is_confirmed_without_signalling(self):
+        child, started = self.child()
+        child.stdin.close()
+        self.assertEqual(os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT).si_pid, child.pid)
+        with mock.patch.object(M.signal, 'pidfd_send_signal') as send:
+            self.assertTrue(M.stop(child.pid, os.getpid(), started, graceful=False))
+            send.assert_not_called()
+        self.assertEqual(child.wait(timeout=1), 0)
+
+    def test_actual_live_child_with_unverified_owner_is_left_running(self):
+        child, started = self.child()
+        with mock.patch.object(M, 'process_stat', return_value=((os.getpid(), started), False)), \
+                mock.patch.object(M, 'KILL_SECONDS', .02), \
+                mock.patch.object(M.signal, 'pidfd_send_signal') as send:
+            self.assertFalse(M.stop(child.pid, os.getpid(), started, graceful=False))
+            send.assert_not_called()
+        self.assertIsNone(child.poll())
 
     def test_actual_term_and_already_reaped_child(self):
         child, started = self.child()
