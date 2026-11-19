@@ -4094,13 +4094,13 @@ mod tests {
             ),
             (
                 |response| {
-                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE".into()
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE".into();
                 },
                 AcquireDiagnostic::MptcpConnectSocketNetworkUnreachable,
             ),
             (
                 |response| {
-                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE".into()
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE".into();
                 },
                 AcquireDiagnostic::MptcpConnectSocketHostUnreachable,
             ),
