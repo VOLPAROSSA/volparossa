@@ -44,7 +44,7 @@ script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository_directory=$(CDPATH='' cd -- "$script_directory/.." && pwd)
 native_launcher=$script_directory/volparossa-mpquic-launch
 
-for command_name in awk cargo dpkg-deb du find head install jq md5sum mktemp rm sed sha256sum sort touch xargs; do
+for command_name in awk cargo dpkg-deb find head install jq md5sum mktemp rm sed sha256sum sort touch xargs; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         printf 'Required packaging command is missing: %s\n' "$command_name" >&2
         exit 1
@@ -221,8 +221,17 @@ cargo metadata --locked --offline --all-features \
     --filter-platform x86_64-unknown-linux-gnu --format-version 1 > "$metadata_file"
 "$script_directory/collect-cargo-licenses.sh" "$metadata_file" \
     "$package_root/usr/share/doc/volparossa/cargo-licenses"
-installed_size=$(du -sk "$package_root/etc" "$package_root/usr" | \
-    awk '{ total += $1 } END { print total }')
+# Use the Debian Installed-Size convention for the payload. Filesystem block
+# allocation can vary between identical staging trees on the same build host.
+find "$package_root/etc" "$package_root/usr" -printf '%y %s %D:%i %n\n' > "$staging_parent/installed-files"
+installed_size=$(awk '
+    $1 == "f" || $1 == "l" {
+        if ($4 == 1 || !counted[$3]++) total += int(($2 + 1023) / 1024)
+        next
+    }
+    { total++ }
+    END { print total + 0 }
+' "$staging_parent/installed-files")
 case "$installed_size" in
     ''|*[!0-9]*) printf '%s\n' 'Cannot determine installed package size.' >&2; exit 1 ;;
 esac
