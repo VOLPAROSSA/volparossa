@@ -1,0 +1,1 @@
+{"failed_publish_owner_delete": {"cloud": "no_archive", "image": "unconfirmed"}, "kind": "storage-consumer-maintenance-cleanup", "local_fixture_removed": true, "no_owned_fixture_process_observed": true, "passed": true, "provider_usage_proven": false, "remote_cleanup_confirmed": false, "removed_directories": 20, "removed_files": 40, "version": 1}
