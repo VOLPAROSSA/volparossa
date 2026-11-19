@@ -299,6 +299,7 @@ def inside(args, work, provision):
                    firefox_exit_after_cleanup=None, stderr=None, stderr_collection_failed=False)
     report["startup"] = startup
     browser, client, stderr = None, None, None
+    tab_phase = None
     try:
         core.driver_status(work, "browser-start")
         flags = [] if use_ui else ["--headless"]
@@ -335,16 +336,20 @@ def inside(args, work, provision):
         core.driver_status(work, "script-start")
         if use_ui:
             ui = runpy.run_path(str(ROOT / "scripts/browser-native-ui.py"))
+            tab_phase = "grant"
             report["tab_controls"] = ui["connect_tabs"](client, [args.grant_a, args.grant_b],
                 [grant["hostname"] + ":" + str(grant["port"]) for grant in grants], work)
+            tab_phase = None
         result = client.command("WebDriver:ExecuteAsyncScript", {"script": SCRIPT,
             "args": [None if use_ui else grants, [args.url_a, args.url_b], args.expected_sha256, args.expected_bytes, certificate, str(work)],
             "newSandbox": True, "sandbox": "system"})["value"]
         report["result"] = result
         check_result(result, args.expected_bytes)
         if use_ui:
+            tab_phase = "release"
             ui["release_tabs"](client, work)
             report["tab_controls"]["explicit_releases"] = 2
+            tab_phase = None
         client.command("Marionette:SetContext", {"value": "content"})
         handles = window_handles(client) - initial_tabs
         require(len(handles) == 2)
@@ -358,6 +363,12 @@ def inside(args, work, provision):
         require(browser.wait(timeout=20) == 0)
         report["passed"] = True
     finally:
+        if tab_phase is not None:
+            # Export only which reviewed, GUI-generated markers exist. Window
+            # titles, grant contents and raw Marionette replies stay private.
+            report["tab_controls_progress"] = dict(phase=tab_phase, markers=[
+                f"{tag}-{i}" for i in range(1, 8) for tag in ("menu", "item", "prompt", "ordinary")
+                if (work / f"ui-{tag}-{i}").is_file()])
         startup["firefox_exit_before_cleanup"] = browser.poll() if browser is not None else None
         if client is not None:
             client.socket.close()

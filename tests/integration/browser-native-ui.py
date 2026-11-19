@@ -41,12 +41,22 @@ class Display:
         for event in (self.test.XTestFakeButtonEvent, self.test.XTestFakeKeyEvent):
             event.argtypes = [ct.c_void_p, ct.c_uint, ct.c_int, ct.c_ulong]
 
-    def focus_browser(self):
+    def focus_browser(self, process_id):
         windows = subprocess.check_output(["xwininfo", "-root", "-tree"], text=True, timeout=3)
-        match = re.search(r'(0x[0-9a-f]+) "[^"\n]*": \("Navigator" "firefox"\)', windows)
-        if not match:
-            raise ValueError("Firefox window disappeared from private display")
-        self.x.XSetInputFocus(self.display, int(match.group(1), 16), 2, 0)
+        # Unbranded Gecko builds append their update channel to WM_CLASS.
+        # Select the browser window belonging to the connected parent process.
+        candidates = re.findall(r'^\s*(0x[0-9a-f]+) [^\n]*: \("Navigator" "[^"\n]+"\)',
+                                windows, re.MULTILINE)
+        owned = []
+        for window in candidates:
+            props = subprocess.run(["xprop", "-id", window, "_NET_WM_PID", "WM_WINDOW_ROLE"],
+                                   capture_output=True, text=True, timeout=3)
+            if props.returncode == 0 and props.stdout.splitlines() == [
+                    f"_NET_WM_PID(CARDINAL) = {process_id}", 'WM_WINDOW_ROLE(STRING) = "browser"']:
+                owned.append(window)
+        if len(owned) != 1:
+            raise ValueError("expected one Firefox browser window on the private display")
+        self.x.XSetInputFocus(self.display, int(owned[0], 16), 2, 0)
         self.x.XSync(self.display, 0)
 
     def close(self):
@@ -197,7 +207,7 @@ return win.__volparossaTrialUI.owners.map(owner => owner?.status.state ?? null);
 
 def open_menu(client, display, index):
     xy = wait_for(lambda: client.script(RECT, [index]), "tab inaccessible")
-    display.focus_browser()
+    display.focus_browser(client.script("return Services.appinfo.processID;"))
     display.point(xy, 3)
 
 
