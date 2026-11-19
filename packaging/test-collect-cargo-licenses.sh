@@ -36,7 +36,7 @@ jq '
         or (.name == "hickory-proto" and .version == "0.25.2")
         or (.name == "hickory-resolver" and .version == "0.25.2")
         or (.name == "base256emoji" and .version == "1.0.2")
-        or (.name == "blake3" and .version == "1.8.5")
+        or (.name == "blake3" and .version == "1.8.7")
         or (.name == "libp2p-yamux" and .version == "0.47.0")
         or (.name == "sev" and .version == "8.0.0")
         or (.name == "time" and .version == "0.3.41")
@@ -59,9 +59,6 @@ notices=$test_tmp/notices
 for license_path in \
     "$notices/ctutils-0.4.5/LICENSE-APACHE" \
     "$notices/ctutils-0.4.5/LICENSE-MIT" \
-    "$notices/blake3-1.8.5/LICENSE_A2" \
-    "$notices/blake3-1.8.5/LICENSE_A2LLVM" \
-    "$notices/blake3-1.8.5/LICENSE_CC0" \
     "$notices/hickory-proto-0.25.2/LICENSE-APACHE" \
     "$notices/hickory-proto-0.25.2/LICENSE-MIT" \
     "$notices/hickory-resolver-0.25.2/LICENSE-APACHE" \
@@ -74,6 +71,14 @@ for license_path in \
     "$notices/yamux-0.13.10/LICENSE-MIT"
 do
     [ -f "$license_path" ] || fail "vendored license was not collected: $license_path"
+done
+
+# BLAKE3 ships three license choices under upstream underscore filenames.
+blake3_manifest=$(jq -er '[.packages[] | select(.name == "blake3" and .version == "1.8.7") | .manifest_path] | select(length == 1) | .[0]' "$metadata")
+for license in LICENSE_A2 LICENSE_A2LLVM LICENSE_CC0; do
+    original=$(dirname -- "$blake3_manifest")/$license
+    test -s "$original" || fail "blake3 original $license file missing"
+    cmp "$original" "$notices/blake3-1.8.7/$license" || fail "blake3 original $license bytes changed"
 done
 
 for license in LICENSE-APACHE LICENSE-MIT; do

@@ -63,7 +63,7 @@ parking_lot = "0.12.4"
 pem = "3.0.6"
 percent-encoding = "2.3.1"
 prost = "0.14.1"
-prost-build = "=0.14.4"
+prost-build = "=0.14.6"
 quinn = { version = "0.11.8", default-features = false, features = ["log", "platform-verifier", "ring", "runtime-tokio", "rustls"] }
 rand = "0.8.5"
 rand_chacha = "0.3.1"
@@ -72,7 +72,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "ring"] }
 rsa = { version = "=0.9.10", default-features = false, features = ["std"] }
 rtnetlink = "0.17.0"
-rustix = { version = "=1.1.4", features = ["fs", "mount", "process", "thread"] }
+rustix = { version = "=1.1.6", features = ["fs", "mount", "process", "thread"] }
 rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "cache", "chrono", "fallible_uint", "libsqlite3-sys", "limits", "modern_sqlite", "trace", "uuid"] }
 rustls = { version = "0.23.27", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-pki-types = "1.12.0"

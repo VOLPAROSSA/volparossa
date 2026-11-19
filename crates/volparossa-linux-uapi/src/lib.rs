@@ -10,7 +10,7 @@
 //! [`ensure_waitable_sigchld_disposition`] and
 //! [`ensure_default_lifecycle_signal_dispositions`] queries, the fixed
 //! [`install_pid_one_lifecycle_signal_handlers`] and
-//! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls,
+//! [`verify_pid_one_lifecycle_signal_handlers`] signal-action calls, [`exit_process_immediately`],
 //! [`install_worker_confinement_filter`], and the ownership-sealed Tokio registration
 //! in [`OwnedAsyncFd`].
 //! The process hook performs exactly one async-signal-safe `close_range(2)` syscall between
@@ -800,10 +800,15 @@ pub fn verify_pid_one_lifecycle_signal_handlers() -> io::Result<()> {
 }
 
 extern "C" fn pid_one_lifecycle_emergency_exit(signal: libc::c_int) {
-    // SAFETY: `_exit(2)` is async-signal-safe and never returns. The kernel invokes this private
-    // handler only for one of the three fixed managed signals, whose `128 + signal` status fits
-    // in the process exit-status byte.
-    unsafe { libc::_exit(128 + signal) }
+    exit_process_immediately(128 + signal)
+}
+
+/// Terminates every thread in the process with the given exit status.
+///
+/// Linux libc's `_exit(2)` is async-signal-safe and skips destructors and registered exit handlers.
+pub fn exit_process_immediately(status: i32) -> ! {
+    // SAFETY: _exit accepts any integer status, takes no pointers and never returns.
+    unsafe { libc::_exit(status) }
 }
 
 fn fixed_pid_one_lifecycle_action() -> io::Result<libc::sigaction> {
