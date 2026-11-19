@@ -1,27 +1,68 @@
 //! Explicit publication handoff; agent configuration alone chooses its storage and listener.
 
-use std::{path::Path, time::Duration};
+use std::{
+    fs::Permissions, io::Read as _, os::unix::fs::PermissionsExt as _, path::Path, time::Duration,
+};
 
 use anyhow::{Context as _, Result, bail};
 use tokio::time::timeout;
 use volparossa_content::{
-    CacheLimits, ChunkStore, SignedManifest, VerifiedManifest,
+    CHUNK_BYTES, CacheLimits, ChunkStore, SignedManifest, VerifiedManifest,
     private_message::PRIVATE_MESSAGE_CONTENT_TYPE, transfer::serve_peer,
 };
 use volparossa_local_control::{ContentImportRequest, ContentReceipt, control_request::Operation};
 
+pub(in crate::content) enum Source<'a> {
+    Cache(&'a Path),
+    File(&'a Path),
+}
+
+fn stage_file(
+    input: &Path,
+    manifest: &VerifiedManifest,
+    destination: &Path,
+    limits: CacheLimits,
+) -> Result<ChunkStore> {
+    let mut file = crate::content::open_regular(input, manifest.length())?;
+    if file.metadata()?.len() != manifest.length() {
+        bail!("public file length differs from its signed manifest");
+    }
+    let mut store = ChunkStore::create(destination, limits)?;
+    let mut buffer = vec![0; CHUNK_BYTES];
+    for chunk in manifest.chunks() {
+        let bytes = &mut buffer[..usize::try_from(chunk.length())?];
+        file.read_exact(bytes)?;
+        store.put_verified_if_space(*chunk.id(), bytes)?;
+    }
+    if file.read(&mut buffer[..1])? != 0 {
+        bail!("public file extends past its signed length");
+    }
+    Ok(store)
+}
+
 pub(in crate::content) async fn run(
     signed: &SignedManifest,
     manifest: &VerifiedManifest,
-    source: &Path,
+    source: Source<'_>,
     limits: CacheLimits,
     socket: &Path,
 ) -> Result<ContentReceipt> {
     if manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE {
         bail!("private messages cannot be admitted as public contributions");
     }
-    let mut store =
-        ChunkStore::open(source, limits).context("cannot reopen your owned source cache")?;
+    let temporary;
+    let mut store = match source {
+        Source::Cache(path) => {
+            ChunkStore::open(path, limits).context("cannot reopen your owned source cache")?
+        }
+        Source::File(path) => {
+            temporary = tempfile::Builder::new()
+                .permissions(Permissions::from_mode(0o700))
+                .tempdir()
+                .context("cannot create private contribution staging")?;
+            stage_file(path, manifest, &temporary.path().join("chunks"), limits)?
+        }
+    };
     super::verify_complete(manifest, &mut store)?;
     let operation = Operation::ContentImport(ContentImportRequest {
         manifest: signed.encode(),

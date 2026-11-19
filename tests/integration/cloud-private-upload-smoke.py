@@ -26,7 +26,9 @@ F = CLOUD["FRAGMENTS"]
 require, read, create = F["require"], F["read"], F["create"]
 private_file, invoke, unlock = F["private_file"], F["invoke"], F["unlock"]
 owner_root = CLOUD["owner_root"]
-PINS_PATH = HERE / "cloud-private-upload-pins.json"
+RETAINED = os.environ.get("CLOUD_UPLOAD_PROFILE", "ordinary") == "retained-owner"
+PINS_PATH = HERE / ("cloud-retained-upload-pins.json" if RETAINED else "cloud-private-upload-pins.json")
+RECOVERY = runpy.run_path(str(HERE / "cloud-retained-upload.py")) if RETAINED else None
 PINS = json.loads(PINS_PATH.read_text())
 REVISION = PINS["revision"]
 HASHES = {name: record["sha256"] for name, record in PINS["files"].items()}
@@ -58,6 +60,12 @@ INVENTORY_ROLES = ("relay0", "relay1", "relay2", "exit", "exit2")
 PRESELECTION_CODES = ("PRESELECTION_SAMPLE_NO_EXIT", "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS",
     "PRESELECTION_SAMPLE_INVALID_POLICY", "PRESELECTION_SAMPLE_INVALID_SNAPSHOT", "PRESELECTION_SAMPLE_ENTROPY")
 UPLOAD_FAILURE_CODES = {
+    "image application command failed": "application_cli",
+    "no committed copy before owner stop": "partial_commit_unobserved",
+    "fragment staging survived owner stop": "staging_unreleased",
+    "partial committed journal missing": "partial_journal",
+    "resumed identities or acknowledgements differ": "retained_identity",
+    "retained owner upload proof incomplete": "owner_resume",
     "upload ciphertext geometry invalid": "geometry",
     "upload fragment count differs": "geometry",
     "upload range differs": "geometry",
@@ -401,6 +409,8 @@ def serve_ui(root, mode):
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     clean = False
+    interrupted_upload = RETAINED and mode == "upload"
+    stop_requested = False
     try:
         UI_PARENT_STAGE = "service_readiness"
         require(bool(select.select([service.stdout], [], [], 60)[0]), "Cloud service readiness timeout")
@@ -415,15 +425,26 @@ def serve_ui(root, mode):
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
         try:
-            stdout, stderr = process.communicate(json.dumps(payload).encode(), timeout=1900)
+            if interrupted_upload:
+                process.stdin.write(json.dumps(payload).encode())
+                process.stdin.close()
+                process.stdin = None
+                RECOVERY["stop_at_commit"](root, service, process)
+                stop_requested = True
+                stdout, stderr = process.communicate(timeout=45)
+            else:
+                stdout, stderr = process.communicate(json.dumps(payload).encode(), timeout=1900)
             require(len(stdout) <= 4096 and len(stderr) <= 16384, "UI output exceeds closed bound")
             value = json.loads(stdout)
             stage = value.get("stage") if type(value) is dict else None
             UI_STAGE = stage if type(stage) is str and stage in UI_STAGES else "unreported"
             UI_FAILURE = closed_ui_failure(value, mode)
-            require(process.returncode == 0, "original UI failed")
+            if interrupted_upload:
+                require(process.returncode == 1 and UI_FAILURE is not None, "interrupted UI receipt missing")
+            else:
+                require(process.returncode == 0, "original UI failed")
             UI_PARENT_STAGE = "ui_contract"
-            result = ui_record(value, mode)
+            result = RECOVERY["interrupted_ui"](value) if interrupted_upload else ui_record(value, mode)
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -435,8 +456,8 @@ def serve_ui(root, mode):
     finally:
         failed_at = UI_PARENT_STAGE if sys.exc_info()[0] is not None else None
         UI_PARENT_STAGE = "service_shutdown"
-        if service.poll() is None:
-            os.killpg(service.pid, signal.SIGTERM)
+        if service.poll() is None and not stop_requested:
+            service.send_signal(signal.SIGTERM)
         try: stdout, stderr = service.communicate(timeout=20)
         except subprocess.TimeoutExpired:
             os.killpg(service.pid, signal.SIGKILL); service.communicate(timeout=5)
@@ -476,6 +497,13 @@ def upload(root, binary, client, keys):
         storageConfig=str(root / "upload-storage.json")))).encode())
     STAGE = "original_ui_upload"
     ui = serve_ui(root, "upload")
+    if RETAINED:
+        STAGE = "retained_owner_resume"
+        obj, = RECOVERY["targets"](root)
+        size = read(obj / "bundle/receipt.json")["cipher_bytes"]
+        recovery = RECOVERY["resume"](root, source, node, size, upload_geometry, read(root / "service.json"),
+                                      create, CLOUD["process_json"])
+        ui = dict(interrupted_ui=ui, recovery=recovery)
     STAGE = "uploaded_object"
     target, receipt = uploaded_object(root)
     STAGE = "upload_cipher"
@@ -610,10 +638,15 @@ def validate_evidence(value):
         "baseline import or grants missing")
     deposited, restored = value["upload"], value["restore"]
     require(deposited["baseline"] == CLOUD["upload_report"](initial["ciphertext_bytes"]), "baseline deposit missing")
-    ui_record(deposited["ui"], "upload"); ui_record(restored["ui"], "download")
+    ui_record(restored["ui"], "download")
     size = deposited["upload_ciphertext_bytes"]
     upload_plan = upload_geometry(size)
-    total_copies = 8 + 2 * len(upload_plan["lengths"])
+    upload_copies = 2 * len(upload_plan["lengths"])
+    if RETAINED:
+        RECOVERY["validate"](deposited["ui"], upload_copies)
+    else:
+        ui_record(deposited["ui"], "upload")
+    total_copies = 8 + upload_copies
     require(restored["upload_ciphertext_bytes"] == size
         and deposited["committed_fragment_copies"] == total_copies and restored["baseline_restores"] == restored["upload_downloads"] == 2,
         "upload/restore counts differ")

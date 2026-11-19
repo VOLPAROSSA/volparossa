@@ -9,8 +9,8 @@ fixed artistic rings and arcs; they are fictional, with no visitor location or d
 ## Shared identity and upstream marks
 
 The exact reviewed shared source is
-[homepage commit 8114d966](https://github.com/VOLPAROSSA/volparossa.github.io/commit/8114d966f3e9be878cb6dbb3d155a5739edfeb03),
-theme v1.0.3. `theme/theme-version.json` identifies every imported file. The original
+[homepage commit 991cf163](https://github.com/VOLPAROSSA/volparossa.github.io/commit/991cf1638c906226574b9c21bb32c6618fc07fb7),
+theme v1.1.0. `theme/theme-version.json` identifies every imported file. The original
 VOLPAROSSA logo remains unchanged in `theme/assets/logo-original.png`; the display
 logo and favicon are the existing reviewed derivatives.
 

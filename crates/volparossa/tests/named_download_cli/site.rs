@@ -8,18 +8,25 @@ use tokio::{
     process::Command,
     time::timeout,
 };
-use volparossa_content::site::{SITE_CONTENT_TYPE, SiteAsset, SiteBundle};
+use volparossa_content::{
+    VerifiedManifest,
+    site::{SITE_CONTENT_TYPE, SiteAsset, SiteBundle},
+};
 
 use super::{Fault, Fixture, NAME, directory_names, isolated_network};
 
 #[path = "browser.rs"]
 mod browser;
+#[path = "confirm.rs"]
+mod confirm;
+#[path = "site/exact.rs"]
+mod exact;
 
 #[test]
 fn site_cli_delivers_signed_html_assets_ranges_and_cleans_up() {
     isolated_network(
         "site::site_cli_delivers_signed_html_assets_ranges_and_cleans_up",
-        successful_site(false),
+        successful_site(false, false),
         "loopback",
     );
 }
@@ -28,7 +35,7 @@ fn site_cli_delivers_signed_html_assets_ranges_and_cleans_up() {
 fn site_cache_only_uses_existing_signed_cache_and_reports_no_provider_activity() {
     isolated_network(
         "site::site_cache_only_uses_existing_signed_cache_and_reports_no_provider_activity",
-        successful_site(true),
+        successful_site(true, false),
         "loopback",
     );
 }
@@ -89,12 +96,19 @@ fn site_command(fixture: &Fixture, lifetime: &str) -> Command {
     command
 }
 
-async fn successful_site(cache_only: bool) {
+async fn successful_site(cache_only: bool, pinned: bool) {
     let mut fixture = site_fixture();
     if cache_only {
         fixture.retain_for_cache_only();
+    } else if pinned {
+        fixture.retained = Some(fixture.publication(Fault::None));
     }
-    let browser_artifact = std::env::var_os("VOLPAROSSA_SITE_BROWSER_ARTIFACT");
+    let selected = pinned.then(|| fixture.retained.as_ref().unwrap().1.clone());
+    let browser_artifact = if pinned {
+        None
+    } else {
+        std::env::var_os("VOLPAROSSA_SITE_BROWSER_ARTIFACT")
+    };
     let lifetime = if browser_artifact.is_some() {
         "60"
     } else {
@@ -102,12 +116,24 @@ async fn successful_site(cache_only: bool) {
     };
     let root = fixture.directory.path().to_owned();
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
-    let mut child = site_command(&fixture, lifetime).spawn().unwrap();
+    let mut command = site_command(&fixture, lifetime);
+    if let Some(manifest) = &selected {
+        command
+            .arg("--expected-manifest-id")
+            .arg(hex::encode(manifest.manifest_id()));
+    }
+    let mut child = command.spawn().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     timeout(Duration::from_secs(15), async {
         let ((), read) = tokio::join!(
-            fixture.serve(&listener, Fault::None, cache_only),
+            fixture.serve_checked(&listener, Fault::None, cache_only, |query| {
+                exact::assert_query(
+                    query,
+                    selected.as_ref().map(VerifiedManifest::manifest_id),
+                    cache_only.then_some(3),
+                );
+            }),
             output.read_line(&mut line)
         );
         assert!(
@@ -120,23 +146,7 @@ async fn successful_site(cache_only: bool) {
     drop(listener);
     fs::remove_file(root.join("control.sock")).unwrap();
     let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(ready["operation"], "native_site_ready");
-    assert_eq!(ready["assets"], 4);
-    assert_eq!(ready["name"], NAME);
-    assert_eq!(ready["native_publisher_authenticated"], true);
-    assert_eq!(ready["https_origin_authenticated"], false);
-    assert_eq!(ready["static_only"], true);
-    assert_eq!(ready["automatic_browser_open"], false);
-    assert_eq!(ready["cache_only"], cache_only);
-    assert_eq!(
-        ready["peer_bytes"],
-        if cache_only { 0 } else { fixture.bytes.len() }
-    );
-    if cache_only {
-        assert_eq!(ready["providers_used"], 0);
-        assert_eq!(ready["provider_peer_ids"], serde_json::json!([]));
-        assert_eq!(ready["control_relay_peer_id"], "");
-    }
+    assert_ready(&ready, &fixture, selected.as_ref());
     let url = ready["site_url"].as_str().unwrap();
     let host = url
         .strip_prefix("http://")
@@ -181,6 +191,33 @@ async fn successful_site(cache_only: bool) {
             .await
             .is_err()
     );
+}
+
+fn assert_ready(ready: &serde_json::Value, fixture: &Fixture, selected: Option<&VerifiedManifest>) {
+    assert_eq!(ready["operation"], "native_site_ready");
+    if let Some(manifest) = selected {
+        assert_eq!(ready["manifest_id"], hex::encode(manifest.manifest_id()));
+        assert_eq!(ready["revision"], manifest.metadata().revision);
+        assert_eq!(ready["sha256"], hex::encode(manifest.object_sha256()));
+        assert_eq!(ready["globally_latest"], false);
+    }
+    assert_eq!(ready["assets"], 4);
+    assert_eq!(ready["name"], NAME);
+    assert_eq!(ready["native_publisher_authenticated"], true);
+    assert_eq!(ready["https_origin_authenticated"], false);
+    assert_eq!(ready["static_only"], true);
+    assert_eq!(ready["automatic_browser_open"], false);
+    let cache_only = fixture.cache_only;
+    assert_eq!(ready["cache_only"], cache_only);
+    assert_eq!(
+        ready["peer_bytes"],
+        if cache_only { 0 } else { fixture.bytes.len() }
+    );
+    if cache_only {
+        assert_eq!(ready["providers_used"], 0);
+        assert_eq!(ready["provider_peer_ids"], serde_json::json!([]));
+        assert_eq!(ready["control_relay_peer_id"], "");
+    }
 }
 
 async fn check_assets(port: u16, host: &str, bundle: &SiteBundle) {

@@ -41,8 +41,10 @@ on:
           - private-storage-maintenance
           - cloud-upload-maintenance
           - image-snapshot
+          - image-immich
           - cloud-private-file
           - cloud-private-upload
+          - cloud-private-upload-resume
           - content-repair
           - content-replication
           - content-mailbox
@@ -82,6 +84,10 @@ on:
           - agent-adapter-aggregation
           - agent-autonomous-aggregation
           - agent-policy-assessment
+      image_revision:
+        description: Exact reviewed VOLPAROSSA Image commit for image-immich
+        type: string
+        default: ''
   pull_request:
     branches:
       - main
@@ -98,14 +104,21 @@ defaults:
     shell: bash
 
 env:
-  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario || 'datapath' }}
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario || 'datapath' }}
+  VOLPAROSSA_CLOUD_UPLOAD_PROFILE: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'retained-owner' || 'ordinary' }}
 
 jobs:
+  image-immich:
+    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'image-immich'
+    uses: ./.github/workflows/image-immich-peer.yml
+    with:
+      image_revision: ${{ inputs.image_revision }}
+
   alpha-topology:
     name: ${{ inputs.scenario == 'transaction-abci' && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'feature/alpha-vertical-runtime')
     runs-on: ubuntu-24.04
     # New continuation has its own outer ceiling; signed E and legacy 150min are unchanged.
@@ -202,6 +215,7 @@ jobs:
           sh -n tests/integration/cloud-private-file-smoke.sh
           python3 -B tests/integration/test-cloud-private-upload-smoke.py
           python3 -B tests/integration/test-cloud-private-upload-wiring.py
+          python3 -B tests/integration/test-cloud-retained-upload.py
           sh -n tests/integration/cloud-private-upload-smoke.sh
           python3 -B tests/integration/test-content-retain-smoke.py
           sh -n tests/integration/content-repair-smoke.sh
@@ -438,6 +452,10 @@ jobs:
           package_args=()
           native_args=()
           coding_args=()
+          cloud_args=()
+          if test "$VOLPAROSSA_CLOUD_UPLOAD_PROFILE" = retained-owner; then
+            cloud_args=(--cloud-owner-resume)
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-native-coding; then
             coding_args=(--native-runtime "$VOLPAROSSA_NATIVE_RUNTIME")
           fi
@@ -463,6 +481,7 @@ jobs:
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             "${native_args[@]}" \
             "${coding_args[@]}" \
+            "${cloud_args[@]}" \
             "${package_args[@]}" \
             --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
@@ -1215,7 +1234,8 @@ jobs:
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/cloud-private-upload-smoke.json"
-          python3 -B tests/integration/cloud-private-upload-smoke.py report "$report" "$GITHUB_SHA"
+          CLOUD_UPLOAD_PROFILE="$VOLPAROSSA_CLOUD_UPLOAD_PROFILE" \
+            python3 -B tests/integration/cloud-private-upload-smoke.py report "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

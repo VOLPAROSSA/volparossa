@@ -18,6 +18,16 @@ updates:
         applies-to: version-updates
         patterns:
           - "*"
+        # The helper's reviewed D-Bus graph has exact versions and feature bounds.
+        # multibase 0.9.3 also needs an upstream notice for its base45 dependency.
+        # Direct version updates for these crates receive their own review.
+        exclude-patterns:
+          - "zbus"
+          - "zbus_macros"
+          - "zbus_utils"
+          - "zcheapstr"
+          - "zruntime"
+          - "multibase"
         update-types:
           - "minor"
           - "patch"

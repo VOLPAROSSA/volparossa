@@ -236,7 +236,7 @@ protected_quote_case "$CASE"
     def test_host_cleanup_only_after_confirmed_stop_and_scratch_removal(self):
         text = HOST.read_text()
         cleanup = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
-        position = cleanup.index('if [ "$scenario" = protected-quote ]; then')
+        position = cleanup.index('if [ "$scenario" = protected-quote ]')
         self.assertLess(cleanup.index("stop_qemu_child abort"), position)
         self.assertLess(cleanup.index('rm -rf --one-file-system -- "$RUN_DIRECTORY"'), position)
         self.assertIn('qemu_joined:($joined == "yes")', cleanup[position:])
@@ -270,7 +270,7 @@ protected_quote_case "$CASE"
 
     def test_host_receipt_retains_unknown_join_and_does_not_overwrite(self):
         source = HOST.read_text()
-        start = source.index('    if [ "$scenario" = protected-quote ]; then\n        quote_private_removed=false')
+        start = source.index('    if [ "$scenario" = protected-quote ]', source.index('cleanup() {'))
         end = source.index('\n    exit "$status"', start)
         block = source[start:end] + '\nexit "$status"\n'
         with tempfile.TemporaryDirectory() as directory:

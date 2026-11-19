@@ -1050,6 +1050,23 @@ unambiguous UTF-8 paths. Keep secrets outside this explicitly public directory. 
 bundle is never written over an existing file. HTML, CSS, JavaScript, images, fonts and media are
 indexed into one signed publication; no files are extracted while viewing.
 
+#### Confirm availability after an interrupted contribution
+
+If the acknowledgement from `content contribute` was lost, check the original signed site
+against the daemon's active contribution service with its trusted publisher key.
+
+```sh
+volparossa content site confirm --manifest ./site.v1.pb --publisher-key "$PUBLISHER_KEY"
+```
+
+A successful receipt identifies the name, exact revision, manifest ID and signed expiry.
+The CLI verifies every byte through the local control socket and discards the streamed copy.
+It requires no private key, new cache or further contribution. A newer or conflicting
+selection, policy denial, expired site, missing bytes or incomplete response produces no
+confirmation. An unsuccessful check leaves the original handoff unresolved. The observation
+covers this daemon at the time of the check; remote retention and browser rendering require
+independent checks.
+
 #### Retrieve and view by trusted publisher name
 
 Import and serve that public publication using the [existing account handoff](#moving-an-explicit-public-publication-to-or-from-the-service)

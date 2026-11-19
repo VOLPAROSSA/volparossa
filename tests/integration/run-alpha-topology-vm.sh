@@ -19,16 +19,23 @@ host_tools_directory=
 output_directory=
 expected_commit=
 scenario=alpha
+image_handoff=
+image_return=
+image_revision=
 code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
+cloud_owner_resume=no
 weather_client_bundle=
 weather_client_manifest_sha256=
 weather_android_source=
 weather_android_commit=
 weather_client_version=
 decoder_abi_inputs=
+decoder_mode=historical-v1
+decoder_mode_set=no
+decoder_source=
 
 guest_memory_for_scenario() {
     # These fixtures co-locate two 360M providers in one guest. Production
@@ -41,6 +48,19 @@ guest_memory_for_scenario() {
     esac
 }
 
+image_input_identity() {
+    stat -c '%d:%i:%u:%a:%h:%s:%z' -- "$1" "$1/receipt.json" "$1/snapshot.pgp"
+}
+
+release_image_source() {
+    [ "$(image_input_identity "$1")" = "$2" ] || return 1
+    [ "$(python3 -B "$HERE/image-topology-input.py" verify "$1")" = "$image_handoff_sha256" ] || return 1
+    [ "$(sha256sum <"$1/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ] || return 1
+    [ "$(image_input_identity "$1")" = "$2" ] || return 1
+    rm -- "$1/snapshot.pgp" || return 1
+    [ ! -e "$1/snapshot.pgp" ] && [ ! -L "$1/snapshot.pgp" ]
+}
+
 usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
@@ -50,10 +70,13 @@ usage() {
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
+        '       image-snapshot optionally accepts --image-handoff DIRECTORY --image-return DIRECTORY --image-revision SHA.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
+        '       cloud-private-upload optionally accepts --cloud-owner-resume to exercise an interrupted real upload.' \
         '       Android profile 6 additionally requires --weather-android-source DIRECTORY (exact prepared hosted source).' \
-        '       weather-decoder-abi requires --decoder-abi-inputs DIRECTORY (source-admitted exact public files; no --mpquic).' \
+        '       weather-decoder-abi defaults to historical-v1 with --decoder-abi-inputs DIRECTORY.' \
+        '       --decoder-mode source-input-inventory requires --decoder-source DIRECTORY (fixed reviewed Weather source only).' \
         '       Native-editor, cooperative-code, content-provider and weather-decoder-abi accept --host-tools-directory PATH (verified workspace-only QEMU).'
 }
 
@@ -78,6 +101,24 @@ print_plan() {
         ;;
     esac
     if [ "$scenario" = weather-decoder-abi ]; then
+        if [ "$decoder_mode" != historical-v1 ]; then
+            if [ "$decoder_mode" = source-v1 ]; then
+                printf '%s\n' 'Weather source-v1 ABI trial: fixed reviewed14-file payload and source record;' \
+                    '  a second clean Debian13 guest prepares the same signed package environment without compilation;' \
+                    '  relocated offline ABI, complete input/environment rechecks, no historical artifact fallback.'
+                return
+            fi
+            if [ "$decoder_mode" = source-build ]; then
+                printf '%s\n' 'Weather source build: requires the checked-in reviewed environment lock;' \
+                    '  exact image/packages/sources, offline unprivileged bwrap build and upstream libaec tests;' \
+                    '  bounded runner-local payload readback, metadata-only upload, no decoder admission.'
+                return
+            fi
+            printf '%s\n' 'Weather source inventory: pinned Debian 13 guest and fixed signed snapshot;' \
+                '  verify indexes and every .deb before guest-only installation; no compiler execution;' \
+                '  export bounded unadmitted metadata and remove the disposable VM, package data and keys.'
+            return
+        fi
         printf '%s\n' \
             'Weather-decoder ABI: verify only the source-reviewed public artifact members before copying;' \
             '  install minimal Debian guest tools, then execute the admitted decoder unprivileged/offline;' \
@@ -529,6 +570,14 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
+        --image-handoff|--image-return|--image-revision)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || exit 64
+            case $1 in
+                --image-handoff) [ -z "$image_handoff" ] || exit 64; image_handoff=$2 ;;
+                --image-return) [ -z "$image_return" ] || exit 64; image_return=$2 ;;
+                --image-revision) [ -z "$image_revision" ] || exit 64; image_revision=$2 ;;
+            esac
+            shift ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
@@ -540,6 +589,7 @@ while [ "$#" -gt 0 ]; do
             code_bundle=$2
             shift
             ;;
+        --cloud-owner-resume) cloud_owner_resume=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -568,6 +618,18 @@ while [ "$#" -gt 0 ]; do
         --decoder-abi-inputs)
             if [ "$#" -lt 2 ] || [ -n "$decoder_abi_inputs" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             decoder_abi_inputs=$2
+            shift
+            ;;
+        --decoder-mode)
+            [ "$#" -ge 2 ] && [ "$decoder_mode_set" = no ] || exit 64
+            case $2 in historical-v1|source-input-inventory|source-build|source-v1) ;; *) exit 64 ;; esac
+            decoder_mode=$2
+            decoder_mode_set=yes
+            shift
+            ;;
+        --decoder-source)
+            [ "$#" -ge 2 ] && [ -z "$decoder_source" ] && [ -n "$2" ] || exit 64
+            decoder_source=$2
             shift
             ;;
         --code-manifest-sha256)
@@ -622,13 +684,21 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$cloud_owner_resume" = yes ] && [ "$scenario" != cloud-private-upload ]; then
+    usage >&2
+    exit 64
+fi
 if [ "$mode" = preview ]; then
+    [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source$image_handoff$image_return$image_revision" ]; then
         usage >&2
         exit 64
     fi
     print_plan
+    if [ "$cloud_owner_resume" = yes ]; then
+        printf '%s\n' 'Retained-owner profile requires a real interrupted browser upload and offline owner CLI resume.'
+    fi
     printf '%s\n' 'PREVIEW ONLY: no image, VM, key, file, service or network state was changed.'
     exit 0
 fi
@@ -642,17 +712,48 @@ case $image_path:$output_directory in
     /*:/*) ;;
     *) exit 64 ;;
 esac
+if [ -n "$image_handoff$image_return$image_revision" ]; then
+    [ "$scenario" = image-snapshot ] && [ "$image_revision" = 0da0c35e9372a828553f376c3eb404a6081e0bb8 ] || exit 64
+    for directory in "$image_handoff" "$image_return" "$output_directory"; do
+        case $directory in /*) ;; *) exit 64 ;; esac
+        case $directory in *[[:cntrl:]]*) exit 64 ;; esac
+        [ -d "$directory" ] && [ "$(readlink -f -- "$directory")" = "$directory" ] || exit 64
+    done
+    # Empty return and diagnostic roots must be independent of the private input and one another.
+    for directory in "$image_handoff" "$image_return"; do
+        [ "$(stat -c '%u:%a' -- "$directory")" = "$(id -u):700" ] || exit 64
+        case "$directory/" in "$output_directory/"*) exit 64 ;; esac
+        case "$output_directory/" in "$directory/"*) exit 64 ;; esac
+    done
+    case "$image_handoff/" in "$image_return/"*) exit 64 ;; esac
+    case "$image_return/" in "$image_handoff/"*) exit 64 ;; esac
+    [ -z "$(find "$image_return" -mindepth 1 -maxdepth 1 -printf x -quit)" ] || exit 64
+fi
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
 if [ "$scenario" != weather-decoder-abi ] && [ "$scenario" != wifi-mesh ] && [ "$scenario" != transaction-abci ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ "$scenario" != agent-private-code ] && [ "$scenario" != agent-private-conversation ] && [ "$scenario" != agent-native-coding ] && [ "$scenario" != agent-native-editor ] && [ "$scenario" != agent-private-browser ] && [ "$scenario" != agent-reasoning ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 if [ "$scenario" = weather-decoder-abi ]; then
-    case $decoder_abi_inputs in /*) ;; *) usage >&2; exit 64 ;; esac
-    case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    if [ "$decoder_mode" != historical-v1 ]; then
+        if [ "$decoder_mode" = source-v1 ]; then
+            case $decoder_abi_inputs in /*) ;; *) exit 64 ;; esac
+            case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+            case $decoder_abi_inputs in "$decoder_source"|"$decoder_source"/*) exit 64 ;; esac
+            case $decoder_source in "$decoder_abi_inputs"/*) exit 64 ;; esac
+        else
+            [ -z "$decoder_abi_inputs" ] || exit 64
+        fi
+        case $decoder_source in /*) ;; *) exit 64 ;; esac
+        case $decoder_source in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    else
+        [ -z "$decoder_source" ] || exit 64
+        case $decoder_abi_inputs in /*) ;; *) usage >&2; exit 64 ;; esac
+        case $decoder_abi_inputs in /|*/|*//*|*/../*|*/./*|*/..|*/.|*[[:cntrl:]]*) exit 64 ;; esac
+    fi
     # This is a distinct source-admitted ABI fixture, never a caller-selected
     # runtime or a disguised content-provider/browser/native scenario.
     [ -z "$mpquic_path$package_path$native_runtime_path$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256" ] || exit 64
-elif [ -n "$decoder_abi_inputs" ]; then
+elif [ -n "$decoder_abi_inputs$decoder_source" ] || [ "$decoder_mode_set" = yes ]; then
     exit 64
 fi
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
@@ -707,6 +808,15 @@ qemu-system-x86_64 -accel help | grep -Fx kvm >/dev/null \
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPOSITORY=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)
+if [ -n "$image_handoff" ]; then
+    image_original_identity=$(image_input_identity "$image_handoff")
+    image_handoff_sha256=$(python3 -B "$HERE/image-topology-input.py" verify "$image_handoff")
+    case $image_handoff_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#image_handoff_sha256}" -eq 64 ] || exit 64
+    image_receipt_sha256=$(sha256sum <"$image_handoff/receipt.json" | cut -d ' ' -f1)
+    image_handoff_bytes=$(stat -c %s -- "$image_handoff/snapshot.pgp")
+    [ "$(image_input_identity "$image_handoff")" = "$image_original_identity" ] || exit 64
+fi
 MANIFEST=$REPOSITORY/tests/helper/debian13-amd64-image-v1.json
 IMAGE_FILENAME=debian-13-genericcloud-amd64-20260826-2582.qcow2
 IMAGE_SHA512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
@@ -795,13 +905,14 @@ elif [ "$scenario" = weather-decoder-abi ]; then
             printf '%s\n' 'Decoder ABI VM scratch requires non-memory-backed workspace storage' >&2
             exit 69 ;;
     esac
-elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ]; then
+elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${image_handoff:-}" ]; then
     # Every provider proof builds Rust in this 4 GiB guest. A growing qcow2
     # overlay on tmpfs otherwise competes directly with the guest's RAM.
     # Keep scratch beside validated workspace evidence, never in its export.
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=content-provider-kvm
+    [ -z "${image_handoff:-}" ] || RUN_DIRECTORY_PREFIX=image-topology-kvm
     [ -z "$browser_filter_bundle" ] || RUN_DIRECTORY_PREFIX=browser-filter-kvm
     [ -z "${weather_client_bundle:-}" ] || RUN_DIRECTORY_PREFIX=weather-client-kvm
     runner_scratch_filesystem=$(stat -f -c '%T' -- "$RUN_DIRECTORY_PARENT") || exit 69
@@ -866,8 +977,11 @@ cleanup() {
         printf '%s\n' 'QEMU exit unconfirmed; private VM scratch retained' >&2
     fi
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
-        install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" \
-            2>/dev/null || true
+        if [ "$decoder_mode" != historical-v1 ]; then
+            tail -c 131072 "$RUN_DIRECTORY/console.log" >"$output_directory/vm-console.log" 2>/dev/null || true
+        else
+            install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" 2>/dev/null || true
+        fi
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
         tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
@@ -911,7 +1025,22 @@ cleanup() {
                   joined_core_acceptance:false}' >"$output_directory/weather-android-vm-cleanup.json"
         ); then status=1; fi
     fi
-    if [ "$scenario" = protected-quote ]; then
+    if [ "$decoder_mode" != historical-v1 ]; then
+        decoder_private_removed=false
+        if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then decoder_private_removed=true; fi
+        [ "$decoder_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
+        if ! (set -C
+            jq -n --arg revision "$expected_commit" --arg started "$QEMU_STARTED" --arg joined "$QEMU_JOINED" \
+                --arg mode "$decoder_mode" --argjson removed "$decoder_private_removed" --argjson status "$status" \
+                '{schema:1,kind:(if $mode == "source-build" then "weather-source-build-vm-cleanup" elif $mode == "source-v1" then "weather-source-trial-abi-vm-cleanup" else "weather-source-inventory-vm-cleanup" end),core_commit:$revision,
+                  qemu_started:($started == "yes"),qemu_joined:($joined == "yes"),
+                  private_guest_state_removed:$removed,owner_exit_status:$status,admitted:false,
+                  compiled:(if $mode == "source-build" then null else false end)}' \
+                >"$output_directory/inventory-vm-cleanup.json"); then status=1; fi
+    fi
+    if [ "$scenario" = protected-quote ] || [ -n "${image_handoff:-}" ]; then
+        cleanup_report=protected-quote-vm-cleanup.json
+        [ -z "${image_handoff:-}" ] || cleanup_report=image-vm-cleanup.json
         quote_private_removed=false
         if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then quote_private_removed=true; fi
         [ "$quote_private_removed" = true ] || { [ "$status" -ne 0 ] || status=1; }
@@ -920,7 +1049,7 @@ cleanup() {
                 --argjson removed "$quote_private_removed" \
                 '{schema_version:1,source_revision:$revision,qemu_started:($started == "yes"),
                   qemu_joined:($joined == "yes"),private_guest_state_removed:$removed}' \
-                >"$output_directory/protected-quote-vm-cleanup.json"); then
+                >"$output_directory/$cleanup_report"); then
             [ "$status" -ne 0 ] || status=1
         fi
     fi
@@ -930,6 +1059,15 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ -n "$image_handoff" ]; then
+    image_stage=$RUN_DIRECTORY/image-input
+    mkdir -m 0700 -- "$image_stage"
+    cp --no-dereference --preserve=mode -- "$image_handoff/snapshot.pgp" "$image_handoff/receipt.json" "$image_stage/"
+    [ "$(python3 -B "$HERE/image-topology-input.py" verify "$image_stage")" = "$image_handoff_sha256" ] || exit 64
+    [ "$(sha256sum <"$image_stage/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ] || exit 64
+    image_stage_identity=$(image_input_identity "$image_stage")
+fi
 
 SOURCE_ARCHIVE=$RUN_DIRECTORY/source.tar.gz
 git -C "$REPOSITORY" archive --format=tar --prefix=source/ "$expected_commit" \
@@ -981,12 +1119,27 @@ if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative
     CODE_MANIFEST_SHA256=$code_manifest_sha256
 fi
 DECODER_ABI_DIRECTORY=$RUN_DIRECTORY/weather-decoder-inputs
+DECODER_TRIAL_PAYLOAD_DIRECTORY=$RUN_DIRECTORY/weather-decoder-source-trial-inputs
 if [ "$scenario" = weather-decoder-abi ]; then
     # The reviewed source record, not a CLI hash or artifact receipt, chooses
     # every admitted byte. These operations never execute an input binary.
-    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
-    python3 -B "$HERE/weather-decoder-abi.py" stage-inputs "$decoder_abi_inputs" "$DECODER_ABI_DIRECTORY"
-    python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$DECODER_ABI_DIRECTORY"
+    if [ "${decoder_mode:-historical-v1}" != historical-v1 ]; then
+        if [ "$decoder_mode" = source-build ]; then
+            python3 -B "$HERE/weather-decoder-abi.py" stage-build-source "$decoder_source" "$DECODER_ABI_DIRECTORY"
+            python3 -B "$HERE/weather-decoder-abi.py" verify-build-source "$DECODER_ABI_DIRECTORY"
+        else
+            python3 -B "$HERE/weather-decoder-abi.py" stage-source "$decoder_source" "$DECODER_ABI_DIRECTORY"
+            python3 -B "$HERE/weather-decoder-abi.py" verify-source "$DECODER_ABI_DIRECTORY"
+            if [ "$decoder_mode" = source-v1 ]; then
+                python3 -B "$HERE/weather-decoder-abi.py" stage-source-trial-inputs "$decoder_abi_inputs" "$DECODER_TRIAL_PAYLOAD_DIRECTORY"
+                python3 -B "$HERE/weather-decoder-abi.py" verify-source-trial-inputs "$DECODER_TRIAL_PAYLOAD_DIRECTORY"
+            fi
+        fi
+    else
+        python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$decoder_abi_inputs"
+        python3 -B "$HERE/weather-decoder-abi.py" stage-inputs "$decoder_abi_inputs" "$DECODER_ABI_DIRECTORY"
+        python3 -B "$HERE/weather-decoder-abi.py" verify-inputs "$DECODER_ABI_DIRECTORY"
+    fi
 fi
 
 OVERLAY=$RUN_DIRECTORY/overlay.qcow2
@@ -2019,14 +2172,39 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+cloud_owner_resume=no
 code_archive_sha256=none
 code_manifest_sha256=none
 browser_filter_archive_sha256=none
 browser_filter_manifest_sha256=none
 weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
+decoder_mode=historical-v1
 # Native and cooperative bundles share positions only in disjoint scenarios.
+image_handoff_sha256=
+image_receipt_sha256=
+image_revision=
 case $scenario in
+    weather-decoder-abi)
+        if [ "$#" -eq 6 ]; then
+            case $6 in source-input-inventory|source-build|source-v1) ;; *) exit 64 ;; esac
+            decoder_mode=$6
+        else
+            [ "$#" -eq 5 ] || exit 64
+        fi
+        ;;
+    image-snapshot)
+        case $# in
+            5) ;;
+            8) image_revision=$6; image_handoff_sha256=$7; image_receipt_sha256=$8
+               [ "$image_revision" = 0da0c35e9372a828553f376c3eb404a6081e0bb8 ] || exit 64
+               for digest in "$image_handoff_sha256" "$image_receipt_sha256"; do
+                   case $digest in ''|*[!0-9a-f]*) exit 64 ;; esac
+                   [ "${#digest}" -eq 64 ] || exit 64
+               done ;;
+            *) exit 64 ;;
+        esac
+        ;;
     agent-native-coding|agent-native-editor)
         [ "$#" -eq 6 ] || exit 64
         native_runtime_sha256=${6:-none}
@@ -2051,6 +2229,13 @@ case $scenario in
         else
             [ "$#" -eq 5 ] || exit 64
         fi
+        ;;
+    cloud-private-upload)
+        case $# in
+            5) ;;
+            6) [ "$6" = retained-owner ] || exit 64; cloud_owner_resume=yes ;;
+            *) exit 64 ;;
+        esac
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
@@ -2078,6 +2263,61 @@ if [ "$scenario" = weather-decoder-abi ]; then
     test "$(dpkg --print-architecture)" = amd64
     tar -xzf source.tar.gz
     cd source
+    if [ "$decoder_mode" != historical-v1 ]; then
+        decoder_inventory_output=/home/vpci/alpha-output
+        decoder_inventory_finalize() {
+            decoder_inventory_status=$?
+            trap - EXIT HUP INT TERM
+            set +e
+            decoder_export=export-source-inventory
+            if [ "$decoder_mode" = source-build ]; then decoder_export=export-source-build; fi
+            if [ "$decoder_mode" = source-v1 ]; then decoder_export=export-source-trial; fi
+            python3 -B tests/integration/weather-decoder-abi.py "$decoder_export" "$decoder_inventory_output" || exit 1
+            printf '%s\n' "$decoder_inventory_status" >"$decoder_inventory_output/guest-exit-status" || exit 1
+            cp /home/vpci/guest-phase.txt "$decoder_inventory_output/current-phase" || exit 1
+            : >/home/vpci/weather-source-export.list || exit 1
+            if [ "$decoder_mode" = source-build ]; then
+                python3 -B tests/integration/weather-decoder-abi.py source-build-export-names >/home/vpci/weather-source-allowed.list || exit 1
+            elif [ "$decoder_mode" = source-v1 ]; then
+                python3 -B tests/integration/weather-decoder-abi.py source-trial-export-names >/home/vpci/weather-source-allowed.list || exit 1
+            else
+                printf '%s\n' candidate.json base-files.json before.tsv after.tsv resolver.log apt-update.log apt-install.log \
+                inventory-commands.json source-binding.json inventory-report.json inventory-export.json \
+                debian.InRelease debian-security.InRelease guest-exit-status current-phase >/home/vpci/weather-source-allowed.list || exit 1
+            fi
+            while IFS= read -r name; do
+                path=$decoder_inventory_output/$name
+                if [ -e "$path" ] || [ -L "$path" ]; then
+                    [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c '%u:%h' "$path")" = "$(id -u):1" ] || exit 1
+                    printf '%s\n' "$name" >>/home/vpci/weather-source-export.list || exit 1
+                fi
+            done </home/vpci/weather-source-allowed.list
+            tar --no-recursion -C "$decoder_inventory_output" -czf /home/vpci/alpha-output.tar.gz \
+                -T /home/vpci/weather-source-export.list || exit 1
+            exit "$decoder_inventory_status"
+        }
+        trap decoder_inventory_finalize EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        guest_phase weather-source-verify
+        if [ "$decoder_mode" = source-build ]; then
+            python3 -B tests/integration/weather-decoder-abi.py verify-build-source /home/vpci/weather-decoder-source
+            timeout --signal=TERM --kill-after=10s 2340s python3 -B tests/integration/weather-decoder-abi.py \
+                source-build --expected-commit "$expected_commit"
+        elif [ "$decoder_mode" = source-v1 ]; then
+            python3 -B tests/integration/weather-decoder-abi.py source-admission-info
+            python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
+            python3 -B tests/integration/weather-decoder-abi.py verify-source-trial-inputs /home/vpci/weather-decoder-source-trial-inputs
+            timeout --signal=TERM --kill-after=10s 1110s python3 -B tests/integration/weather-decoder-abi.py \
+                source-trial --expected-commit "$expected_commit"
+        else
+            python3 -B tests/integration/weather-decoder-abi.py verify-source /home/vpci/weather-decoder-source
+            timeout --signal=TERM --kill-after=10s 900s python3 -B tests/integration/weather-decoder-abi.py \
+                source-input-inventory --expected-commit "$expected_commit"
+        fi
+        exit 0
+    fi
     decoder_abi_output=/home/vpci/alpha-output
     test ! -e "$decoder_abi_output" && test ! -L "$decoder_abi_output"
     decoder_abi_finalize() {
@@ -2322,7 +2562,11 @@ if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ];
         /home/vpci/signal-backup-runtime --download "$@"
 elif [ "$scenario" = image-snapshot ]; then
     guest_phase image-runtime-provision
-    sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+    if [ -n "$image_revision" ]; then
+        sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download --revision "$image_revision"
+    else
+        sudo -n python3 -B tests/integration/image-snapshot-provision.py provision --download
+    fi
 elif [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
     guest_phase storage-consumer-runtime-provision
     sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10
@@ -2334,7 +2578,11 @@ elif [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-uplo
     fi
 elif [ "$scenario" = cloud-private-upload ]; then
     guest_phase cloud-upload-runtime-provision
-    sudo -n python3 -B tests/integration/cloud-private-upload-provision.py provision --download
+    if [ "$cloud_owner_resume" = yes ]; then
+        sudo -n python3 -B tests/integration/cloud-private-upload-provision.py --owner-resume provision --download
+    else
+        sudo -n python3 -B tests/integration/cloud-private-upload-provision.py provision --download
+    fi
 elif [ "$scenario" = cloud-private-file ]; then
     guest_phase cloud-runtime-provision
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
@@ -2460,12 +2708,28 @@ topology_scenario=alpha
 case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|cloud-upload-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
-if [ "$scenario" = image-snapshot ]; then
+if [ "$scenario" = image-snapshot ] && [ -n "${image_handoff_sha256:-}" ]; then
+    guest_phase image-handoff-admission
+    image_input=/home/vpci/image-peer-handoff
+    [ "$(python3 -B tests/integration/image-topology-input.py verify "$image_input")" = "$image_handoff_sha256" ]
+    [ "$(sha256sum <"$image_input/receipt.json" | cut -d ' ' -f1)" = "$image_receipt_sha256" ]
+    image_handoff_bytes=$(stat -c %s -- "$image_input/snapshot.pgp")
+    test ! -e /run/volparossa-image-handoff
+    test ! -L /run/volparossa-image-handoff
+    sudo -n chown root:root -- "$image_input" "$image_input/snapshot.pgp" "$image_input/receipt.json"
+    sudo -n mv -T -- "$image_input" /run/volparossa-image-handoff
+    set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
+        IMAGE_REVISION="$image_revision" IMAGE_HANDOFF_SHA256="$image_handoff_sha256"
+elif [ "$scenario" = image-snapshot ]; then
     set -- IMAGE_SOURCE=/opt/volparossa-image IMAGE_NODE=/opt/volparossa-node/bin/node \
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-upload ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
         CLOUD_REVISION=ffdcfaa15cdd2a029dae545904b0a58603da4e17
+    if [ "$cloud_owner_resume" = yes ]; then
+        set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
+            CLOUD_UPLOAD_PROFILE=retained-owner CLOUD_REVISION=396d5d4907f4859437b69b88943c18fefba9a2e8
+    fi
 elif [ "$scenario" = cloud-private-file ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
         CLOUD_REVISION=63bba5d1163a69e1ee6b4218c9e7462d941f22f7
@@ -2628,6 +2892,24 @@ elif [ "$scenario" = private-storage-fragments ] || [ "$scenario" = private-stor
 else
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
 fi
+if [ -n "$image_handoff_sha256" ] && [ "$topology_status" -eq 0 ]; then
+    guest_phase image-peer-return
+    # Claim the fixed worker directory after topology cleanup and verify the restored ciphertext
+    # before making the separate, private vpci return file available to the host.
+    image_private=/run/volparossa-image-handoff
+    image_peer_return=/home/vpci/image-peer-return
+    [ "$(readlink -f -- "$image_private")" = "$image_private" ]
+    [ "$(stat -c '%u:%a:%F' -- "$image_private")" = "$(id -u volparossa-worker):700:directory" ]
+    sudo -n chown --no-dereference root:root -- "$image_private"
+    [ -z "$(sudo -n find "$image_private" -mindepth 1 -maxdepth 1 ! -name snapshot.pgp -printf x -quit)" ]
+    [ "$(sudo -n stat -c '%u:%a:%h:%s:%F' -- "$image_private/snapshot.pgp")" = \
+        "$(id -u volparossa-worker):600:1:$image_handoff_bytes:regular file" ]
+    mkdir -m 0700 -- "$image_peer_return"
+    sudo -n install -o vpci -g vpci -m 0600 -- "$image_private/snapshot.pgp" "$image_peer_return/snapshot.pgp"
+    (cd "$image_peer_return" && printf '%s  snapshot.pgp\n' "$image_handoff_sha256" | sha256sum --check --status --strict -)
+    sudo -n rm -- "$image_private/snapshot.pgp"
+    sudo -n rmdir -- "$image_private"
+fi
 guest_phase driver-finished
 if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
 if [ "$private_dns_status" -ne 0 ]; then exit "$private_dns_status"; fi
@@ -2748,8 +3030,12 @@ scp_decoder_abi_inputs() {
     # Only the private, already source-verified snapshot is copied recursively;
     # no arbitrary caller directory reaches scp or executes in the guest.
     [ "$scenario" = weather-decoder-abi ] || return 64
+    decoder_guest_target=/home/vpci/weather-decoder-inputs
+    if [ "$decoder_mode" != historical-v1 ]; then decoder_guest_target=/home/vpci/weather-decoder-source; fi
     ssh_bounded 15s test ! -e /home/vpci/weather-decoder-inputs
     ssh_bounded 15s test ! -L /home/vpci/weather-decoder-inputs
+    ssh_bounded 15s test ! -e "$decoder_guest_target"
+    ssh_bounded 15s test ! -L "$decoder_guest_target"
     timeout --signal=TERM --kill-after=10s 600s scp -r \
         -F /dev/null -i "$SSH_KEY" -P 22223 \
         -o BatchMode=yes -o ConnectTimeout=5 \
@@ -2760,7 +3046,22 @@ scp_decoder_abi_inputs() {
         -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
         -o StrictHostKeyChecking=yes -o Tunnel=no \
         -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_ABI_DIRECTORY" \
-        vpci@127.0.0.1:/home/vpci/weather-decoder-inputs
+        "vpci@127.0.0.1:$decoder_guest_target" || return
+    if [ "$decoder_mode" = source-v1 ]; then
+        ssh_bounded 15s test ! -e /home/vpci/weather-decoder-source-trial-inputs
+        ssh_bounded 15s test ! -L /home/vpci/weather-decoder-source-trial-inputs
+        timeout --signal=TERM --kill-after=10s 600s scp -r \
+            -F /dev/null -i "$SSH_KEY" -P 22223 \
+            -o BatchMode=yes -o ConnectTimeout=5 \
+            -o ClearAllForwardings=yes -o ControlMaster=no -o ForwardAgent=no \
+            -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+            -o IdentitiesOnly=yes -o IdentityAgent=none \
+            -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no \
+            -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
+            -o StrictHostKeyChecking=yes -o Tunnel=no \
+            -o UserKnownHostsFile="$KNOWN_HOSTS" "$DECODER_TRIAL_PAYLOAD_DIRECTORY" \
+            "vpci@127.0.0.1:/home/vpci/weather-decoder-source-trial-inputs" || return
+    fi
 }
 
 retrieve_incomplete_output() {
@@ -2795,6 +3096,20 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ -n "$image_handoff" ]; then
+    ssh_base mkdir -m 0700 /home/vpci/image-peer-handoff
+    for image_file in snapshot.pgp receipt.json; do
+        scp_to "$image_stage/$image_file" "/home/vpci/image-peer-handoff/$image_file"
+        ssh_base chmod 0600 "/home/vpci/image-peer-handoff/$image_file"
+    done
+    # Verify the exact privately owned pair as vpci before releasing either host source.
+    [ "$(ssh_bounded 30s python3 -I -B - verify /home/vpci/image-peer-handoff <"$HERE/image-topology-input.py")" = \
+        "$image_handoff_sha256" ] || exit 1
+    [ "$(ssh_base sha256sum /home/vpci/image-peer-handoff/receipt.json)" = \
+        "$image_receipt_sha256  /home/vpci/image-peer-handoff/receipt.json" ] || exit 1
+    release_image_source "$image_stage" "$image_stage_identity"
+    release_image_source "$image_handoff" "$image_original_identity"
+fi
 if [ "$scenario" = weather-decoder-abi ]; then scp_decoder_abi_inputs; fi
 if [ -n "$browser_filter_bundle" ]; then scp_to "$BROWSER_FILTER_ARCHIVE" /home/vpci/browser-filter.tar; fi
 if [ -n "$weather_client_bundle" ]; then scp_to "$WEATHER_CLIENT_ARCHIVE" /home/vpci/weather-client.tar; fi
@@ -2814,6 +3129,9 @@ driver_time_bound=2400s
 # original proof. This outer ceiling never extends signed owner authority.
 [ "$scenario" != cloud-upload-maintenance ] || driver_time_bound=14400s
 [ "$scenario" != weather-decoder-abi ] || driver_time_bound=720s
+[ "$decoder_mode" != source-input-inventory ] || driver_time_bound=960s
+[ "$decoder_mode" != source-build ] || driver_time_bound=2400s
+[ "$decoder_mode" != source-v1 ] || driver_time_bound=1500s
 # Includes source-building the original UI and two extra real peer-backed downloads.
 # Application exchange/lease bounds remain unchanged.
 [ "$scenario" != cloud-private-file ] || driver_time_bound=3600s
@@ -2847,6 +3165,21 @@ driver_time_bound=2400s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
 [ "$scenario" != signal-backup-fragments ] || driver_time_bound=7200s
 case $scenario in
+    weather-decoder-abi)
+        if [ "$decoder_mode" != historical-v1 ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$decoder_mode"
+        else
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
+        fi
+        ;;
+    image-snapshot)
+        set --
+        [ -z "$image_handoff" ] || set -- "$image_revision" "$image_handoff_sha256" "$image_receipt_sha256"
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
+        ;;
     content-provider)
         if [ "$weather_client_version" = 6 ]; then
             # Own the driver and Android/tunnel children in one bounded process.
@@ -2881,6 +3214,12 @@ case $scenario in
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
         fi
+        ;;
+    cloud-private-upload)
+        set --
+        [ "$cloud_owner_resume" = no ] || set -- retained-owner
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
         ;;
     agent-native-coding|agent-native-editor)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
@@ -2926,6 +3265,21 @@ if ! scp_from_bounded "$retrieval_bound" /home/vpci/alpha-output.tar.gz "$RUN_DI
     exit "$GUEST_STATUS"
 fi
 tar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-output.tar.gz"
+if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    # Reject overlong private transfers even if the guest return changes after its verification.
+    (ulimit -f "$(( (image_handoff_bytes + 511) / 512 ))"
+     scp_from_bounded 60s /home/vpci/image-peer-return/snapshot.pgp "$RUN_DIRECTORY/image-peer-restored.pgp")
+    [ "$(stat -c %s -- "$RUN_DIRECTORY/image-peer-restored.pgp")" -eq "$image_handoff_bytes" ] || exit 1
+    [ "$(sha256sum <"$RUN_DIRECTORY/image-peer-restored.pgp" | cut -d ' ' -f1)" = "$image_handoff_sha256" ] || exit 1
+fi
+if [ "$decoder_mode" = source-build ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    if python3 -B "$HERE/weather-decoder-abi.py" readback-source-payload --source "$decoder_source" \
+        --run-directory "$RUN_DIRECTORY" --output "$output_directory.payload" >"$RUN_DIRECTORY/readback-report.json"; then
+        install -m 0600 "$RUN_DIRECTORY/readback-report.json" "$output_directory/readback-report.json"
+    else
+        GUEST_STATUS=1
+    fi
+fi
 if [ "$weather_client_version" = 6 ] && [ "$GUEST_STATUS" -eq 0 ]; then
     python3 -B "$HERE/weather-android-owner.py" join --config "$WEATHER_ANDROID_CONFIG" || GUEST_STATUS=1
 fi
@@ -2934,7 +3288,11 @@ if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"
     exit 1
 fi
 if [ "$scenario" != signal-backup ] && [ "$scenario" != signal-backup-fragments ]; then
-    install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+    if [ "$decoder_mode" != historical-v1 ]; then
+        tail -c 131072 "$CONSOLE" >"$output_directory/vm-console.log"
+    else
+        install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
+    fi
 fi
 ssh_bounded 15s sudo -n systemctl poweroff >/dev/null 2>&1 || true
 if ! stop_qemu_child normal; then
@@ -2942,5 +3300,16 @@ if ! stop_qemu_child normal; then
     exit "$GUEST_STATUS"
 fi
 printf '%s  %s\n' "$IMAGE_SHA512" "$image_path" | sha512sum --check --strict -
+if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then
+    [ "$(readlink -f -- "$image_return")" = "$image_return" ] || exit 1
+    [ "$(stat -c '%u:%a:%F' -- "$image_return")" = "$(id -u):700:directory" ] || exit 1
+    [ -z "$(find "$image_return" -mindepth 1 -maxdepth 1 -printf x -quit)" ] || exit 1
+    (
+        returned=$(mktemp -- "$image_return/.snapshot.XXXXXXXX")
+        trap 'rm -f -- "$returned"' EXIT
+        install -m 0600 -- "$RUN_DIRECTORY/image-peer-restored.pgp" "$returned"
+        ln -T -- "$returned" "$image_return/snapshot.pgp"
+    )
+fi
 FINISHED=yes
 exit "$GUEST_STATUS"

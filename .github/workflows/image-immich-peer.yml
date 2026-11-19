@@ -1,0 +1,86 @@
+name: Immich peer snapshot recovery
+
+on:
+  workflow_call:
+    inputs:
+      image_revision:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    name: Restore an Immich album through three Storage providers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      IMAGE_REVISION: ${{ inputs.image_revision }}
+      IMAGE_CHECKOUT: ${{ github.workspace }}/image
+      CORE_CHECKOUT: ${{ github.workspace }}/core
+    steps:
+      - name: Bind the reviewed application revision
+        shell: bash
+        run: |
+          [[ "$IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+
+      - name: Check out Core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: core
+          persist-credentials: false
+
+      - name: Check out Image
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VOLPAROSSA/volparossa-image
+          ref: ${{ inputs.image_revision }}
+          path: image
+          persist-credentials: false
+
+      - name: Verify ciphertext handoff and fixture isolation
+        working-directory: core
+        run: |
+          python3 -B tests/integration/test-image-topology-input.py
+          python3 -B tests/integration/test-image-peer-vm-wiring.py
+
+      - name: Prepare the pinned Debian VM and native transport
+        run: bash core/tests/integration/image-topology-host.sh prepare
+
+      - name: Recover the encrypted backup and open its album in a fresh Immich instance
+        run: |
+          python3 -B "$IMAGE_CHECKOUT/tests/immich/recover.py" \
+            --core-checkout "$CORE_CHECKOUT" --core-revision "$GITHUB_SHA" --image-revision "$IMAGE_REVISION"
+
+      - name: Collect the last confirmed guest phase after a failure
+        if: failure()
+        run: |
+          report="$RUNNER_TEMP/image-topology-result/image-snapshot-smoke.json"
+          if [[ -f "$report" && ! -L "$report" && $(stat -c %s "$report") -le 1048576 ]]; then
+            jq -e --arg core "$GITHUB_SHA" '
+              select(.source_revision == $core and .report_kind == "volparossa-image-snapshot") |
+              {core_revision:$core,
+               phase:(.phase | if IN("private-storage-fragments-prepare","private-storage-fragments-upload",
+                 "private-storage-fragments-withdrawal","private-storage-fragments-restore",
+                 "private-storage-fragments-finish","image-snapshot-complete") then . else "unconfirmed" end),
+               blocker:(.observed_blocker | if IN("FRAGMENTS_OWNER_PREPARE_FAILED","FRAGMENTS_UPLOAD_FAILED",
+                 "FRAGMENTS_SURVIVOR_RESTORE_FAILED","FRAGMENTS_FINISH_FAILED","IMAGE_SNAPSHOT_EVIDENCE_INVALID",
+                 "FRAGMENTS_PROTECTED_FLOW_INCOMPLETE","FRAGMENTS_PRIVATE_CLEANUP_FAILED") then . else null end),
+               guest_cleanup_confirmed:(.cleanup.complete == true),
+               host_state_confirmed:(.host_state.unchanged == true)}' "$report" >"$RUNNER_TEMP/image-topology-phase.json"
+          fi
+
+      - name: Retain the application and transport receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: immich-peer-recovery-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/immich-restore-result.json
+            ${{ runner.temp }}/image-topology-receipt.json
+            ${{ runner.temp }}/image-topology-phase.json
+          if-no-files-found: warn
+          retention-days: 14
