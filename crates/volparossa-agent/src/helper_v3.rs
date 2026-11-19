@@ -1749,6 +1749,18 @@ fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
         "MPTCP_CONNECT_POLL_TIMED_OUT" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpConnectPollTimedOut
         }
+        "MPTCP_CONNECT_SOCKET_REFUSED" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketRefused
+        }
+        "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketNetworkUnreachable
+        }
+        "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketHostUnreachable
+        }
+        "MPTCP_CONNECT_SOCKET_TIMED_OUT" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketTimedOut
+        }
         "BACKEND_RESULT_AMBIGUOUS" => AcquireDiagnostic::BackendResultAmbiguous,
         "STALE_BACKEND_RESULT" => AcquireDiagnostic::StaleBackendResult,
         "MPTCP_FLOW_IDENTITY_UNAVAILABLE" => AcquireDiagnostic::FlowIdentityUnavailable,
@@ -3927,10 +3939,15 @@ mod tests {
             HelperResult::InvalidRequest,
             HelperResult::Expired,
         ] {
-            assert_eq!(
-                acquire_diagnostic("MPTCP_CONNECT_POLL_TIMED_OUT", result),
-                AcquireDiagnostic::Unknown
-            );
+            for code in [
+                "MPTCP_CONNECT_POLL_TIMED_OUT",
+                "MPTCP_CONNECT_SOCKET_REFUSED",
+                "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE",
+                "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE",
+                "MPTCP_CONNECT_SOCKET_TIMED_OUT",
+            ] {
+                assert_eq!(acquire_diagnostic(code, result), AcquireDiagnostic::Unknown);
+            }
         }
     }
 
@@ -3956,6 +3973,26 @@ mod tests {
             (
                 |response| response.diagnostic_code = "MPTCP_CONNECT_POLL_TIMED_OUT".into(),
                 AcquireDiagnostic::MptcpConnectPollTimedOut,
+            ),
+            (
+                |response| response.diagnostic_code = "MPTCP_CONNECT_SOCKET_REFUSED".into(),
+                AcquireDiagnostic::MptcpConnectSocketRefused,
+            ),
+            (
+                |response| {
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE".into();
+                },
+                AcquireDiagnostic::MptcpConnectSocketNetworkUnreachable,
+            ),
+            (
+                |response| {
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE".into();
+                },
+                AcquireDiagnostic::MptcpConnectSocketHostUnreachable,
+            ),
+            (
+                |response| response.diagnostic_code = "MPTCP_CONNECT_SOCKET_TIMED_OUT".into(),
+                AcquireDiagnostic::MptcpConnectSocketTimedOut,
             ),
         ] {
             let (error, diagnostic) =
