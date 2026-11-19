@@ -1468,7 +1468,10 @@ CONSUMER_CONTROL_NAMES = {"storage-consumer-control-underlay.json"} | {
     for phase in ("publish", "exercise", "finish")
     for suffix in ("before", "after", "relay0", "relay1", "relay2")
 }
-MAINTENANCE_NAMES |= CONSUMER_CONTROL_NAMES
+MAINTENANCE_NAMES |= CONSUMER_CONTROL_NAMES | {
+    f"private-storage-core-{phase}-control-{moment}.json"
+    for phase in ("restore", "finish") for moment in ("before", "after")
+}
 MAINTENANCE_PRIORITY_NAMES = {
     name for name in MAINTENANCE_NAMES if name not in CONSUMER_CONTROL_NAMES and (
     name.startswith("storage-consumer-") or name.startswith("private-storage-maintenance-")
@@ -1507,10 +1510,10 @@ CLOUD_UPLOAD_OUTCOME_NAMES = {
     "private-storage-fragments-cloud_upload_deleted_usage.json",
     "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase",
 }
-# 172 exact old/new receipt names + five recovery names = 177 slots.
-# Main adds two strictly validated failure-boundary/provider-usage sidecars.
-# The old scenario stays at 128; byte-identical copies share only one slot.
-CLOUD_UPLOAD_FILE_COUNT_LIMIT = 177
+# Reserve one slot for each allowed original and the five recovery records.
+CLOUD_UPLOAD_FILE_COUNT_LIMIT = len(CLOUD_UPLOAD_NAMES | {
+    "guest-phase.txt", "current-phase", "guest-exit-status", "host-state-before.json", "host-state-after.json",
+})
 
 SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json", "signal-backup-fragments-route-diagnostic.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",

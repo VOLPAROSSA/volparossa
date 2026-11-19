@@ -25,6 +25,7 @@ CHUNK = WIRE_CHUNK_BYTES
 FIXTURE = bytes(range(256)) * (3 * CHUNK // 256) + b"VOLPAROSSA synthetic opaque fragment transport fixture".ljust(73, b".")
 BYTES, SHA = len(FIXTURE), hashlib.sha256(FIXTURE).hexdigest()
 LENGTHS = (CHUNK, CHUNK, CHUNK, 73)
+SURVIVOR_READ_BYTES = (2 * (2 * CHUNK + LENGTHS[-1]), 2 * CHUNK)
 PROVIDER_BYTES, PROVIDER_LEASES = (2 * CHUNK + 73, 2 * CHUNK + 73, 2 * CHUNK), (3, 3, 2)
 NODES = ("relay4", "relay5", "relay3")
 PHASES = dict(upload=56, restore=16, finish=16)
@@ -614,7 +615,7 @@ def validate_network(phase, peers, layout, name, *, maintenance_contexts=False, 
         else:
             require(app[node]["response_payload_bytes"] == 0, "stopped or untouched provider returned payload")
     if name == "restore":
-        for node, minimum in ((NODES[1], 2 * (2 * CHUNK + LENGTHS[-1])), (NODES[2], 2 * CHUNK)):
+        for node, minimum in zip(NODES[1:], SURVIVOR_READ_BYTES, strict=True):
             require(app[node]["response_payload_bytes"] >= minimum, "actual survivor fragment payload absent")
     control = phase["control_privacy"]
     control_node = next(node for node in ROLES[1:4] if peers[node] == layout["control_relay_peer_id"])

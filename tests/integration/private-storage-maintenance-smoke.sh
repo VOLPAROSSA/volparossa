@@ -349,9 +349,16 @@ private_storage_maintenance_finalize_report() {
         7) maintenance_diagnostic_command=route-diagnostic; maintenance_schema=6; maintenance_report_command=report-consumer-v7 ;;
         8) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=7; maintenance_report_command=report-consumer-v8 ;;
         9) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=8; maintenance_report_command=report-consumer-v9 ;;
-        10) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=9; maintenance_report_command=report-consumer-v10 ;;
+        10) maintenance_diagnostic_command=route-diagnostic-v3; maintenance_schema=10; maintenance_report_command=report-core-matrix ;;
         *) return 1 ;;
     esac
+    if [ "${storage_consumer_profile_version:-7}" = 10 ] && [ "$maintenance_status" -ne 0 ]; then
+        # The guest trap has joined the observers even when the owner failed before phase finish.
+        case ${PHASE:-} in
+            private-storage-fragments-restore|private-storage-fragments-finish)
+                storage_core_control_receipt "${PHASE##*-}" || true ;;
+        esac
+    fi
     # Already published at the original supervisor gate, before TERM/cleanup.
     # Reject malformed private metadata rather than exporting it as evidence.
     if [ -e "$WORK/private-storage-maintenance-supervisor.json" ] \

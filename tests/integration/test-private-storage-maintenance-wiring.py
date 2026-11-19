@@ -308,7 +308,7 @@ private_storage_fragments_run() {
         start = workflow.index('      - name: Require actual owner-private storage maintenance')
         gate = workflow[start:workflow.index('\n      - name:', start + 1)]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
-        self.assertIn('private-storage-maintenance-smoke.py report-consumer-v10 "$report" "$GITHUB_SHA"', gate)
+        self.assertIn('private-storage-maintenance-smoke.py report-core-matrix "$report" "$GITHUB_SHA"', gate)
         self.assertIn('host-state-before.json', gate)
         self.assertIn('host-state-after.json', gate)
 
