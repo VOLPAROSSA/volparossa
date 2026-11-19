@@ -31,6 +31,7 @@ LOCK_SHA256 = "bc06486a375791ed118b10f10c33428b0fefa37ce22e6c2cf56c2bf37dd11040"
 CANDIDATE = "build/signal-backup-candidate"
 NODE = "build/node-v24.19.0-linux-x64-with-npm/bin/node"
 FRAGMENT_TRIAL = False
+MAILBOX_TRIAL = False
 FILES = {
     "LICENSE": (35149, "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"),
     "upstream-lock.json": (2100, "1993b0dafb24a107d3702de4d5d144d765aba65123e9f680900fbf6f9200c385"),
@@ -74,7 +75,7 @@ def digest(path):
 def check_pins():
     require(re.fullmatch(r"[0-9a-f]{40}", CHAT_REVISION or "")
             and CHAT_REVISION != "0" * 40, "reviewed chat revision is required")
-    require(len(FILES) == (17 if FRAGMENT_TRIAL else 14)
+    require(len(FILES) == (26 if MAILBOX_TRIAL else 17 if FRAGMENT_TRIAL else 14)
             and sum(size for size, _ in FILES.values()) <= 1024 * 1024)
     for name, (size, sha) in FILES.items():
         path = Path(name)
@@ -82,10 +83,10 @@ def check_pins():
                 and 0 < size <= 131072 and re.fullmatch(r"[0-9a-f]{64}", sha))
 
 
-def select_fragment_trial():
+def select_fragment_trial(mailbox=False):
     """Explicit separate source cohort; never change the historical replica pin."""
-    global CHAT_REVISION, FILES, FRAGMENT_TRIAL
-    path = Path(__file__).with_name("signal-backup-fragments-pins.json")
+    global CHAT_REVISION, FILES, FRAGMENT_TRIAL, MAILBOX_TRIAL
+    path = Path(__file__).with_name("signal-mailbox-pins.json" if mailbox else "signal-backup-fragments-pins.json")
     value = read_json(path)
     require(set(value) == {"version", "chat_revision", "signal_revision", "files"}
             and value["version"] == 1 and value["signal_revision"] == SIGNAL_REVISION,
@@ -95,13 +96,26 @@ def select_fragment_trial():
         "overlay/ts/services/backups/volparossa/storage.node.ts",
         "overlay/ts/test-mock/backups/volparossa-withdrawal.node.ts",
     }
+    if mailbox:
+        expected.update({
+            "overlay/ts/services/mailbox/content.preload.ts",
+            "overlay/ts/services/mailbox/files.node.ts",
+            "overlay/ts/services/mailbox/packet.node.ts",
+            "overlay/ts/services/mailbox/session.preload.ts",
+            "patches/signal-mailbox.patch",
+            "scripts/run_native_mailbox.py",
+            "scripts/run_native_receipts.py",
+            "scripts/signal_mailbox.py",
+            "tests/native/paired-mailbox_test.node.ts",
+        })
     require(set(value["files"]) == expected, "fragment source inventory differs")
     files = {}
     for name, entry in value["files"].items():
         require(set(entry) == {"bytes", "sha256"} and type(entry["bytes"]) is int,
                 "fragment source entry differs")
         files[name] = (entry["bytes"], entry["sha256"])
-    CHAT_REVISION, FILES, FRAGMENT_TRIAL = value["chat_revision"], files, True
+    CHAT_REVISION, FILES = value["chat_revision"], files
+    FRAGMENT_TRIAL, MAILBOX_TRIAL = not mailbox, mailbox
     check_pins()
 
 
@@ -296,6 +310,15 @@ def provision(root):
     report["node_sha256"] = digest(root / NODE)
     require((candidate / "node_modules/electron/path.txt").read_bytes() == b"electron"
             and not (candidate / "preload.bundle.cache").exists())
+    if MAILBOX_TRIAL:
+        # Allow the independent worker UID to read only the pinned test sources and public receipt.
+        for name in ("scripts/run_native_mailbox.py", "scripts/run_native_receipts.py",
+                     "scripts/signal_mailbox.py", "tests/native/paired-mailbox_test.node.ts"):
+            (root / name).chmod(0o444)
+            for parent in (root / name).parents:
+                if parent == root:
+                    break
+                parent.chmod(0o755)
     expose_tree(candidate)
     expose_tree((root / NODE).parent.parent)
     (root / "build").chmod(0o755)
@@ -310,12 +333,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("provision",))
     parser.add_argument("root", type=Path)
-    parser.add_argument("--trial", choices=("replicas", "fragments"), default="replicas")
+    parser.add_argument("--trial", choices=("replicas", "fragments", "mailbox"), default="replicas")
     parser.add_argument("--download", action="store_true", required=True,
                         help="explicit guest-only source/dependency/native downloads and offline compilation")
     args = parser.parse_args()
-    if args.trial == "fragments":
-        select_fragment_trial()
+    if args.trial in ("fragments", "mailbox"):
+        select_fragment_trial(mailbox=args.trial == "mailbox")
     print(json.dumps(dict(plan="pinned-signal-runtime-only", root=str(args.root),
                          steps=[step[0] for step in STEPS], native_app_started=False)), flush=True)
     provision(args.root)
