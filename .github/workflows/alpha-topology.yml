@@ -363,11 +363,14 @@ jobs:
           python3 -B tests/integration/test-reciprocity-private-dns-capture.py
           python3 -B tests/packaging/test-private-dns-package-proof.py
 
+      - name: Prepare the signed Ubuntu archive
+        id: ubuntu_archive
+        uses: VOLPAROSSA/.github/actions/ubuntu-archive@0b26926c9893b01713aded0d331efb1333ddf0c0
+
       - name: Install official Ubuntu VM tools
         run: |
           set -euo pipefail
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install \
             --yes --no-install-recommends \
             build-essential cmake git libevent-dev pkg-config \
             qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
@@ -387,7 +390,7 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e /opt/volparossa-native-browser-build && test ! -L /opt/volparossa-native-browser-build
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             apparmor bubblewrap zstd make perl unzip pkg-config libarchive-tools
           # The guarded cleanup can also remove an empty directory if acquisition
           # stops before the producer writes its ownership marker.
@@ -427,7 +430,7 @@ jobs:
           test ! -e /opt/volparossa-native-coding-build
           test ! -L /opt/volparossa-native-coding-build
           df -h /opt
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             python3 apparmor bubblewrap patch clang libssl-dev libclang-dev protobuf-compiler binutils
           sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /opt/volparossa-native-coding-build
           bash tests/integration/native-coding-apparmor.sh "$GITHUB_SHA"
@@ -458,7 +461,7 @@ jobs:
           VMP_RUN_TESTS: no
         run: |
           set -euo pipefail
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4
           protoc --version
           cargo fetch --locked
