@@ -27,6 +27,8 @@ import time
 import urllib.error
 import urllib.request
 
+import transaction_abci_bank as bank
+
 COMET_COMMIT = "0880b4d378f347ab16e54ec677ff50d803f37d62"
 GO_VERSION = "go1.27.1"
 GO_SHA256 = "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
@@ -430,6 +432,7 @@ class Trial:
     def __init__(self, args):
         self.args = args
         self.work = Path(args.work)
+        self.bank_owner = None
         self.processes = {}
         self.phase = "setup"
         self.end = time.monotonic() + TRIAL_SECONDS
@@ -517,6 +520,9 @@ class Trial:
                     os.chmod(output.name, 0o600)
                     output.write(secret[:32])
         self.payer, self.recipient = [account["public_key"] for account in accounts]
+        if self.args.bank_authorizer_sha256:
+            # The original account generator also wrote its signing keys to disk.
+            shutil.rmtree(account_home)
         genesis = json.loads((self.work / "node0/config/genesis.json").read_text())
         seconds = int(time.time())
         chain = "volparossa-test-" + secrets.token_hex(12)
@@ -602,6 +608,12 @@ class Trial:
         return {"height": height, "block_hash": hashes[0], "header_app_hash": apps[0]}
 
     def sign(self, action, operation, **options):
+        if self.bank_owner is not None:
+            terms = ((options["recipient"], str(options["units"])) if action == "reserve"
+                     else (options["reservation"],))
+            now = int(time.time())
+            return self.bank_owner.prepare(action, operation, now - 5, now + 240, terms,
+                                           (self.work / "payer.seed").read_bytes())
         command = [self.args.adapter, "sign-" + action, "--ledger", self.ledger,
                    "--secret-key", str(self.work / "payer.seed"), "--operation", operation,
                    "--valid-from", str(int(time.time()) - 5), "--expires", str(int(time.time()) + 240)]
@@ -696,6 +708,9 @@ class Trial:
             self.launch(n, "comet")
         self.checkpoint("startup", **self.wait(lambda: self.converged(2)))
         self.ledger = info(0)["ledger_id"]
+        if self.args.bank_authorizer_sha256:
+            self.bank_owner = bank.Owner(self.work, self.ledger, checked, require)
+            self.report["checkpoints"]["startup"]["bank_genesis_ledger"] = self.ledger
         self.phase = "signed_conflict"
         operations = [secrets.token_hex(32), secrets.token_hex(32)]
         commands = [self.sign("reserve", op, recipient=self.recipient, units=70) for op in operations]
@@ -726,6 +741,10 @@ class Trial:
         self.wait(lambda: self.same_receipts(original_receipts))
         self.checkpoint("commit", debited_units=70, credited_units=70, conserved_units=100,
                         **self.wait(lambda: self.converged(int(committed["height"]) + 1)))
+        if self.bank_owner is not None:
+            (self.work / "payer.seed").unlink()
+            self.report["checkpoints"]["commit"]["bank_command_sha256"] = [
+                receipt["command_sha256"] for receipt in original_receipts]
         self.phase = "partition_3_1"
         self.cut([0, 1, 2], [3])
         # Allow at most an already signed in-flight block to drain; then observe exact stability.
@@ -772,6 +791,11 @@ class Trial:
         # A cache rejection or old tx-index entry is not execution proof. Both
         # original byte strings must occur in actual new committed blocks.
         retry_commands = [commands[winner], commit]
+        if self.bank_owner is not None:
+            require(not (self.work / "payer.seed").exists() and not (self.work / "account-keygen").exists(),
+                    "bank_authorization_key_present")
+            retry_commands = [self.bank_owner.replay(op, original) for op, original in
+                              zip((operations[winner], commit_operation), retry_commands, strict=True)]
         retry_start = max(int(rpc(n, "status")["sync_info"]["latest_block_height"]) for n in range(4))
         for command in retry_commands:
             self.broadcast(3, command)
@@ -785,6 +809,12 @@ class Trial:
                         retry_result_codes=[0, 0], unchanged_balances=True, unchanged_receipts=True,
                         original_receipt_sequences=[receipt["sequence"] for receipt in original_receipts],
                         second_abci_execution_proven=True, **converged)
+        if self.bank_owner is not None:
+            reopened = [hashlib.sha256(raw).hexdigest() for raw in retry_commands]
+            self.report["checkpoints"]["crash_replay"]["bank_command_sha256"] = reopened
+            self.report["bank_authorizer"] = dict(source_revision=bank.source_revision(),
+                authorizer_sha256=self.args.bank_authorizer_sha256, genesis_ledger=self.ledger, seed_removed=True,
+                reopened_without_seed=True, reserve_sha256=reopened[0], commit_sha256=reopened[1])
         self.report["acceptance"] = True
 
     def finish(self):
@@ -846,6 +876,13 @@ def execute(args):
             os.chmod(destination, 0o755)
             setattr(args, attribute, str(destination))
         verify_build(build, args.expected_commit, Path(args.comet), Path(args.adapter))
+        if args.bank_authorizer_sha256:
+            source = Path("/home/vpci/bank-ordered-authorizer")
+            destination = work / "bin/ordered_authorizer"
+            try:
+                bank.stage_binary(source, destination, args.bank_authorizer_sha256, pwd.getpwnam("vpci").pw_uid)
+            except ValueError:
+                raise TrialFailure("bank_authorizer_digest") from None
         existing_names = {line.split()[0] for line in checked(["ip", "netns", "list"]).decode().splitlines()}
         require(not existing_names.intersection(namespace_names(prefix)), "namespace_collision")
         for command in network_plan(prefix):
@@ -858,6 +895,8 @@ def execute(args):
                    str(Path(__file__).resolve()), "--inside", "--namespace", prefix,
                    "--work", str(work), "--output", str(output),
                    "--comet", args.comet, "--adapter", args.adapter]
+        if args.bank_authorizer_sha256:
+            command.extend(["--bank-authorizer-sha256", args.bank_authorizer_sha256])
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, start_new_session=True)
         process.wait(timeout=TRIAL_SECONDS + 30)
@@ -953,6 +992,7 @@ def parse_args():
     parser.add_argument("--expected-commit")
     parser.add_argument("--comet")
     parser.add_argument("--adapter")
+    parser.add_argument("--bank-authorizer-sha256")
     parser.add_argument("--output")
     parser.add_argument("--build-receipt")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)

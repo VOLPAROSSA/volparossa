@@ -368,15 +368,15 @@ jq -e '[.packages[] | select(.name == "serde_yaml" or .name == "unsafe-libyaml")
     "$root_metadata" >/dev/null || fail 'the root graph still contains the unmaintained YAML stack'
 pass 'root configuration uses only the pinned maintained YAML Organization packages'
 
-check_single_registry_package "$root_metadata" zbus 6.1.0
-check_single_registry_package "$root_metadata" zbus_macros 6.1.0
-check_single_registry_package "$root_metadata" zbus_utils 6.0.0
+check_single_registry_package "$root_metadata" zbus 6.3.0
+check_single_registry_package "$root_metadata" zbus_macros 6.3.0
+check_single_registry_package "$root_metadata" zbus_utils 6.1.0
 check_single_registry_package "$root_metadata" zcheapstr 1.0.0
 check_single_registry_package "$root_metadata" zruntime 0.2.0
 jq -e '
     ([.packages[] | select(.name == "zbus_names" or .name == "zvariant" or
         .name == "zvariant_derive" or .name == "zvariant_utils")] | length == 0) and
-    ([.resolve.nodes[] | select(.id | contains("zbus@6.1.0")) | .features] ==
+    ([.resolve.nodes[] | select(.id | contains("zbus@6.3.0")) | .features] ==
         [["comms", "proxy", "tokio"]]) and
     ([.resolve.nodes[] | select(.id | contains("zruntime@0.2.0")) | .features] ==
         [["broadcast", "event", "lock", "unblock"]])

@@ -256,6 +256,19 @@ routes, DNS or firewall. Acceptance requires live packet-drop observations,
 rejoined state, original receipts, byte-identical retries in newly committed
 blocks and complete owned-resource cleanup. Only bounded receipts are exported.
 
+The `transaction-abci-bank` profile uses the same network, accounts and
+partition checks. It builds the reviewed Bank `ordered_authorizer` example with
+Rust 1.98.1, pins the resulting executable by SHA-256 and runs each owner operation
+in a separate unprivileged process with its own network namespace. The owner
+initializes a local store from the public genesis and checks its ledger ID
+against all four nodes. Bank prepares the competing signed reserves and the
+winning transfer’s commit. After the payer seed is removed and validator 3
+restarts, Bank reopens both retained intents and submits the exact original
+bytes through the fixture. The four validator receipts, block inclusion and
+conserved TEST balances establish the observed outcome. The owner’s local
+store provides the signing context. The distributed state is read from the
+validators. [Bank source](https://github.com/VOLPAROSSA/volparossa-bank)
+
 Earlier four-validator trials reached different functional boundaries but failed
 partition or parent-state gates. Their original failed verdicts and diagnostic
 sequence remain in the [service evidence archive](../archive/service-notes-20261026.txt).
