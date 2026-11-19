@@ -30,6 +30,10 @@ def block(start, end):
     return start + SOURCE.split(start, 1)[1].split(end, 1)[0]
 
 
+def if_block(start):
+    return block(start, '\nfi\n') + '\nfi\n'
+
+
 def run(script, env):
     return subprocess.run(['sh', '-eu', '-c', script], env=dict(os.environ, LC_ALL='C', **env),
                           capture_output=True, timeout=5)
@@ -55,8 +59,7 @@ class ImagePeerVmHandoff(unittest.TestCase):
         return env
 
     def test_separate_private_directories_are_required(self):
-        admission = block('if [ -n "$image_handoff$image_return$image_revision" ]; then\n',
-                          'if [ -n "$studio_handoff$studio_evidence_sha256" ]; then')
+        admission = if_block('if [ -n "$image_handoff$image_return$image_revision" ]; then\n')
         for mutation in ('valid', 'alias', 'nested', 'symlink', 'nonprivate', 'not_empty', 'wrong_revision', 'wrong_scenario'):
             with self.subTest(mutation=mutation):
                 env = self.fixtures()
@@ -79,7 +82,7 @@ class ImagePeerVmHandoff(unittest.TestCase):
 
     def test_verified_guest_transfer_precedes_removal_of_exact_host_sources(self):
         start = 'if [ -n "$image_handoff" ]; then\n    ssh_base mkdir'
-        transfer = block(start, 'if [ -n "${studio_handoff:-}" ]; then')
+        transfer = if_block(start)
         script = '\n'.join([function('image_input_identity'), function('release_image_source'), '''
 image_original_identity=$(image_input_identity "$image_handoff")
 image_stage_identity=$(image_input_identity "$image_stage")
@@ -133,9 +136,7 @@ ssh_base() {
 
     def test_only_exact_successful_return_published_outside_diagnostics(self):
         start = 'if [ -n "${image_handoff:-}" ] && [ "$GUEST_STATUS" -eq 0 ]; then\n'
-        # The unindented terminator closes this Image operation; later application
-        # operations can follow it independently.
-        retrieve = block(start, '\nfi\n') + '\nfi\n'
+        retrieve = if_block(start)
         publish = start + SOURCE.rsplit(start, 1)[1].split('FINISHED=yes', 1)[0]
         self.assertLess(SOURCE.rindex('stop_qemu_child normal'), SOURCE.rindex(start))
         self.assertLess(SOURCE.index('release_image_source "$image_handoff"'), SOURCE.index('GUEST_STATUS=$?'))
