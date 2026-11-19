@@ -842,7 +842,6 @@ dependencies = [
  "digest 0.10.7",
  "fiat-crypto 0.2.9",
  "rustc_version",
- "serde",
  "subtle",
  "zeroize",
 ]
@@ -858,6 +857,7 @@ dependencies = [
  "curve25519-dalek-derive",
  "fiat-crypto 0.3.0",
  "rustc_version",
+ "serde",
  "subtle",
  "zeroize",
 ]
@@ -5136,7 +5136,7 @@ dependencies = [
  "volparossa-routing",
  "volparossa-test-support",
  "volparossa-wireguard",
- "x25519-dalek 2.0.1",
+ "x25519-dalek 3.0.0",
  "zbus",
  "zeroize",
 ]
@@ -5854,7 +5854,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
 dependencies = [
  "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
  "rand_core 0.10.1",
+ "serde",
  "zeroize",
 ]
 
