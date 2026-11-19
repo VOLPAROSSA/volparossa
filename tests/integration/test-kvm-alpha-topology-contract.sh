@@ -530,14 +530,28 @@ guest = (root / "kvm-alpha-topology.sh").read_text()
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 workflow = (root / "../../.github/workflows/alpha-topology.yml").resolve().read_text()
 assert guest.count("agent_autonomous_aggregation=no") == 2
-timeout_line = next(line.strip() for line in workflow.splitlines() if line.strip().startswith('timeout-minutes:'))
+scenario_selector = next(line.strip() for line in workflow.splitlines()
+    if line.strip().startswith("VOLPAROSSA_ALPHA_SCENARIO:"))
+assert scenario_selector == (
+    "VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || "
+    "inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || "
+    "inputs.scenario == 'content-provider-map' && 'content-provider' || "
+    "inputs.scenario == 'browser-native-source' && 'browser-network' || inputs.scenario || 'datapath' }}")
+topology_job = workflow.split('\n  alpha-topology:\n', 1)[1]
+# Capacity measurement and Immich each own a separate job on the public runner.
+dispatch = "(github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity')"
+assert dispatch in topology_job.split("runs-on:", 1)[0]
+for choice in ("image-immich", "browser-native-capacity"):
+    assert f"if: github.event_name == 'workflow_dispatch' && inputs.scenario == '{choice}'" in workflow
+timeout_line = next(line.strip() for line in topology_job.splitlines() if line.strip().startswith('timeout-minutes:'))
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
 # Both Signal scenarios retain their 150-minute window alongside maintenance.
 # Compare the whole closed expression: the former single-clause regex did not
 # understand main's parenthesized Signal alternatives and dropped their bound.
 assert timeout_line == (
-    "timeout-minutes: ${{ inputs.scenario == 'agent-native-coding' && 240 || "
+    "timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || "
+    "inputs.scenario == 'agent-native-coding' && 240 || "
     "inputs.scenario == 'agent-autonomous-aggregation' && 180 || "
     "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
     "|| inputs.scenario == 'private-storage-maintenance') "
