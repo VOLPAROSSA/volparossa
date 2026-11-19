@@ -72,6 +72,19 @@ and [guest result](../development/evidence/mixed-link-44517187229/mixed-link-smo
 The earlier gain has therefore not repeated on this source. The Exit's original 10–20 second
 scheduler samples cover only part of the connection and do not establish the cause.
 
+The [instrumented trial at `81ef1035`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44527488065)
+measured 6.519 Mbps on WAN and 9.367 Mbps on LAN+WAN, a 1.43698x gain. Each real
+32-MiB HTTP/3 response matched its destination hash and completed endpoint drain. During
+the aggregate response, both capped links carried incoming WireGuard data in all four
+measured quarters. The client observed 27,184,736 bytes from the LAN relay and
+12,933,872 bytes from the WAN relay after release. All eight privacy captures passed,
+the host snapshots matched and cleanup left zero owned objects. The
+[guest report](../development/evidence/mixed-link-44527488065/mixed-link-smoke.json) and
+[response observations](../development/evidence/mixed-link-44527488065/mixed-link-response-windows.json)
+come from artifact 14534115481 (SHA-256
+`ce7be56a0be6f9afd1ec2a8f7575e103744ffbc417c88b50788fbabe9531a9fb`).
+The two November trials show that the measured gain varies under the same two link caps.
+
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
 public-IP fallback is used.
