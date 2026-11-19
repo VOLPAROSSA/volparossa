@@ -72,8 +72,11 @@ def inventory(root):
     return result
 
 
-def checked_pins():
-    pins = json.loads(PINS.read_text())
+def checked_pins(revision=None):
+    if revision is None:
+        pins = json.loads(PINS.read_text())
+    else:
+        pins = source_checks()["profile"](revision)
     require(pins["version"] == 1 and len(pins["revision"] or "") == 40
             and set(pins["revision"]) <= set("0123456789abcdef")
             and pins["repository"] == "https://github.com/VOLPAROSSA/volparossa-browser")
@@ -97,9 +100,9 @@ def export(browser_checkout, native_build, output, *, source_built=False):
     core = HERE.parents[1]
     require(output.is_relative_to(core / "build") and output != core / "build"
             and not output.exists() and build.is_relative_to(browser / "build"))
-    pins = checked_pins()
     # Local identity check only: no fetch, credentials, hooks or remote mutation.
     revision = subprocess.check_output(["git", "-C", str(browser), "rev-parse", "HEAD"], text=True).strip()
+    pins = checked_pins(revision) if source_built else checked_pins()
     require(revision == pins["revision"])
     for name, item in pins["files"].items():
         require(file_record(browser / name)["sha256"] == item["sha256"]
@@ -111,7 +114,8 @@ def export(browser_checkout, native_build, output, *, source_built=False):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if source_built:
             build_record = source_checks()["validate_build"](browser, build)
-            require(build_record["controller_sha256"] == AFTER_CONTROLLER)
+            require(build_record["controller_sha256"] ==
+                    pins["files"]["integration/" + CONTROLLER]["sha256"])
             receipt = build_record["receipt_sha256"]
             overlay = None
         else:
@@ -136,7 +140,7 @@ def export(browser_checkout, native_build, output, *, source_built=False):
         # native compilation already included the corrected DOM-owner lookup.
         controller = output / "build/firefox-native/browser/modules" / CONTROLLER
         if source_built:
-            require(digest(controller) == AFTER_CONTROLLER)
+            require(digest(controller) == build_record["controller_sha256"])
         else:
             require(digest(controller) == BEFORE_CONTROLLER)
             controller.chmod(0o600)
@@ -155,10 +159,12 @@ def export(browser_checkout, native_build, output, *, source_built=False):
             copy_regular(build / "source" / name, output / "provenance/source-overlay" / name)
         copy_regular(build / "source/LICENSE", output / "provenance/FIREFOX-LICENSE")
         copy_regular(HERE / "browser-native-core.py", output / "scripts/browser_native_core.py")
+        if source_built and "tab_chrome_patch_sha256" in build_record:
+            copy_regular(HERE / "browser-native-ui.py", output / "scripts/browser-native-ui.py")
         module = "browser_native_shared.py" if source_built else "browser_native_runtime.py"
         copy_regular(Path(__file__).resolve(), output / "scripts" / module)
         if source_built:
-            for name in ("browser-native-source.py", "browser-native-pins.json"):
+            for name in ("browser-native-source.py", "browser-native-pins.json", "browser-native-tab-pins.json"):
                 copy_regular(HERE / name, output / "scripts" / name)
             copy_regular(HERE / "browser-native-source-runtime.py", output / "scripts/browser_native_runtime.py")
         record = dict(version=2 if source_built else 1,
@@ -195,25 +201,28 @@ def validate(root):
     if value["kind"] == "source-built-native-firefox-core-trial":
         record = value["source_build"]
         source_checks()["validate_record"](record)
+        pins = checked_pins(record["browser_revision"])
         require(value["version"] == 2 and value["native_rebuild"] is True and value["javascript_overlay"] is None
-                and value["browser_pins"] == checked_pins() and value["browser_revision"] == record["browser_revision"]
+                and value["browser_pins"] == pins and value["browser_revision"] == record["browser_revision"]
                 and value["original_build_receipt_sha256"] == record["receipt_sha256"]
                 and digest(receipt) == record["receipt_sha256"] and digest(overlay) == record["overlay_sha256"]
                 and baseline["outputs"] == record["outputs"])
-        for name, pin in checked_pins()["files"].items():
+        for name, pin in pins["files"].items():
             path = root / name
             require(path.stat().st_size == pin["bytes"] and digest(path) == pin["sha256"])
         plugin_sha = record["plugin_container_sha256"]
+        controller_sha = record["controller_sha256"]
     else:
         require(value["version"] == 1 and value["kind"] == "local-native-firefox-core-trial"
                 and value["native_rebuild"] is False and value["original_build_receipt_sha256"] == BASE_RECEIPT_SHA
                 and digest(receipt) == BASE_RECEIPT_SHA and value["javascript_overlay"]["original_sha256"] == BEFORE_CONTROLLER
                 and value["javascript_overlay"]["runtime_sha256"] == AFTER_CONTROLLER)
         plugin_sha = PLUGIN_SHA
+        controller_sha = AFTER_CONTROLLER
     for name, sha in baseline["outputs"].items():
         require(digest(root / "build/firefox-native" / Path(name).name) == sha)
     require(digest(root / "build/firefox-native/plugin-container") == plugin_sha
-            and digest(root / "build/firefox-native/browser/modules" / CONTROLLER) == AFTER_CONTROLLER)
+            and digest(root / "build/firefox-native/browser/modules" / CONTROLLER) == controller_sha)
     require(value["files"] == inventory(root))
     return value
 
