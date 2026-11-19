@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "kind": "native-firefox-core-ordinary-tabs",
+  "passed": false,
+  "core_revision": "669e73eab7ea3e19faeb8f6caef8ef726bdbbb2a",
+  "browser_revision": "c3311ebedcc02dc45ff9c9822cee62f091609f86",
+  "runtime_version": "157.0.1",
+  "runtime_source_stamp": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+  "native_bundle_sha256": "ca12c4b65dacc2114797ef43847e9ad4212cb3935dce166cddbc8a0adefc9551",
+  "original_build_receipt_sha256": "329ec0ca63cf09ade61c32189664b963480fcc097da1a3138c5ea38cd5dfea69",
+  "javascript_overlay": null,
+  "profile_ech_grease_disabled": false,
+  "native_ech_wire_proven": false,
+  "full_browser_killswitch": false,
+  "expected_bytes": 33554432,
+  "expected_sha256": "814f04845a4f2424d6fb8506145a97a7f5818ef1eeeb675256f72c116687febd",
+  "overlay_kernel_proof_external": true,
+  "namespace": "net:[4026532280]",
+  "socket_access": {
+    "path_type_verified": true,
+    "socket_parent_owner_group_match": true,
+    "peer_uid_matches_socket": true,
+    "unix_connect_verified": true,
+    "capability_sent": false
+  },
+  "control_namespace": {
+    "scope": "client-control-directory",
+    "original_socket_inode_preserved": true,
+    "original_parent_inode_preserved": true,
+    "read_only": true,
+    "grant_unmodified": true
+  },
+  "startup": {
+    "phase": "ready",
+    "marionette_connected": true,
+    "session_created": true,
+    "initial_window_count": 2,
+    "firefox_exit_before_cleanup": null,
+    "firefox_exit_after_cleanup": -15,
+    "stderr": {
+      "captured_bytes": 38,
+      "total_bytes": 38,
+      "truncated": false,
+      "captured_sha256": "d37095890e41abeb8aa1cae77e628c525ff001e33622b496422c431b4a24aaaf",
+      "eof": true,
+      "observed": {
+        "shared_library_load": false,
+        "xpcom_initialization": false,
+        "display_unavailable": false,
+        "profile_unavailable": false,
+        "permission_denied": false,
+        "read_only_filesystem": false,
+        "user_namespace_warning": false,
+        "marionette_listening": false,
+        "crash_indicator": false
+      },
+      "unclassified_output": true
+    },
+    "stderr_collection_failed": false
+  },
+  "result": {
+    "fatal": "native_network_core_driver_failed",
+    "phase": "request-b",
+    "code": "SCRIPT_FAILED",
+    "attachment": null,
+    "navigation": {
+      "stage": "stream-stop",
+      "nsresult": 2152398868,
+      "received_bytes": 0,
+      "chunk_bytes": 0,
+      "selected": true,
+      "stream_done": false,
+      "window_done": false,
+      "current_uri_matches": false,
+      "owner_overlay": true
+    }
+  },
+  "cleanup": {
+    "browser_exited": true,
+    "profile_removed": true
+  }
+}

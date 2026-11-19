@@ -671,6 +671,10 @@ impl DiscoveryService {
         &mut self,
         peer: PeerId,
     ) -> Result<kad::QueryId, DiscoveryError> {
+        #[cfg(feature = "internal-test-hooks")]
+        {
+            self.explicit_peer_actions.provider_lookups += 1;
+        }
         if !self.protocol_roles.relay() {
             return Err(DiscoveryError::ProtocolRole);
         }
@@ -814,6 +818,10 @@ impl DiscoveryService {
         request: ContentServiceRequest,
         addresses: Vec<libp2p::Multiaddr>,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
+        #[cfg(feature = "internal-test-hooks")]
+        {
+            self.explicit_peer_actions.provider_requests += 1;
+        }
         if !self.protocol_roles.relay() {
             return Err(DiscoveryError::ProtocolRole);
         }
@@ -850,6 +858,10 @@ impl DiscoveryService {
         control_relay: &PeerId,
         request: ContentDiscoveryRequest,
     ) -> Result<(request_response::OutboundRequestId, ConnectionId), DiscoveryError> {
+        #[cfg(feature = "internal-test-hooks")]
+        {
+            self.explicit_peer_actions.discovery_requests += 1;
+        }
         if !self.protocol_roles.client() {
             return Err(DiscoveryError::ProtocolRole);
         }

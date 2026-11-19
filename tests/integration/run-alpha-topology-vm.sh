@@ -19,14 +19,19 @@ host_tools_directory=
 output_directory=
 expected_commit=
 scenario=alpha
+studio_handoff=
+studio_evidence_sha256=
 image_handoff=
 image_return=
 image_revision=
 code_bundle=
 code_manifest_sha256=
+browser_native_bundle=
+browser_native_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
 cloud_owner_resume=no
+map_traffic=no
 bank_sha256=
 weather_client_bundle=
 weather_client_manifest_sha256=
@@ -71,7 +76,9 @@ usage() {
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
+        '       content-repair optionally accepts --studio-handoff DIRECTORY --studio-evidence-sha256 SHA256.' \
         '       image-snapshot optionally accepts --image-handoff DIRECTORY --image-return DIRECTORY --image-revision SHA.' \
+        '       content-provider accepts --map-traffic for signed Map cold, offline and expired delivery.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
         '       transaction-abci optionally accepts --bank-authorizer-sha256 SHA256 for the same-run source-built TEST authorizer.' \
@@ -80,6 +87,7 @@ usage() {
         '       weather-decoder-abi defaults to historical-v1 with --decoder-abi-inputs DIRECTORY.' \
         '       --decoder-mode source-input-inventory requires --decoder-source DIRECTORY (fixed reviewed Weather source only).' \
         '       Native-editor, cooperative-code, content-provider and weather-decoder-abi accept --host-tools-directory PATH (verified workspace-only QEMU).'
+    printf '%s\n' '       browser-network optionally accepts --host-tools-directory PATH --browser-native-bundle PATH'
 }
 
 print_plan() {
@@ -572,6 +580,10 @@ while [ "$#" -gt 0 ]; do
         --preview) mode=preview ;;
         --execute) mode=execute ;;
         --yes) approval=yes ;;
+        --studio-handoff|--studio-evidence-sha256)
+            [ "$#" -ge 2 ] || exit 64
+            case $1 in --studio-handoff) studio_handoff=$2 ;; *) studio_evidence_sha256=$2 ;; esac
+            shift ;;
         --image-handoff|--image-return|--image-revision)
             [ "$#" -ge 2 ] && [ -n "$2" ] || exit 64
             case $1 in
@@ -598,6 +610,7 @@ while [ "$#" -gt 0 ]; do
             [ "${#bank_sha256}" -eq 64 ] || exit 64
             shift ;;
         --cloud-owner-resume) cloud_owner_resume=yes ;;
+        --map-traffic) [ "$map_traffic" = no ] || exit 64; map_traffic=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -650,6 +663,18 @@ while [ "$#" -gt 0 ]; do
             image_path=$2
             shift
             ;;
+        --browser-native-manifest-sha256)
+            [ "$#" -ge 2 ] && [ -z "$browser_native_manifest_sha256" ] || { usage >&2; exit 64; }
+            browser_native_manifest_sha256=$2
+            case $browser_native_manifest_sha256 in *[!0-9a-f]*) exit 64 ;; esac
+            [ "${#browser_native_manifest_sha256}" -eq 64 ] || exit 64
+            shift
+            ;;
+        --browser-native-bundle)
+            [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            browser_native_bundle=$2
+            shift
+            ;;
         --mpquic)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             mpquic_path=$2
@@ -692,6 +717,10 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$map_traffic" = yes ]; then
+    [ "$mode" = execute ] && [ "$scenario" = content-provider ] \
+        && [ -z "$browser_filter_bundle$weather_client_bundle" ] || exit 64
+fi
 if [ "$cloud_owner_resume" = yes ] && [ "$scenario" != cloud-private-upload ]; then
     usage >&2
     exit 64
@@ -702,7 +731,7 @@ fi
 if [ "$mode" = preview ]; then
     [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source$image_handoff$image_return$image_revision" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_native_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source$studio_handoff$studio_evidence_sha256$image_handoff$image_return$image_revision" ]; then
         usage >&2
         exit 64
     fi
@@ -723,6 +752,12 @@ case $image_path:$output_directory in
     /*:/*) ;;
     *) exit 64 ;;
 esac
+if [ -n "$studio_handoff$studio_evidence_sha256" ]; then
+    [ "$scenario" = content-repair ] && [ "${studio_handoff##*/}" = studio-topology-handoff ] || exit 64
+    case $studio_handoff in /*) ;; *) exit 64 ;; esac
+    case $studio_evidence_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+    [ "${#studio_evidence_sha256}" -eq 64 ] || exit 64
+fi
 if [ -n "$image_handoff$image_return$image_revision" ]; then
     [ "$scenario" = image-snapshot ] && [ "$image_revision" = 0da0c35e9372a828553f376c3eb404a6081e0bb8 ] || exit 64
     for directory in "$image_handoff" "$image_return" "$output_directory"; do
@@ -797,11 +832,24 @@ case ${#expected_commit} in 40|64) ;; *) exit 64 ;; esac
 [ "$(id -u)" -ne 0 ] || { printf '%s\n' 'VM runner must remain unprivileged' >&2; exit 77; }
 
 if [ -n "$host_tools_directory" ]; then
-    case $scenario in agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal|content-provider|weather-decoder-abi) ;; *) exit 64 ;; esac
+    case $scenario in browser-network|agent-native-editor|agent-cooperative-code|agent-cooperative-code-proposal|content-provider|weather-decoder-abi) ;; *) exit 64 ;; esac
     case $host_tools_directory in /*) ;; *) exit 64 ;; esac
     python3 -B "$(dirname -- "$0")/browser-native-tools.py" --verify --output "$host_tools_directory"
     PATH=$host_tools_directory/bin:$PATH
     export PATH
+fi
+BROWSER_NATIVE_SHA256=none
+[ -z "$browser_native_manifest_sha256" ] || [ -n "$browser_native_bundle" ] || exit 64
+if [ -n "$browser_native_bundle" ]; then
+    [ "$scenario" = browser-network ] || exit 64
+    case $browser_native_bundle in /*) ;; *) exit 64 ;; esac
+    [ "$(readlink -f -- "$browser_native_bundle")" = "$browser_native_bundle" ] || exit 64
+    [ -f "$browser_native_bundle" ] && [ ! -L "$browser_native_bundle" ] || exit 64
+    [ "$(stat -Lc '%s' "$browser_native_bundle")" -le 1073741824 ] || exit 64
+    BROWSER_NATIVE_SHA256=$(sha256sum "$browser_native_bundle" | awk '{print $1}')
+    if [ -n "$browser_native_manifest_sha256" ]; then
+        BROWSER_NATIVE_SHA256=source:$BROWSER_NATIVE_SHA256:$browser_native_manifest_sha256
+    fi
 fi
 
 for command_name in awk cat chmod cloud-localds cmp cut dpkg-deb find git grep gzip install \
@@ -819,6 +867,9 @@ qemu-system-x86_64 -accel help | grep -Fx kvm >/dev/null \
 
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPOSITORY=$(CDPATH='' cd -- "$HERE/../.." && pwd -P)
+if [ -n "${studio_handoff:-}" ]; then
+    python3 -B "$HERE/studio-topology-input.py" "$studio_handoff" "$studio_evidence_sha256" "$expected_commit" >/dev/null
+fi
 if [ -n "$image_handoff" ]; then
     image_original_identity=$(image_input_identity "$image_handoff")
     image_handoff_sha256=$(python3 -B "$HERE/image-topology-input.py" verify "$image_handoff")
@@ -906,6 +957,13 @@ elif [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperati
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=cooperative-code-kvm
+elif [ "$scenario" = browser-network ] && [ -n "$browser_native_bundle" ]; then
+    # Local native trials may run on a host whose /tmp is RAM-backed. Keep the
+    # disposable VM disk beside, never inside, the SSD evidence directory:
+    # temporary SSH keys must not enter the evidence privacy scan or archive.
+    [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
+    RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
+    RUN_DIRECTORY_PREFIX=browser-native-kvm
 elif [ "$scenario" = weather-decoder-abi ]; then
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
@@ -916,13 +974,14 @@ elif [ "$scenario" = weather-decoder-abi ]; then
             printf '%s\n' 'Decoder ABI VM scratch requires non-memory-backed workspace storage' >&2
             exit 69 ;;
     esac
-elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${image_handoff:-}" ]; then
+elif [ "$scenario" = content-provider ] || [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ] || [ -n "${image_handoff:-}" ]; then
     # Every provider proof builds Rust in this 4 GiB guest. A growing qcow2
     # overlay on tmpfs otherwise competes directly with the guest's RAM.
     # Keep scratch beside validated workspace evidence, never in its export.
     [ "$(readlink -f -- "$output_directory")" = "$output_directory" ] || exit 64
     RUN_DIRECTORY_PARENT=$(dirname -- "$output_directory")
     RUN_DIRECTORY_PREFIX=content-provider-kvm
+    [ -z "${studio_handoff:-}" ] || RUN_DIRECTORY_PREFIX=studio-topology-kvm
     [ -z "${image_handoff:-}" ] || RUN_DIRECTORY_PREFIX=image-topology-kvm
     [ -z "$browser_filter_bundle" ] || RUN_DIRECTORY_PREFIX=browser-filter-kvm
     [ -z "${weather_client_bundle:-}" ] || RUN_DIRECTORY_PREFIX=weather-client-kvm
@@ -995,6 +1054,7 @@ cleanup() {
         fi
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
+        # Preserve startup failures too: there may not be a serial console yet.
         tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
             2>/dev/null || status=1
     fi
@@ -1002,10 +1062,6 @@ cleanup() {
         # Keep runner-owned provenance even when guest retrieval fails or a
         # guest archive happens to contain the same basename.
         install -m 0600 "$RUN_DIRECTORY/qemu-outer-uplink.json" "$output_directory/qemu-outer-uplink.json" \
-            2>/dev/null || status=1
-    fi
-    if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
-        tail -c 131072 "$RUN_DIRECTORY/qemu.stderr" >"$output_directory/qemu.stderr" \
             2>/dev/null || status=1
     fi
     if [ -z "$QEMU_PID" ]; then
@@ -1049,8 +1105,9 @@ cleanup() {
                   compiled:(if $mode == "source-build" then null else false end)}' \
                 >"$output_directory/inventory-vm-cleanup.json"); then status=1; fi
     fi
-    if [ "$scenario" = protected-quote ] || [ -n "${image_handoff:-}" ]; then
+    if [ "$scenario" = protected-quote ] || [ -n "${studio_handoff:-}" ] || [ -n "${image_handoff:-}" ]; then
         cleanup_report=protected-quote-vm-cleanup.json
+        [ -z "${studio_handoff:-}" ] || cleanup_report=studio-vm-cleanup.json
         [ -z "${image_handoff:-}" ] || cleanup_report=image-vm-cleanup.json
         quote_private_removed=false
         if [ ! -e "$RUN_DIRECTORY" ] && [ ! -L "$RUN_DIRECTORY" ]; then quote_private_removed=true; fi
@@ -1450,11 +1507,11 @@ CLOUD_UPLOAD_OUTCOME_NAMES = {
 # The old scenario stays at 128; byte-identical copies share only one slot.
 CLOUD_UPLOAD_FILE_COUNT_LIMIT = 177
 
-SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
+SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json", "signal-backup-fragments-route-diagnostic.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
     "guest-exit-status", "current-phase"} | {
     f"signal-backup-fragments-{name}.json" for name in (
-        "smoke", "evidence", "prepare", "native", "uploaded", "restore", "finish", "withdrawal",
+        "smoke", "evidence", "prepare", "native", "uploaded", "refusal", "restore", "finish", "withdrawal",
         "uploaded_usage", "restored_usage", "deleted_usage", "isolation", "layout", "guard")
 } | {name for phase in ("upload", "restore", "finish") for name in (
     f"private-storage-fragments-{phase}-live-selection.json",
@@ -2183,7 +2240,10 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+browser_native_sha256=none
 cloud_owner_resume=no
+browser_source_manifest=
+map_traffic=no
 bank_sha256=
 code_archive_sha256=none
 code_manifest_sha256=none
@@ -2192,11 +2252,21 @@ browser_filter_manifest_sha256=none
 weather_client_archive_sha256=none
 weather_client_manifest_sha256=none
 decoder_mode=historical-v1
-# Native and cooperative bundles share positions only in disjoint scenarios.
+# Native, browser and cooperative bundles share positions only in disjoint scenarios.
+studio_evidence_sha256=
 image_handoff_sha256=
 image_receipt_sha256=
 image_revision=
 case $scenario in
+    content-repair)
+        case $# in
+            5) ;;
+            6) studio_evidence_sha256=$6
+               case $studio_evidence_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
+               [ "${#studio_evidence_sha256}" -eq 64 ] || exit 64 ;;
+            *) exit 64 ;;
+        esac
+        ;;
     transaction-abci)
         if [ "$#" -eq 6 ]; then
             bank_sha256=$6
@@ -2235,6 +2305,20 @@ case $scenario in
         code_archive_sha256=${6:-none}
         code_manifest_sha256=${7:-none}
         ;;
+    browser-network)
+        [ "$#" -eq 6 ] || exit 64
+        browser_native_sha256=${6:-none}
+        case $browser_native_sha256 in
+            source:*)
+                hashes=${browser_native_sha256#source:}
+                browser_native_sha256=${hashes%%:*}
+                browser_source_manifest=${hashes#*:}
+                [ "$hashes" = "$browser_native_sha256:$browser_source_manifest" ] || exit 64
+                case $browser_native_sha256$browser_source_manifest in *[!0-9a-f]*) exit 64 ;; esac
+                [ "${#browser_native_sha256}" -eq 64 ] && [ "${#browser_source_manifest}" -eq 64 ] || exit 64
+                ;;
+        esac
+        ;;
     content-provider)
         if [ "$#" -eq 8 ]; then
             [ "$6" = weather-client ] || exit 64
@@ -2242,6 +2326,9 @@ case $scenario in
             weather_client_manifest_sha256=$8
             case $weather_client_archive_sha256:$weather_client_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
             [ "${#weather_client_archive_sha256}" -eq 64 ] && [ "${#weather_client_manifest_sha256}" -eq 64 ] || exit 64
+        elif [ "$#" -eq 6 ]; then
+            [ "$6" = map-traffic ] || exit 64
+            map_traffic=yes
         elif [ "$#" -eq 7 ]; then
             browser_filter_archive_sha256=$6
             browser_filter_manifest_sha256=$7
@@ -2515,7 +2602,7 @@ fi
 if [ "$scenario" = image-snapshot ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends gpg gpg-agent gpgconf tar
 fi
-if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ "$browser_filter_manifest_sha256" != none ] || [ "$weather_client_manifest_sha256" != none ]; then
+if [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooperative-browser-discovered ] || [ "$scenario" = browser-network ] || [ "$scenario" = cloud-private-file ] || [ "$scenario" = cloud-private-upload ] || [ -n "$studio_evidence_sha256" ] || [ "$browser_filter_manifest_sha256" != none ] || [ "$weather_client_manifest_sha256" != none ]; then
     # Exact pinned ESR is extracted separately, not installed; these are its
     # ordinary Debian dependencies plus the isolated browser/HTTPS fixture tools.
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
@@ -2607,10 +2694,21 @@ elif [ "$scenario" = cloud-private-upload ]; then
 elif [ "$scenario" = cloud-private-file ]; then
     guest_phase cloud-runtime-provision
     sudo -n python3 -B tests/integration/cloud-private-file-provision.py provision --download
-elif [ "$scenario" = browser-network ]; then
+elif [ "$scenario" = browser-network ] || [ -n "$studio_evidence_sha256" ]; then
     guest_phase browser-network-provision
-    sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
-        provision /home/vpci/browser-network-runtime
+    if [ "$browser_native_sha256" = none ]; then
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-network-provision.py \
+            provision /home/vpci/browser-network-runtime
+    else
+        set -- provision /home/vpci/browser-native-runtime.tar.gz "$browser_native_sha256"
+        if [ -n "$browser_source_manifest" ]; then set -- "$@" --source-manifest-sha256 "$browser_source_manifest"; fi
+        sudo -n runuser -u vpci -- python3 -B tests/integration/browser-native-runtime.py "$@"
+    fi
+    if [ -n "$studio_evidence_sha256" ]; then
+        test ! -e /opt/volparossa-studio-browser
+        test ! -L /opt/volparossa-studio-browser
+        sudo -n mv -T -- /home/vpci/browser-network-runtime /opt/volparossa-studio-browser
+    fi
 fi
 guest_phase build
 if [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
@@ -2708,28 +2806,41 @@ fi
 # or installed binaries that could affect the later datapath evidence.
 package_status=0
 if [ "$scenario" = alpha ]; then
-guest_phase package-lifecycle
-mkdir /home/vpci/alpha-output/package
-package_stdout=/home/vpci/package-lifecycle.stdout
-package_stderr=/home/vpci/package-lifecycle.stderr
-set +e
-sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
-    --execute --yes \
-    --package /home/vpci/volparossa.deb \
-    --output /home/vpci/alpha-output/package \
-    >"$package_stdout" 2>"$package_stderr"
-package_status=$?
-set -e
-mv -- "$package_stdout" /home/vpci/alpha-output/package/runner.stdout
-mv -- "$package_stderr" /home/vpci/alpha-output/package/runner.stderr
-printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
+    guest_phase package-lifecycle
+    package_output=/home/vpci/alpha-output/package
+    mkdir "$package_output"
+    if [ "$private_dns_status" -eq 0 ]; then
+        package_stdout=/home/vpci/package-lifecycle.stdout
+        package_stderr=/home/vpci/package-lifecycle.stderr
+        sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
+            --execute --yes \
+            --package /home/vpci/volparossa.deb \
+            --output "$package_output" \
+            >"$package_stdout" 2>"$package_stderr" || package_status=$?
+        mv -- "$package_stdout" "$package_output/runner.stdout"
+        mv -- "$package_stderr" "$package_output/runner.stderr"
+    else
+        tail -c 32768 /home/vpci/private-unbound-build.log >"$package_output/worker-provision.log"
+        package_status=$private_dns_status
+    fi
+    printf '%s\n' "$private_dns_status" >"$package_output/worker-provision-status"
+    printf '%s\n' "$package_status" >"$package_output/guest-exit-status"
 fi
 
 topology_scenario=alpha
 case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|cloud-upload-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
-if [ "$scenario" = image-snapshot ] && [ -n "${image_handoff_sha256:-}" ]; then
+if [ -n "$studio_evidence_sha256" ]; then
+    guest_phase studio-handoff-admission
+    site_input=/home/vpci/studio-topology-handoff
+    python3 -B tests/integration/studio-topology-input.py "$site_input" "$studio_evidence_sha256" "$expected_commit" >/dev/null
+    sudo -n chown root:root -- "$site_input" "$site_input/site.vps" "$site_input/manifest.bin" "$site_input/evidence.json"
+    test ! -e /run/volparossa-studio-handoff
+    test ! -L /run/volparossa-studio-handoff
+    sudo -n mv -T -- "$site_input" /run/volparossa-studio-handoff
+    set -- STUDIO_EVIDENCE_SHA256="$studio_evidence_sha256"
+elif [ "$scenario" = image-snapshot ] && [ -n "${image_handoff_sha256:-}" ]; then
     guest_phase image-handoff-admission
     image_input=/home/vpci/image-peer-handoff
     [ "$(python3 -B tests/integration/image-topology-input.py verify "$image_input")" = "$image_handoff_sha256" ]
@@ -2746,7 +2857,7 @@ elif [ "$scenario" = image-snapshot ]; then
         IMAGE_REVISION=e177afebabd99ac0773de2a73d60275346a5de52
 elif [ "$scenario" = cloud-private-upload ]; then
     set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
-        CLOUD_REVISION=ffdcfaa15cdd2a029dae545904b0a58603da4e17
+        CLOUD_REVISION=178592a3881d49f839f7716a154f7ef446ecbda5
     if [ "$cloud_owner_resume" = yes ]; then
         set -- CLOUD_SOURCE=/opt/volparossa-cloud CLOUD_NODE=/opt/volparossa-node/bin/node \
             CLOUD_UPLOAD_PROFILE=retained-owner CLOUD_REVISION=396d5d4907f4859437b69b88943c18fefba9a2e8
@@ -2759,6 +2870,9 @@ set +e
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --code-bundle /home/vpci/cooperative-code-inputs \
         --code-manifest-sha256 "$code_manifest_sha256"
+elif [ "${map_traffic:-no}" = yes ]; then
+    sh tests/integration/map-traffic-sources.sh download /home/vpci/map-traffic || exit 1
+    set -- ./tests/integration/kvm-alpha-topology.sh --map-traffic
 elif [ "$browser_filter_manifest_sha256" != none ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --browser-filter-bundle /home/vpci/browser-filter.tar \
         --browser-filter-manifest-sha256 "$browser_filter_manifest_sha256"
@@ -2795,6 +2909,15 @@ if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; the
             sudo -n cp -- "/home/vpci/$retained" "/home/vpci/alpha-output/$retained"
         fi
     done
+fi
+if [ "$scenario" = alpha ] && [ "$private_dns_status" -eq 0 ] && [ "$package_status" -eq 0 ] && [ "$topology_status" -eq 0 ]; then
+    core_version=$(dpkg-deb -f /home/vpci/volparossa.deb Version)
+    case $core_version in ''|*[!0-9.]*) exit 65 ;; esac
+    worker=volparossa-private-dns-worker_${core_version}_amd64.deb
+    [ -f "dist/$worker" ] && [ ! -L "dist/$worker" ] && [ "$(stat -c %s "dist/$worker")" -le 16777216 ] || exit 65
+    (cd dist && sha256sum --check --strict /home/vpci/private-unbound-worker.sha256)
+    install -m 0600 "dist/$worker" "/home/vpci/alpha-output/package/$worker"
+    install -m 0600 /home/vpci/private-unbound-worker.sha256 "/home/vpci/alpha-output/package/$worker.sha256"
 fi
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
@@ -3117,6 +3240,13 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ -n "${studio_handoff:-}" ]; then
+    ssh_base mkdir -m 0700 /home/vpci/studio-topology-handoff
+    for studio_file in site.vps manifest.bin evidence.json; do
+        scp_to "$studio_handoff/$studio_file" "/home/vpci/studio-topology-handoff/$studio_file"
+        ssh_base chmod 0600 "/home/vpci/studio-topology-handoff/$studio_file"
+    done
+fi
 if [ -n "$bank_sha256" ]; then
     bank_binary=$(dirname -- "$image_path")/bank-ordered-authorizer
     [ -f "$bank_binary" ] && [ ! -L "$bank_binary" ] || exit 1
@@ -3146,6 +3276,7 @@ if [ -n "$native_runtime_path" ]; then scp_to "$native_runtime_path" /home/vpci/
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then scp_to "$CODE_ARCHIVE" /home/vpci/cooperative-code.tar; fi
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
+if [ -n "$browser_native_bundle" ]; then scp_to "$browser_native_bundle" /home/vpci/browser-native-runtime.tar.gz; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
 scp_to "$GUEST_DIAGNOSTICS" /home/vpci/guest-diagnostics.py
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
@@ -3242,6 +3373,9 @@ case $scenario in
         elif [ -n "$weather_client_bundle" ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" weather-client "$WEATHER_CLIENT_ARCHIVE_SHA256" "$WEATHER_CLIENT_MANIFEST_SHA256"
+        elif [ "${map_traffic:-no}" = yes ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" map-traffic
         elif [ -n "$browser_filter_bundle" ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_FILTER_ARCHIVE_SHA256" "$BROWSER_FILTER_MANIFEST_SHA256"
@@ -3249,6 +3383,12 @@ case $scenario in
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
         fi
+        ;;
+    content-repair)
+        set --
+        [ -z "$studio_evidence_sha256" ] || set -- "$studio_evidence_sha256"
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$@"
         ;;
     cloud-private-upload)
         set --
@@ -3263,6 +3403,10 @@ case $scenario in
     agent-cooperative-code|agent-cooperative-code-proposal)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
             "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$CODE_ARCHIVE_SHA256" "$CODE_MANIFEST_SHA256"
+        ;;
+    browser-network)
+        ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+            "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_NATIVE_SHA256"
         ;;
     *)
         ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \

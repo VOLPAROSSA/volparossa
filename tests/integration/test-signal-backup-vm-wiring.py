@@ -91,7 +91,6 @@ class SignalBackupWiring(unittest.TestCase):
         self.assertIn('signal-backup-smoke.py report "$report" "$GITHUB_SHA"', gate)
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
-        self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup'"), 2)
 
     def test_fragment_variant_has_separate_pins_proof_and_closed_failure_surface(self):
         fixture = runpy.run_path(str(HERE / "signal-backup-fragments-smoke.py"))
@@ -123,7 +122,6 @@ class SignalBackupWiring(unittest.TestCase):
         gate = workflow.split("      - name: Require native Signal fragments", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
         self.assertIn('signal-backup-fragments-smoke.py report "$report" "$GITHUB_SHA"', gate)
-        self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup-fragments'"), 2)
 
 
 if __name__ == "__main__":

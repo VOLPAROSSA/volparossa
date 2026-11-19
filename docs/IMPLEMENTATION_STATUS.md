@@ -278,6 +278,13 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   recheck confirmed the same message ID. An independent download of the stored
   MIME matched all 313 original bytes. Profile and server cleanup passed.
   [Joined real-mailbox receipt and reproduction](https://github.com/VOLPAROSSA/volparossa-mail/blob/350c050e5b59c5205af837137de48058fa1f087c/third_party/thunderbird-stalwart-extension-smoke.json)
+  Thunderbird subsequently closed normally after the owner imported the message.
+  The original server returned the message after the client exited. The trial then
+  killed Stalwart, confirmed its listener stopped and reopened the same SQLite
+  database. An incorrect password returned HTTP 401. The owner retrieved the
+  original message ID and all 313 MIME bytes. The receipt records one upload,
+  one import and two metadata reads after the first response was replaced by 503.
+  [Mail integration](https://github.com/VOLPAROSSA/volparossa-mail/pull/15) · [Native client and server receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/4406e3772d22762cae5fcaca6b5ed7b4cc840214/third_party/thunderbird-stalwart-mailbox-crash-recovery)
 - **Chat** now emits a receipt event once per distinct message timestamp
   within one incoming encrypted Signal receipt. Separate envelopes and linked
   devices keep separate events. Three synthetic cases exercised the method
@@ -314,6 +321,14 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   separate evidence.
   [Native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44412679519)
   · [Main integration and archive digests](https://github.com/VOLPAROSSA/volparossa/pull/350)
+  A separate Debian 13 guest ran the ordinary Core helper, agent and Weather
+  bridge with an owner distinct from the cache provider. A signed ECMWF
+  forecast for Berlin was read twice across a bridge restart. The first HTTP
+  read after its original signed expiry returned 503, 50 ms past the deadline.
+  The direct Core read also refused the expired product. The Weather client
+  had only loopback and the guest had no network card. The guest removed the
+  original plaintext, stopped both services and left its scratch directory empty.
+  [Weather run](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44427401562) · [Original expiry receipt](development/evidence/weather-cache-expiry-44427401562/result.json)
 - **Map** clears an expired positioning-quality result when the Android
   activity or its window regains focus, and when a new assessment is requested.
   Eight synthetic Android/JNI emulator cases passed on `249266a8`, including
@@ -335,6 +350,29 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   real financial settlement remain open.
   [Hosted example](https://github.com/VOLPAROSSA/volparossa-bank/actions/runs/44413979688)
   · [Bank main integration](https://github.com/VOLPAROSSA/volparossa-bank/pull/13)
+
+  Four validators with separate stores subsequently executed the Bank owner's
+  original signed commands. They moved 70 of 100 TEST units once. After the
+  signing seed was removed and a validator restarted, both original commands
+  were executed again at block 24. The receipt sequences remained 1 and 2,
+  balances were unchanged and all four validators converged at height 25.
+  The trial covered 3–1 and 2–2 partitions. Cleanup removed the private keys
+  and namespaces and reaped the processes. The host observer accepted the
+  observed lifetime countdown. Its raw snapshots differed.
+  [Four-validator run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Original build, consensus and cleanup receipts](development/evidence/bank-validators-44426288636)
+
+### Native Firefox ordinary tabs
+
+Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
+Both ordinary tabs verified the same 32 MiB body over two carrying MPTCP
+subflows on distinct WireGuard paths. Releasing the first route at both ends
+left the second transfer active. The origin observed the Exit address with no
+proxy credentials. Firefox exited, its private profile was removed, the guest
+network state matched and zero owned objects remained. Grant assignment in
+this run used the privileged test driver. The preceding attempt stopped after
+the first complete body.
+[Passing build and KVM](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054)
+· [Both trials and original receipts](applications/BROWSER_NETWORK.md#two-complete-native-firefox-navigations)
 
 ### Core project website — 2026-10-30
 
@@ -413,13 +451,15 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at three Cloud reservations. The latest run stopped during Image deposit with four incomplete copies and one outstanding provider reservation. [Storage trials](#storage-consumer-and-provider-evidence) |
-| Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
-| DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
-| Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
-| Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
-| Transactions / Bank | Durable owner-local TEST accounting and bounded four-validator partition/replay pass; full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
+| DPS / Map | The Linux adapter reopened a signed peer traffic dataset offline and refused it after expiry. Organic Maps independently calculated two walking routes offline on Android 35. Applying live peer traffic to the native routing engine and field accuracy remain open. [Map trials](#map-weather-and-application-evidence) |
+| Cache / Weather | Drizz.li refused an expired ECMWF forecast and displayed the refreshed revision. Three independent Overmorrow release builds produced identical files. Physical device and iOS expiry still need evidence. [Weather trials](#map-weather-and-application-evidence) |
+| Code / Browser AI | Two tabs in a source-built Firefox each downloaded 32 MiB over protected connections. Detaching one preserved the other. The coding, cooperative job and protected inference trials have separate acceptance criteria. [Native browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054) |
+| Transactions / Bank | Four validators executed the retained Bank commands, preserved 100 TEST units across partitions, and returned the original receipts after restart and replay. Full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
+| Chat | Signal Desktop preserved delivery receipts across restart. A native encrypted backup recovered all four fragments after a provider returned. [Signal trials](#map-weather-and-application-evidence) |
+| Citizen | Public replay verified three fictional referenda with Belenios 3.3.0 and rejected altered results. Eligibility and deployment for an actual election remain open. [Referendum trial](#map-weather-and-application-evidence) |
 | Other applications / maintenance | Continue every agreed integration and organization-wide work; component/source checks do not complete consumer scenarios. |
 
 ### Execution priorities and next milestones
@@ -676,6 +716,79 @@ Cloud publication, repair, cold restoration or acknowledged remote deletion.
 [Original evidence archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409967365/artifacts/14480386650)
 SHA-256 `a5895c3e122b8559b9703b1bb0b3b9482c90152668cd5b4e850938ae7541a1e4`.
 
+The foreground deposit now allows one new TLS handshake per copy after a
+correlated timeout before READY, within the original exchange deadline.
+The framed owner/provider test reopened its original journal after losing the
+first Reserve confirmation. It retained the first acknowledged chunk, rejected
+a subsequent authentication failure, completed the original lease and read the
+exact bytes back. Deletion returned provider use to zero. The test used the
+real SQLite provider and a controlled local IPC transport. It passed in the
+default-branch change's workspace suite (4,459 passed, zero failed, 21 ignored).
+[Core integration](https://github.com/VOLPAROSSA/volparossa/pull/386)
+· [Quality and test log](https://github.com/VOLPAROSSA/volparossa/actions/runs/44418876629)
+
+The next twelve-node trial on `462581e2` prepared Image and Cloud. Image
+publication stopped at fragment 2, copy 0. The owner had yet to send a signed
+Reserve. The agent spent 90–120 seconds awaiting the response frame length for
+the provider challenge and exhausted its operation deadline. The error report
+does not establish how many length bytes arrived. Separate fixture records
+observed a provider TLS timeout without identifying the affected copy.
+The Image adapter closed. The later owner deletion returned an incomplete
+result. Independent reads found zero leases, reserved bytes and committed
+bytes at all three providers. Local cleanup removed 40 files and 20 directories,
+and the host snapshots matched. Cloud publication and combined repair were
+not reached. The 82,243-byte Actions ZIP has SHA-256
+`12cfd2f78bce34895487d6fb9e116eef7f33adc4c86b8e3f6891928ec8838b56`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44419915713)
+· [Original failure, usage and cleanup reports](development/evidence/storage-maintenance-44419915713)
+
+The twelve-node trial on `9335306b` completed the separate Core lifecycle and
+deleted all eleven Core copies. The consumer phase prepared two encrypted inputs
+of 799,146 bytes each and passed Image enrollment. Cloud stopped during deposit.
+Its fragment 0 FINALIZE (copy 0) and RESERVE (copy 1) each made eight attempts
+to acquire a protected stream before READY. Both reported `helper_kernel` on
+the first and last attempt. A separate RESERVE on fragment 1, copy 0 returned
+`CONTENT_POLICY`. The helper logged one MPTCP poll timeout. The phase observer also recorded a
+generic transport-unavailable response. Neither observation identified a fragment or copy.
+
+During failure cleanup, the owner confirmed deletion for both Image and Cloud.
+Before the private journals were removed, all three providers independently
+reported zero leases, reserved bytes and committed bytes. The disposable guest
+removed its fixture state and both host snapshots matched byte for byte.
+Cloud publication stopped before joint repair, cold restore and the final
+acceptance checks. The 82,290-byte ZIP has SHA-256
+`a3870f4a6ab880537cb1e8752f3d64c569579f71e5cdb7415378ce1f2c0590e8`.
+[Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44430761553) · [Original application, route and cleanup receipts](development/evidence/storage-maintenance-44430761553)
+
+On `b856970b`, the twelve-node trial deleted all eleven standalone Core copies
+and prepared both 799,146-byte encrypted application inputs. The Cloud CLI
+reported one failure during deposit. Its reserve for fragment 1, copy 1
+returned `CONTENT_POLICY` while waiting for agent READY. The protected
+stream acquisition log projection was empty. The incomplete fixture sample
+included a provider C selector-read error and had no fragment or copy binding.
+Both owners confirmed deletion. All three providers independently reported
+zero leases, reserved bytes and committed bytes. The host snapshots matched.
+Combined repair and cold restoration remain open. The original 81,804-byte
+Actions ZIP has SHA-256
+`38468903864d1f287f161674cfcc4fd1901a92bacef266cc940bd6e39eca8b14`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44440163724) · [Original application, sample and cleanup receipts](development/evidence/storage-maintenance-44440163724)
+
+In the following twelve-node run at `e5d06b21e87409139d78317dc7deeae6b372b51b`,
+Image stopped during publication. FINALIZE on fragment 2, copy 0 reached the
+initial READY boundary with a TLS handshake deadline. RESERVE on fragment 2,
+copy 1 and fragment 3, copy 0 each reported eight helper-kernel acquisition
+rounds. Fragment 3, copy 1 reported three rounds, from helper-kernel to another
+helper rejection. All four foreground failures carried `CONTENT_UNAVAILABLE`.
+The separate incomplete sampler observed a two-sided TLS timeout at provider C.
+Its samples carry no fragment or copy identity. Image confirmed owner deletion.
+Cloud had no archive. All three independent provider measurements showed zero
+leases, reserved bytes and committed bytes. Local cleanup completed and the
+guest's outside-namespace network snapshots matched. Joint maintenance and
+cold restoration remained pending. The preceding run reached Cloud before it
+stopped. The 82,262-byte archive (artifact `14496173050`) has SHA-256
+`95205102709774ce80e5a7df56fc85121e399b3aa4a2d00744ae8fc5c72a50dd`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447515035) · [Original application, samples and cleanup receipts](development/evidence/storage-maintenance-44447515035)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -701,6 +814,14 @@ turns and removed each request’s files. At shutdown it reaped the child and
 removed private session state. VM, tool and scratch cleanup all passed. The
 corrupted image failed at `verity_read` before entrypoint invocation.
 [Merge](https://github.com/VOLPAROSSA/volparossa/pull/332) · [Public trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/42145544662)
+
+In a separate twelve-node guest on `d375bf79`, the requester selected two
+MPTCP paths and received an authenticated refusal of its versioned
+guest-key confirmation request. The provider reported that the protected
+device was unavailable. No worker was admitted and no private input was
+released. The network observer, host checkpoint and VM cleanup passed.
+A positive hardware appraisal and a private inference result remain open.
+[Protected-quote run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44425796022) · [Original route and VM receipts](development/evidence/protected-quote-44425796022)
 
 The host configuration checkpoint accepted a change in IPv6 reference metadata.
 The raw IPv6 route fingerprint changed. IPv4 routes, resolver configuration and
@@ -806,6 +927,20 @@ Preserve unpublished Map `feature/native-traffic-lifecycle` at `ca7a4e59a057`.
 [DPS/Map history](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
 and the [service contract](services/DPS.md) retain research and acceptance detail.
 
+### Map, Weather and application evidence
+
+On Core `8ca8522c` and Map `f965604d`, an independent provider delivered all 325 signed bytes to the Linux Map adapter. After disconnect, the owner reopened the same bytes with zero peer traffic. One second after signed expiry, the adapter refused a new handoff. The host snapshots matched. The road graph in this trial was synthetic. In a separate Android 35 emulator, two cold launches of the original Organic Maps app calculated walking routes of 390 m and 490 m using the Monaco map package in airplane mode. Native routing with the signed peer traffic feed remains open. [Peer traffic trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44438057954) · [Organic Maps trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44444481182)
+
+Two cold Drizz.li builds produced identical bytes for all 97 tracked files. In the browser trial, the expired ECMWF publication returned HTTP 503. Drizz.li then displayed 9 °C from signed revision 2. Overmorrow passed all 24 Flutter tests in three independent release builds. All 64 output files matched in relative path, mode and content, totalling 24,608,666 bytes. Physical devices and iOS remain open. [Drizz.li build comparison](https://github.com/VOLPAROSSA/volparossa-weather/pull/41) · [Forecast refresh](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44445914018) · [Overmorrow comparison](https://github.com/VOLPAROSSA/volparossa-weather/pull/44) · [Third build](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44447940253)
+
+The original Silex dashboard ran in Chrome against its Rust server. The operator created, renamed and duplicated a project. After restarting the server and browser, the dashboard listed both projects and the operator deleted them. A separate build produced the native 34,281,248-byte Silex executable. Native WebView execution and publication authorization remain open. [Dashboard trial](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/44445227423) · [Native build](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/44444745137)
+
+Signal Desktop processed delivery receipts for two simulated encrypted peers. After reopening its SQLCipher database, three intended receipts still showed delivered, the cross-recipient control still showed sent, and the four message IDs matched. In a separate Citizen trial, the upstream Belenios verifier and public replay checked the encrypted ballots, decryption and totals for three fictional referenda. Four yes votes among six eligible residents adopted the proposal, four no votes rejected it, and three yes with one abstention left it undecided. [Native Signal run](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44435698764) · [Offline Belenios run](https://github.com/VOLPAROSSA/volparossa-citizen/actions/runs/44434956603)
+
+Signal Desktop exported a 198,352-byte encrypted backup. When two of three Storage providers went offline, two of four fragments remained readable and the owner received no partial output. After one provider returned, the owner recovered all four fragments and imported the original backup in Signal. All three providers reported zero remaining usage after cleanup. [Native Signal and Storage trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44444982433)
+
+With Thunderbird closed, the owner’s Stalwart server accepted a second message over local SMTP. It rejected an unknown local recipient and external forwarding. After Stalwart restarted on the same SQLite database, the owner recovered both the original import and the delivered message, including its stored transport headers. This exercised an isolated loopback mail server. [Source-bound Thunderbird and Stalwart receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/5bb90ec3be8c168fd58a19e2d03f626f6560d96b/third_party/thunderbird-stalwart-owner-smtp)
+
 ### Latest completed integration evidence
 
 - **Code:** actual 38824828727 on Code `fd4ff9688c58` / Core `7d0f9f0b492c`
@@ -817,8 +952,8 @@ and the [service contract](services/DPS.md) retain research and acceptance detai
 - **Weather/cache:** Drizz.li 38228710535 and Overmorrow 38241212407 prove actual
   protected acquisition and initial/refresh UI behavior. Installed Android
   38717988016 passes actual app-triggered delivery, cache refresh and
-  background/resume on Core `aac5be7f` / Weather `3b90442a`. Expiry evidence is
-  synthetic; physical devices, iOS and full source/feature coverage remain open.
+  background/resume on Core `aac5be7f` / Weather `3b90442a`. The separate offline Debian trial 44427401562 now covers real cache expiry.
+  Physical devices, iOS and full source/feature coverage remain open.
 - **Transactions:** actual 37669796654 on `2ea504e399eb` passes four-validator
   TEST conservation/conflict, 3–1/2–2 partitions, rejoin and committed-retry
   replay. Raw parent snapshots differ; the separately bounded expiry-countdown
@@ -833,27 +968,9 @@ include independent review, resource limits, artifacts and unresolved cases.
 
 ### Retained branches and resumption dependencies
 
-This index identifies preserved work, not current locks or verified live remote
-heads. Inspect `git worktree list` and the task's relevant Git/CI state before
-using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
+The owner-designated central build chat maintains the current work across repositories. The organization queue links to the open work and the protected project goal records its mandate. For local checkout paths, use `git worktree list` in the selected repository. [Organization maintenance](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md) · [Project goal](development/GOAL.md)
 
-| Work | Retained branch / checkout | Resume boundary |
-| --- | --- | --- |
-| Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
-| Main resident composition | `integration/resident-model-main-20261022`, merged PR332 | Keep the tested commit `6ac9f2a8` available on the ref admitted by the public workflow. |
-| Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
-| Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
-| Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |
-| Automatic upload | `feature/cloud-upload-tls-v9`, `.git/codex-cloud-upload-tls-v9`, PR279 | Complete shared consumer profile and remote cleanup before upload acceptance. |
-| Earlier Storage dependencies | `.git/codex-storage-route-retirement`, `.git/codex-storage-real-route-sequence`, `.git/codex-storage-natural-expiry-sequence`, `.git/codex-storage-post-acquire-clock` | Preserve PR275/285/287/288 history and later integrated corrections; old heads are not current implementation status. |
-| Map | `feature/native-traffic-lifecycle` at ca7a4e59; quality work `.volparossa-dev/worktrees/dps-native-quality-20261021` | Preserve unpublished work and accepted debug fixture; complete real sensors/navigation. |
-| Studio publication | `.volparossa-dev/worktrees/studio-publisher-pin-20261023`, PR337 | Pin guard integrated; preparation, native authority and hosting remain required. |
-
-The original root `error.log`, dirty/untracked work in other retained trees,
-recovery manifests, pinned models/caches and `.git/ci-evidence/` remain preserved.
-An old branch name, prunable registry entry or ended conversation is not evidence
-that its work can be deleted. Existing failed reports are immutable; if their
-artifacts expire, record the evidence gap rather than reconstructing success.
+The automatic upload candidate continues in Core #279. The resident model trials retain their source-specific workflow revisions and original outcomes. The October index preserves the earlier branches, machine-local paths and failed trials as historical evidence. [Upload candidate](https://github.com/VOLPAROSSA/volparossa/pull/279) · [Resident model evidence](#protected-compute-evidence) · [October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies)
 
 ## Network baseline and remaining proof
 
@@ -868,6 +985,16 @@ configured IPv4 bottleneck; arbitrary ISP/Wi-Fi/physical-radio guarantees do not
 follow. Local-only configuration alone does not prove offline private-endpoint
 routing. All newer shared-service, application and update requirements remain
 part of completion.
+
+The full Core candidate at `43b71ac3` produced two identical release packages
+on the Ubuntu runner, SHA-256 `0973864d3fdf348fe31f932921400e219aeebba5f85ab17488a44f95379e1d19`.
+In Debian 13, the suite no longer indexed the pinned Unbound packages and the
+private DNS companion was unavailable to apt. The independent network trial
+passed A01–A13 and A15. A14 counted eleven remaining runtime sockets after
+the forced crash. The outer host snapshots matched. The acceptance gate
+withheld the downloadable package.
+[Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447116925) ·
+[Guest package error](development/evidence/alpha-package-44447116925/package-apt.stderr)
 
 ## Fixed alpha v1 scorecard
 

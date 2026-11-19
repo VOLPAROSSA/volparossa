@@ -3984,24 +3984,51 @@ fn classify_acquire_transport_execution(
             AcquireTransportExecution::Definite(BackendError::Invalid)
         }
         Some(InternalWorkerResult::Kernel) => {
-            // The coordinator has authenticated this exact request-bound, descriptor-free
-            // failure. Preserve only the precise existing connect-poll timeout, never infer
-            // it from a log, missing errno, a generic Kernel result or another socket kind.
-            let poll_timed_out = request.is_client_mptcp_connect()
-                && execution
-                    .response
-                    .acquire_failure
-                    .is_some_and(|diagnostic| {
-                        diagnostic.validate().is_ok()
-                            && diagnostic.operation == AcquireFailureOperation::Poll as i32
-                            && diagnostic.class == AcquireFailureClass::TimedOut as i32
-                            && diagnostic.errno.is_none()
-                    });
-            AcquireTransportExecution::Definite(if poll_timed_out {
-                BackendError::MptcpConnectPollTimedOut
-            } else {
-                BackendError::Kernel
-            })
+            // Only a correlated, descriptor-free client connect rejection can supply these
+            // closed diagnostics. Both retain the existing definite Kernel failure category.
+            let diagnostic = execution
+                .response
+                .acquire_failure
+                .filter(|failure| request.is_client_mptcp_connect() && failure.validate().is_ok());
+            let error = diagnostic.map_or(BackendError::Kernel, |failure| {
+                match (failure.operation(), failure.class(), failure.errno) {
+                    (
+                        AcquireFailureOperation::ConnectOperationDeadline,
+                        AcquireFailureClass::TimedOut,
+                        None,
+                    ) => BackendError::MptcpConnectOperationDeadline,
+                    (AcquireFailureOperation::Poll, AcquireFailureClass::TimedOut, None) => {
+                        BackendError::MptcpConnectPollTimedOut
+                    }
+                    (
+                        AcquireFailureOperation::Bind,
+                        AcquireFailureClass::Io,
+                        Some(libc::EADDRINUSE),
+                    ) => BackendError::MptcpBindAddressInUse,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ECONNREFUSED),
+                    ) => BackendError::MptcpConnectSocketRefused,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ENETUNREACH),
+                    ) => BackendError::MptcpConnectSocketNetworkUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::EHOSTUNREACH),
+                    ) => BackendError::MptcpConnectSocketHostUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ETIMEDOUT),
+                    ) => BackendError::MptcpConnectSocketTimedOut,
+                    _ => BackendError::Kernel,
+                }
+            });
+            AcquireTransportExecution::Definite(error)
         }
         Some(
             InternalWorkerResult::Conflict
@@ -6228,26 +6255,54 @@ pub(super) mod tests {
         assert!(capture.0.lock().expect("captured fields").is_empty());
     }
 
+    fn classifies_as(
+        execution: DiagnosticExecution,
+        request: &InternalAcquireTransportSocket,
+        expected: BackendError,
+    ) {
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, request),
+            AcquireTransportExecution::Definite(error) if error == expected
+        ));
+    }
+
     #[test]
-    fn acquire_diagnostic_does_not_change_definite_kernel_classification() {
-        let request = InternalAcquireTransportSocket {
-            route_context_id: vec![1; 16],
-            path_id: 1,
-            role: InternalEndpointRole::Client as i32,
-            descriptor_kind: InternalTransportSocketKind::MptcpConnected as i32,
-            expected_local: None,
-            expected_remote: None,
-        };
-        for present in [false, true] {
-            let mut execution = acquire_log_execution(Some(libc::EADDRINUSE));
-            if !present {
-                execution.response.acquire_failure = None;
-            }
-            assert!(matches!(
-                classify_acquire_transport_execution(execution, &request),
-                AcquireTransportExecution::Definite(BackendError::Kernel)
-            ));
+    fn acquire_diagnostic_recognizes_only_the_exact_client_mptcp_bind_collision() {
+        let request = mptcp_connected_acquire_request();
+        let collision = || acquire_log_execution(Some(libc::EADDRINUSE));
+        classifies_as(collision(), &request, BackendError::MptcpBindAddressInUse);
+        for errno in [None, Some(libc::EADDRNOTAVAIL), Some(libc::EACCES)] {
+            classifies_as(acquire_log_execution(errno), &request, BackendError::Kernel);
         }
+        let mut other = collision();
+        other.response.acquire_failure.as_mut().unwrap().operation =
+            AcquireFailureOperation::Connect as i32;
+        classifies_as(other, &request, BackendError::Kernel);
+        let mut other = collision();
+        other.response.acquire_failure.as_mut().unwrap().class =
+            AcquireFailureClass::TimedOut as i32;
+        classifies_as(other, &request, BackendError::Kernel);
+        let mut absent = collision();
+        absent.response.acquire_failure = None;
+        classifies_as(absent, &request, BackendError::Kernel);
+
+        let mut other = request.clone();
+        other.role = InternalEndpointRole::Exit as i32;
+        classifies_as(collision(), &other, BackendError::Kernel);
+        other = request.clone();
+        other.descriptor_kind = InternalTransportSocketKind::MptcpListener as i32;
+        classifies_as(collision(), &other, BackendError::Kernel);
+        let mut non_kernel = collision();
+        non_kernel.response.result = InternalWorkerResult::Invalid as i32;
+        classifies_as(non_kernel, &request, BackendError::Invalid);
+        let mut conflicting = collision();
+        conflicting.response.outcome = Some(internal_worker_response::Outcome::Destroyed(
+            ContextDestroyed {},
+        ));
+        assert!(matches!(
+            classify_acquire_transport_execution(conflicting, &request),
+            AcquireTransportExecution::RequiresCleanup(BackendError::CleanupIncomplete)
+        ));
     }
 
     fn mptcp_connect_poll_timeout_execution() -> DiagnosticExecution {
@@ -6371,14 +6426,85 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn acquire_diagnostic_preserves_only_credentialed_mptcp_connect_socket_errors() {
+        let request = mptcp_connected_acquire_request();
+        for (errno, expected) in [
+            (libc::ECONNREFUSED, BackendError::MptcpConnectSocketRefused),
+            (
+                libc::ENETUNREACH,
+                BackendError::MptcpConnectSocketNetworkUnreachable,
+            ),
+            (
+                libc::EHOSTUNREACH,
+                BackendError::MptcpConnectSocketHostUnreachable,
+            ),
+            (libc::ETIMEDOUT, BackendError::MptcpConnectSocketTimedOut),
+        ] {
+            let mut execution = acquire_log_execution(Some(errno));
+            let failure = execution.response.acquire_failure.as_mut().unwrap();
+            failure.operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &request, expected);
+            for operation in [
+                AcquireFailureOperation::Bind,
+                AcquireFailureOperation::Connect,
+            ] {
+                let mut execution = acquire_log_execution(Some(errno));
+                execution
+                    .response
+                    .acquire_failure
+                    .as_mut()
+                    .unwrap()
+                    .operation = operation as i32;
+                classifies_as(execution, &request, BackendError::Kernel);
+            }
+            let mut wrong_kind = request.clone();
+            wrong_kind.descriptor_kind = InternalTransportSocketKind::MptcpListener as i32;
+            let mut execution = acquire_log_execution(Some(errno));
+            execution
+                .response
+                .acquire_failure
+                .as_mut()
+                .unwrap()
+                .operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &wrong_kind, BackendError::Kernel);
+        }
+        let mut unknown = acquire_log_execution(Some(libc::EINVAL));
+        unknown.response.acquire_failure.as_mut().unwrap().operation =
+            AcquireFailureOperation::ConnectSocketError as i32;
+        classifies_as(unknown, &request, BackendError::Kernel);
+    }
+
+    #[test]
     fn acquire_diagnostic_preserves_only_exact_mptcp_connect_poll_timeout() {
         let request = mptcp_connected_acquire_request();
         assert!(matches!(
             classify_acquire_transport_execution(mptcp_connect_poll_timeout_execution(), &request),
             AcquireTransportExecution::Definite(BackendError::MptcpConnectPollTimedOut)
         ));
+        let operation_deadline = AcquireFailureOperation::ConnectOperationDeadline as i32;
+        let mut worker_budget = mptcp_connect_poll_timeout_execution();
+        worker_budget
+            .response
+            .acquire_failure
+            .as_mut()
+            .unwrap()
+            .operation = operation_deadline;
+        classifies_as(
+            worker_budget,
+            &request,
+            BackendError::MptcpConnectOperationDeadline,
+        );
+        for errno in [0, libc::ETIMEDOUT] {
+            let mut malformed = mptcp_connect_poll_timeout_execution();
+            let failure = malformed.response.acquire_failure.as_mut().unwrap();
+            failure.operation = operation_deadline;
+            failure.errno = Some(errno);
+            classifies_as(malformed, &request, BackendError::Kernel);
+        }
         // Every other declared operation/class and unknown values retain Kernel.
-        for operation in (0..=19).filter(|value| *value != AcquireFailureOperation::Poll as i32) {
+        for operation in (0..=20).filter(|value| {
+            *value != AcquireFailureOperation::Poll as i32 && *value != operation_deadline
+        }) {
             let mut execution = mptcp_connect_poll_timeout_execution();
             execution
                 .response
@@ -7744,7 +7870,7 @@ pub(super) mod tests {
         .expect("current worker credentials");
         let worker = std::thread::spawn(move || {
             let mut request_ids = Vec::new();
-            for attempt in 0..2 {
+            for attempt in 0..3 {
                 let received = receive_credential_worker_request(&peer, expected_worker)
                     .expect("fresh MPTCP Acquire reached the same worker");
                 let Some(internal_worker_request::Operation::AcquireTransportSocket(value)) =
@@ -7768,13 +7894,25 @@ pub(super) mod tests {
                         class: AcquireFailureClass::TimedOut as i32,
                         errno: None,
                     });
+                } else if attempt == 1 {
+                    response.acquire_failure = Some(AcquireFailureDiagnostic {
+                        operation: AcquireFailureOperation::Bind as i32,
+                        class: AcquireFailureClass::Io as i32,
+                        errno: Some(libc::EADDRINUSE),
+                    });
                 }
                 send_credential_worker_response(&peer, &received.request, &response, None)
                     .expect("credentialed descriptor-free failure");
             }
-            assert_ne!(request_ids[0], request_ids[1]);
+            assert_eq!(
+                request_ids
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                3
+            );
         });
-        for attempt in 0_u8..2 {
+        for attempt in 0_u8..3 {
             let mut binding =
                 acquire_binding(key, tokio::time::Instant::now() + Duration::from_secs(2));
             binding.operation_sequence += u64::from(attempt);
@@ -7797,10 +7935,10 @@ pub(super) mod tests {
             assert_eq!(completion.binding, binding);
             assert_eq!(
                 completion.result.err(),
-                Some(if attempt == 0 {
-                    BackendError::MptcpConnectPollTimedOut
-                } else {
-                    BackendError::Kernel
+                Some(match attempt {
+                    0 => BackendError::MptcpConnectPollTimedOut,
+                    1 => BackendError::MptcpBindAddressInUse,
+                    _ => BackendError::Kernel,
                 })
             );
             assert!(alive.load(Ordering::SeqCst));

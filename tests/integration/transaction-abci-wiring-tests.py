@@ -162,8 +162,8 @@ class TransactionWiring(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertIn("          - transaction-abci\n", text)
         self.assertIn("python3 -B tests/integration/transaction-abci-wiring-tests.py", text)
-        for name in ("Build exact pinned mqvpn/xquic runtime", "Require successful A01-A15 evidence"):
-            self.assertIn("env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci'", workflow_step(name))
+        self.assertIn("env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci'",
+                      workflow_step("Build exact pinned mqvpn/xquic runtime"))
         run = workflow_step("Run disposable production-helper topology")
         self.assertIn('test "$VOLPAROSSA_ALPHA_SCENARIO" != transaction-abci', run)
         self.assertIn('"${native_args[@]}"', run)

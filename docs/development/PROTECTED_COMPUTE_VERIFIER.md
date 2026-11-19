@@ -412,6 +412,19 @@ firmware scope in the [development archive](../archive/development-notes-2026102
 Full integration and suitable-hardware trials remain separate open acceptance
 requirements.
 
+On a provider without the fixed guest device, the owner can use the same
+`compute quote verify --key-confirmation-v1` command. An authenticated
+refusal exits with status 1, `provider_claim=fixed_quote_device_unavailable`,
+`worker_admission=false` and `private_input_released=false`. The provider
+and requester both opt in with the same flag. The quote command accepts
+public policy and certificate inputs only.
+
+The separate `compute peer submit --execute` command accepts signed public
+datasets. A validly signed dataset marked `private` is rejected locally
+before contacting the owner socket or creating a job handle. The CLI regression
+exercises that boundary with synthetic text and a public control using the
+same publisher, provider and receiving socket.
+
 ## What is still needed before private tasks can run remotely
 
 Certificate and report signatures are necessary but insufficient. A complete

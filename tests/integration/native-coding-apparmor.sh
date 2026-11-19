@@ -4,7 +4,11 @@
 set -euo pipefail
 test "${GITHUB_ACTIONS:-}" = true
 test "${RUNNER_OS:-}" = Linux
-test "${VOLPAROSSA_ALPHA_SCENARIO:-}" = agent-native-coding
+case ${VOLPAROSSA_ALPHA_SCENARIO:-} in
+  agent-native-coding) mode=coding ;;
+  browser-network) test "${VOLPAROSSA_NATIVE_BROWSER_SOURCE:-}" = true; mode=browser ;;
+  *) exit 64 ;;
+esac
 test "$(id -u)" -ne 0
 test "$#" -eq 1
 [[ "$1" =~ ^[0-9a-f]{40}$ ]]
@@ -137,7 +141,11 @@ print(json.dumps({"ci_bwrap_preflight": True, "mode": sys.argv[2], "capabilities
                   "no_new_privs": True, "resolver_file_read_only": sys.argv[2] == "online"}))
 ' "$(id -u)" "$network" "$(readlink /proc/self/ns/net)" "$resolver" "$resolver_sha"
 done
-setsid python3 -B "$here/native-coding-runtime.py" build --yes --expected-commit "$1" &
+if test "$mode" = browser; then
+  setsid bash "$here/browser-native-build.sh" compile &
+else
+  setsid python3 -B "$here/native-coding-runtime.py" build --yes --expected-commit "$1" &
+fi
 build_pid=$!
 if wait "$build_pid"; then build_status=0; else build_status=$?; fi
 build_pid=

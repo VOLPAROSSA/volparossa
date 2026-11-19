@@ -682,7 +682,7 @@ class FixtureTests(unittest.TestCase):
         self.assertIn("if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-conversation'", workflow)
         self.assertIn('agent-private-conversation.py report "$report" "$GITHUB_SHA"', workflow)
         self.assertIn('python3 -B tests/integration/test-agent-private-conversation.py', workflow)
-        self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation'"), 4)
+        self.assertEqual(workflow.count("env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation'"), 2)
         self.assertIn('test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation &&', workflow)
         upload = workflow.split('      - name: Upload bounded private conversation fixture evidence\n', 1)[1].split('\n      - name:', 1)[0]
         paths = [line.strip().split(' }}/', 1)[1] for line in upload.splitlines() if '${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/' in line]

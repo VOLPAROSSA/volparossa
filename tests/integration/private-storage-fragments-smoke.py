@@ -126,7 +126,7 @@ def restore_cli_receipt(stdout):
         return dict(report="unavailable_or_invalid")
 
 
-def restore_invoke(binary, socket, args, expected=0, deadline=700):
+def restore_invoke(binary, socket, args, expected=0, deadline=700, *, incomplete=False):
     global RESTORE_CLI
     RESTORE_CLI = dict(exit_code=None, timed_out=False, stdout_bytes=None, stderr_bytes=None,
                        receipt=None)
@@ -138,7 +138,10 @@ def restore_invoke(binary, socket, args, expected=0, deadline=700):
                            receipt=restore_cli_receipt(stdout))
         require(process.returncode == expected, "private replica CLI operation failed")
         require(len(stdout) <= 16384 and len(stderr) <= 16384, "replica diagnostics exceeded fixture bound")
-        if expected:
+        if incomplete:
+            require(expected == 1 and RESTORE_CLI["receipt"].get("operation_complete") is False,
+                    "incomplete restore requires its original nonzero CLI report")
+        elif expected:
             require(not stdout, "failed no-clobber operation emitted a success response")
             return None
         return json.loads(stdout)
@@ -381,7 +384,7 @@ def check_identity(root):
             "signed root or retained owner/provider/grant/archive/lease changed")
 
 
-def validate_cli(value, operation, keys, phase):
+def validate_cli(value, operation, keys, phase, *, uncertain_first_provider=(0, 3)):
     require(value["operation"] == "private_storage_fragments_" + operation
         and value["logical_ciphertext_bytes"] == BYTES and value["fragment_count"] == 4
         and value["copies_per_fragment"] == 2 and value["distinct_provider_identities"] == 3
@@ -401,7 +404,7 @@ def validate_cli(value, operation, keys, phase):
         for copy, receipt in enumerate(entry["copies"]):
             provider = (index + copy) % 3
             charge = ("unattempted" if phase == "created" else "deleted" if phase == "deleted"
-                      else "uncertain" if phase == "restore" and provider == 0 and index in (0, 3) else "committed")
+                      else "uncertain" if phase == "restore" and provider == 0 and index in uncertain_first_provider else "committed")
             require(receipt["provider_key"] == keys[provider] and receipt["charge"] == charge, "fragment copy placement or charge differs")
             retained = charge not in ("unattempted", "deleted")
             require(receipt["last_confirmed_stored_bytes"] == (size if retained else 0)
@@ -459,10 +462,10 @@ def upload(root, binary, client, keys, *, invoke_operation=None):
         source_removed_before_restore=True, staging_removed=True)
 
 
-def validate_restore_result(value, keys):
+def validate_restore_result(value, keys, *, uncertain_first_provider=(0, 3)):
     global RESTORE_STAGE
     RESTORE_STAGE = "validate_accounting"
-    validate_cli(value, "restore", keys, "restore")
+    validate_cli(value, "restore", keys, "restore", uncertain_first_provider=uncertain_first_provider)
     RESTORE_STAGE = "validate_survivor_receipts"
     selected = (1, 1, 2, 1)
     require(value["restored"] is True and value["whole_archive_sha256_verified"] is True

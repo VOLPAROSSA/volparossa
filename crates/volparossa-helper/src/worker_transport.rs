@@ -239,6 +239,21 @@ impl From<WorkerTransportError> for AcquireTransportFailure {
     }
 }
 
+/// The caller deadline reserves time for returning the credentialed response. Its expiry
+/// does not establish a full connect poll timeout or a kernel ETIMEDOUT.
+fn acquire_operation_deadline(error: io::Error) -> AcquireTransportFailure {
+    let diagnostic = (error.kind() == io::ErrorKind::TimedOut && error.raw_os_error().is_none())
+        .then_some(AcquireFailureDiagnostic {
+            operation: AcquireFailureOperation::ConnectOperationDeadline as i32,
+            class: AcquireFailureClass::TimedOut as i32,
+            errno: None,
+        });
+    AcquireTransportFailure {
+        error: WorkerTransportError::Io(error),
+        diagnostic,
+    }
+}
+
 fn acquire_io<T>(
     operation: AcquireFailureOperation,
     result: io::Result<T>,
@@ -1349,7 +1364,7 @@ pub(crate) fn create_transport_socket_diagnosed(
         TransportSocketExpectation::MptcpConnected { local, remote } => {
             let operation_deadline = deadline
                 .before_tail(MPTCP_ACQUIRE_REPLY_TAIL)
-                .map_err(WorkerTransportError::Io)?;
+                .map_err(acquire_operation_deadline)?;
             create_connected_mptcp(local, remote, operation_deadline)
         }
         TransportSocketExpectation::MptcpListener { local } => {
@@ -1585,7 +1600,7 @@ fn create_connected_mptcp(
     validate_connected_mptcp_diagnosed(&socket, local, remote)?;
     operation_deadline
         .ensure_remaining()
-        .map_err(WorkerTransportError::Io)?;
+        .map_err(acquire_operation_deadline)?;
     Ok(socket.into())
 }
 
@@ -1649,7 +1664,7 @@ fn wait_for_connect(
     // An exhausted caller budget does not establish a full connect timeout.
     operation_deadline
         .ensure_remaining()
-        .map_err(WorkerTransportError::Io)?;
+        .map_err(acquire_operation_deadline)?;
     let events = match readiness {
         Err(error) if error.kind() == io::ErrorKind::TimedOut && error.raw_os_error().is_none() => {
             return Err(AcquireTransportFailure {
@@ -2388,6 +2403,36 @@ mod tests {
     }
 
     #[test]
+    fn loopback_refusal_is_read_from_the_completed_connect_socket() {
+        // Keep the target port bound without listening so another local test cannot claim it.
+        let target = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        target
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        let client = Socket::new(
+            Domain::IPV4,
+            Type::STREAM.nonblocking(),
+            Some(Protocol::TCP),
+        )
+        .unwrap();
+        let pending = client.connect(&target.local_addr().unwrap()).unwrap_err();
+        assert_eq!(pending.raw_os_error(), Some(libc::EINPROGRESS));
+        let error = wait_for_connect(
+            &client,
+            HardDeadline::after(Duration::from_secs(5)).unwrap(),
+            HardDeadline::after(Duration::from_secs(2)).unwrap(),
+        )
+        .unwrap_err();
+        let detail = error.diagnostic.expect("socket diagnostic");
+        assert_eq!(
+            detail.operation(),
+            AcquireFailureOperation::ConnectSocketError
+        );
+        assert_eq!(detail.class(), AcquireFailureClass::Io);
+        assert_eq!(detail.errno, Some(libc::ECONNREFUSED));
+    }
+
+    #[test]
     fn connect_poll_preserves_reply_time_and_distinguishes_its_own_timeout() {
         let (mut writer, _peer) = UnixStream::pair().expect("connected socket pair");
         writer.set_nonblocking(true).expect("nonblocking writer");
@@ -2412,8 +2457,16 @@ mod tests {
         let failure = acquire_failure(wait_for_connect(&blocked, operation, cap));
         assert!(matches!(failure.error, WorkerTransportError::Io(ref error)
             if error.kind() == io::ErrorKind::TimedOut));
-        assert!(failure.diagnostic.is_none());
-        let reply = response(&request, InternalWorkerResult::Kernel);
+        assert_eq!(
+            failure.diagnostic,
+            Some(AcquireFailureDiagnostic {
+                operation: AcquireFailureOperation::ConnectOperationDeadline as i32,
+                class: AcquireFailureClass::TimedOut as i32,
+                errno: None,
+            })
+        );
+        let mut reply = response(&request, InternalWorkerResult::Kernel);
+        reply.acquire_failure = failure.diagnostic;
         send_credential_worker_response_with_deadline(&child, &request, &reply, None, worker)
             .expect("send failure in the original budget");
         let execution = receive_credential_worker_response_with_deadline(

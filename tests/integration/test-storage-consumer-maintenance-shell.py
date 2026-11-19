@@ -11,6 +11,24 @@ TEXT = SCRIPT.read_text()
 
 
 class ConsumerShell(unittest.TestCase):
+    def test_failed_publish_delete_exports_only_closed_states_and_preserves_the_primary_failure(self):
+        script = """
+. "$1"
+consumer_user=/owner
+binary_directory=/bin
+WORK=/fixture
+private_storage_consumer_private() { printf '%s' "$sample"; return "$status"; }
+private_storage_consumer_release_known image
+"""
+        for sample, status, expected in [('owner_confirmed', 0, 'owner_confirmed'), ('unconfirmed', 0, 'unconfirmed'),
+                ('secret pathname', 0, 'unavailable'), ('owner_confirmed', 1, 'unavailable')]:
+            result = subprocess.run(['sh', '-eu', '-c', script, 'fixture', str(SCRIPT)],
+                env={'sample': sample, 'status': str(status)}, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), expected)
+        phase = TEXT.split('private_storage_consumer_phase() {', 1)[1].split('\n}', 1)[0]
+        self.assertLess(phase.index('storage-consumer-failure-boundary.py'), phase.index('private_storage_consumer_release_known image'))
+        self.assertLess(phase.index('private_storage_consumer_release_known cloud'), phase.index('fail CONSUMER_APPLICATION_FAILED'))
+
     def test_catalog_restore_socket_fits_the_guest_root_before_owner_setup(self):
         # Stop at the first install. Only the preflight runs with the real guest path shape.
         script = '''

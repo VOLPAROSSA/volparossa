@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn live_control_rechecks_keep_authority_and_observe_only_this_initial_rejection() {
+    use crate::route_setup::ContentProviderRouteError::{RoleOverlap, Unavailable};
+    let pinned = PeerId::random();
+    let other = PeerId::random();
+    for (live, policy) in [
+        (Err(Unavailable), false),
+        (Err(RoleOverlap), true),
+        (Ok(other), true),
+    ] {
+        let observation = observation::Observation::default();
+        let error = require_pinned_control(pinned, live, Some(&observation)).unwrap_err();
+        let (result, code) = if policy {
+            assert!(matches!(error, ContentError::Policy));
+            (ControlResult::Policy, "CONTENT_POLICY")
+        } else {
+            assert!(matches!(error, ContentError::Unavailable));
+            (ControlResult::Unavailable, "CONTENT_UNAVAILABLE")
+        };
+        let detail = observation.detail().unwrap();
+        detail.validate_rejection(result, code).unwrap();
+        assert_eq!(detail.stage, Stage::ControlSelection as i32);
+        assert_eq!(detail.deadline_scope, Deadline::None as i32);
+        assert!(
+            detail.tls_failure.is_none()
+                && detail.challenge.is_none()
+                && detail.flow_acquire.is_none()
+        );
+        assert!(matches!(
+            require_pinned_control(pinned, live, None),
+            Err(ContentError::Policy)
+        ));
+    }
+    let sibling = observation::Observation::default();
+    require_pinned_control(pinned, Ok(pinned), Some(&sibling)).unwrap();
+    require_pinned_control(pinned, Ok(pinned), None).unwrap();
+    assert!(sibling.detail().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn challenge_replacement_reserves_a_handshake_within_both_original_deadlines() {
+    let now = tokio::time::Instant::now();
+    let idle = tls::HANDSHAKE_TIMEOUT;
+    let operation_end = now + EXCHANGE_TIMEOUT;
+    let offer_end = now + idle * 4;
+    for (operation, exchange) in [(operation_end, offer_end), (offer_end, operation_end)] {
+        let limit = challenge_idle_limit(true, operation, exchange).unwrap();
+        assert_eq!(limit.idle, idle);
+        assert_eq!(limit.retry_before, offer_end - idle);
+        assert!(challenge_idle_limit(false, operation, exchange).is_none());
+    }
+    tokio::time::advance(idle * 2).await;
+    assert!(challenge_idle_limit(true, operation_end, offer_end).is_none());
+    tokio::time::advance(EXCHANGE_TIMEOUT).await;
+    assert!(challenge_idle_limit(true, operation_end, operation_end).is_none());
+}
+
 #[tokio::test]
 async fn tls_close_v9_query_opt_in_does_not_revive_or_disclose_sibling_outcomes() {
     use volparossa_local_control::{

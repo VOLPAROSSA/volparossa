@@ -45,6 +45,26 @@ pub(super) struct CopyRecord {
     pub(super) charge: Charge,
 }
 
+impl CopyRecord {
+    pub(super) fn report(&self, journal: &Journal, charge: Charge) -> serde_json::Value {
+        serde_json::json!({
+            "provider_key": hex::encode(self.provider_key), "charge": charge,
+            "last_confirmed_stored_bytes": journal.last_stored_bytes,
+            "last_confirmed_expiry": journal.last_expiry,
+            "last_confirmed_state": journal.last_state.and_then(|state| ReceiptState::try_from(state).ok()).map(|state| format!("{state:?}")),
+        })
+    }
+
+    pub(super) fn charge_for(&self, journal: &Journal) -> Charge {
+        if self.charge == Charge::Unattempted && !journal.reserve_unsent() {
+            // A standalone writer can use the same child journal without the parent manifest.
+            Charge::Uncertain
+        } else {
+            self.charge
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
@@ -166,10 +186,12 @@ impl LockedSet {
     }
 
     pub(super) fn open(path: &Path) -> Result<Self> {
-        let retained = Self::open_without_recovery(path)?;
+        let mut retained = Self::open_without_recovery(path)?;
         retained.recover_handoff_copy()?;
         for index in 0..retained.data.copies.len() {
-            retained.copy(index)?;
+            let copy = retained.copy(index)?;
+            let record = &mut retained.data.copies[index];
+            record.charge = record.charge_for(&copy.journal);
         }
         Ok(retained)
     }
@@ -471,7 +493,7 @@ impl LockedSet {
             "replica journal differs from its original owner/provider/archive binding"
         );
         journal.target()?;
-        let valid_charge = match record.charge {
+        let valid_charge = match record.charge_for(journal) {
             Charge::Unattempted => journal.lease.is_none() && journal.last_state.is_none(),
             Charge::Reserved => {
                 matches!(journal.last_state, Some(value) if value == ReceiptState::Reserved as i32 || value == ReceiptState::Partial as i32)
@@ -515,18 +537,14 @@ impl LockedSet {
         let mut copies = Vec::with_capacity(self.data.copies.len());
         for (index, record) in self.data.copies.iter().enumerate() {
             let retained = self.copy(index)?;
-            match record.charge {
+            let charge = record.charge_for(&retained.journal);
+            match charge {
                 Charge::Reserved => reserved += self.data.ciphertext_bytes,
                 Charge::Committed => committed += self.data.ciphertext_bytes,
                 Charge::Uncertain => uncertain += self.data.ciphertext_bytes,
                 Charge::Unattempted | Charge::Deleted => {}
             }
-            copies.push(serde_json::json!({
-                "provider_key": hex::encode(record.provider_key), "charge": record.charge,
-                "last_confirmed_stored_bytes": retained.journal.last_stored_bytes,
-                "last_confirmed_expiry": retained.journal.last_expiry,
-                "last_confirmed_state": retained.journal.last_state.and_then(|state| ReceiptState::try_from(state).ok()).map(|state| format!("{state:?}")),
-            }));
+            copies.push(record.report(&retained.journal, charge));
         }
         Ok(serde_json::json!({
             "operation": format!("private_storage_replicas_{operation}"),

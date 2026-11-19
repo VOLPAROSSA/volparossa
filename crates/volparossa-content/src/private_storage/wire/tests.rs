@@ -2,6 +2,7 @@
 
 mod begin_observation;
 mod bridge_observation;
+mod challenge_recovery;
 mod diagnostic;
 mod provider_activity;
 mod request_stage;

@@ -178,16 +178,8 @@ async fn remote(
     .await?;
     let control = context
         .routes
-        .content_discovery_control()
-        .await
-        .ok_or(ContentError::Unavailable)?;
-    if !context
-        .routes
-        .content_provider_is_distinct(&request.peer)
-        .await
-    {
-        return Err(ContentError::Policy);
-    }
+        .content_provider_control(&request.peer)
+        .await?;
     let mut providers = until_requester_closed(local, async {
         context
             .discovery
@@ -238,12 +230,7 @@ async fn exchange(
     spare: Option<&background_custody::Lease<'_>>,
 ) -> Result<(), ContentError> {
     let current = checked_policy(context, Some(policy)).await?;
-    if context.routes.content_discovery_control().await != Some(control)
-        || !context
-            .routes
-            .content_provider_is_distinct(&request.peer)
-            .await
-    {
+    if context.routes.content_provider_control(&request.peer).await != Ok(control) {
         return Err(ContentError::Policy);
     }
     super::check_publication_time(&request.manifest)?;

@@ -23,6 +23,16 @@ private_storage_consumer_private() {
         -- python3 -B "$WORK/bin/storage-consumer-maintenance-smoke.py" "$@"
 }
 
+private_storage_consumer_release_known() {
+    # Only these closed states enter the cleanup receipt. Core output stays
+    # inside the unprivileged owner process, including on command failure.
+    if release_result=$(private_storage_consumer_private release-known "$consumer_user" "$1" \
+        "$binary_directory/volparossa" "$WORK/runtime-client/control/agent.sock" 2>/dev/null); then
+        case $release_result in no_archive|owner_confirmed|unconfirmed) printf '%s\n' "$release_result"; return ;; esac
+    fi
+    printf '%s\n' unavailable
+}
+
 private_storage_consumer_phase() {
     case $1 in publish|exercise|finish) ;; *) fail CONSUMER_PHASE_INVALID ;; esac
     consumer_phase=$1
@@ -62,6 +72,12 @@ private_storage_consumer_phase() {
             "$WORK/bin/storage-consumer-failure-boundary.py" capture "$WORK" \
             "$binary_directory/volparossa" "$consumer_phase" "${provider_baseline_ms:-0}") \
             >/dev/null 2>&1 || true
+        if [ "$consumer_phase" = publish ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
+            # The application and observer have joined. Freeze their failure first,
+            # then address each archive with its own retained identity and journal.
+            consumer_image_release=$(private_storage_consumer_release_known image)
+            consumer_cloud_release=$(private_storage_consumer_release_known cloud)
+        fi
     fi
     [ "$consumer_status" -eq 0 ] || fail CONSUMER_APPLICATION_FAILED
     # These are independent actual route, packet/control and completion checks,
@@ -106,7 +122,11 @@ private_storage_consumer_cleanup() {
     if [ "${storage_fixture_correlation:-no}" = yes ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
         private_storage_consumer_usage_snapshot || true
     fi
-    private_storage_consumer_private cleanup "$consumer_user" \
+    set --
+    if [ -n "${consumer_image_release:-}" ] && [ -n "${consumer_cloud_release:-}" ]; then
+        set -- "$consumer_image_release" "$consumer_cloud_release"
+    fi
+    private_storage_consumer_private cleanup "$consumer_user" "$@" \
         >"$WORK/storage-consumer-private-cleanup.json" || return 1
     # Only an empty fixture-owned parent is removed here. Provider deletion is
     # checked separately; removing private local state never proves it.

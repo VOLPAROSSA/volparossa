@@ -46,12 +46,23 @@ def prepared(root):
 class Retained(unittest.TestCase):
     def test_source_profile_and_original_ui_stay_distinct(self):
         provision = runpy.run_path(str(HERE / "cloud-private-upload-provision.py"))
-        self.assertEqual(provision["configured"]()["load_pins"]()["revision"], "ffdcfaa15cdd2a029dae545904b0a58603da4e17")
+        self.assertEqual(provision["configured"]()["load_pins"]()["revision"], "178592a3881d49f839f7716a154f7ef446ecbda5")
         new = provision["configured"](True)["load_pins"]()
         self.assertEqual(new["revision"], "396d5d4907f4859437b69b88943c18fefba9a2e8")
         with mock.patch.dict(os.environ, CLOUD_UPLOAD_PROFILE="retained-owner"):
             smoke = runpy.run_path(str(HERE / "cloud-private-upload-smoke.py"))
             self.assertEqual((smoke["PINS"], smoke["REVISION"]), (new, new["revision"]))
+            originals = ("scripts/immich_snapshot.py", "src/core-storage.mjs", "LICENSE")
+            files = {}
+            for name in originals:
+                key = "vendor/volparossa-image/" + Path(name).name
+                files[name] = dict(local=key, **new["files"][key])
+            vendor = dict(version=1, local_modifications=False, files=files,
+                repository="https://github.com/VOLPAROSSA/volparossa-image",
+                revision="78cc1d6cc7012ac64bbd07408990b63ed025d127")
+            smoke["verify_image_source"](vendor)
+            with self.assertRaises(ValueError):
+                smoke["verify_image_source"](dict(vendor, revision="770a23fef01cb4cc69303a433b31b9df0d26b44e"))
         script = HERE / "run-alpha-topology-vm.sh"
         for scenario, expected in (("cloud-private-upload", 0), ("cloud-private-file", 64)):
             run = subprocess.run(["sh", script, "--preview", "--scenario", scenario, "--cloud-owner-resume"],

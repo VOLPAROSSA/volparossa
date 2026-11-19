@@ -391,16 +391,18 @@ async fn observe_or_reserve(
             expires_at: retained.journal.requested_expiry,
         }
     };
-    let reply = remote(
+    let target = retained
+        .journal
+        .target()
+        .context(Boundary::new(operation, Stage::JournalOpen))?;
+    let reply = remote_with_journal(
         socket,
         grant,
         signer,
-        retained
-            .journal
-            .target()
-            .context(Boundary::new(operation, Stage::JournalOpen))?,
+        target,
         operation,
         &[],
+        Some(retained),
     )
     .await?;
     retained
@@ -463,13 +465,25 @@ pub(super) fn checked_input(path: &Path, expected: [u8; 32]) -> Result<(File, u6
     Ok((file, length))
 }
 
-pub(super) async fn remote(
+pub(super) fn remote<'a>(
+    socket: &'a Path,
+    grant: &'a VerifiedStorageGrant,
+    signer: &'a SigningKey,
+    target: StorageTarget,
+    operation: StorageOperation,
+    payload: &'a [u8],
+) -> impl Future<Output = Result<StorageTransfer>> + 'a {
+    remote_with_journal(socket, grant, signer, target, operation, payload, None)
+}
+
+async fn remote_with_journal(
     socket: &Path,
     grant: &VerifiedStorageGrant,
     signer: &SigningKey,
     target: StorageTarget,
     operation: StorageOperation,
     payload: &[u8],
+    journal: Option<&mut LockedJournal>,
 ) -> Result<StorageTransfer> {
     let mut stage = Stage::Authorization;
     let mut outcome_request_id = None;
@@ -530,6 +544,12 @@ pub(super) async fn remote(
                     expires,
                 },
             )?;
+            if matches!(operation, StorageOperation::Reserve { .. }) {
+                stage = Stage::JournalSave;
+                journal
+                    .context("a signed Reserve requires its owner journal")?
+                    .begin_reserve()?;
+            }
             stage = Stage::WireReceipt;
             outcome_request_id = Some(request_id.clone());
             let result = wire::finish(&mut stream, grant, &challenge, &request, payload).await?;

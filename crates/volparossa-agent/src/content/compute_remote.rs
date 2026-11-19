@@ -189,14 +189,7 @@ async fn exchange(
     )
     .await
     .map_err(|_| ContentError::Unavailable)?;
-    let control = context
-        .routes
-        .content_discovery_control()
-        .await
-        .ok_or(ContentError::Unavailable)?;
-    if !context.routes.content_provider_is_distinct(&peer).await {
-        return Err(ContentError::Policy);
-    }
+    let control = context.routes.content_provider_control(&peer).await?;
     *stage = "COMPUTE_RPC_DISCOVERY_FAILED";
     let mut providers = context
         .discovery
@@ -340,9 +333,7 @@ pub(super) async fn checked_route(
     provider: PeerId,
 ) -> Result<(), ContentError> {
     checked_policy(context, Some(policy)).await?;
-    if context.routes.content_discovery_control().await != Some(control)
-        || !context.routes.content_provider_is_distinct(&provider).await
-    {
+    if context.routes.content_provider_control(&provider).await != Ok(control) {
         return Err(ContentError::Policy);
     }
     Ok(())

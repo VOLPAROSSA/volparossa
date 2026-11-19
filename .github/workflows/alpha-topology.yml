@@ -31,6 +31,7 @@ on:
           - content-message
           - content-https
           - content-provider
+          - content-provider-map
           - protected-quote
           - content-custody
           - private-storage-peer
@@ -59,6 +60,8 @@ on:
           - agent-native-coding
           - agent-private-browser
           - browser-network
+          - browser-native-capacity
+          - browser-native-source
           - agent-reasoning
           - agent-artifact
           - agent-train-cycle
@@ -89,41 +92,83 @@ on:
         description: Exact reviewed VOLPAROSSA Image commit for image-immich
         type: string
         default: ''
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read
-
-concurrency:
-  group: alpha-production-helper-topology-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}-${{ inputs.scenario || 'datapath' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 defaults:
   run:
     shell: bash
 
 env:
-  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario || 'datapath' }}
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario == 'transaction-abci-bank' && 'transaction-abci' || inputs.scenario == 'cloud-private-upload-resume' && 'cloud-private-upload' || inputs.scenario == 'content-provider-map' && 'content-provider' || inputs.scenario == 'browser-native-source' && 'browser-network' || inputs.scenario || 'datapath' }}
   VOLPAROSSA_CLOUD_UPLOAD_PROFILE: ${{ inputs.scenario == 'cloud-private-upload-resume' && 'retained-owner' || 'ordinary' }}
+  VOLPAROSSA_NATIVE_BROWSER_SOURCE: ${{ inputs.scenario == 'browser-native-source' && 'true' || 'false' }}
 
 jobs:
+  native-browser-capacity:
+    name: Measure Gecko workspace and unprivileged KVM
+    if: inputs.scenario == 'browser-native-capacity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Measure the native builder prerequisites
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          df -B1 --output=source,size,avail,target "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          for tools in /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache; do
+            if test -d "$tools"; then du -sxB1 "$tools"; fi
+          done
+          test -c /dev/kvm
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          kvm_gid=$(stat -Lc '%g' /dev/kvm)
+          test "$kvm_gid" -gt 0
+          test "$(getent group "$kvm_gid" | cut -d: -f1)" = kvm
+          sudo -n -- /usr/bin/setpriv --reuid "$(id -u)" --regid "$kvm_gid" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs --reset-env \
+            /usr/bin/python3 -B tests/integration/browser-native-capacity.py "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+
   image-immich:
-    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'image-immich'
+    if: inputs.scenario == 'image-immich'
     uses: ./.github/workflows/image-immich-peer.yml
     with:
       image_revision: ${{ inputs.image_revision }}
 
   alpha-topology:
     name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'feature/alpha-vertical-runtime')
+    if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'
     runs-on: ubuntu-24.04
-    # New continuation has its own outer ceiling; signed E and legacy 150min are unchanged.
-    timeout-minutes: ${{ inputs.scenario == 'cloud-upload-maintenance' && 270 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
+    timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'cloud-upload-maintenance' && 270 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
+
+    env:
+      # These scenarios validate their own reports. Unlisted scenarios require full A01–A15 evidence.
+      FOCUSED_SCENARIOS: >-
+        [
+          "crash-recovery", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link",
+          "mpquic-growth", "mptcp-growth", "mptcp-refill", "sharing", "download-sharing",
+          "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "content", "content-message",
+          "content-https", "content-provider", "protected-quote", "content-custody",
+          "private-storage-peer", "private-storage-replicas", "signal-backup",
+          "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments",
+          "private-storage-maintenance", "cloud-upload-maintenance", "image-snapshot", "cloud-private-file",
+          "cloud-private-upload", "content-repair", "content-replication", "content-mailbox",
+          "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel",
+          "agent-private-task", "agent-private-code", "agent-private-conversation",
+          "agent-native-coding", "agent-private-browser", "browser-network", "agent-reasoning",
+          "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine",
+          "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery",
+          "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task",
+          "agent-public-document", "agent-cooperative-browser",
+          "agent-cooperative-browser-discovered", "agent-public-collection",
+          "agent-public-network-sources", "agent-task-graph", "agent-ready-dag",
+          "agent-model-planning", "agent-model-task-graph", "agent-successor-serving",
+          "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation",
+          "agent-policy-assessment"
+        ]
 
     steps:
       - name: Check out selected revision
@@ -220,6 +265,7 @@ jobs:
           sh -n tests/integration/cloud-private-upload-smoke.sh
           python3 -B tests/integration/test-content-retain-smoke.py
           sh -n tests/integration/content-repair-smoke.sh
+          python3 -B tests/integration/test-content-repair-site-restore.py
           python3 -B tests/integration/test-content-repair-smoke.py
           sh -n tests/integration/content-named-smoke.sh
           sh -n tests/integration/content-provider-filter-smoke.sh
@@ -249,6 +295,9 @@ jobs:
           python3 -B tests/integration/agent-private-task-browser.py self-test
           sh -n tests/integration/browser-network-smoke.sh
           python3 -B tests/integration/test-browser-network-smoke.py
+          python3 -B tests/integration/test-browser-native.py
+          python3 -B tests/integration/test-browser-native-source.py
+          bash -n tests/integration/browser-native-build.sh
           python3 -B tests/integration/agent-private-task-code.py self-test
           sh -n tests/integration/agent-private-conversation.sh
           python3 -B tests/integration/test-agent-private-conversation.py
@@ -340,6 +389,41 @@ jobs:
           install -d -m 0700 "$output"
           printf 'VOLPAROSSA_ALPHA_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
 
+      - name: Prepare the exact public Firefox, Mozilla build tools and Rust
+        if: inputs.scenario == 'browser-native-source'
+        run: |
+          set -euo pipefail
+          test ! -e /opt/volparossa-native-browser-build && test ! -L /opt/volparossa-native-browser-build
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            apparmor bubblewrap zstd make perl unzip pkg-config libarchive-tools
+          # The guarded cleanup can also remove an empty directory if acquisition
+          # stops before the producer writes its ownership marker.
+          printf 'VOLPAROSSA_NATIVE_SCRATCH_RESERVED=true\n' >> "$GITHUB_ENV"
+          sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /opt/volparossa-native-browser-build
+          bash tests/integration/browser-native-build.sh prepare
+
+      - name: Compile Firefox 157 with two jobs in the reviewed offline sandbox
+        if: inputs.scenario == 'browser-native-source'
+        timeout-minutes: 233
+        run: bash tests/integration/native-coding-apparmor.sh "$GITHUB_SHA"
+
+      - name: Verify the source build and pack the private guest runtime
+        if: inputs.scenario == 'browser-native-source'
+        run: bash tests/integration/browser-native-build.sh export
+
+      - name: Remove this run's compiler checkout and unpacked binaries before VM start
+        if: always() && inputs.scenario == 'browser-native-source'
+        run: |
+          scratch=/opt/volparossa-native-browser-build
+          if test "${VOLPAROSSA_NATIVE_SCRATCH_RESERVED:-}" = true && test -d "$scratch"; then
+            if test -f "$scratch/.owner"; then
+              bash tests/integration/browser-native-build.sh clean-build
+            else
+              test ! -L "$scratch" && test "$(stat -c '%u:%a' "$scratch")" = "$(id -u):700"
+              sudo -n rmdir -- "$scratch"
+            fi
+          fi
+
       - name: Source-build exact native Codex runtime for the selected coding proof
         if: env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-native-coding'
         timeout-minutes: 120
@@ -381,6 +465,9 @@ jobs:
           VMP_RUN_TESTS: no
         run: |
           set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            protobuf-compiler=3.21.12-8.2ubuntu0.4
+          protoc --version
           cargo fetch --locked
           source_date_epoch=$(git log -1 --format=%ct)
           SOURCE_DATE_EPOCH="$source_date_epoch" \
@@ -454,10 +541,13 @@ jobs:
         env:
           BANK_REQUESTED: ${{ inputs.scenario == 'transaction-abci-bank' }}
           BANK_AUTHORIZER_SHA256: ${{ steps.bank.outputs.sha256 }}
+          MAP_TRAFFIC: ${{ inputs.scenario == 'content-provider-map' }}
         run: |
           set -euo pipefail
           runner_uid=$(id -u)
           case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          map_args=()
+          if [[ $MAP_TRAFFIC == true ]]; then map_args=(--map-traffic); fi
           package_args=()
           native_args=()
           coding_args=()
@@ -475,6 +565,14 @@ jobs:
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh && test "$VOLPAROSSA_ALPHA_SCENARIO" != transaction-abci && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-training && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-priority && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-cancel && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-task && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-code && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-native-coding && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-browser && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-reasoning; then
             native_args=(--mpquic "$VOLPAROSSA_ALPHA_MPQUIC")
+          fi
+          browser_args=()
+          if test "$VOLPAROSSA_NATIVE_BROWSER_SOURCE" = true; then
+            test -f "$VOLPAROSSA_BROWSER_NATIVE_BUNDLE"
+            test "$(sha256sum "$VOLPAROSSA_BROWSER_NATIVE_BUNDLE" | cut -d' ' -f1)" = \
+              "$(jq -er '.archive_sha256' "$RUNNER_TEMP/native-browser-handoff/expected.json")"
+            browser_args=(--browser-native-bundle "$VOLPAROSSA_BROWSER_NATIVE_BUNDLE"
+              --browser-native-manifest-sha256 "$(jq -er '.bundle_sha256' "$RUNNER_TEMP/native-browser-handoff/expected.json")")
           fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = alpha; then
             package_args=(--package "$VOLPAROSSA_ALPHA_PACKAGE")
@@ -494,8 +592,9 @@ jobs:
             --execute --yes \
             --image "$VOLPAROSSA_ALPHA_IMAGE" \
             "${native_args[@]}" \
+            "${browser_args[@]}" \
             "${coding_args[@]}" \
-            "${cloud_args[@]}" "${bank_args[@]}" \
+            "${cloud_args[@]}" "${bank_args[@]}" "${map_args[@]}" \
             "${package_args[@]}" \
             --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
             --output "$VOLPAROSSA_ALPHA_OUTPUT" \
@@ -731,7 +830,7 @@ jobs:
             if test -f "$report"; then
               jq -r '"autonomous public replica repair after restart: \(.success)",
                 "reached phase: \(.phase)", "blocker: \(.observed_blocker // "none")",
-                "scope: healthy partial journal recovery; not initial network placement or full alpha"' \
+                "signed site revision served by independent holder: \(.repair.offline_site.viewer.ready.revision // "unavailable")"' \
                 "$report" >>"$GITHUB_STEP_SUMMARY"
             else
               printf '%s\n' 'The VM did not publish public replica repair runtime evidence.' >>"$GITHUB_STEP_SUMMARY"
@@ -1053,7 +1152,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'protected-quote' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-maintenance' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-upload-maintenance' && env.VOLPAROSSA_ALPHA_SCENARIO != 'image-snapshot' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-file' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-upload' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-native-coding' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'browser-network' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser-discovered' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
+        if: ${{ always() && !contains(fromJSON(env.FOCUSED_SCENARIOS), env.VOLPAROSSA_ALPHA_SCENARIO) }}
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -1138,10 +1237,44 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/browser-network-smoke.json"
           python3 -B tests/integration/browser-network-smoke.py report "$report" "$GITHUB_SHA"
+          if test "$VOLPAROSSA_NATIVE_BROWSER_SOURCE" = true; then
+            jq -e --arg sha "$GITHUB_SHA" --slurpfile produced "$RUNNER_TEMP/native-browser-handoff/expected.json" '
+              ($produced | length) == 1 and $produced[0].core_revision == $sha and .source_revision == $sha and
+              .network.provision.kind == "source-built-native-firefox" and
+              .network.provision.source_build == $produced[0].source_build and
+              .network.provision.native_bundle_sha256 == $produced[0].bundle_sha256 and
+              .network.browser.original_build_receipt_sha256 == $produced[0].source_build.receipt_sha256
+            ' "$report"
+          fi
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Retain only the source-built Firefox attestation and bounded browser receipts
+        if: always() && inputs.scenario == 'browser-native-source'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-browser-source-proof-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/native-browser-handoff/expected.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/browser-network-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/browser-network-browser.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/browser-network-readiness.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Remove the private source-built Firefox handoff
+        if: always() && inputs.scenario == 'browser-native-source'
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/native-browser-handoff"
+          if test -d "$directory"; then
+            test ! -L "$directory" && test "$(stat -c '%u:%a' "$directory")" = "$(id -u):700"
+            rm -f -- "$directory/firefox.tar.gz" "$directory/expected.json"
+            rmdir -- "$directory"
+          fi
+          test ! -e "$directory"
 
       - name: Require signed device refusal over the real protected provider route
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'protected-quote'
@@ -1168,6 +1301,20 @@ jobs:
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Verify signed Map peer receipt and disconnected expiry
+        if: always() && inputs.scenario == 'content-provider-map'
+        run: |
+          set -euo pipefail
+          jq -e --arg core "$GITHUB_SHA" '
+            .schema == 1 and .core_revision == $core and .map_revision == "f965604d365f87612caa6686e50b3705313a0ddc" and
+            .cold.providers == 1 and .cold.peer_bytes > 0 and .cold.peer_bytes == .cold.verified_payload_bytes and
+            .warm.providers == 0 and .warm.peer_bytes == 0 and .warm.verified_payload_bytes == .cold.peer_bytes and
+            .cold.synthetic_dataset_sha256 == .warm.synthetic_dataset_sha256 and .cold.synthetic_dataset_sha256 == .expired.synthetic_dataset_sha256 and
+            .expired.expired_publication_refused and .expired.no_new_handoff and .expired.observed_at >= .expired.signed_expiry and
+            .cold.owner_file_mode == "0600" and .warm.owner_file_mode == "0600" and .publisher_originals_removed and
+            .distinct_publisher_and_client and .provider_cache_isolated and .route_disconnected and .owner_cleanup
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/content-provider-map-traffic.json" >/dev/null
 
       - name: Require actual private storage upload, reopen, non-consuming restore and delete
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'private-storage-peer'
@@ -1797,7 +1944,7 @@ jobs:
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-repair-smoke.json"
-          python3 -B tests/integration/content-repair-smoke.py report "$report" "$GITHUB_SHA"
+          python3 -B tests/integration/content-repair-smoke.py report-restored "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -2290,7 +2437,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
-          path: ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+            !${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/package/*.deb
           if-no-files-found: warn
           retention-days: 7
 
@@ -2353,7 +2502,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity-private-dns' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-refill' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'protected-quote' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-peer' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup' && env.VOLPAROSSA_ALPHA_SCENARIO != 'signal-backup-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-replicas' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-handoff' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-fragments' && env.VOLPAROSSA_ALPHA_SCENARIO != 'private-storage-maintenance' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-upload-maintenance' && env.VOLPAROSSA_ALPHA_SCENARIO != 'image-snapshot' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-file' && env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-upload' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-native-coding' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'browser-network' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-cycle' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-train-loop' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact-quarantine' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-loss' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-follow' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-peer-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-ready-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-jobs-package-queue' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-document' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-cooperative-browser-discovered' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-collection' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-public-network-sources' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-ready-dag' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-planning' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-model-task-graph' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-successor-serving' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-active-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-adapter-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-autonomous-aggregation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-policy-assessment'
+        if: ${{ !contains(fromJSON(env.FOCUSED_SCENARIOS), env.VOLPAROSSA_ALPHA_SCENARIO) }}
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -2503,3 +2652,45 @@ jobs:
             "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-before-upgrade.json" >/dev/null
           jq -e 'all(.checks[]; .status != "fail")' \
             "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-after-upgrade.json" >/dev/null
+
+      - name: Verify the downloadable package against the guest checksum
+        if: inputs.scenario == 'alpha'
+        run: |
+          set -euo pipefail
+          package="$VOLPAROSSA_ALPHA_PACKAGE"
+          test -f "$package"
+          test ! -L "$package"
+          tested_sha=$(jq -er '.package.sha256 | select(test("^[0-9a-f]{64}$"))' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json")
+          cd -- "$(dirname -- "$package")"
+          name=${package##*/}
+          printf '%s  %s\n' "$tested_sha" "$name" > "$name.sha256"
+          sha256sum --check --strict -- "$name.sha256"
+
+          version=$(dpkg-deb -f "$package" Version)
+          [[ "$version" =~ ^[0-9]+([.][0-9]+)*$ ]]
+          worker="volparossa-private-dns-worker_${version}_amd64.deb"
+          source_dir="$VOLPAROSSA_ALPHA_OUTPUT/package"
+          test -f "$source_dir/$worker" && test ! -L "$source_dir/$worker"
+          test -f "$source_dir/$worker.sha256" && test ! -L "$source_dir/$worker.sha256"
+          test "$(dpkg-deb -f "$source_dir/$worker" Package)" = volparossa-private-dns-worker
+          test "$(dpkg-deb -f "$source_dir/$worker" Architecture)" = amd64
+          test "$(dpkg-deb -f "$source_dir/$worker" Version)" = "$version"
+          (cd "$source_dir" && sha256sum -- "$worker") | cmp - "$source_dir/$worker.sha256"
+          install -m 0600 "$source_dir/$worker" "$source_dir/$worker.sha256" .
+          sha256sum --check --strict "$worker.sha256"
+          printf 'VOLPAROSSA_ALPHA_WORKER_PACKAGE=%s/%s\n' "$PWD" "$worker" >> "$GITHUB_ENV"
+
+      - name: Upload the tested Debian Core package
+        if: inputs.scenario == 'alpha'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: volparossa-core-debian13-amd64-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}
+            ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}.sha256
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

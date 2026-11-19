@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, writeFile, chmod, symlink, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, rename, link, writeFile, chmod, symlink, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -1169,6 +1169,17 @@ test('four explicit phases and distinct deterministic incompressible fixture ide
   assert.throws(() => fixtureBytes('other'), /fixture_label/u);
 });
 
+test('Image exercise reports only known error codes from its own stages', () => {
+  const ctx = { provision: '1'.repeat(64), signal: new AbortController().signal, stage: 'image_owner_start' };
+  const failure = code => consumerFailureReport(ctx, 'exercise', Object.assign(new Error('private path'), { code }));
+  assert.equal(failure('maintenance_cleanup_unconfirmed').code, 'maintenance_cleanup_unconfirmed');
+  ctx.stage = 'image_repair';
+  assert.equal(failure('ENOENT').code, 'ENOENT');
+  assert.equal(failure('private path').code, 'application_failed');
+  ctx.stage = 'cloud_repair';
+  assert.equal(failure('ENOENT').code, 'application_failed');
+});
+
 test('same-fd private reads admit exact boundary and reject oversize, writable and symlink inputs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'storage-consumer-inert-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1179,6 +1190,31 @@ test('same-fd private reads admit exact boundary and reject oversize, writable a
   await chmod(path, 0o644); await assert.rejects(boundedFile(path, 4), /private_file/u);
   await chmod(path, 0o600); await symlink(path, join(root, 'link'));
   await assert.rejects(boundedFile(join(root, 'link'), 4));
+});
+
+test('atomic replica replacement between open and first fstat retries only a valid unlinked inode', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'storage-replica-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'replicas.json'), next = join(root, 'next');
+  await writeFile(path, 'old', { mode: 0o600 });
+  await writeFile(next, 'new', { mode: 0o600 });
+  const probe = await open(path);
+  const prototype = Object.getPrototypeOf(probe);
+  const originalStat = prototype.stat;
+  await probe.close();
+  t.mock.method(prototype, 'stat', async function (...args) {
+    await rename(next, path);
+    const retired = await Reflect.apply(originalStat, this, args);
+    assert.equal(retired.nlink, 0n);
+    return retired;
+  }, { times: 1 });
+  const ctx = { signal: new AbortController().signal, deadline: performance.now() + 2000 };
+  let reads = 0;
+  const bytes = await retainedSnapshot(ctx, () => { reads++; return boundedFile(path, 3); });
+  assert.equal(reads, 2);
+  assert.equal(bytes.toString(), 'new');
+  await link(path, join(root, 'alias'));
+  await assert.rejects(boundedFile(path, 3), { code: 'private_file' });
 });
 
 test('checkpoint validates authority scope and closed stage/cursor bounds', () => {

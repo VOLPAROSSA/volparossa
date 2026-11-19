@@ -504,6 +504,7 @@ pub(crate) enum AcquireFailureOperation {
     PeerAddress = 16,
     MptcpInfo = 17,
     ConnectReadiness = 18,
+    ConnectOperationDeadline = 19,
 }
 
 /// Closed original failure classes; missing errno is unknown, not zero.
@@ -539,6 +540,8 @@ impl AcquireFailureDiagnostic {
             || ((operation == AcquireFailureOperation::ConnectReadiness)
                 != (class == AcquireFailureClass::AmbiguousReadiness))
             || (class == AcquireFailureClass::AmbiguousReadiness && self.errno.is_some())
+            || (operation == AcquireFailureOperation::ConnectOperationDeadline
+                && (class != AcquireFailureClass::TimedOut || self.errno.is_some()))
         {
             return Err(InternalProtocolError::Invalid);
         }
@@ -2859,7 +2862,7 @@ mod tests {
 
     #[test]
     fn acquire_diagnostic_closed_values_and_errno_bound_are_exhaustive() {
-        for operation in 0..=19 {
+        for operation in 0..=20 {
             for class in 0..=4 {
                 for errno in [None, Some(-1), Some(0), Some(1), Some(4095), Some(4096)] {
                     let value = AcquireFailureDiagnostic {
@@ -2867,11 +2870,12 @@ mod tests {
                         class,
                         errno,
                     };
-                    let expected = (1..=18).contains(&operation)
+                    let expected = (1..=19).contains(&operation)
                         && (1..=3).contains(&class)
                         && errno.is_none_or(|value| (1..=4095).contains(&value))
                         && ((operation == 18) == (class == 3))
-                        && (class != 3 || errno.is_none());
+                        && (class != 3 || errno.is_none())
+                        && (operation != 19 || (class == 2 && errno.is_none()));
                     assert_eq!(value.validate().is_ok(), expected);
                 }
             }

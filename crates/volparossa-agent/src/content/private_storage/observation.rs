@@ -145,6 +145,12 @@ impl Observation {
         }
     }
 
+    pub(super) fn record_control_rejection(&self) {
+        self.reset();
+        self.stage
+            .store(Stage::ControlSelection as i32, Ordering::Relaxed);
+    }
+
     pub(super) fn detail(&self) -> Option<PrivateStorageRemoteDetail> {
         let stage = self.stage.load(Ordering::Relaxed);
         let deadline_scope = self.deadline.load(Ordering::Relaxed);
@@ -212,15 +218,25 @@ impl Observation {
         result
     }
 
+    #[cfg(test)]
     pub(super) fn budget<T>(
         &self,
         scope: Deadline,
         duration: Duration,
         operation: impl Future<Output = Result<T, ContentError>>,
     ) -> impl Future<Output = Result<T, ContentError>> {
+        self.budget_from(scope, Instant::now(), duration, operation)
+    }
+
+    pub(super) fn budget_from<T>(
+        &self,
+        scope: Deadline,
+        started: Instant,
+        duration: Duration,
+        operation: impl Future<Output = Result<T, ContentError>>,
+    ) -> impl Future<Output = Result<T, ContentError>> {
         // Construct the original timeout now, not lazily on our first poll: the
         // diagnostic wrapper must not shift the existing absolute deadline.
-        let started = Instant::now();
         let operation = timeout_at(started + duration, operation);
         if scope == Deadline::Operation {
             // The observation and deadline share this same construction-time instant,

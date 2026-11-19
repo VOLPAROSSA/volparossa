@@ -25,7 +25,7 @@ cloud_private_upload_run() {
     [ "$CLOUD_SOURCE" = /opt/volparossa-cloud ] || fail CLOUD_SOURCE_INVALID
     [ "$CLOUD_NODE" = /opt/volparossa-node/bin/node ] || fail CLOUD_NODE_INVALID
     case ${CLOUD_UPLOAD_PROFILE:-ordinary}:$CLOUD_REVISION in
-        ordinary:ffdcfaa15cdd2a029dae545904b0a58603da4e17|retained-owner:396d5d4907f4859437b69b88943c18fefba9a2e8) ;;
+        ordinary:178592a3881d49f839f7716a154f7ef446ecbda5|retained-owner:396d5d4907f4859437b69b88943c18fefba9a2e8) ;;
         *) fail CLOUD_REVISION_INVALID ;;
     esac
     if [ ! -f "$CLOUD_SOURCE/provision.json" ] || [ -L "$CLOUD_SOURCE/provision.json" ]; then
@@ -46,7 +46,7 @@ cloud_private_upload_run() {
 
 cloud_private_upload_finalize_report() {
     cloud_status=$1
-    cloud_scope="Pinned Cloud original Files/Uppy upload through real owner encryption and protected fragments. Authenticated synthetic DAV baseline source stopped; both local ciphertexts removed; service stopped and restarted; provider A offline; two baseline restores and two original UI downloads. Exact retained physical charges, all-copy retirement and joined private service/browser cleanup. No full OpenCloud accounts, sharing, writable synchronization or general server-independent availability proof."
+    cloud_scope="Pinned original Files/Uppy upload, guest owner encryption and protected fragments. Source and both local ciphertexts removed; service/browser restarted; provider A offline; two baseline and two UI restores, exact charges and all-copy retirement. No full OpenCloud account/sharing/sync proof."
     if [ "${CLOUD_UPLOAD_PROFILE:-ordinary}" = retained-owner ]; then
         cloud_scope="Original Files/Uppy upload interrupted after a committed copy. Owner CLI reopened original encrypted catalog/ciphertext/journal after browser and source removal. Two fresh UI downloads with one provider stopped; bounded test cleanup and physical charges. No maintenance enrollment or independent-device proof."
     fi
