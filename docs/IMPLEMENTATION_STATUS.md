@@ -450,7 +450,7 @@ is removed; behavioral tests and production paths are unchanged.
 
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
-| Network | Core `9072cce8` passed A01–A15 and the install, upgrade and removal of the Debian 13 amd64 package pair. Mixed-link performance and the expanded DICN scenarios remain open. [Acceptance and packages](#network-baseline-and-remaining-proof) |
+| Network | Two independent runners built identical Core and DNS worker packages at `428e2899`. Both passed A01–A15 and the Debian 13 install, upgrade and removal trial. One 32 MiB mixed-link transfer measured 1.437× the WAN-only throughput. The earlier trial measured 0.972×. [Acceptance and packages](#network-baseline-and-remaining-proof) · [Both mixed-link runs](https://github.com/VOLPAROSSA/volparossa/pull/439) |
 | Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
@@ -1051,6 +1051,25 @@ The repository retains both package checksums and the original acceptance eviden
 [Core checksum](development/evidence/alpha-package-44453914133/volparossa_0.1.0_amd64.deb.sha256) ·
 [Worker checksum](development/evidence/alpha-package-44453914133/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) ·
 [Installation instructions](../packaging/README.md)
+
+On 19 November 2026, two independent hosted runners each built the Debian
+amd64 packages twice from Core `428e28999768f274e61c0267e34db4f671677b2f`.
+The Core package (26,104,956 bytes) and private DNS worker (52,796 bytes)
+each matched byte for byte across the two downloads. The package builder now
+calculates Installed-Size from logical file sizes, so filesystem block allocation
+does not change the binary archive. Both Debian 13 KVM runs passed A01–A15,
+installed the package pair, preserved the identity across the upgrade and
+removed the package. Each guest counted zero remaining test objects and its
+before/after host snapshots matched.
+[First acceptance](development/evidence/alpha-package-44530318378/acceptance-report.json) ·
+[Second acceptance](development/evidence/alpha-package-44530323130/acceptance-report.json) ·
+[First package lifecycle](development/evidence/alpha-package-44530318378/package-lifecycle.json) ·
+[Second package lifecycle](development/evidence/alpha-package-44530323130/package-lifecycle.json) ·
+[Core SHA-256](development/evidence/alpha-package-44530323130/volparossa_0.1.0_amd64.deb.sha256) ·
+[Worker SHA-256](development/evidence/alpha-package-44530323130/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) ·
+[First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530318378) ·
+[Second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130) ·
+[Download the tested packages](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130/artifacts/14537641263)
 
 ## Fixed alpha v1 scorecard
 
