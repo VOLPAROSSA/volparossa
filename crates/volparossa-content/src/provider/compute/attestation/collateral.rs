@@ -14,6 +14,8 @@ use rsa::{
     signature::Verifier as _,
     traits::PublicKeyParts as _,
 };
+#[cfg(test)]
+use sev::certs::snp::builtin::milan;
 use sha2::{Digest as _, Sha256, Sha384};
 use x509_cert::{
     Certificate, Version,
