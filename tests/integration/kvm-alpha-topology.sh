@@ -1567,7 +1567,7 @@ else
     WORK=$(mktemp -d "/opt/va.$RUN_ID.XXXXXX")
     case $WORK in /opt/va.*) ;; *) exit 69 ;; esac
 fi
-longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock
+longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock.apps
 [ "${#longest_control_socket}" -lt 108 ] || exit 69
 chmod 0700 "$WORK"
 
@@ -1981,6 +1981,18 @@ retire_unit() {
     systemctl clean --what=fdstore "$retire_name" >/dev/null 2>&1 || true
     systemctl reset-failed "$retire_name" >/dev/null 2>&1 || true
     return 0
+}
+
+retire_runtime_sockets() {
+    # SIGKILL bypasses the agent's normal guards for both control listeners.
+    # Retire only known endpoint names in this run's per-node runtime tree.
+    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 \
+        relay5 exit exit2; do
+        cleanup_runtime=$WORK/runtime-$cleanup_node
+        rm -f -- "$cleanup_runtime/helper.sock" \
+            "$cleanup_runtime/control/agent.sock" "$cleanup_runtime/control/agent.sock.apps" \
+            "$cleanup_runtime/native/mpquic.sock" "$cleanup_runtime/native/mpquic.sock.exit" || return 1
+    done
 }
 
 mpquic_growth_finalize_report() {
@@ -2512,13 +2524,7 @@ cleanup() {
         original_status=1
         OBSERVED_BLOCKER=A14_REMAINING_INVENTORY_UNAVAILABLE
     fi
-    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 \
-        relay5 exit exit2; do
-        rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
-            "$WORK/runtime-$cleanup_node/control/agent.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock.exit"
-    done
+    if [ "$REMAINING_UNITS" -eq 0 ]; then retire_runtime_sockets || original_status=1; fi
     remaining_runtime_sockets=$(find "$WORK"/runtime-* -type s -print \
         | awk 'END { print NR + 0 }')
 
