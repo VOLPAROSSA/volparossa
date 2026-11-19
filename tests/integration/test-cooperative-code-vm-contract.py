@@ -32,6 +32,7 @@ def selected_topology_argv(scenario):
     script = "\n".join(("set -eu", 'scenario=$1', "expected_commit=" + "a" * 40,
                         "code_manifest_sha256=" + "b" * 64,
                         "browser_filter_manifest_sha256=none", "weather_client_manifest_sha256=none",
+                        "studio_evidence_sha256=",
                         "exec 3>&1",
                         "guest_phase() { :; }", "sudo() { printf '%s\\0' \"$@\" >&3; }", selector))
     result = subprocess.run(["sh", "-c", script, "test", scenario], capture_output=True, timeout=5, check=True)
