@@ -2702,7 +2702,7 @@ set +e
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --code-bundle /home/vpci/cooperative-code-inputs \
         --code-manifest-sha256 "$code_manifest_sha256"
-elif [ "$map_traffic" = yes ]; then
+elif [ "${map_traffic:-no}" = yes ]; then
     sh tests/integration/map-traffic-sources.sh download /home/vpci/map-traffic || exit 1
     set -- ./tests/integration/kvm-alpha-topology.sh --map-traffic
 elif [ "$browser_filter_manifest_sha256" != none ]; then
@@ -3148,7 +3148,7 @@ case $scenario in
         elif [ -n "$weather_client_bundle" ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" weather-client "$WEATHER_CLIENT_ARCHIVE_SHA256" "$WEATHER_CLIENT_MANIFEST_SHA256"
-        elif [ "$map_traffic" = yes ]; then
+        elif [ "${map_traffic:-no}" = yes ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" map-traffic
         elif [ -n "$browser_filter_bundle" ]; then
