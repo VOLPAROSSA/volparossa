@@ -439,8 +439,8 @@ async fn fake_agent(
         control_request::Operation, control_response::Payload, read_request, write_response,
     };
     let mut index = 0;
-    // Seventeen deposit attempts, eleven restore attempts, one renewal and two deletes.
-    while index < 31 {
+    // Twenty-four deposit attempts, eleven restore attempts, one renewal and two deletes.
+    while index < 38 {
         let (mut local, _) = listener.accept().await.unwrap();
         let request = read_request(&mut local).await.unwrap();
         if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
@@ -687,8 +687,45 @@ async fn peer_ipc_requires_terminal_and_streams_resumable_private_copy() {
         );
         assert_eq!(retained.journal.last_stored_bytes, CHUNK_BYTES as u64);
     }
-    // Progress reopens the durable prefix. The next Append can select a fresh
-    // route before READY while retaining the original lease and signed bytes.
+    // A recovered Append consumes the single copy allowance. A later pre-READY
+    // Finalize rejection preserves the complete durable prefix and its original lease.
+    for event in [None, missing_control, None, missing_control] {
+        inject.send(event).unwrap();
+    }
+    assert!(
+        transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
+            .await
+            .is_err()
+    );
+    assert_eq!(retained.journal.last_stored_bytes, bytes.len() as u64);
+    assert_eq!(
+        retained.journal.last_state,
+        Some(ReceiptState::Partial as i32)
+    );
+    for (failure, background) in [(policy, false), (missing_control, true)] {
+        inject.send(None).unwrap(); // Observe the same complete, uncommitted prefix.
+        inject.send(failure).unwrap();
+        let attempt =
+            transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input);
+        let result = if background {
+            transfer::with_maintenance_turn(vec![1; 32], attempt).await
+        } else {
+            attempt.await
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::control::AgentRejected>()
+                .is_some()
+        );
+        assert_eq!(transfer::known_target(&retained.journal).unwrap(), target);
+        assert_eq!(
+            retained.journal.last_state,
+            Some(ReceiptState::Partial as i32)
+        );
+    }
+    // Foreground Progress observes the prefix. Finalize then loses its control
+    // before READY and reaches the provider once on the replacement connection.
     for event in [None, missing_control, None] {
         inject.send(event).unwrap();
     }
