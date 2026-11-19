@@ -190,6 +190,27 @@ independent hosting and Firefox rendering.
 [Restored-site trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44400834835)
 · [Silex hosting trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952)
 
+To reproduce the Silex trial from a checked-out, hosted Core development branch,
+pass its exact HEAD and the reviewed Studio application revision. The job runs
+the original editor, verifies the signed export, stops the publisher, and opens
+the same release in Firefox through the independent holder.
+
+```sh
+gh workflow run quality.yml --repo VOLPAROSSA/volparossa \
+  --ref "$(git branch --show-current)" -f core_revision="$(git rev-parse HEAD)" \
+  -f studio_export_pack=true -f studio_proof_mode=signed-site-topology \
+  -f studio_revision=cb66fd7f35b7bda3012b771d2a136fb9fa836fc1
+```
+
+The generated four-asset restoration runs separately in the Core topology
+workflow. It verifies the independently served revision 3 and the original
+site bytes after the authorized restore.
+
+```sh
+gh workflow run alpha-topology.yml --repo VOLPAROSSA/volparossa \
+  --ref "$(git branch --show-current)" -f scenario=content-repair
+```
+
 ## Static, dynamic and application boundaries
 
 Static hosting is the first complete workflow, with ordinary portable export and

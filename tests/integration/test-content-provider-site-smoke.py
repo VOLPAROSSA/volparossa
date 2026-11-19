@@ -4,10 +4,12 @@
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 import runpy
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).parent
 CHECK = runpy.run_path(str(HERE / "content-provider-site-smoke.py"))
@@ -105,6 +107,71 @@ class SiteProof(unittest.TestCase):
             changed["expected_peers"][changed["layout"]["provider_nodes"][1]]]
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](changed)
+
+    def test_open_invocation_pins_only_the_explicit_restored_release(self):
+        expected = fixture()["input"]
+        pin = "a" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            arguments = ["volparossa", "/control", "/agent-cache", directory,
+                         "parent-netns", "client-netns", "985", "985", "1003"]
+            for release, expected_options in (
+                    ({}, ["--min-revision", "1"]),
+                    (dict(restored_release=dict(revision=3, manifest_id=pin)),
+                     ["--min-revision", "3", "--expected-manifest-id", pin])):
+                (Path(directory) / "expected.json").write_text(json.dumps(dict(expected, **release)), encoding="utf-8")
+                with patch.dict(CHECK["HTTPS"], process_boundary=lambda *_: {}), \
+                        patch("subprocess.Popen", side_effect=RuntimeError("captured command")) as launch, \
+                        self.assertRaisesRegex(RuntimeError, "captured command"):
+                    CHECK["consume"](arguments)
+                self.assertEqual(launch.call_args.args[0], [
+                    "volparossa", "--control-socket", "/control", "content", "site", "open",
+                    "--publisher-key", expected["publisher_key"], "--name", expected["name"], *expected_options,
+                    "--cache", "/agent-cache", "--min-free-bytes", "0", "--lifetime-seconds", "90"])
+
+    def test_restored_viewer_pins_the_reviewed_manifest_and_rejects_another_signed_revision(self):
+        evidence = fixture()
+        inputs = evidence["input"]
+        app = evidence["application"]
+        pin = app["ready"]["manifest_id"]
+        self.assertEqual(CHECK["release_arguments"](inputs, False), ["--min-revision", "1"])
+        inputs["restored_release"] = dict(revision=3, manifest_id=pin)
+        selector = ["--min-revision", "3", "--expected-manifest-id", pin]
+        self.assertEqual(CHECK["release_arguments"](inputs, False), selector)
+        app["release_selection"] = selector
+        for key in ("ready", "final"):
+            app[key]["revision"] = 3
+        CHECK["validate_application"](evidence, app, {pin}, False)
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](evidence)
+        with self.assertRaises(ValueError):
+            CHECK["validate_application"](evidence, app, {pin, "b" * 64}, False)
+        for key in ("ready", "final"):
+            for change in (dict(revision=1), dict(revision=4), dict(manifest_id="b" * 64)):
+                changed = copy.deepcopy(app)
+                changed[key].update(change)
+                with self.subTest(key=key, change=change), self.assertRaises(ValueError):
+                    CHECK["validate_application"](evidence, changed, {pin}, False)
+        changed = copy.deepcopy(app)
+        changed["release_selection"] = ["--min-revision", "3"]
+        with self.assertRaises(ValueError):
+            CHECK["validate_application"](evidence, changed, {pin}, False)
+        for change in (dict(studio_handoff={}), dict(bundle_sha256="b" * 64),
+                       dict(restored_release=None), dict(restored_release=dict(revision=3, manifest_id="invalid")),
+                       dict(restored_release=dict(revision=1, manifest_id=pin))):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                CHECK["release_arguments"](dict(inputs, **change), False)
+        with self.assertRaises(ValueError):
+            CHECK["release_arguments"](inputs, True)
+
+    def test_receipts_cannot_rebind_chunk_count_away_from_the_signed_byte_length(self):
+        evidence = fixture()
+        evidence["input"]["chunks"] = 8
+        evidence["publish"]["chunks"] = 8
+        for app in (evidence["application"], evidence["cache_only"]["application"]):
+            for key in ("ready", "final"):
+                app[key]["chunks"] = 8
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](evidence)
 
     def test_cache_only_requires_same_authority_no_route_or_discovery_and_zero_provider_payload(self):
         evidence = fixture()
