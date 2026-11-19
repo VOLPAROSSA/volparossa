@@ -9,6 +9,11 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# Explicit local two-provider integration fixture, built separately from the CLI.
+[[example]]
+name = "mailbox-provider-pair"
+path = "tests/fixtures/mailbox_provider_pair.rs"
+
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
