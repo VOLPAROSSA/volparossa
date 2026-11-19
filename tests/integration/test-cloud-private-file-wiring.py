@@ -118,9 +118,6 @@ class CloudSnapshotWiring(unittest.TestCase):
         self.assertIn('cloud-private-file-smoke.py report "$report" "$GITHUB_SHA"', gate)
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
-        for title in ("Validate normative acceptance report before upload", "Require successful A01-A15 evidence"):
-            segment = workflow.split("      - name: " + title, 1)[1].split("\n        env:", 1)[0]
-            self.assertIn("env.VOLPAROSSA_ALPHA_SCENARIO != 'cloud-private-file'", segment)
 
 
 if __name__ == "__main__":

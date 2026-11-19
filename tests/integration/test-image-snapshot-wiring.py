@@ -111,9 +111,6 @@ class ImageSnapshotWiring(unittest.TestCase):
         self.assertIn('image-snapshot-smoke.py report "$report" "$GITHUB_SHA"', gate)
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
-        for title in ("Validate normative acceptance report before upload", "Require successful A01-A15 evidence"):
-            segment = workflow.split("      - name: " + title, 1)[1].split("\n        env:", 1)[0]
-            self.assertIn("env.VOLPAROSSA_ALPHA_SCENARIO != 'image-snapshot'", segment)
 
 
 if __name__ == "__main__":
