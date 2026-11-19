@@ -342,6 +342,10 @@ jq() { return 83; }
             self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
             self.assertIn("--property=PrivateNetwork=yes", command)
             self.assertIn("--property=User=volparossa", command)
+            self.assertIn("--property=RootDirectory=" + str(staging / "root"), command)
+            self.assertNotIn("--property=RootEphemeral=yes", command)
+            self.assertIn("--property=WorkingDirectory=/workbench", command)
+            self.assertIn("--property=BindPaths=" + str(projects) + ":/workbench", command)
 
     def test_workbench_inputs_pin_each_committed_file_and_the_official_editor(self):
         value = manifest()

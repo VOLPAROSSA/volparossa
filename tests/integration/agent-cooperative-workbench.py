@@ -60,11 +60,14 @@ def service(root, code, release, owner_socket):
     readonly = ["/usr", "/etc/passwd", "/etc/group", "/etc/ld.so.cache", "/etc/fonts",
                 f"{code}/code:/opt/volparossa-code", f"{release}:/opt/volparossa-editor",
                 f"{code}/runtime/node:/opt/volparossa-node", f"{owner_socket}:/workbench/public.sock"]
+    # This root already belongs exclusively to this invocation. On ext4,
+    # systemd 257 creates the fallback RootEphemeral copy under the unit's
+    # umask, leaving its root untraversable by the editor user.
     props = ["User=volparossa", "Group=volparossa", "UMask=0077", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
              "AmbientCapabilities=", "PrivateNetwork=yes", "PrivateDevices=yes", "ProtectProc=invisible",
              "ProtectSystem=strict", "ReadOnlyPaths=/sys", "ProtectControlGroups=yes", "MountAPIVFS=yes",
              "TemporaryFileSystem=/tmp:mode=1777", "KillMode=control-group", "TimeoutStopSec=20s", "RuntimeMaxSec=2520s",
-             "MemoryMax=3G", "MemorySwapMax=0", f"RootDirectory={root}", "RootEphemeral=yes",
+             "MemoryMax=3G", "MemorySwapMax=0", f"RootDirectory={root}", "WorkingDirectory=/workbench",
              "BindReadOnlyPaths=" + " ".join(readonly), f"BindPaths={code}/projects:/workbench", "ReadWritePaths=/workbench"]
     return ["/usr/bin/systemd-run", "--quiet", "--wait", "--collect", "--unit=" + UNIT, "--service-type=exec",
             *("--property=" + prop for prop in props), "--", "/opt/volparossa-node",
