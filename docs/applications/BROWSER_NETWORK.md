@@ -211,8 +211,8 @@ payload/cleanup gates, while retaining main's request-scoped route snapshot and
 eligible relay/Exit-control selection. The scoped-selection changes were absent
 from the original trial's source. They do not invent missing advertisements, and
 the integration alone does not prove a fix for this or any earlier failed trial.
-Native ordinary-tab payload, full hashes, two carrying paths per route and
-independent detach still require a new exact-source disposable proof.
+The next trials exercised native ordinary-tab payload, both full hashes, two
+carrying paths per route and independent detach.
 
 ## Hosted native Firefox trial on 19 November 2026
 
@@ -236,7 +236,7 @@ and marked only the first payload request ready. The origin's
 `request_rejected` category covers multiple request checks, so the exact
 reason for rejection is unknown. The guest network state matched before and
 after cleanup, Firefox exited, its profile was removed and zero owned topology
-objects remained. The second hash and independent detach are still outstanding.
+objects remained. This attempt ended before the second hash and independent detach.
 [Origin diagnostic](../development/evidence/browser-native-44416643207/browser-network-driver.json)
 · [Topology and cleanup](../development/evidence/browser-native-44416643207/browser-network-smoke.json)
 
@@ -245,7 +245,29 @@ within the original phase deadline. It returns an empty 404 for an exact
 same-origin favicon request and accepts an empty TLS close before any HTTP
 bytes. Each accepted connection still requires the fixture Exit address and
 TLS. Only the two exact object requests can advance the payload gates. Separate
-counters and bounded error codes identify what the next run observes.
+counters distinguish those ancillary requests from object transfers.
+
+### Two complete native Firefox navigations
+
+Core `50b92f8acf4debb7b5a3e117fd14c7f5f8e26a39` rebuilt the same
+Browser `c3311ebedcc02dc45ff9c9822cee62f091609f86` offline in 86 minutes
+53 seconds. Both ordinary Firefox tabs rendered the expected text and
+verified 33,554,432 bytes with SHA-256
+`3d8f7855a909ad05676127faddb8ebdb4d68e0a9404c353407630805d89d50b5`.
+The TLS 1.3 origin recorded two requests from the Exit and one ancillary
+favicon request. No proxy credentials reached the origin. The client and Exit
+kernel samples showed two carrying MPTCP subflows on distinct WireGuard paths
+for each transfer. Releasing attachment A removed its route at both ends.
+Tab B finished on its own route. Firefox exited, its private profile was removed,
+the guest network snapshots matched and zero owned topology objects remained.
+[Hosted build and KVM](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054)
+· [Original topology report](../development/evidence/browser-native-44434221054/browser-network-smoke.json)
+· [Origin diagnostic](../development/evidence/browser-native-44434221054/browser-network-driver.json)
+· [Source-build attestation](../development/evidence/browser-native-44434221054/expected.json)
+
+The trial supplies both scoped grants through the privileged driver. Interaction
+with a visible tab menu, raw ECH wire evidence and browser-wide traffic policy
+have separate verification boundaries.
 
 ## Build the native browser and run the ordinary-tab proof
 

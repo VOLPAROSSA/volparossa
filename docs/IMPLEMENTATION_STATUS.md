@@ -363,14 +363,16 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
 
 ### Native Firefox ordinary tabs
 
-Core `669e73ea` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
-The guest verified its first 32 MiB ordinary-tab navigation. The second tab
-selected its route and received zero body bytes. The origin recorded two TLS
-handshakes and one accepted file request. Cleanup removed every owned topology
-object and the guest network snapshots matched. A second full body hash,
-carrying paths on its route and independent detach remain open.
-[Original hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416643207)
-· [Build, browser and origin evidence](applications/BROWSER_NETWORK.md#hosted-native-firefox-trial-on-19-november-2026)
+Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
+Both ordinary tabs verified the same 32 MiB body over two carrying MPTCP
+subflows on distinct WireGuard paths. Releasing the first route at both ends
+left the second transfer active. The origin observed the Exit address with no
+proxy credentials. Firefox exited, its private profile was removed, the guest
+network state matched and zero owned objects remained. Grant assignment in
+this run used the privileged test driver. The preceding attempt stopped after
+the first complete body.
+[Passing build and KVM](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054)
+· [Both trials and original receipts](applications/BROWSER_NETWORK.md#two-complete-native-firefox-navigations)
 
 ### Core project website — 2026-10-30
 
