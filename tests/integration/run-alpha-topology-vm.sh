@@ -1409,7 +1409,7 @@ MAINTENANCE_PRIORITY_NAMES = {
 } | {"host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase",
      "private-storage-provider-activity.json", "private-storage-fixture-correlation.json"}
 
-SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
+SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json", "signal-backup-fragments-route-diagnostic.json",
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
     "guest-exit-status", "current-phase"} | {
     f"signal-backup-fragments-{name}.json" for name in (

@@ -109,6 +109,8 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${storage_fixture_driver:-}" = signal-backup-fragments-smoke.py ]; then
+        benchmark_diagnostic_prefix=signal-backup-fragments
     elif [ "${private_storage_maintenance:-no}" = yes ]; then
         # Internal closed intermediate; only the validated combined projection
         # is exported by the maintenance finalizer, never these private markers.

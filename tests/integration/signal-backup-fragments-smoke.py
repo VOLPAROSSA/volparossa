@@ -24,7 +24,7 @@ PHASES = dict(upload=32, restore=20, finish=16)
 FALSE_SCOPE = (*NATIVE["FALSE_SCOPE"], "automatic_repair", "erasure_coding")
 SUMMARY = ("smoke", "evidence", "prepare", "native", "uploaded", "refusal", "restore", "finish",
            "withdrawal", "uploaded_usage", "restored_usage", "deleted_usage", "isolation", "layout", "guard")
-EXPORT_NAMES = ("a01-expected-peers.json", "signal-backup-private_cleanup.json",
+EXPORT_NAMES = ("a01-expected-peers.json", "signal-backup-private_cleanup.json", f"{NAME}-route-diagnostic.json",
     *(f"{NAME}-{name}.json" for name in SUMMARY), *(name for phase in PHASES for name in (
         f"private-storage-fragments-{phase}-live-selection.json",
         f"private-storage-fragments-{phase}-gates.json",
