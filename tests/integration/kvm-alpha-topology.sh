@@ -18,6 +18,7 @@ private_storage_replicas=no
 private_storage_handoff=no
 signal_backup=no
 signal_backup_fragments=no
+signal_mailbox=no
 private_storage_fragments=no
 private_storage_maintenance=no
 storage_fixture_correlation=no
@@ -94,6 +95,10 @@ print_plan() {
             '  wrong requester, actual fixed-device unavailability, then exhausted one-attempt grant;' \
             '  five-role privacy plus control captures and exact cleanup; no fake firmware or private task;' \
             '  two selected distinct relays are not proof of two-subflow bulk traffic.'
+        return
+    fi
+    if [ "$signal_mailbox" = yes ]; then
+        printf '%s\n' 'Two standalone Signal Desktops with two signed mailbox providers through the real Client agent and protected MPTCP route.'
         return
     fi
     if [ "$signal_backup_fragments" = yes ]; then
@@ -794,6 +799,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_handoff=no
             signal_backup=no
             signal_backup_fragments=no
+            signal_mailbox=no
             private_storage_fragments=no
             private_storage_maintenance=no
             storage_fixture_correlation=no
@@ -834,6 +840,7 @@ while [ "$#" -gt 0 ]; do
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
+                signal-mailbox) scenario=content-mailbox; signal_mailbox=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup-fragments) scenario=content-custody; signal_backup=yes; signal_backup_fragments=yes; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 reciprocity-private-dns) scenario=reciprocity; reciprocal_private_dns=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-peer) scenario=content-custody; private_storage_peer=yes; wifi_link=no; uplink_link=no ;;
@@ -2336,6 +2343,9 @@ cleanup() {
     fi
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
+        if [ "$signal_mailbox" = yes ] && command -v signal_mailbox_cleanup >/dev/null 2>&1; then
+            signal_mailbox_cleanup || original_status=1
+        fi
     fi
     if [ "$signal_backup" = yes ] && command -v signal_backup_cleanup >/dev/null 2>&1; then
         signal_backup_cleanup || original_status=1
@@ -2648,6 +2658,7 @@ cleanup() {
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+        if [ "$signal_mailbox" = yes ]; then signal_mailbox_finalize_report "$original_status" || original_status=1; fi
     elif [ "$signal_backup_fragments" = yes ]; then
         signal_backup_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$signal_backup" = yes ]; then
@@ -2993,6 +3004,10 @@ if [ "$scenario" = content-mailbox ]; then
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-mailbox-smoke.sh
     . "$source_directory/tests/integration/content-mailbox-smoke.sh"
+    if [ "$signal_mailbox" = yes ]; then
+        # shellcheck source=tests/integration/signal-mailbox-smoke.sh
+        . "$source_directory/tests/integration/signal-mailbox-smoke.sh"
+    fi
 fi
 if [ "$scenario" = dns-cache ]; then
     # shellcheck source=tests/integration/dns-cache-smoke.sh
@@ -6469,7 +6484,7 @@ start_privacy_observers() {
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;
-        content-mailbox-send-privacy|content-mailbox-receive-privacy)
+        content-mailbox-send-privacy|content-mailbox-receive-privacy|content-mailbox-desktop-privacy)
             [ "$scenario" = content-mailbox ] || return 1 ;;
         private-storage-peer-privacy)
             [ "$private_storage_peer" = yes ] || return 1 ;;
