@@ -413,7 +413,7 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at three Cloud reservations. The latest run stopped during Image deposit with four incomplete copies and one outstanding provider reservation. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial stopped at an Image reservation. All three providers reported zero usage after cleanup. The owner could not confirm every deletion. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
@@ -686,6 +686,21 @@ real SQLite provider and a controlled local IPC transport. It passed in the
 default-branch change's workspace suite (4,459 passed, zero failed, 21 ignored).
 [Core integration](https://github.com/VOLPAROSSA/volparossa/pull/386)
 · [Quality and test log](https://github.com/VOLPAROSSA/volparossa/actions/runs/44418876629)
+
+The next twelve-node trial on `462581e2` prepared Image and Cloud. Image
+publication stopped at fragment 2, copy 0. The owner had yet to send a signed
+Reserve. The agent spent 90–120 seconds awaiting the response frame length for
+the provider challenge and exhausted its operation deadline. The error report
+does not establish how many length bytes arrived. Separate fixture records
+observed a provider TLS timeout without identifying the affected copy.
+The Image adapter closed. The later owner deletion returned an incomplete
+result. Independent reads found zero leases, reserved bytes and committed
+bytes at all three providers. Local cleanup removed 40 files and 20 directories,
+and the host snapshots matched. Cloud publication and combined repair were
+not reached. The 82,243-byte Actions ZIP has SHA-256
+`12cfd2f78bce34895487d6fb9e116eef7f33adc4c86b8e3f6891928ec8838b56`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44419915713)
+· [Original failure, usage and cleanup reports](development/evidence/storage-maintenance-44419915713)
 
 #### Automatic upload integration candidate
 
