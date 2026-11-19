@@ -417,9 +417,12 @@ impl LockedFragments {
                     intent.phase != super::super::retained::HandoffPhase::Complete
                 }));
             let mut confirmed = 0;
+            let mut copy_rows = Vec::with_capacity(copies.data.copies.len());
             for (copy, record) in copies.data.copies.iter().enumerate() {
                 let retained = copies.copy(copy)?;
-                match record.charge {
+                let charge = record.charge_for(&retained.journal);
+                copy_rows.push(record.report(&retained.journal, charge));
+                match charge {
                     Charge::Reserved => reserved += fragment.length,
                     Charge::Committed => {
                         committed += fragment.length;
@@ -432,7 +435,7 @@ impl LockedFragments {
                     Charge::Uncertain => uncertain += fragment.length,
                     Charge::Unattempted | Charge::Deleted => {}
                 }
-                if !matches!(record.charge, Charge::Unattempted | Charge::Deleted) {
+                if !matches!(charge, Charge::Unattempted | Charge::Deleted) {
                     let provider = providers
                         .iter()
                         .position(|key| key == &record.provider_key)
@@ -445,7 +448,7 @@ impl LockedFragments {
             fragments.push(
                 serde_json::json!({"index": index, "offset": fragment.offset,
                 "ciphertext_bytes": fragment.length, "confirmed_unexpired_copies": confirmed,
-                "copies": copies.report("status")?["copies"]}),
+                "copies": copy_rows}),
             );
         }
         let mut report = serde_json::json!({

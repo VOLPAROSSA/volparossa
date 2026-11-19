@@ -217,8 +217,8 @@ pub(super) async fn delete(
         let mut results = Vec::new();
         for copy in 0..copies.data.copies.len() {
             let record = &copies.data.copies[copy];
-            if record.charge == Charge::Unattempted {
-                // There can be no remote reservation: begin() is durable before any send.
+            if record.charge == Charge::Unattempted && copies.copy(copy)?.journal.reserve_unsent() {
+                // Every writer records a possible Reserve before sending the signed operation.
                 // Do not mark this absent copy deleted or allocate a lease to delete it.
                 results.push("never_reserved");
                 continue;
@@ -234,5 +234,9 @@ pub(super) async fn delete(
         }
         outcomes.push(serde_json::json!({"index": index, "copy_outcomes": results}));
     }
-    finish(set, "delete", outcomes, complete)
+    let mut report = finish(set, "delete", outcomes, complete)?;
+    if report["physical_payload_charge_upper_bound"] != 0 {
+        report["operation_complete"] = false.into();
+    }
+    Ok(report)
 }
