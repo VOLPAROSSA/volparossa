@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Cross-check native observations, grants, route receipts and closed artifact exports."""
+import copy
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import tempfile
+import unittest
+
+HERE = Path(__file__).resolve().parent
+SMOKE = runpy.run_path(str(HERE / "signal-mailbox-smoke.py"))
+BASE = runpy.run_path(str(HERE / "test-content-mailbox-smoke.py"))
+SOURCE = "a" * 40
+PINS = json.loads((HERE / "signal-mailbox-pins.json").read_bytes())
+
+
+def receipt():
+    evidence = BASE["fixture"]()
+    cleanup = dict(complete=True, remaining_owned_objects=0)
+    host = dict(unchanged=True, before_sha256="b"*64, after_sha256="b"*64)
+    base = dict(report_kind="volparossa-private-mailbox", source_revision=SOURCE, success=True, runner_exit_status=0,
+                cleanup=cleanup, host_state=host, independent_sender_node_claimed=False, full_c07_claimed=False,
+                full_alpha_acceptance_claimed=False, mailbox=evidence)
+    phase = copy.deepcopy(evidence["phases"]["receive"])
+    phase["gates"].update(exit_mptcp_tls_completed=12, exact_provider_lookups=12)
+    native = dict(chat_revision=PINS["chat_revision"], signal_revision=PINS["signal_revision"],
+                  two_signed_grants_enrolled=True, private_test_state_removed=True, control_socket_gid_checked=True,
+                  native=SMOKE["NATIVE"].copy(), native_runtime_sha256={n:"c"*64 for n in (
+                    "node_modules/electron/dist/electron", "node_modules/@signalapp/ringrtc/build/linux/libringrtc-x64.node",
+                    "node_modules/@signalapp/libsignal-client/prebuilds/linux-x64/@signalapp+libsignal-client.node",
+                    "node_modules/@signalapp/sqlcipher/prebuilds/linux-x64/@signalapp+sqlcipher.node",
+                    "bundles/main.js", "bundles/preload/main.js", "bundles/workers/sql.js")})
+    return dict(source_revision=SOURCE,report_kind="volparossa-signal-mailbox",success=True,mailbox=base,
+                desktops=native,desktop_route=phase,host_state=host,cleanup=cleanup)
+
+
+class RoutedNativeMailbox(unittest.TestCase):
+    def test_actual_two_phase_contract(self):
+        record = receipt()
+        SMOKE["verified"](record, SOURCE)
+        for change in (lambda r:r["desktops"]["native"].update(receiver_offline_during_deposit=False),
+                       lambda r:r["desktops"]["native"].update(confirm_before_import=False),
+                       lambda r:r["desktop_route"]["gates"].update(exact_provider_lookups=11),
+                       lambda r:r["desktop_route"]["privacy"]["client"].update(direct_client_exit_packets=1),
+                       lambda r:r["desktops"].update(chat_revision="0"*40),
+                       lambda r:r["desktop_route"]["selected_route"].update(route_context_id="9"*32)):
+            modified = copy.deepcopy(record)
+            change(modified)
+            with self.assertRaises(ValueError):
+                SMOKE["verified"](modified, SOURCE)
+
+    def test_guest_export_is_closed_and_matches_driver(self):
+        names=SMOKE["NAMES"]
+        self.assertTrue(all(n.endswith(".json") and "/" not in n for n in names))
+        self.assertFalse(any(x in n for n in names for x in ("identity", "grant", "passphrase","profile")))
+        src=(HERE/"run-alpha-topology-vm.sh").read_text()
+        block=src[src.index("SIGNAL_MAILBOX_NAMES ="):src.index("SIGNAL_NAMES =")]
+        data={}
+        exec(block,data)
+        self.assertEqual(data["SIGNAL_MAILBOX_NAMES"], names | {"current-phase","guest-exit-status",
+                           "signal-backup-provision.json","host-state-before.json","host-state-after.json"})
+        for script in ("run-alpha-topology-vm.sh","kvm-alpha-topology.sh"):
+            out=subprocess.check_output(["sh",HERE/script,"--preview","--scenario","signal-mailbox"],text=True)
+            self.assertIn("two standalone desktops",out.lower().replace("signal desktops","desktops"))
+
+    def test_both_grants_use_private_canonical_paths_and_the_lower_expiry(self):
+        worker = runpy.run_path(str(HERE / "signal-mailbox-native.py"))
+        from unittest.mock import patch
+        grants=[]
+        def cli(_, __, args):
+            side = Path(args[args.index("--identity")+1]).parent.name
+            key = {"a":"a"*64,"b":"b"*64}[side]
+            if args[1]=="recipient-key":
+                return {"identity_public_key_hex":key}
+            path = Path(args[args.index("--invitation")+1])
+            if args[2]=="invite":
+                path.write_bytes(side.encode())
+                return {"owner_key_hex":key,"registered_providers":0,"expires_unix_seconds":{"a":100,"b":105}[side]}
+            grants.append(side);return {"registered_providers":2}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(worker["prepare"].__globals__, invoke=cli), patch("subprocess.run"):
+            root=Path(tmp)/"providers"
+            worker["prepare"](root,"/fake-cli","/fake-agent",["c"*64,"d"*64])
+            self.assertEqual(grants,["a","b"])
+            self.assertTrue((root/"ready").is_file())
+            a,b=[json.loads((root/s/"grants.json").read_bytes()) for s in grants]
+            self.assertEqual(a["sendGrant"],b["receiveGrant"])
+            self.assertEqual(a["expires"],99000)
+            self.assertEqual(b["expires"],99000)
+            cfg=json.loads((root/"a/core.json").read_bytes())
+            self.assertEqual((cfg["socket"],cfg["sendInvitation"]),("/trial/core/agent.sock","/tmp/r/providers/b/invitation"))
+
+if __name__=="__main__":
+    unittest.main()
