@@ -10,6 +10,7 @@ import re
 import runpy
 import stat
 import subprocess
+from tempfile import NamedTemporaryFile
 import sys
 import time
 import urllib.request
@@ -123,6 +124,14 @@ PROVIDER_LIFECYCLE_EVENT_CODES = frozenset(("CONTENT_PROVIDER_REGISTERED",
     "CONTENT_PROVIDER_WITHDRAWN", "CONTENT_PROVIDER_REGISTRATION_EXPIRED",
     "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING", "CONTENT_PROVIDER_REGISTRATION_RECOVERED",
     "CONTENT_PROVIDER_REGISTRATION_FAILED"))
+PEER_DISCOVERY_EVENT_CODES = PROVIDER_LIFECYCLE_EVENT_CODES | {
+    "CONTENT_EXACT_LOOKUP_STARTED", "CONTENT_EXACT_LOOKUP_FINISHED",
+    "CONTENT_EXACT_ADDRESS_QUERY_STARTED", "CONTENT_EXACT_RESOLVED_REQUEST_SENT",
+    "CONTENT_EXACT_ADDRESS_UNAVAILABLE", "CONTENT_PROVIDER_SERVICE_EMPTY",
+    "CONTENT_PROVIDER_OFFER_REJECTED", "CONTENT_PROVIDER_OFFER_VERIFIED",
+    "CONTENT_PROVIDER_RESPONSE_PEER_REJECTED", "CONTENT_PROVIDER_REQUEST_DIAL_FAILED",
+    "CONTENT_PROVIDER_REQUEST_TIMED_OUT", "CONTENT_PROVIDER_REQUEST_CONNECTION_CLOSED",
+    "CONTENT_PROVIDER_REQUEST_IO_FAILED", "CONTENT_PROVIDER_REQUEST_PROTOCOL_UNSUPPORTED"}
 ANSWER_JOININGS = frozenset(("ordered_source_ranges_not_neural_synthesis", "single_source_answer",
     "hierarchical_peer_synthesis", "hierarchical_peer_synthesis_incomplete",
     "incomplete_fragment_answers", "awaiting_fragments_before_peer_synthesis"))
@@ -744,7 +753,7 @@ def observer_invariant_reason(error):
     return OBSERVER_INVARIANT_REASONS.get(str(error)) if type(error) is ValueError else None
 
 
-def closed_rpc_events(path, baseline, query_code):
+def closed_rpc_events(path, baseline, query_code, *, discovery_peer=False):
     require(type(baseline) is int and baseline > 0 and type(query_code) is int and 0 <= query_code <= 255,
             "invalid RPC event observation arguments")
     if query_code != 0:
@@ -754,9 +763,9 @@ def closed_rpc_events(path, baseline, query_code):
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 262144
                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), "invalid private RPC event file")
         records = []
-        counts = dict.fromkeys(sorted(RPC_EVENT_CODES), 0)
-        discovery_counts = dict.fromkeys(sorted(DISCOVERY_FAILURE_EVENT_CODES), 0)
-        provider_counts = dict.fromkeys(sorted(PROVIDER_LIFECYCLE_EVENT_CODES), 0)
+        codes = (PEER_DISCOVERY_EVENT_CODES,) if discovery_peer else (
+            RPC_EVENT_CODES, DISCOVERY_FAILURE_EVENT_CODES, PROVIDER_LIFECYCLE_EVENT_CODES)
+        groups = [dict.fromkeys(sorted(scope), 0) for scope in codes]
         for line in path.read_text(encoding="ascii").splitlines():
             match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
             require(match is not None, "invalid bounded RPC event record")
@@ -764,10 +773,15 @@ def closed_rpc_events(path, baseline, query_code):
             require(timestamp > 0 and (not records or timestamp >= records[-1]), "RPC event clock regressed")
             records.append(timestamp)
             if timestamp > baseline:
-                for group in (counts, discovery_counts, provider_counts):
+                for group in groups:
                     if match[3] in group:
                         group[match[3]] += 1
         require(len(records) <= 1000, "RPC event ring exceeded")
+        if discovery_peer:
+            return dict(state="valid", baseline_unix_ms=baseline, records=len(records), limit=1000,
+                window_covers_baseline=bool(records) and records[0] <= baseline,
+                counts={key: value for key, value in groups[0].items() if value})
+        counts, discovery_counts, provider_counts = groups
         return dict(state="valid", baseline_unix_ms=baseline, limit=1000, records=len(records),
             window_covers_baseline=bool(records) and records[0] <= baseline,
             matching_failures=sum(counts.values()), counts=counts,
@@ -823,15 +837,47 @@ def closed_preselection_events(path):
     return value
 
 
+def peer_event_windows(work, baseline):
+    # The control relay performs exact provider lookups. Each provider has its
+    # own registration state. Query their separate event rings before teardown.
+    layout = read(work / "agent-jobs-layout.json")
+    peers = read(work / "a01-expected-peers.json")
+    control = [node for node in ("relay0", "relay1", "relay2")
+               if peers[node] == layout["control_relay_peer_id"]]
+    providers = layout["provider_nodes"]
+    require(len(control) == 1 and isinstance(providers, list) and len(providers) == len(set(providers)) == 2
+            and set(providers) <= {"relay3", "relay4", "relay5"}, "unknown discovery fixture role")
+    windows = {}
+    for node in [*control, *providers]:
+        with NamedTemporaryFile(dir=work, prefix="discovery-events-", suffix=".private") as private:
+            try:
+                query = subprocess.run([str(work / "bin/volparossa"), "--control-socket",
+                    str(work / f"runtime-{node}/control/agent.sock"), "logs", "--limit", "1000"],
+                    stdin=subprocess.DEVNULL, stdout=private, stderr=subprocess.DEVNULL, timeout=3)
+                code = int(query.returncode != 0)
+            except (OSError, subprocess.SubprocessError):
+                code = 1
+            windows[node] = closed_rpc_events(Path(private.name), baseline, code, discovery_peer=True)
+    return dict(scope="separate_node_rings_without_per_request_correlation",
+                control_relay=control[0], providers=providers, windows=windows)
+
+
 def diagnostic(work, browser_code, observer_code, baseline, rpc_query_code):
     JOBS["guest_work"](work)
     require(0 <= browser_code <= 255 and 0 <= observer_code <= 255, "invalid process exit status")
     root, state = paths(work)
-    write(work / f"{NAME}-diagnostic.json", dict(version=3, browser_exit_status=browser_code,
+    report = dict(version=3, browser_exit_status=browser_code,
         observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json"),
         observer=closed_observer(work / f"{NAME}-observer-status.private"),
         coordinator=coordinator_diagnostic(state),
-        rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code)))
+        rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code))
+    if TRIAL and (browser_code or observer_code):
+        try:
+            report["discovery_peers"] = peer_event_windows(work, baseline)
+        except (OSError, ValueError, TypeError, KeyError):
+            report["discovery_peers"] = dict(state="unavailable")
+        report["version"] = 4
+    write(work / f"{NAME}-diagnostic.json", report)
 
 
 def authorize(path, event):

@@ -716,27 +716,18 @@ impl DiscoveryRuntime {
                 let Some(expected) = self.content.upstream.remove(&request_id) else {
                     return;
                 };
-                if peer == expected {
-                    if let Some(offer) = response.offer() {
-                        if verify_provider(peer, offer, unix_seconds()).is_err() {
-                            self.content.event("CONTENT_PROVIDER_OFFER_REJECTED");
-                        } else if let Some(lookup) = self
-                            .content
-                            .relay
-                            .as_mut()
-                            .filter(|lookup| lookup.collection_deadline > Instant::now())
-                        {
-                            lookup.offers.insert(peer, offer.to_vec());
-                            self.content.event("CONTENT_PROVIDER_OFFER_VERIFIED");
-                        } else {
-                            self.content.event("CONTENT_PROVIDER_OFFER_LATE");
-                        }
+                if let Some(offer) = self.checked_service_offer(expected, peer, &response) {
+                    if let Some(lookup) = self
+                        .content
+                        .relay
+                        .as_mut()
+                        .filter(|lookup| lookup.collection_deadline > Instant::now())
+                    {
+                        lookup.offers.insert(peer, offer.to_vec());
+                        self.content.event("CONTENT_PROVIDER_OFFER_VERIFIED");
                     } else {
-                        self.content.event("CONTENT_PROVIDER_SERVICE_EMPTY");
+                        self.content.event("CONTENT_PROVIDER_OFFER_LATE");
                     }
-                } else {
-                    self.content
-                        .event("CONTENT_PROVIDER_RESPONSE_PEER_REJECTED");
                 }
                 self.maybe_finish_content_lookup();
             }
@@ -744,29 +735,47 @@ impl DiscoveryRuntime {
                 request_id, error, ..
             } => {
                 if self.content.upstream.remove(&request_id).is_some() {
-                    self.content.event(match error {
-                        request_response::OutboundFailure::DialFailure => {
-                            "CONTENT_PROVIDER_REQUEST_DIAL_FAILED"
-                        }
-                        request_response::OutboundFailure::Timeout => {
-                            "CONTENT_PROVIDER_REQUEST_TIMED_OUT"
-                        }
-                        request_response::OutboundFailure::ConnectionClosed => {
-                            "CONTENT_PROVIDER_REQUEST_CONNECTION_CLOSED"
-                        }
-                        request_response::OutboundFailure::UnsupportedProtocols => {
-                            "CONTENT_PROVIDER_REQUEST_PROTOCOL_UNSUPPORTED"
-                        }
-                        request_response::OutboundFailure::Io(_) => {
-                            "CONTENT_PROVIDER_REQUEST_IO_FAILED"
-                        }
-                    });
+                    self.provider_request_failed(&error);
                 }
                 self.maybe_finish_content_lookup();
             }
             // Inbound generic service requests are auto-answered by the libdiscovery pump.
             _ => {}
         }
+    }
+
+    fn checked_service_offer<'a>(
+        &mut self,
+        expected: Libp2pPeerId,
+        peer: Libp2pPeerId,
+        response: &'a ContentServiceResponse,
+    ) -> Option<&'a [u8]> {
+        let reason = match response.offer() {
+            _ if peer != expected => "CONTENT_PROVIDER_RESPONSE_PEER_REJECTED",
+            None => "CONTENT_PROVIDER_SERVICE_EMPTY",
+            Some(bytes) if verify_provider(expected, bytes, unix_seconds()).is_ok() => {
+                return Some(bytes);
+            }
+            Some(_) => "CONTENT_PROVIDER_OFFER_REJECTED",
+        };
+        self.content.event(reason);
+        None
+    }
+
+    fn provider_request_failed(&mut self, error: &request_response::OutboundFailure) {
+        self.content.event(match error {
+            request_response::OutboundFailure::DialFailure => {
+                "CONTENT_PROVIDER_REQUEST_DIAL_FAILED"
+            }
+            request_response::OutboundFailure::Timeout => "CONTENT_PROVIDER_REQUEST_TIMED_OUT",
+            request_response::OutboundFailure::ConnectionClosed => {
+                "CONTENT_PROVIDER_REQUEST_CONNECTION_CLOSED"
+            }
+            request_response::OutboundFailure::UnsupportedProtocols => {
+                "CONTENT_PROVIDER_REQUEST_PROTOCOL_UNSUPPORTED"
+            }
+            request_response::OutboundFailure::Io(_) => "CONTENT_PROVIDER_REQUEST_IO_FAILED",
+        });
     }
 
     fn maybe_finish_content_lookup(&mut self) {

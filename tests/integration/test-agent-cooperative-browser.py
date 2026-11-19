@@ -987,6 +987,7 @@ class CooperativeBrowserProof(unittest.TestCase):
             path.write_text(event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'))
             self.assertFalse(parse()['window_covers_baseline'])
             self.assertEqual(CHECK['closed_rpc_events'](path, 100, 1), dict(state='query_failed'))
+
             for invalid in ('PRIVATE_DATA', event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') + event(100, 'COMPUTE_RPC_ROUTE_FLOW_FAILED'),
                             event(101, 'COMPUTE_RPC_ROUTE_FLOW_FAILED') * 1001, 'x' * 262145):
                 path.write_text(invalid)
@@ -997,6 +998,41 @@ class CooperativeBrowserProof(unittest.TestCase):
         shell = (HERE / 'agent-cooperative-browser.sh').read_text()
         self.assertLess(shell.index('logs --limit 1000'), shell.index('diagnostic "$WORK"'))
         self.assertNotIn('agent-cooperative-browser-rpc-events.private', CHECK['EXPORT_NAMES'])
+
+    def test_failure_samples_only_the_selected_relay_and_enrolled_providers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            (work / "a01-expected-peers.json").write_text(json.dumps(
+                {f"relay{i}": f"peer-{i}" for i in range(6)}))
+            layout = dict(control_relay_peer_id="peer-1", provider_nodes=["relay4", "relay5"])
+            (work / "agent-jobs-layout.json").write_text(json.dumps(layout))
+            observed = []
+            def query(argv, *, stdin, stdout, stderr, timeout):
+                node = Path(argv[2]).parents[1].name.removeprefix("runtime-")
+                observed.append(node)
+                self.assertEqual(argv[3:], ["logs", "--limit", "1000"])
+                self.assertEqual(timeout, 3)
+                if node == "relay5":
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                code = "CONTENT_PROVIDER_SERVICE_EMPTY" if node == "relay1" else "CONTENT_PROVIDER_WITHDRAWN"
+                stdout.write(f"99\tlevel=1\tevent={code}\tsession=\tpath=-\n"
+                             f"101\tlevel=1\tevent={code}\tsession=\tpath=-\n"
+                             "102\tlevel=1\tevent=PRIVATE_UNKNOWN\tsession=\tpath=-\n".encode())
+                stdout.flush()
+                return subprocess.CompletedProcess(argv, 0)
+            with mock.patch.object(subprocess, "run", side_effect=query):
+                result = CHECK["peer_event_windows"](work, 100)
+            self.assertEqual(observed, ["relay1", "relay4", "relay5"])
+            self.assertEqual(result["windows"]["relay1"]["counts"], {"CONTENT_PROVIDER_SERVICE_EMPTY": 1})
+            self.assertEqual(result["windows"]["relay4"]["counts"], {"CONTENT_PROVIDER_WITHDRAWN": 1})
+            self.assertEqual(result["windows"]["relay5"], {"state": "query_failed"})
+            self.assertNotIn("PRIVATE_UNKNOWN", repr(result))
+            self.assertFalse(list(work.glob("*.private")))
+            layout["provider_nodes"] = ["../outside", "relay5"]
+            (work / "agent-jobs-layout.json").write_text(json.dumps(layout))
+            with mock.patch.object(subprocess, "run") as run, self.assertRaises(ValueError):
+                CHECK["peer_event_windows"](work, 100)
+            run.assert_not_called()
 
     def test_discovery_diagnostic_keeps_expiry_connection_and_target_failures_distinct(self):
         # Synthetic producer events exercise the closed exporter, not a live lookup.

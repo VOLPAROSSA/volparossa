@@ -158,9 +158,7 @@ impl DiscoveryRuntime {
                 let Some((key, expected)) = self.content.exact.requests.remove(request_id) else {
                     return false;
                 };
-                let offer = response.offer().filter(|bytes| {
-                    *peer == expected && verify_provider(expected, bytes, unix_seconds()).is_ok()
-                });
+                let offer = self.checked_service_offer(expected, *peer, response);
                 self.finish_exact_content_peer(key, expected, offer.map(<[u8]>::to_vec));
             }
             request_response::Event::OutboundFailure {
@@ -169,6 +167,7 @@ impl DiscoveryRuntime {
                 let Some((key, peer)) = self.content.exact.requests.remove(request_id) else {
                     return false;
                 };
+                self.provider_request_failed(error);
                 // A remembered address can become stale while a provider is offline. Resolve
                 // its exact node ID once within this same original bounded job, not a retry loop.
                 let resolve = matches!(error, request_response::OutboundFailure::DialFailure)
@@ -483,6 +482,12 @@ mod tests {
                 targets.len()
             );
             if withdrawn {
+                assert!(
+                    broker
+                        .content
+                        .events
+                        .contains(&"CONTENT_PROVIDER_SERVICE_EMPTY")
+                );
                 assert_eq!(
                     result.unwrap_err(),
                     super::super::ContentDiscoveryError::Unavailable
