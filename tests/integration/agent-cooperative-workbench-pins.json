@@ -1,5 +1,5 @@
 {
-  "code_revision": "4b27ba35e64d085f1f9a60788b7e3a7e13064874",
+  "code_revision": "c77af086409ab5d0691b75800037aa824994ca40",
   "files": {
     "code/LICENSE": {
       "bytes": 35149,
@@ -30,8 +30,8 @@
       "sha256": "f3b96a7f45f8188985015fee61af58306377a60e7292e83dae787bb5bcd1cb22"
     },
     "code/scripts/public_peer_editor_ui.cjs": {
-      "bytes": 13081,
-      "sha256": "4f346d8f6bd2099614d0709c26072d616a6f795138a452f80abccacbaf1345d6"
+      "bytes": 13436,
+      "sha256": "f3ae42f56285fedd784d9b70b8715eaa628aca74b13888441d6e08724d482621"
     },
     "code/scripts/smoke_editor_ui.cjs": {
       "bytes": 23389,
