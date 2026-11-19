@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Cheap static contract for the manually or integration-PR dispatched KVM alpha runner.
+# Cheap static contract for the manually dispatched KVM alpha runner.
 # shellcheck disable=SC2016
 set -eu
 
@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 
 workflow = Path(sys.argv[1]).read_text()
+events = workflow.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+assert re.findall(r"^  (\w+):", events, re.MULTILINE) == ["workflow_dispatch"]
 options = re.search(r"        options:\n((?:          - [a-z0-9-]+\n)+)", workflow)[1]
 dispatch = re.findall(r"          - ([a-z0-9-]+)", options)
 normalize = next(line for line in workflow.splitlines() if line.startswith("  VOLPAROSSA_ALPHA_SCENARIO:"))
@@ -573,12 +575,6 @@ for line in workflow.splitlines():
     if 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation' in line:
         assert 'test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation' in line
 PYTHON_AUTONOMOUS_AGGREGATION
-grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
-grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
-grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
-    >/dev/null
-grep -F "github.head_ref == 'feature/alpha-vertical-runtime'" "$WORKFLOW" >/dev/null
-if grep -Eq '^  push:' "$WORKFLOW"; then exit 1; fi
 grep -F 'native/volparossa-mpquic/scripts/fetch-upstream.sh --yes' "$WORKFLOW" \
     >/dev/null
 grep -F 'native/volparossa-mpquic/scripts/build-upstream.sh' "$WORKFLOW" >/dev/null
