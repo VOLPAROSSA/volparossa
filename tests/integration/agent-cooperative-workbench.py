@@ -69,7 +69,10 @@ def service(root, code, release, owner_socket, planner_socket=None):
     if planner_socket is not None:
         (root / "opt/volparossa-runtime").mkdir(mode=0o755)
         (code / "projects/private.sock").touch(mode=0o600, exist_ok=False)
-        readonly.extend([f"{code}/runtime:/opt/volparossa-runtime", f"{planner_socket}:/workbench/private.sock"])
+        readonly.append(f"{planner_socket}:/workbench/private.sock")
+        for asset in ("opencode", "build-report.json"):
+            (root / "opt/volparossa-runtime" / asset).touch()
+            readonly.append(f"{code}/runtime/{asset}:/opt/volparossa-runtime/{asset}")
         driver = "public_peer_planner_ui.cjs"
     # This root already belongs exclusively to this invocation. On ext4,
     # systemd 257 creates the fallback RootEphemeral copy under the unit's

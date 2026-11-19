@@ -419,7 +419,8 @@ jq() { return 83; }
             (task / "dataset.manifest").write_bytes(b"synthetic dataset manifest")
             dataset = dict(version=6, visibility="public", purpose="code_proposal", license="GPL-3.0-only",
                 model_profile=C["PROFILE"], source_manifest_hex=source_manifest.hex(),
-                inference=[dict(question="synthetic parser question", context=C["ORIGINAL"].decode(), start=0, end=len(C["ORIGINAL"]))],
+                inference=[dict(question="Correct the bug in add: it should add its two numeric inputs. Return only the entire corrected Python file, "
+                    "without Markdown or explanation. Do not change tests or install dependencies.", context=C["ORIGINAL"].decode(), start=0, end=len(C["ORIGINAL"]))],
                 output_contract="single_file_replacement_v1")
             write(task / "dataset.json", dataset)
             raw = (task / "dataset.json").read_bytes()

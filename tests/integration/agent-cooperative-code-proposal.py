@@ -511,6 +511,8 @@ def retained_result(task, shown, layout, observed, *, workbench=False):
         and data["version"] == 6 and data["visibility"] == "public" and data["purpose"] == "code_proposal"
         and data["model_profile"] == PROFILE and data["output_contract"] == "single_file_replacement_v1"
         and data["license"] == "GPL-3.0-only" and len(data["inference"]) == 1
+        and set(data["inference"][0]) == {"question", "context", "start", "end"}
+        and sha(data["inference"][0]["question"].encode()) == QUESTION_SHA
         and data["inference"][0]["context"].encode() == ORIGINAL
         and data["inference"][0]["start"] == 0 and data["inference"][0]["end"] == len(ORIGINAL), "original public source")
     source_manifest = BROWSER["exact_bytes"](task / "source.manifest", 65536)
