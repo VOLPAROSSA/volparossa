@@ -88,6 +88,7 @@ pub(super) async fn deposit_selected(
                 continue;
             }
         };
+        let first_reserve = set.data.copies[index].charge == Charge::Unattempted;
         set.begin(index)?;
         match transfer::deposit_retained(socket, &grant, signer, &mut retained, input).await {
             Ok(()) => {
@@ -96,6 +97,20 @@ pub(super) async fn deposit_selected(
                 outcomes.push("committed");
             }
             Err(error) => {
+                if first_reserve
+                    && retained.journal.reserve_unsent()
+                    && error.is::<crate::control::AgentRejected>()
+                    && matches!(
+                        error.downcast_ref::<Boundary>(),
+                        Some(Boundary {
+                            operation: DiagnosticOperation::Reserve,
+                            stage: Stage::AgentReady
+                        })
+                    )
+                {
+                    set.data.copies[index].charge = Charge::Unattempted;
+                    set.save()?;
+                }
                 diagnostics.push(
                     index,
                     &error,

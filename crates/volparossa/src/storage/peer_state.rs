@@ -35,6 +35,9 @@ pub(super) struct Journal {
     pub(super) ciphertext_bytes: u64,
     pub(super) sha256: [u8; 32],
     pub(super) requested_expiry: u64,
+    // Absent in older journals, which cannot prove an unsigned first attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserve_attempted: Option<bool>,
     pub(super) lease: Option<String>,
     pub(super) last_stored_bytes: u64,
     pub(super) last_expiry: u64,
@@ -65,11 +68,16 @@ impl Journal {
             ciphertext_bytes: length,
             sha256,
             requested_expiry,
+            reserve_attempted: Some(false),
             lease: None,
             last_stored_bytes: 0,
             last_expiry: 0,
             last_state: None,
         })
+    }
+
+    pub(super) fn reserve_unsent(&self) -> bool {
+        self.reserve_attempted == Some(false) && self.lease.is_none() && self.last_state.is_none()
     }
 
     pub(super) fn grant(
@@ -150,6 +158,18 @@ impl LockedJournal {
         let bytes = read_private(&anchored(&directory).join(JOURNAL), MAX_JOURNAL_BYTES)?;
         let journal = serde_json::from_slice(&bytes).context("invalid private archive journal")?;
         Ok(Self { directory, journal })
+    }
+
+    /// Persist before the signed Reserve can leave the owner, including standalone resumes.
+    pub(super) fn begin_reserve(&mut self) -> Result<()> {
+        if self.journal.reserve_attempted == Some(false) {
+            self.journal.reserve_attempted = Some(true);
+            if let Err(error) = self.save() {
+                self.journal.reserve_attempted = Some(false);
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn save(&self) -> Result<()> {

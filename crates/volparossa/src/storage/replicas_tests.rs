@@ -185,12 +185,14 @@ struct FixturePeer {
     service: Arc<StorageService>,
     grant: VerifiedStorageGrant,
     online: Arc<AtomicBool>,
+    reject_before_ready: Arc<AtomicBool>,
     lose_terminal: Arc<AtomicBool>,
 }
 
 pub(super) struct LocalProviders {
     pub(super) socket: PathBuf,
     pub(super) online: Vec<Arc<AtomicBool>>,
+    pub(super) reject_before_ready: Vec<Arc<AtomicBool>>,
     pub(super) lose_terminal: Vec<Arc<AtomicBool>>,
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
@@ -207,6 +209,7 @@ impl LocalProviders {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let mut peers = Vec::new();
         let mut online = Vec::new();
+        let mut reject_before_ready = Vec::new();
         let mut lose_terminal = Vec::new();
         for (index, signer) in providers.iter().enumerate() {
             let path = root.join(format!("provider-{index}"));
@@ -224,14 +227,17 @@ impl LocalProviders {
             .unwrap();
             let backend = PrivateStorageProvider::new(store, signer.verifying_key()).unwrap();
             let live = Arc::new(AtomicBool::new(true));
+            let reject = Arc::new(AtomicBool::new(false));
             let lose = Arc::new(AtomicBool::new(false));
             peers.push(FixturePeer {
                 service: Arc::new(StorageService::new(Arc::new(signer.clone()), backend)),
                 grant: grants[index].clone(),
                 online: Arc::clone(&live),
+                reject_before_ready: Arc::clone(&reject),
                 lose_terminal: Arc::clone(&lose),
             });
             online.push(live);
+            reject_before_ready.push(reject);
             lose_terminal.push(lose);
         }
         let (stop, mut stopping) = tokio::sync::oneshot::channel();
@@ -247,6 +253,7 @@ impl LocalProviders {
         Self {
             socket,
             online,
+            reject_before_ready,
             lose_terminal,
             stop,
             task,
@@ -284,6 +291,18 @@ async fn local_exchange(mut local: tokio::net::UnixStream, peers: &[FixturePeer]
         .unwrap();
     assert_eq!(requested.grant, peer.grant.signed().encode());
     if !peer.online.load(Ordering::SeqCst) {
+        return;
+    }
+    if peer.reject_before_ready.swap(false, Ordering::SeqCst) {
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: request.request_id,
+            result: volparossa_local_control::ControlResult::Unavailable as i32,
+            diagnostic_code: "CONTENT_UNAVAILABLE".into(),
+            private_storage_remote_detail: None,
+            payload: Some(Payload::Ack(volparossa_local_control::Empty {})),
+        };
+        write_response(&mut local, &response).await.unwrap();
         return;
     }
     let (mut remote, mut provider) = tokio::io::duplex(4096);
@@ -499,3 +518,6 @@ async fn replica_two_real_stores_resume_failover_and_delete_without_consuming_su
     assert_eq!(survivor.usage().unwrap().leases, 1);
     assert_eq!(survivor.usage().unwrap().committed_bytes, length);
 }
+
+#[path = "replicas_reserve_provenance_tests.rs"]
+mod reserve_provenance;

@@ -302,6 +302,8 @@ pub(super) fn authorize_child(
     }
     for copy in 0..copies.data.copies.len() {
         let retained = copies.copy(copy)?;
+        let record = &mut copies.data.copies[copy];
+        record.charge = record.charge_for(&retained.journal);
         if copy >= original_count {
             let expected = &intents[copy - original_count].initial_journal;
             ensure!(
