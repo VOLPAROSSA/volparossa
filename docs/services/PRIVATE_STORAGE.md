@@ -436,6 +436,13 @@ protected transfer's completion confirm the deposit. A partial answer or a
 failed check preserves the original failure for explicit resume. Background
 maintenance retains its existing turn budget.
 
+A foreground copy can also use its existing recovery attempt when the agent
+rejects a connection before READY because its selected control route has
+become unavailable. The owner repeats the connection with the same grant,
+target, operation, data and deadline. The first connection carried no signed
+storage request or payload. TLS handshake timeouts use the same single
+allowance. An explicit control-policy refusal ends the attempt.
+
 The shared consumer VM and its Cloud upload continuation stage Image
 `21988efc1ba112a9840e0f052f4e4d0dc56a9d63` and Cloud
 `08be97111c323df95af68b3331eabd260957d0e4` using `--current-apps`.
