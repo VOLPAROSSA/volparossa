@@ -187,6 +187,24 @@ enum ClientRouteControlState {
     CleanupPending(ClientRouteRetirement),
 }
 
+impl ClientRouteControlState {
+    fn current_content_route(&self) -> Option<&EstablishedRoute<ReservationSession>> {
+        let Self::Established(established) = self else {
+            return None;
+        };
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            return None;
+        }
+        Some(&established.route.as_ref()?.established)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContentProviderRouteError {
+    Unavailable,
+    RoleOverlap,
+}
+
 /// A Client-only Disconnect never claims that another local service's routes were removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClientRouteDisconnectError {
@@ -1748,39 +1766,27 @@ impl ClientRouteControl {
     /// This is observation only; each discovery RPC still authenticates its current connection.
     pub(crate) async fn content_discovery_scope(&self) -> Option<(Libp2pPeerId, [u8; 16])> {
         let state = self.state.lock().await;
-        let ClientRouteControlState::Established(established) = &*state else {
-            return None;
-        };
-        if established.is_expired(crate::unix_millis(), Instant::now()) {
-            return None;
-        }
-        let request = &established.route.as_ref()?.established.request;
+        let request = &state.current_content_route()?.request;
         Some((
             request.control.identity.peer_id,
             request.parameters.route_context_id,
         ))
     }
 
-    /// This first native-content destination must not be any actor on its carrying route.
-    pub(crate) async fn content_provider_is_distinct(&self, peer: &Libp2pPeerId) -> bool {
+    /// Select the control only if the provider is independent of every actor on this route.
+    pub(crate) async fn content_provider_control(
+        &self,
+        peer: &Libp2pPeerId,
+    ) -> Result<Libp2pPeerId, ContentProviderRouteError> {
         let state = self.state.lock().await;
-        let ClientRouteControlState::Established(established) = &*state else {
-            return false;
-        };
-        let Some(route) = established.route.as_ref() else {
-            return false;
-        };
-        if established.is_expired(crate::unix_millis(), Instant::now()) {
-            return false;
-        }
-        let request = &route.established.request;
-        request.exit.peer_id != *peer
-            && request.control.identity.peer_id != *peer
-            && route
-                .established
-                .relay_authorities
-                .iter()
-                .all(|relay| relay.peer_id != *peer)
+        state
+            .current_content_route()
+            .ok_or(ContentProviderRouteError::Unavailable)?
+            .content_provider_control(peer)
+    }
+
+    pub(crate) async fn content_provider_is_distinct(&self, peer: &Libp2pPeerId) -> bool {
+        self.content_provider_control(peer).await.is_ok()
     }
 
     async fn acquire_tcp_flow_transport(
@@ -8190,6 +8196,23 @@ struct EstablishedRoute<P: ClientReservationProtocol> {
 }
 
 impl<P: ClientReservationProtocol> EstablishedRoute<P> {
+    fn content_provider_control(
+        &self,
+        peer: &Libp2pPeerId,
+    ) -> Result<Libp2pPeerId, ContentProviderRouteError> {
+        let control = self.request.control.identity.peer_id;
+        if *peer == control
+            || *peer == self.request.exit.peer_id
+            || self
+                .relay_authorities
+                .iter()
+                .any(|relay| relay.peer_id == *peer)
+        {
+            return Err(ContentProviderRouteError::RoleOverlap);
+        }
+        Ok(control)
+    }
+
     async fn teardown(mut self) -> RetirementOutcome {
         self.owner
             .take()
@@ -13894,6 +13917,59 @@ mod tests {
                 .expect("scope events")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn content_provider_selection_uses_one_carrying_route() {
+        let idle = ClientRouteControl::default();
+        let provider = fixture_identity().peer_id;
+        assert_eq!(
+            idle.content_provider_control(&provider).await,
+            Err(ContentProviderRouteError::Unavailable)
+        );
+
+        let signed_route = || async {
+            let fixture = real_service_fixture();
+            fixture
+                .manager
+                .spawn(fixture.transaction, fixture.transport, fixture.clock)
+                .wait()
+                .await
+                .expect("independently signed route")
+        };
+        let original = signed_route().await;
+        let replacement = signed_route().await;
+        let original_control = original.request.control.identity.peer_id;
+        let original_relay = original.relay_authorities[0].peer_id;
+        assert_eq!(
+            original.content_provider_control(&provider),
+            Ok(original_control)
+        );
+        for overlap in [
+            original_control,
+            original.request.exit.peer_id,
+            original_relay,
+        ] {
+            assert_eq!(
+                original.content_provider_control(&overlap),
+                Err(ContentProviderRouteError::RoleOverlap)
+            );
+        }
+        // The relay is independent of the replacement route, but only that route's
+        // own control can discover it. A grant tied to the original control still fails.
+        let replacement_control = replacement.request.control.identity.peer_id;
+        assert_ne!(original_control, replacement_control);
+        assert_eq!(
+            replacement.content_provider_control(&original_relay),
+            Ok(replacement_control)
+        );
+
+        for route in [original, replacement] {
+            assert!(matches!(
+                route.teardown().await,
+                RetirementOutcome::Destroyed { .. }
+            ));
+        }
     }
 
     #[tokio::test]

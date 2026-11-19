@@ -430,9 +430,7 @@ async fn route_current(
     peer: PeerId,
 ) -> Result<VerifiedPolicy, ContentError> {
     let policy = checked_policy(context, Some(original)).await?;
-    if context.routes.content_discovery_control().await != Some(control)
-        || !context.routes.content_provider_is_distinct(&peer).await
-    {
+    if context.routes.content_provider_control(&peer).await != Ok(control) {
         return Err(ContentError::Policy);
     }
     Ok(policy)
@@ -468,9 +466,9 @@ async fn remote(
         .boundary(Stage::ControlSelection, async {
             context
                 .routes
-                .content_discovery_control()
+                .content_provider_control(&request.peer)
                 .await
-                .ok_or(ContentError::Unavailable)
+                .map_err(ContentError::from)
         })
         .await?;
     route_current(context, &policy, control, request.peer).await?;

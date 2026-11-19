@@ -15,6 +15,8 @@ mod site;
 #[cfg(test)]
 #[path = "studio_signed_site_recovery/tests.rs"]
 mod tests;
+#[path = "studio_signed_site_recovery/topology.rs"]
+mod topology;
 
 use std::cell::Cell;
 

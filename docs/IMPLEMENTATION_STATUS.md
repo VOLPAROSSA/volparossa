@@ -363,14 +363,16 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
 
 ### Native Firefox ordinary tabs
 
-Core `669e73ea` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
-The guest verified its first 32 MiB ordinary-tab navigation. The second tab
-selected its route and received zero body bytes. The origin recorded two TLS
-handshakes and one accepted file request. Cleanup removed every owned topology
-object and the guest network snapshots matched. A second full body hash,
-carrying paths on its route and independent detach remain open.
-[Original hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416643207)
-· [Build, browser and origin evidence](applications/BROWSER_NETWORK.md#hosted-native-firefox-trial-on-19-november-2026)
+Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
+Both ordinary tabs verified the same 32 MiB body over two carrying MPTCP
+subflows on distinct WireGuard paths. Releasing the first route at both ends
+left the second transfer active. The origin observed the Exit address with no
+proxy credentials. Firefox exited, its private profile was removed, the guest
+network state matched and zero owned objects remained. Grant assignment in
+this run used the privileged test driver. The preceding attempt stopped after
+the first complete body.
+[Passing build and KVM](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054)
+· [Both trials and original receipts](applications/BROWSER_NETWORK.md#two-complete-native-firefox-navigations)
 
 ### Core project website — 2026-10-30
 
@@ -449,13 +451,15 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial stopped at an Image reservation. All three providers reported zero usage after cleanup. The owner could not confirm every deletion. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial reached Cloud publication after Image enrollment. The owner confirmed deletion for both applications, and each provider reported zero remaining leases and payload bytes. Joint repair and cold restoration remain open. [Storage trials](#storage-consumer-and-provider-evidence) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
-| DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
-| Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; A separate offline Linux guest served the signed forecast across a restart and refused it after expiry. Automatic acquisition, device/iOS expiry and full precipitation/air-quality coverage remain open. |
+| DPS / Map | The Linux Map adapter retrieved a 325-byte signed traffic dataset from one peer and reopened it from cache after disconnect. An expired publication produced no handoff. The road graph was synthetic. Sensor fusion, field accuracy and live traffic navigation remain open. [Map trial](#map-weather-and-application-evidence) |
+| Cache / Weather | Drizz.li and Overmorrow have completed earlier cache and emulator trials. An offline Linux guest refused an expired forecast after restart. Two cold Drizz.li builds matched, and a separate Flutter release build verified all 35 declared Overmorrow assets. Automatic acquisition, physical device and iOS expiry still need evidence. [Weather trials](#map-weather-and-application-evidence) |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
 | Transactions / Bank | Four validators executed the retained Bank commands, preserved 100 TEST units across partitions, and returned the original receipts after restart and replay. Full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
+| Chat | Signal Desktop preserved three intended delivery receipts across a restart. The cross-recipient control still showed sent. Multi-provider native backup recovery has its own acceptance trial. [Signal trial](#map-weather-and-application-evidence) |
+| Citizen | Public replay verified three fictional referenda with Belenios 3.3.0 and rejected altered results. Eligibility and deployment for an actual election remain open. [Referendum trial](#map-weather-and-application-evidence) |
 | Other applications / maintenance | Continue every agreed integration and organization-wide work; component/source checks do not complete consumer scenarios. |
 
 ### Execution priorities and next milestones
@@ -738,6 +742,24 @@ not reached. The 82,243-byte Actions ZIP has SHA-256
 [Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44419915713)
 · [Original failure, usage and cleanup reports](development/evidence/storage-maintenance-44419915713)
 
+The twelve-node trial on `9335306b` completed the separate Core lifecycle and
+deleted all eleven Core copies. The consumer phase prepared two encrypted inputs
+of 799,146 bytes each and passed Image enrollment. Cloud stopped during deposit.
+Its fragment 0 FINALIZE (copy 0) and RESERVE (copy 1) each made eight attempts
+to acquire a protected stream before READY. Both reported `helper_kernel` on
+the first and last attempt. A separate RESERVE on fragment 1, copy 0 returned
+`CONTENT_POLICY`. The helper logged one MPTCP poll timeout. The phase observer also recorded a
+generic transport-unavailable response. Neither observation identified a fragment or copy.
+
+During failure cleanup, the owner confirmed deletion for both Image and Cloud.
+Before the private journals were removed, all three providers independently
+reported zero leases, reserved bytes and committed bytes. The disposable guest
+removed its fixture state and both host snapshots matched byte for byte.
+Cloud publication stopped before joint repair, cold restore and the final
+acceptance checks. The 82,290-byte ZIP has SHA-256
+`a3870f4a6ab880537cb1e8752f3d64c569579f71e5cdb7415378ce1f2c0590e8`.
+[Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44430761553) · [Original application, route and cleanup receipts](development/evidence/storage-maintenance-44430761553)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -876,6 +898,16 @@ Preserve unpublished Map `feature/native-traffic-lifecycle` at `ca7a4e59a057`.
 [DPS/Map history](https://github.com/VOLPAROSSA/volparossa/blob/89d3aea585ed8a1e4d7db3beac76846d3d3e2dc1/docs/IMPLEMENTATION_STATUS.md#decentralized-positioning-system--2026-10-21)
 and the [service contract](services/DPS.md) retain research and acceptance detail.
 
+### Map, Weather and application evidence
+
+On Core `8ca8522c` and Map `f965604d`, an independent provider delivered all 325 signed bytes to the Map adapter. After disconnect, the owner reopened the same bytes with zero peer traffic. One second after signed expiry, the adapter refused a new handoff. The before and after host snapshots matched. This trial used a synthetic road graph. [Original twelve-node run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44438057954)
+
+Two cold Drizz.li builds produced identical bytes for all 97 tracked files. A separate Overmorrow trial on Weather `19bd528a` ran 24 Flutter tests and built the release web output offline. Its inventory contained 64 files and validated all 35 declared application assets against the pinned source. The run recorded the inventory and removed the build output. Independent reproduction of that output and browser delivery require separate evidence. [Cold Drizz.li comparison](https://github.com/VOLPAROSSA/volparossa-weather/pull/41) · [Overmorrow source build](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44438611156)
+
+The original Silex dashboard ran in Chrome against its Rust server. The operator created, renamed and duplicated a project. After restarting the server and browser, both projects were listed and could be deleted. The runner recorded 42 denied requests and joined all 25 main and four runtime process groups. Native WebView execution and publication authorization remain open. [Original dashboard run](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/44438823258)
+
+Signal Desktop processed delivery receipts for two simulated encrypted peers. After reopening its SQLCipher database, three intended receipts still showed delivered, the cross-recipient control still showed sent, and the four message IDs matched. In a separate Citizen trial, the upstream Belenios verifier and public replay checked the encrypted ballots, decryption and totals for three fictional referenda. Four yes votes among six eligible residents adopted the proposal, four no votes rejected it, and three yes with one abstention left it undecided. [Native Signal run](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44435698764) · [Offline Belenios run](https://github.com/VOLPAROSSA/volparossa-citizen/actions/runs/44434956603)
+
 ### Latest completed integration evidence
 
 - **Code:** actual 38824828727 on Code `fd4ff9688c58` / Core `7d0f9f0b492c`
@@ -903,27 +935,9 @@ include independent review, resource limits, artifacts and unresolved cases.
 
 ### Retained branches and resumption dependencies
 
-This index identifies preserved work, not current locks or verified live remote
-heads. Inspect `git worktree list` and the task's relevant Git/CI state before
-using a checkout. Never reset unpublished work or remove dirty/ambiguous trees.
+The owner-designated central build chat maintains the current work across repositories. The organization queue links to the open work and the protected project goal records its mandate. For local checkout paths, use `git worktree list` in the selected repository. [Organization maintenance](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md) · [Project goal](development/GOAL.md)
 
-| Work | Retained branch / checkout | Resume boundary |
-| --- | --- | --- |
-| Resident feature | `feature/protected-resident-model`, `.git/codex-protected-resident-model`, PR276 | Keep strict failure 39868428738 and later successful-job metadata 39876860833 distinct; inspect the latter receipt before host/configuration claims. |
-| Main resident composition | `integration/resident-model-main-20261022`, merged PR332 | Keep the tested commit `6ac9f2a8` available on the ref admitted by the public workflow. |
-| Model connect diagnostic | `.volparossa-dev/worktrees/resident-connect-observation-20261023`, PR338 | Integrated into retained feature; preserve original host/connect failures. |
-| Storage rotation | `.volparossa-dev/worktrees/storage-maintenance-rotation-20261023`, PR339 | Ordinary source gates pass; actual 39871646877 fails owner-private maintenance. Inspect its report before diagnosing or claiming convergence. |
-| Catalog diagnostic | `.volparossa-dev/worktrees/storage-catalog-restore-20261023`, PR336 | Integrated source; actual 39864473079 fails before catalog work. |
-| Automatic upload | `feature/cloud-upload-tls-v9`, `.git/codex-cloud-upload-tls-v9`, PR279 | Complete shared consumer profile and remote cleanup before upload acceptance. |
-| Earlier Storage dependencies | `.git/codex-storage-route-retirement`, `.git/codex-storage-real-route-sequence`, `.git/codex-storage-natural-expiry-sequence`, `.git/codex-storage-post-acquire-clock` | Preserve PR275/285/287/288 history and later integrated corrections; old heads are not current implementation status. |
-| Map | `feature/native-traffic-lifecycle` at ca7a4e59; quality work `.volparossa-dev/worktrees/dps-native-quality-20261021` | Preserve unpublished work and accepted debug fixture; complete real sensors/navigation. |
-| Studio publication | `.volparossa-dev/worktrees/studio-publisher-pin-20261023`, PR337 | Pin guard integrated; preparation, native authority and hosting remain required. |
-
-The original root `error.log`, dirty/untracked work in other retained trees,
-recovery manifests, pinned models/caches and `.git/ci-evidence/` remain preserved.
-An old branch name, prunable registry entry or ended conversation is not evidence
-that its work can be deleted. Existing failed reports are immutable; if their
-artifacts expire, record the evidence gap rather than reconstructing success.
+The automatic upload candidate continues in Core #279. The resident model trials retain their source-specific workflow revisions and original outcomes. The October index preserves the earlier branches, machine-local paths and failed trials as historical evidence. [Upload candidate](https://github.com/VOLPAROSSA/volparossa/pull/279) · [Resident model evidence](#protected-compute-evidence) · [October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies)
 
 ## Network baseline and remaining proof
 

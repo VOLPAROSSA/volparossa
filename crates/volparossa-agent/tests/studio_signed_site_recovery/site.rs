@@ -228,6 +228,11 @@ pub(super) async fn publish(
     work: Instant,
     total: Instant,
 ) -> Result<(Vec<u8>, VerifiedManifest)> {
+    let lifetime: u64 = if super::topology::enabled()? {
+        7200
+    } else {
+        600
+    };
     let mut args = vec![
         "publish".into(),
         "--input".into(),
@@ -247,7 +252,7 @@ pub(super) async fn publish(
         "--content-type".into(),
         SITE_CONTENT_TYPE.into(),
         "--lifetime-seconds".into(),
-        "600".into(),
+        lifetime.to_string().into(),
         "--identity".into(),
         f.path("state/identity.key").into_os_string(),
         "--passphrase-file".into(),
@@ -272,7 +277,7 @@ pub(super) async fn publish(
             .validity()
             .expires
             .checked_sub(manifest.validity().created)
-            != Some(600)
+            != Some(lifetime)
         || value["operation"] != "offline_content_publish"
         || value["network_publication"] != false
         || value["publisher_key_hex"] != hex::encode(f.publisher.as_bytes())

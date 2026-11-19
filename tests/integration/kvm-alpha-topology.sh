@@ -62,6 +62,7 @@ expected_commit=
 code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
+map_traffic=no
 browser_filter_manifest_sha256=
 browser_filter_directory=
 weather_client_bundle=
@@ -903,6 +904,7 @@ while [ "$#" -gt 0 ]; do
             [ -n "$code_bundle" ] || { usage >&2; exit 64; }
             shift
             ;;
+        --map-traffic) [ "$map_traffic" = no ] || exit 64; map_traffic=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -980,6 +982,10 @@ elif [ -n "$code_bundle$code_manifest_sha256" ]; then
     exit 64
 fi
 
+if [ "$map_traffic" = yes ]; then
+    [ "$mode" = execute ] && [ "$scenario" = content-provider ] && [ "$protected_quote" = no ] \
+        && [ -z "$browser_filter_bundle$weather_client_bundle" ] || exit 64
+fi
 if [ -n "$browser_filter_bundle$browser_filter_manifest_sha256" ]; then
     [ "$scenario" = content-provider ] && [ "$protected_quote" = no ] || exit 64
     case $browser_filter_bundle in /*) ;; *) exit 64 ;; esac
@@ -1127,8 +1133,8 @@ if [ "$scenario" = content-replication ]; then
         || { printf '%s\n' 'content replication executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-repair ]; then
-    for repair_fixture in content-repair-smoke.sh content-repair-smoke.py content-replication-smoke.sh content-replication-smoke.py \
-        content-replication-capture.py; do
+    for repair_fixture in content-repair-smoke.sh content-repair-smoke.py studio-topology-input.py content-repair-memberships.py content-repair-site-restore.py content-replication-smoke.sh content-replication-smoke.py \
+        content-replication-capture.py content-provider-site-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$repair_fixture" ] \
             || [ -L "$source_directory/tests/integration/$repair_fixture" ]; then
             printf '%s\n' 'content repair fixture unavailable' >&2
@@ -2378,6 +2384,9 @@ cleanup() {
     if [ "$scenario" = mptcp-growth ] && command -v mptcp_growth_cleanup >/dev/null 2>&1; then
         mptcp_growth_cleanup || original_status=1
     fi
+    if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ] && ip netns exec "$CLIENT" nft list table inet vp_studio_renderer >/dev/null 2>&1; then
+        ip netns exec "$CLIENT" nft delete table inet vp_studio_renderer || original_status=1
+    fi
     if [ "$scenario" = browser-network ] && command -v browser_network_cleanup >/dev/null 2>&1; then
         browser_network_cleanup || original_status=1
     fi
@@ -3259,7 +3268,11 @@ if [ "$agent_artifact_quarantine" = yes ]; then
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
-    for repair_script in content-repair-smoke.py content-replication-smoke.py content-replication-capture.py; do
+    if [ -n "${STUDIO_EVIDENCE_SHA256:-}" ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/studio-recipient-browser.py" "$WORK/bin/studio-recipient-browser.py"
+    fi
+    for repair_script in content-repair-smoke.py studio-topology-input.py content-repair-memberships.py content-repair-site-restore.py content-replication-smoke.py content-replication-capture.py \
+        content-provider-site-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$repair_script" "$WORK/bin/$repair_script"
     done
 fi
