@@ -87,6 +87,7 @@ fn import_receipt_retains_original_authority_after_decode_and_rejects_substituti
     assert!(verified.confirm(&token, &wrong_bytes).is_err());
     assert!(restored.verify(&sender.verifying_key(), NOW + 2).is_err());
     assert!(restored.verify(&owner.verifying_key(), NOW + 200).is_err());
+    verify_archived_times(&restored, &owner, &sender);
     assert!(restored.verify(&owner.verifying_key(), NOW).is_err());
     assert!(
         SignedImportReceipt::sign(&sender, &checked, &message, plaintext, &token, NOW + 1).is_err()
@@ -104,4 +105,21 @@ fn import_receipt_retains_original_authority_after_decode_and_rejects_substituti
     let mut trailing = original.encode();
     trailing.extend_from_slice(&[0x18, 1]);
     assert!(SignedImportReceipt::decode(&trailing).is_err());
+}
+
+fn verify_archived_times(receipt: &SignedImportReceipt, owner: &SigningKey, sender: &SigningKey) {
+    let historical = receipt
+        .verify_at_issuance(&owner.verifying_key(), NOW + 301)
+        .unwrap();
+    assert_eq!(historical.expires(), NOW + 200);
+    assert!(
+        receipt
+            .verify_at_issuance(&sender.verifying_key(), NOW + 301)
+            .is_err()
+    );
+    assert!(
+        receipt
+            .verify_at_issuance(&owner.verifying_key(), NOW)
+            .is_err()
+    );
 }
