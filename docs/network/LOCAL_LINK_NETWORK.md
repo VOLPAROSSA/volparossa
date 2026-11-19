@@ -61,6 +61,17 @@ complete captures and unchanged guest state. Earlier attempts failed, and this m
 one configured passing topology does not establish repeatable gain or a general speed guarantee.
 The diagnostic-only change does not prove a causal scheduler repair; detailed source-scoped
 results are centralized in [implementation status](../IMPLEMENTATION_STATUS.md).
+On 19 November 2026, the [protected-source comparison at `a155a415`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44517187229)
+delivered both 32-MiB responses with matching application hashes. WAN alone measured 6.489 Mbps
+and LAN+WAN 6.307 Mbps (0.97190x), below the required 1.25x. The client received 2,843,136
+outer WireGuard bytes from the LAN relay and 36,648,112 from the WAN relay during the combined
+response window. All eight privacy captures drained and the before/after guest snapshots matched.
+The [original comparison](../development/evidence/mixed-link-44517187229/mixed-link-bandwidth.json)
+and [guest result](../development/evidence/mixed-link-44517187229/mixed-link-smoke.json) come from artifact
+`14526584654` (148,982 bytes, SHA-256 `ccca4dafad44eb55819c4ae8c0ea38d40c8dff9c14fbd1bed38b2b5a749de5d6`).
+The earlier gain has therefore not repeated on this source. The Exit's original 10–20 second
+scheduler samples cover only part of the connection and do not establish the cause.
+
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
 public-IP fallback is used.

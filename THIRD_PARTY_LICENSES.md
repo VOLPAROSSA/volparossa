@@ -639,9 +639,10 @@ selection, and idle or sole-writable paths remain usable. The new regression
 fails with the previous patch and passes with this patch. This is deterministic
 scheduler evidence, not a live failover or bandwidth acceptance claim.
 The explicit, default-off `VMP_DEV_EDT_TRACE=1` fixture option emits at most
-64 sparse `NATIVE_EDT_SAMPLE` lines per connection, from 10 seconds inclusive
-to 20 seconds exclusive after the first non-startup application selection.
-This is a scheduling-relative window, not an HTTP-response marker. Each line
+64 sparse `NATIVE_EDT_SAMPLE` lines per connection, from 1 second inclusive
+to 65 seconds exclusive after the first non-startup application selection.
+Samples carry the guest wall clock so a trial can associate them with its actual
+HTTP response interval. Each line
 contains at most eight eligible local path numbers, their existing EDT costs
 and sendability, bounded-counter metric snapshots, and the selected path;
 the total eligible count makes truncation visible. There are no endpoints,
