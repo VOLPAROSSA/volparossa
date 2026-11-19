@@ -1049,16 +1049,16 @@ The package does not depend on or start the standalone Unbound daemon.
 
 ### Maintained D-Bus client and pinned compiler candidate
 
-The workspace pins `zbus` 6.1.0 with default features disabled and only Tokio
+The workspace pins `zbus` 6.3.0 with default features disabled and only Tokio
 and client-proxy support. `zbus_names`, `zvariant` and `zvariant_derive` are
 merged into the maintained package; no compatibility fork or advisory ignore
 is added. Exact official crates.io archive SHA-256 values and upstream VCS
-metadata for zbus6.1.0, zbus_macros6.1.0, zbus_utils6.0.0, zcheapstr1.0.0 and
+metadata for zbus 6.3.0, zbus_macros 6.3.0, zbus_utils 6.1.0, zcheapstr1.0.0 and
 zruntime0.2.0 are recorded in [the source pinset](third_party/rust/zbus6-sources.json).
 Their original MIT notices are retained unchanged under
 `third_party/rust/licenses/<package>-<version>/LICENSE`. No local upstream
 source patch is applied. The zbus/macros source commit is
-[`90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2`](https://github.com/z-galaxy/zbus/tree/90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2).
+[`d751b7963e78f3a719cfaf62bea937508670a76c`](https://github.com/z-galaxy/zbus/tree/d751b7963e78f3a719cfaf62bea937508670a76c).
 
 The earlier build candidate used exact Rust1.99.1, retained as a reference profile.
 The reviewed official distribution

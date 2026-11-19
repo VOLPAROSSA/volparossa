@@ -18,9 +18,11 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = runpy.run_path(str(ROOT / 'scripts/run-ctutils-hosted.py'))
 POLICY = NATIVE['POLICY']
-SHA = 'fcff5faa63a63d5b81051740f7382017f10b3440b3f401d97f0cf0b3b39c62d9'
-LOCK_SHA = '251467a1767ef3aeeced3a709169792c1395962148fa57254f9329803481cb9f'
-VCS = dict(git=dict(sha1='90b4de2d6fa7d7f5b0cb8dd955709d3e765fd2b2'), path_in_vcs='zbus')
+VERSION = '6.3.0'
+PACKAGE = f'zbus-{VERSION}'
+SHA = '6b4aae740b23927ceabed962431abab2cdefb9f7f885e5bbab062da09bf580e4'
+LOCK_SHA = '55a8a674a52b9623961397286ad84c3cd1955cc696d35b89d83ab424c1a88920'
+VCS = dict(git=dict(sha1='d751b7963e78f3a719cfaf62bea937508670a76c'), path_in_vcs='zbus')
 FEATURES = 'tokio,proxy,p2p'
 TESTS = tuple('message::builder::tests::' + name for name in ('strings','typed_values','a_later_valid_call_keeps_the_first_error','raw')) + (
     'message::tests::test',) + tuple('connection::builder::tests::' + name for name in (
@@ -42,7 +44,7 @@ def admission(env, revision):
 
 def original_files(raw, lock):
     selected = [x for x in lock['package'] if x['name'] == 'zbus']
-    if len(selected) != 1 or selected[0]['version'] != '6.1.0' or selected[0]['checksum'] != SHA:
+    if len(selected) != 1 or selected[0]['version'] != VERSION or selected[0]['checksum'] != SHA:
         raise ValueError('root zbus lock binding')
     if not 0 < len(raw) <= 4 * 1024**2 or hashlib.sha256(raw).hexdigest() != SHA:
         raise ValueError('original zbus archive checksum')
@@ -53,11 +55,11 @@ def original_files(raw, lock):
         for entry in archive:
             path=Path(entry.name)
             if (not entry.isfile() or entry.linkname or path.is_absolute() or '..' in path.parts
-                    or path.parts[0]!='zbus-6.1.0' or str(path) in files or len(files)>=1024):
+                    or path.parts[0]!=PACKAGE or str(path) in files or len(files)>=1024):
                 raise ValueError('unsafe zbus member')
             files[str(path)]=archive.extractfile(entry).read()
-    if (hashlib.sha256(files['zbus-6.1.0/Cargo.lock']).hexdigest()!=LOCK_SHA
-            or json.loads(files['zbus-6.1.0/.cargo_vcs_info.json'])!=VCS):
+    if (hashlib.sha256(files[f'{PACKAGE}/Cargo.lock']).hexdigest()!=LOCK_SHA
+            or json.loads(files[f'{PACKAGE}/.cargo_vcs_info.json'])!=VCS):
         raise ValueError('original zbus VCS/lock')
     return files
 
@@ -85,13 +87,13 @@ def execute():
     try:
         env=POLICY['activate']('runner', home=private/'cargo-home')
         env['CARGO_TARGET_DIR']=str(private/'target')
-        with urllib.request.urlopen('https://static.crates.io/crates/zbus/zbus-6.1.0.crate',timeout=60) as response:
+        with urllib.request.urlopen(f'https://static.crates.io/crates/zbus/{PACKAGE}.crate',timeout=60) as response:
             raw=response.read(4*1024**2+1)
         files=original_files(raw,tomllib.loads((ROOT/'Cargo.lock').read_text()))
         for name,data in files.items():
             path=private/name;path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             with path.open('xb') as stream:stream.write(data)
-        source=private/'zbus-6.1.0'
+        source=private/PACKAGE
         POLICY['check_graph'](source/'Cargo.toml')
         POLICY['write_scope'](env, output/'cargo-source-policy.json', cwd=source,
                               graphs={'zbus-upstream': source/'Cargo.toml'})

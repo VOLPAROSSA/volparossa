@@ -8,6 +8,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,56 @@ SPEC.loader.exec_module(FIXTURE)
 
 
 class FixtureContracts(unittest.TestCase):
+    def test_bank_authorization_uses_private_stdin_and_reopens_without_seed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "node0").mkdir()
+            (root / "node0/app.json").write_bytes(b'{"version":1}')
+            calls = []
+
+            def checked(command, *, input_bytes):
+                calls.append((command, input_bytes))
+                return b"ready\n" if command[command.index(str(root / "bin/ordered_authorizer")) + 1] == "init" else b"original"
+
+            with patch.object(FIXTURE.bank.pwd, "getpwuid", side_effect=KeyError), \
+                    patch.object(FIXTURE.bank.os, "chown") as chown:
+                owner = FIXTURE.bank.Owner(root, "1" * 64, checked, FIXTURE.require)
+            chown.assert_called_once_with(root / "bank-owner", FIXTURE.bank.OWNER_UID, FIXTURE.bank.OWNER_UID)
+            seed = bytes(range(32))
+            raw = owner.prepare("reserve", "2" * 64, 100, 300, ("3" * 64, "70"), seed)
+            self.assertEqual(owner.replay("2" * 64, raw), raw)
+            self.assertEqual([stdin for _, stdin in calls], [b'{"version":1}', seed, None])
+            self.assertTrue(all(argv[:4] == ["unshare", "--net", "--", "setpriv"] for argv, _ in calls))
+            with self.assertRaises(FIXTURE.TrialFailure):
+                owner.replay("2" * 64, b"different")
+
+    def test_bank_binary_binding_refuses_wrong_digest_writable_mode_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "example"
+            binary.write_bytes(b"closed parser fixture")
+            binary.chmod(0o500)
+            sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+            destination = binary.with_name("verified")
+            FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
+            self.assertEqual(destination.read_bytes(), binary.read_bytes())
+            destination.unlink()
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, "0" * 64, os.getuid())
+            self.assertFalse(destination.stat().st_mode & 0o111)
+            destination.unlink()
+            binary.chmod(0o770)
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
+            binary.chmod(0o500)
+            link = binary.with_name("link")
+            link.symlink_to(binary)
+            with self.assertRaises(OSError):
+                FIXTURE.bank.stage_binary(link, destination, sha, os.getuid())
+            link.unlink()
+            link.hardlink_to(binary)
+            with self.assertRaises(ValueError):
+                FIXTURE.bank.stage_binary(binary, destination, sha, os.getuid())
+
     def countdown(self, before, after, *, label="routes6", times=(100_000_000_000, 100_010_000_000,
                                                                 110_000_000_000, 110_010_000_000)):
         left = FIXTURE.timed_parent_read(label, json.dumps(before).encode(), *times[:2])
@@ -457,6 +508,15 @@ class FixtureContracts(unittest.TestCase):
             return {**value, "sequence": 999} if node == 3 else value
         with patch.object(FIXTURE, "query", side_effect=changed):
             self.assertFalse(trial.same_receipts(receipts))
+
+    def test_transient_rust_build_selects_the_verified_guest_distrib_and_public_cache(self):
+        shell = SOURCE.with_name("transaction-abci-vm-guest.sh").read_text()
+        unit_build = shell.split('if [ "$stage" = build ]; then', 1)[1].split("    exit 0", 1)[0]
+        used = unit_build.index("cargo build --locked -p volparossa-transaction-abci")
+        for binding in ("rust_bin=/home/vpci/.local/volparossa-rust-1.89.0/bin",
+                        'PATH="$rust_bin:/usr/bin:/bin"', "CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1",
+                        '$(command -v cargo)', "rustc 1.89.0 (29483883e 2025-08-04)", "GIT_ALLOW_PROTOCOL=https"):
+            self.assertLess(unit_build.index(binding), used)
 
     def test_guest_toolchain_remains_pinned_and_resource_bounded(self):
         shell = SOURCE.with_name("transaction-abci-vm-guest.sh").read_text()
