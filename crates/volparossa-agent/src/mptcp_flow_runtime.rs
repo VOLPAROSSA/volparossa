@@ -81,7 +81,9 @@ enum ExitRuntimeEvent<A, T> {
 }
 
 fn accept_failure_ends_route(error: &MptcpAcceptError) -> bool {
-    matches!(error, MptcpAcceptError::Listener(_))
+    // Linux accept4 can discard an aborted pending connection while returning no new FD.
+    // The listening FD and active flows are still owned by this route.
+    matches!(error, MptcpAcceptError::Listener(error) if error.raw_os_error() != Some(libc::ECONNABORTED))
 }
 
 async fn next_exit_runtime_event<A, T: 'static>(
@@ -279,7 +281,7 @@ impl ProductionMptcpExitRuntime {
                     if accept_failure_ends_route(&error) {
                         break;
                     }
-                    // The rejected stream is already closed. Preserve this same listener and
+                    // The failed connection yielded no usable stream. Preserve this listener and
                     // the independently owned flows, but never hide the failed acceptance or
                     // let repeated rejections monopolize the executor. The next iteration
                     // still checks shutdown, route expiry, capacity and path maintenance.
@@ -988,7 +990,15 @@ mod tests {
     }
 
     #[test]
-    fn only_listener_accept_failure_ends_reusable_exit_route() {
+    fn listener_errors_remain_terminal_unless_the_kernel_reports_an_aborted_connection() {
+        let listener_error =
+            |errno| MptcpAcceptError::Listener(io::Error::from_raw_os_error(errno));
+        assert!(!accept_failure_ends_route(&listener_error(
+            libc::ECONNABORTED
+        )));
+        for errno in [libc::EBADF, libc::EINVAL, libc::EMFILE, libc::ENOMEM] {
+            assert!(accept_failure_ends_route(&listener_error(errno)));
+        }
         for kind in [io::ErrorKind::ConnectionAborted, io::ErrorKind::Other] {
             assert!(accept_failure_ends_route(&MptcpAcceptError::Listener(
                 io::Error::from(kind)
@@ -1002,6 +1012,8 @@ mod tests {
     #[tokio::test]
     async fn rejected_exit_accept_returns_to_cancellation_and_expiry_checks() {
         let mut flows = JoinSet::<()>::new();
+        let (finish, previous) = tokio::sync::oneshot::channel();
+        flows.spawn(async move { previous.await.unwrap() });
         let mut maintenance = time::interval_at(
             time::Instant::now() + Duration::from_secs(30),
             Duration::from_secs(1),
@@ -1013,11 +1025,14 @@ mod tests {
                 io::Error::from(io::ErrorKind::ConnectionAborted),
             )))
         };
-        for _ in 0..2 {
+        let aborted = std::future::ready(Err(MptcpAcceptError::Listener(
+            io::Error::from_raw_os_error(libc::ECONNABORTED),
+        )));
+        for next in [aborted, rejection()] {
             let event = next_exit_runtime_event(
                 Duration::from_secs(60),
                 true,
-                rejection(),
+                next,
                 &mut flows,
                 &mut maintenance,
             )
@@ -1029,6 +1044,19 @@ mod tests {
             assert!(!accept_failure_ends_route(&error));
             tokio::task::yield_now().await;
         }
+        assert!(matches!(
+            next_exit_runtime_event(
+                Duration::from_secs(60),
+                true,
+                std::future::ready(Ok::<(), MptcpAcceptError>(())),
+                &mut flows,
+                &mut maintenance,
+            )
+            .await,
+            ExitRuntimeEvent::Accepted(Ok(()))
+        ));
+        finish.send(()).unwrap();
+        flows.join_next().await.unwrap().unwrap();
         assert!(
             failed,
             "a rejected acceptance must not become a successful route outcome"
