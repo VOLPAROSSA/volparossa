@@ -28,6 +28,13 @@ pub fn verify_milan_v2_signature_facts(
     received: &[u8],
     vcek_der: &[u8],
 ) -> Result<SignatureFacts, EvidenceError> {
+    signature_facts_and_chain(received, vcek_der).map(|(facts, _)| facts)
+}
+
+pub(super) fn signature_facts_and_chain(
+    received: &[u8],
+    vcek_der: &[u8],
+) -> Result<(SignatureFacts, [x509_cert::Certificate; 3]), EvidenceError> {
     let report = exact_report(received)?;
     if vcek_der.is_empty() || vcek_der.len() > MAX_VCEK_BYTES {
         return Err(EvidenceError::Encoding);
@@ -49,19 +56,16 @@ pub fn verify_milan_v2_signature_facts(
         .map_err(|_| EvidenceError::Signature)?;
     // The upstream verifier performs the actual cryptography. Separately bind
     // the declared algorithms to that exact supported scheme before any facts.
-    let leaf_certificate = chain.vek.clone().into();
-    cert_profile::check_chain(
-        &chain.ca.ark.clone().into(),
-        &chain.ca.ask.clone().into(),
-        &leaf_certificate,
-    )?;
+    let certificates = [chain.ca.ark.into(), chain.ca.ask.into(), chain.vek.into()];
+    let [root, intermediate, leaf] = &certificates;
+    cert_profile::check_chain(root, intermediate, leaf)?;
     // A signature alone does not bind the leaf's chip/firmware claims to the
     // signed report. Use REPORTED_TCB, the version that derives this VCEK.
     endorsement::check_claims(
-        &leaf_certificate,
+        leaf,
         received.try_into().map_err(|_| EvidenceError::Encoding)?,
     )?;
-    Ok(SignatureFacts {
+    let facts = SignatureFacts {
         report_sha256: Sha256::digest(received).into(),
         vcek_sha256: Sha256::digest(vcek_der).into(),
         measurement: report.measurement,
@@ -81,16 +85,12 @@ pub fn verify_milan_v2_signature_facts(
             MilanTcb::from_report(&received[0x1f0..0x1f8])?,
         ],
         platform_smt_enabled: received[0x40] & 1 != 0,
-        validity: [
-            validity(chain.ca.ark),
-            validity(chain.ca.ask),
-            validity(chain.vek),
-        ],
-    })
+        validity: certificates.each_ref().map(validity),
+    };
+    Ok((facts, certificates))
 }
 
-fn validity(cert: Certificate) -> (u64, u64) {
-    let cert: x509_cert::Certificate = cert.into();
+fn validity(cert: &x509_cert::Certificate) -> (u64, u64) {
     let validity = cert.tbs_certificate.validity;
     (
         validity.not_before.to_unix_duration().as_secs(),

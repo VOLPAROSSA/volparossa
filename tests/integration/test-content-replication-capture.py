@@ -139,6 +139,49 @@ class ReplicationCaptureTests(unittest.TestCase):
             self.assertEqual(CAPTURE.classify(current, "relay4", *CAPTURE.decode_frame(frame)[1:],
                                               "ar0", frame=frame), {"forbidden_packets": 1})
 
+    def test_repair_leave_requires_witnessed_sender_group_link_and_kernel_retry_window(self):
+        current = repair_layout()
+        start, stop = 100, 200
+        current["restart_memberships"] = {node: dict(group="224.0.0.251", robustness=2,
+            stop_started_ns=start, stop_completed_ns=stop, interfaces={link: dict(source=source, interval_ms=1000)})
+            for node, link, source in (("relay4", "ar0", "10.241.90.1"), ("relay5", "underlay", "50.166.6.1"))}
+        end = stop + 2_000_000_000
+        valid = bytes([0x22, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0]) + socket.inet_aton("224.0.0.251")
+        expected = {"control_packets": 1, "mdns_membership_packets": 1, "repair_mdns_leave_packets": 1}
+        denied = {"forbidden_packets": 1}
+
+        def classify_leave(role="relay4", iface="ar0", source="10.241.90.1", ns=start, **options):
+            frame = membership_frame(source, payload=checksummed(options.pop("payload", valid)), **options)
+            packet = CAPTURE.decode_frame(frame)
+            return CAPTURE.classify(current, role, *packet[1:], iface, frame=frame, observed_ns=ns)
+
+        self.assertEqual(classify_leave(), expected)
+        self.assertEqual(classify_leave("relay0", "r0a", ns=end), expected)
+        self.assertEqual(classify_leave("provider", "underlay", "50.166.6.1", stop), expected)
+        for options in (dict(ns=start-1), dict(ns=end+1), dict(ns=None), dict(source="10.241.90.2"),
+                        dict(iface="ar1"), dict(source="10.241.94.1", iface="ar1"),
+                        dict(role="relay1", iface="r1a"), dict(destination="224.0.0.2"),
+                        dict(options=bytes(4)), dict(ttl=2), dict(payload=valid + b"extra")):
+            with self.subTest(options=options):
+                self.assertEqual(classify_leave(**options), denied)
+        for position, replacement in ((0, 0x16), (1, 1), (4, 1), (7, 2), (8, 2),
+                                      (9, 1), (11, 1), (15, 252)):
+            altered = bytearray(valid)
+            altered[position] = replacement
+            self.assertEqual(classify_leave(payload=altered), denied)
+        bad = bytearray(membership_frame("10.241.90.1", payload=checksummed(valid)))
+        bad[40] ^= 1
+        self.assertEqual(CAPTURE.classify(current, "relay4", *CAPTURE.decode_frame(bad)[1:],
+                                          "ar0", frame=bad, observed_ns=start), denied)
+        for phase in ("uptake", "reserve-fetch", "peer-learning"):
+            current["phase"] = phase
+            self.assertEqual(classify_leave(role="provider", iface="underlay", source="50.166.6.1"), denied)
+        current["phase"] = "repair-uptake"
+        current["restart_memberships"]["relay4"]["group"] = "224.0.0.250"
+        self.assertEqual(classify_leave(), denied)
+        del current["restart_memberships"]
+        self.assertEqual(classify_leave(), denied)
+
     def test_repair_wireguard_error_is_reverse_exact_client_leg_quote_not_delivered_data(self):
         current = repair_layout()
         expected = {"control_packets": 1, "wireguard_port_unreachable_packets": 1}

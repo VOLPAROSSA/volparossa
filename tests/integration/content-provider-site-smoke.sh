@@ -161,6 +161,10 @@ content_provider_site_run() {
         -- test -r "$site_client_cache"; then fail CONTENT_SITE_CONSUMER_CACHE_EXPOSED; fi
     # Preserve the two-publication site proof above before adding a third tiny publication.
     content_provider_filter_cold_run
+    if [ "${map_traffic:-no}" = yes ]; then
+        . "$source_directory/tests/integration/map-traffic.sh"
+        map_traffic_cold
+    fi
     if [ -n "${weather_client_bundle:-}" ]; then
         # Preserve the existing publication-count proof. Acquire/publish the
         # separate public forecast only now, before this route is disconnected.
@@ -173,6 +177,7 @@ content_provider_site_run() {
     [ "$(stat -Lc '%a:%u:%g' "$site_client_cache")" = "700:$AGENT_UID:$AGENT_GID" ] \
         || fail CONTENT_SITE_CACHE_OWNERSHIP_CHANGED
     content_provider_filter_warm_run
+    if [ "${map_traffic:-no}" = yes ]; then map_traffic_offline; fi
     jq -n --arg context "$provider_context" --argjson user "$WORKER_UID" --argjson user_gid "$WORKER_GID" \
         --argjson agent "$AGENT_UID" --argjson agent_gid "$AGENT_GID" --argjson control "$site_control_gid" \
         --arg cache "$site_client_cache" --arg before "$site_cache_before" --arg after "$site_cache_after" \

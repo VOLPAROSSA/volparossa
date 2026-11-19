@@ -1,10 +1,10 @@
 # Cooperative browser: real public peer execution
 
-Recorded source-bound candidate: the last trial documented below starts four
-workers and retains all four terminal receipts with normal task cleanup confirmed.
-Its answer is still incomplete; child ending subtypes were not exported. The joined
-browser result, synthesis and cancellation proof remain incomplete. Local fixture
-checks are not a browser, model or network execution claim.
+On 19 November 2026 the public ESR panel completed a two-peer answer and
+cancelled a second live task. An independent observer saw all 21 first-task
+workers and both cancellation-task workers finish. The full KVM trial failed
+its route-continuity check. [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434704508)
+· [Original panel, execution, worker and route reports](development/evidence/browser-cooperative-44434704508)
 
 The public browser integration has a separate socket and panel from private local
 compute. `ask(question, context)` prefills the panel only. Sending requires a supported
@@ -27,8 +27,8 @@ each new task; the browser still supplies no providers or model configuration.
 Selection stays within the operator's model profile and one mutually compatible
 fingerprint. The validated retained enrollment determines the reported selected cohort;
 actual executor keys remain separate. This does not yet implement automatic model
-choice or cross-job answer continuation. Completed browser/Code live trials used
-fixed peers, so they do not prove this new service discovery path.
+choice or cross-job answer continuation. The discovered-360M browser trial
+recorded below used service discovery for its signed peer jobs.
 
 An explicit operator `--refine-incomplete` setting authorizes bounded recovery
 for token-limited public document leaves. It is retained with the original enrollment;
@@ -48,8 +48,9 @@ shows EOS and covers the exact original range. Intermediate token-limited child
 receipts remain unchanged and cannot enter synthesis themselves. A child that cannot
 be repaired within the limits remains incomplete; the mechanism does not repeat the same terminal job, enlarge the model
 limits or turn a partial answer into a complete one. Retained child jobs resume under
-the same source validity and receipt bindings. Actual end-to-end model recovery is
-still unproved; EOS alone is not proof of answer correctness.
+the same source validity and receipt bindings. The October trial recorded two refinement splits to depth two. The November
+trial recorded eight splits to depth four and retained ten effective leaves. Answer quality has no semantic evaluation in
+this test.
 
 The separate `agent-cooperative-browser-discovered` candidate selects
 `--model-profile smollm2-360m-v1 --discover-peers --refine-incomplete --refinement-levels 4`. It preserves the public README,
@@ -106,7 +107,7 @@ The discovered scenario uses the same checker with the explicit leading selector
 
 ## Recorded trial outcomes
 
-These are source-bound historical checkpoints, not new runs on the current source:
+Each row refers to the Core and Browser revisions used by the recorded trial.
 
 | Trial | Recorded outcome |
 | --- | --- |
@@ -114,9 +115,36 @@ These are source-bound historical checkpoints, not new runs on the current sourc
 | Discovered-360M `37042900209`, Core `e04860bc` | One EOS and one token-limited leaf, no synthesis or live cancellation proof; cleanup passes. |
 | Retained recovery `37052601519`, Core `abb30f34` | Four workers, two terminal receipts; unconfirmed child exchanges and insufficient event-window coverage. Failed normal task cleanup, despite later forced fixture cleanup. |
 | Later discovered trial `37058432693`, Core `b76b8a24` | Four terminal receipts and normal task cleanup; incomplete answer, no synthesis, child generation-ending subtype unavailable. Failed panel proof. |
+| Discovered-360M `37207405766`, Core `7621087a` | Two source parts, two refinement splits, four EOS leaves and one EOS synthesis. The browser completed and observed cancellation of its second task. Failed the worker-lifetime check before broker stop. |
+| Inventory trial `37209763534`, Core `434431d8` | Stopped before connecting or starting work. Final cleanup removed all owned objects and the guest network snapshots matched. |
+| [Discovered-360M 44434704508](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434704508), Core `0efdac51`, Browser `326ce0f2` | ESR 140.16.0 displayed the verified answer after 21 signed jobs, ten effective leaves and two synthesis levels. The second task reached scoped cancellation. Panel and worker observations passed. The overall trial failed route continuity. |
 
-The [complete original trial records](archive/implementation-notes-20261026.txt)
-retain earlier failures, source fixes, receipts, artifact/log digests and diagnostic
+The November panel ran with loopback as its only interface and a read-only
+host view. Prefill dispatched no work. The two executors matched the two
+discovered peers, and the displayed answer hash matched the verified result.
+Independent observers confirmed that all 23 observed workers ended and the
+fixture removed its model runtime, private job roots and publisher key.
+
+The initial route context was `974ca711032f3c6177157c1a69091737`. The live
+sample after the panel completed returned `9d1373dff2bdba9376f31ab29f05b38b`.
+The Exit capture recorded 615,881 and 564,388 response payload bytes for the two
+providers. The samples do not establish when or why the context changed.
+The fixture stopped before its remaining phase-specific transport checks.
+Cleanup left zero owned topology objects and both guest-root snapshots had
+SHA-256 `3db64e4fb6d345423adbd76f7ee84a6a6fe6a5b8b6f8185c210906a4ec7fc4cb`.
+The original Actions ZIP had SHA-256
+`657872ae41b2d7c768a476b75a852355088c67c07a42e6d7382368996c7fb11c`.
+[Retained byte-exact reports](development/evidence/browser-cooperative-44434704508)
+
+
+The worker-lifetime observer formerly counted the persistent broker among the
+task's transient workers. The correction excludes only the recorded broker
+PID and start time before deliberate broker shutdown. Every observed transient
+descendant must finish. The failed inventory trial never reached this check.
+[Original October source and observations](archive/IMPLEMENTATION_STATUS_20261023.md.txt#L8884)
+
+The [earlier trial records](archive/implementation-notes-20261026.txt)
+retain failures, source fixes, receipts, artifact/log digests and diagnostic
 limits. An empty sampled event ring cannot prove that the whole run had no failures;
 forced teardown cannot replace terminal receipts or confirmed normal task cleanup.
 For later integration evidence and next work, use [implementation status](IMPLEMENTATION_STATUS.md#latest-completed-integration-evidence).
