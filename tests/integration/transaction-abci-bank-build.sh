@@ -15,7 +15,7 @@ git init -q "$work/bank"
 git -C "$work/bank" -c transfer.fsckObjects=true fetch --quiet --depth 1 https://github.com/VOLPAROSSA/volparossa-bank.git "$revision"
 git -C "$work/bank" checkout -q --detach FETCH_HEAD
 [[ $(git -C "$work/bank" rev-parse HEAD) == "$revision" ]]
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends musl-tools \
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "$UBUNTU_ARCHIVE_CONFIG" install --yes --no-install-recommends musl-tools \
     protobuf-compiler=3.21.12-8.2ubuntu0.4 libprotoc32t64=3.21.12-8.2ubuntu0.4 libprotobuf32t64=3.21.12-8.2ubuntu0.4
 test "$(protoc --version)" = 'libprotoc 3.21.12'
 target=x86_64-unknown-linux-musl
