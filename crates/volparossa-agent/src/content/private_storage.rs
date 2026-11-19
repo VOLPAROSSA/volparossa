@@ -458,6 +458,17 @@ fn require_pinned_control(
     Err(live.err().map_or(ContentError::Policy, ContentError::from))
 }
 
+async fn connect_provider_route(context: &ControlContext) -> Result<(), ContentError> {
+    Box::pin(
+        context
+            .routes
+            .connect_tcp(&context.config, &context.discovery, &context.helper),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| ContentError::Unavailable)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "The established local RPC and its original operation deadline must remain bound"
@@ -474,15 +485,7 @@ async fn remote(
 ) -> Result<(), ContentError> {
     let policy = checked_policy(context, None).await?;
     observation
-        .requester_boundary(Stage::RouteConnect, local, async {
-            Box::pin(context.routes.connect_tcp(
-                &context.config,
-                &context.discovery,
-                &context.helper,
-            ))
-            .await
-            .map_err(|_| ContentError::Unavailable)
-        })
+        .requester_boundary(Stage::RouteConnect, local, connect_provider_route(context))
         .await?;
     let control = observation
         .boundary(Stage::ControlSelection, async {
@@ -574,6 +577,29 @@ fn challenge_idle_limit(
         .then_some(wire::ChallengeIdleLimit { idle, retry_before })
 }
 
+/// A vanished local route has opened no provider stream. Only an unused foreground
+/// replacement can reconnect it, within the original signed offer and grant deadline.
+async fn reconnect_unopened_route(
+    cause: crate::route_setup::ContentStreamOpenCause,
+    replacement: &mut Option<wire::ChallengeIdleLimit>,
+    reconnect: impl Future<Output = Result<(), ContentError>>,
+) -> Result<tokio::time::Instant, ContentError> {
+    if cause != crate::route_setup::ContentStreamOpenCause::RouteState {
+        return Err(ContentError::Unavailable);
+    }
+    let cutoff = replacement
+        .take()
+        .ok_or(ContentError::Unavailable)?
+        .retry_before;
+    if tokio::time::Instant::now() >= cutoff {
+        return Err(ContentError::Unavailable);
+    }
+    tokio::time::timeout_at(cutoff, reconnect)
+        .await
+        .map_err(|_| ContentError::Unavailable)??;
+    Ok(cutoff)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Two request-local observers preserve existing stream and deadline ownership"
@@ -611,9 +637,9 @@ async fn exchange(
             return Err(ContentError::Unavailable);
         }
         let endpoint = provider.offer.endpoint();
-        flow = Box::pin(
+        let opened = Box::pin(
             observation.requester_boundary(Stage::StreamOpen, local, async {
-                context
+                match context
                     .routes
                     .open_content_stream_diagnosed(
                         &current,
@@ -622,15 +648,31 @@ async fn exchange(
                         unix_millis(),
                     )
                     .await
-                    .map_err(|failure| {
+                {
+                    Ok(flow) => Ok(Some(flow)),
+                    Err(failure) => {
                         observation
                             .record_stream_failure(observation::stream_failure(failure.cause()));
                         observation.record_flow_acquire(failure.flow_acquire());
-                        ContentError::Unavailable
-                    })
+                        reconnect_by = Some(
+                            reconnect_unopened_route(
+                                failure.cause(),
+                                &mut idle_limit,
+                                connect_provider_route(context),
+                            )
+                            .await?,
+                        );
+                        Ok(None)
+                    }
+                }
             }),
         )
         .await?;
+        let Some(opened) = opened else {
+            // The next iteration checks the original pinned control, policy, offer and grant.
+            continue;
+        };
+        flow = opened;
         let mut remote = observation
             .requester_boundary(Stage::TlsHandshake, local, async {
                 tls::connect_observed(

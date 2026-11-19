@@ -1,5 +1,94 @@
 use super::*;
 
+#[tokio::test]
+async fn missing_route_uses_one_foreground_replacement_before_original_cutoff() {
+    use crate::route_setup::ContentStreamOpenCause::{FlowAcquire, Policy, RouteState};
+    use std::cell::Cell;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let mut replacement = challenge_idle_limit(true, deadline, deadline);
+    let cutoff = replacement.unwrap().retry_before;
+    let attempts = Cell::new(0);
+    let reconnect = || async {
+        attempts.set(attempts.get() + 1);
+        Ok(())
+    };
+    for cause in [Policy, FlowAcquire] {
+        assert!(
+            reconnect_unopened_route(cause, &mut replacement, reconnect())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(attempts.get(), 0);
+    assert_eq!(
+        reconnect_unopened_route(RouteState, &mut replacement, reconnect())
+            .await
+            .unwrap(),
+        cutoff
+    );
+    assert!(
+        reconnect_unopened_route(RouteState, &mut replacement, reconnect())
+            .await
+            .is_err()
+    );
+    let mut background = challenge_idle_limit(false, deadline, deadline);
+    assert!(
+        reconnect_unopened_route(RouteState, &mut background, reconnect())
+            .await
+            .is_err()
+    );
+    assert_eq!(attempts.get(), 1);
+}
+
+#[tokio::test]
+async fn unusable_route_stops_waiting_at_its_original_cutoff_or_requester_close() {
+    use crate::route_setup::ContentStreamOpenCause::RouteState;
+    use std::future::pending;
+    let limit = |after| {
+        Some(wire::ChallengeIdleLimit {
+            idle: Duration::from_secs(1),
+            retry_before: tokio::time::Instant::now() + after,
+        })
+    };
+    let mut expired = limit(Duration::ZERO);
+    assert!(
+        reconnect_unopened_route(RouteState, &mut expired, async {
+            panic!("expired route replacement started")
+        })
+        .await
+        .is_err()
+    );
+    let mut short = limit(Duration::from_millis(20));
+    assert!(
+        reconnect_unopened_route(RouteState, &mut short, pending())
+            .await
+            .is_err()
+    );
+    assert!(short.is_none());
+
+    let (client, mut local) = UnixStream::pair().unwrap();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let job = tokio::spawn(async move {
+        let observation = observation::Observation::default();
+        let mut replacement = limit(Duration::from_secs(60));
+        let result = observation
+            .requester_boundary(
+                Stage::StreamOpen,
+                &mut local,
+                reconnect_unopened_route(RouteState, &mut replacement, async {
+                    started.send(()).unwrap();
+                    pending().await
+                }),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(observation.detail().is_none());
+    });
+    running.await.unwrap();
+    drop(client);
+    timeout(Duration::from_secs(2), job).await.unwrap().unwrap();
+}
+
 #[test]
 fn live_control_rechecks_keep_authority_and_observe_only_this_initial_rejection() {
     use crate::route_setup::ContentProviderRouteError::{RoleOverlap, Unavailable};

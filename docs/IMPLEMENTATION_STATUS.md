@@ -813,6 +813,16 @@ owned fixtures and its before/after network digests matched. This run has no
 consumer provider-usage snapshot for the failed Image deposit.
 [Original 81,532-byte archive, SHA-256 `8e6123b1…ce80bc75`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44514676250/artifacts/14527619866) · [Original reports](development/evidence/storage-maintenance-44514676250)
 
+On `bb48e128` the shared publication reached Cloud. Its only failed operation
+was RESERVE for fragment 3, copy 0. The agent returned `CONTENT_UNAVAILABLE`
+during stream opening with local route state as its reason. The provider had
+received no signed reservation on this connection. A separate helper sample
+recorded a bind error (errno 98) without a matching request identity. Both
+owners confirmed deletion. Providers A, B and C independently reported zero
+leases, reserved bytes and committed bytes. The eleven-copy Core lifecycle and
+guest cleanup completed. The guest's before/after host-state digests matched.
+[Original 81,981-byte archive, SHA-256 `cfb1313c…8bb5e46`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44516433050/artifacts/14529597943) · [Original reports](development/evidence/storage-maintenance-44516433050)
+
 
 #### Automatic upload integration candidate
 
