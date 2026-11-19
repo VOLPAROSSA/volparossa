@@ -244,6 +244,116 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertNotIn("private", json.dumps(result))
             self.assertNotIn("secret", json.dumps(result))
 
+    def test_native_origin_classifies_only_complete_bound_requests(self):
+        from io import BytesIO
+        import time
+
+        class Request(BytesIO):
+            recv = BytesIO.read
+
+            def settimeout(self, seconds):
+                self.timeout = seconds
+
+        def classify(wire, native=True, duration=10):
+            return CHECK["origin_request"](Request(wire), "second", native, time.monotonic() + duration)
+
+        host = b"Host: destination.volparossa.test:18443\r\n"
+        def get(target, headers=host):
+            return b"GET /" + target + b" HTTP/1.1\r\n" + headers + b"\r\n"
+
+        self.assertEqual(classify(get(b"second.bin")), "object")
+        self.assertEqual(classify(get(b"favicon.ico")), "favicon_requests")
+        self.assertEqual(classify(b""), "empty_connections")
+        for request, native, reason in (
+                (b"", False, "empty_request"), (get(b"favicon.ico"), False, "unexpected_target"),
+                (get(b"first.bin"), True, "unexpected_target"), (get(b"other"), True, "unexpected_target"),
+                (get(b"favicon.ico", host + b"Proxy-Authorization: private\r\n"), True, "proxy_header"),
+                (get(b"favicon.ico", host + b"X: Bearer private\r\nX: public\r\n"), True, "proxy_header"),
+                (get(b"favicon.ico", host + host), True, "authority"),
+                (get(b"favicon.ico", b"Host: elsewhere\r\n"), True, "authority"),
+                (b"G", True, "incomplete_header"), (b"X" * 8192, True, "header_bounds"),
+                (get(b"second.bin", host + b"broken\r\n"), True, "header_format"),
+                (get(b"second.bin") + b"body", True, "header_format")):
+            with self.subTest(reason=reason, native=native), self.assertRaisesRegex(ValueError, "^"+reason+"$"):
+                classify(request, native)
+        with self.assertRaises(TimeoutError):
+            classify(get(b"second.bin"), duration=-1)
+
+    def test_native_origin_interleaves_tls_without_counting_auxiliary_connections_as_payload(self):
+        # Anonymous local socket pairs exercise the real TLS origin. The listener only models accept/address.
+        import socket
+        import ssl
+        from concurrent.futures import ThreadPoolExecutor
+        from http.client import HTTPResponse
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "origin"
+            run_id = "1" * 32
+            context = CHECK["origin"].__globals__
+            with patch.dict(context, BODY_BYTES=65536):
+                CHECK["seed"](root, run_id, native_tabs=True)
+                tls = ssl.create_default_context(cafile=str(root / "ca.pem"))
+                tls.set_alpn_protocols(["http/1.1"])
+                for phase in CHECK["PHASES"]:
+                    for gate in ("release", "continue"):
+                        (root / f"{phase}.{gate}").touch()
+                def exchange(targets, expect_failure=False):
+                    pairs = [socket.socketpair() for _ in targets]
+                    listener = Mock()
+                    listener.accept.side_effect = [(a, ("47.163.4.1", 1)) for a, _ in pairs]
+                    manager = Mock()
+                    manager.__enter__ = Mock(return_value=listener)
+                    manager.__exit__ = Mock(return_value=False)
+                    network = SimpleNamespace(socket=lambda *args: manager, AF_INET=socket.AF_INET,
+                        SOCK_STREAM=socket.SOCK_STREAM, SOL_SOCKET=socket.SOL_SOCKET, SO_REUSEADDR=socket.SO_REUSEADDR)
+                    report = root / "origin.json"
+                    report.unlink(missing_ok=True)
+                    try:
+                        with patch.dict(context, socket=network), ThreadPoolExecutor(max_workers=1) as pool:
+                            task = pool.submit(CHECK["origin"], root, root, run_id, report, native_tabs=True)
+                            replies = []
+                            for target, (_, client) in zip(targets, pairs):
+                                client.settimeout(5)
+                                with tls.wrap_socket(client, server_hostname=CHECK["HOST"]) as stream:
+                                    if target is None:
+                                        try:
+                                            stream.unwrap().close()
+                                        except (ssl.SSLEOFError, ConnectionResetError):
+                                            pass
+                                        continue
+                                    request = f"GET /{target} HTTP/1.1\r\nHost: {CHECK['HOST']}:{CHECK['PORT']}\r\n\r\n"
+                                    stream.sendall(request.encode("ascii"))
+                                    response = HTTPResponse(stream)
+                                    response.begin()
+                                    replies.append((response.status, response.read()))
+                                    response.close()
+                            if expect_failure:
+                                with self.assertRaisesRegex(ValueError, "^auxiliary_limit$"):
+                                    task.result(timeout=5)
+                            else:
+                                task.result(timeout=5)
+                        diag = CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
+                        return replies, diag, CHECK["read"](report) if report.exists() else None
+                    finally:
+                        for endpoints in pairs:
+                            for endpoint in endpoints:
+                                endpoint.close()
+                replies, diag, report = exchange(("first.bin", "favicon.ico", None, "second.bin"))
+                self.assertEqual((diag["accepted_connections"], diag["tls_completed"], diag["requests_ready"]), (4, 4, 2))
+                self.assertEqual((diag["favicon_requests"], diag["empty_connections"], diag["status"]), (1, 1, "complete"))
+                self.assertEqual([status for status, _ in replies], [200, 404, 200])
+                self.assertEqual(replies[1][1], b"")
+                expected = CHECK["body_hash"](run_id, native_tabs=True)
+                self.assertEqual([hashlib.sha256(r[1]).hexdigest() for r in (replies[0], replies[2])],
+                                 [expected, expected])
+                self.assertTrue(report["complete"])
+                self.assertEqual([r["phase"] for r in report["requests"]], ["first", "second"])
+                _, diag, report = exchange([None] * (CHECK["MAX_NATIVE_AUXILIARY_CONNECTIONS"] + 1), expect_failure=True)
+                self.assertEqual((diag["error"], diag["requests_ready"]), ("auxiliary_limit", 0))
+                self.assertIsNone(report)
+
     def test_origin_failure_retains_closed_stage_and_longer_initial_accept_budget(self):
         # No sockets/traffic: the fixture's exception-to-closed-metadata contract only.
         def failing_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
@@ -269,8 +379,8 @@ class BrowserNetworkEvidence(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     CHECK["origin_diagnostic"](root / "origin-diagnostic.json")
         source = (HERE / "browser-network-smoke.py").read_text()
-        self.assertIn("listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)", source)
-        self.assertLess(source.index("accepted.settimeout(30)"), source.index("with tls.wrap_socket"))
+        self.assertIn("deadline = time.monotonic() + ORIGIN_INITIAL_ACCEPT_SECONDS", source)
+        self.assertLess(source.index("accepted.settimeout(min(30, remaining(deadline)))"), source.index("with tls.wrap_socket"))
 
     def test_request_codes_are_closed_and_preserved(self):
         detail = dict(stage="stream-stop", nsresult=0x804B000D, proxy_status=502,
@@ -389,6 +499,28 @@ class BrowserNetworkEvidence(unittest.TestCase):
             self.assertEqual(CHECK["read"](output), dict(observation_complete=False,
                 failed_stage="guard_validation", process_boundary_verified=True,
                 fixture_loopback_only_uid_guard=False))
+
+    def test_failure_report_identifies_selected_runtime_without_completed_network(self):
+        shell = """
+            . "$1"
+            WORK=$2 output_directory=$2 bn_stage=$3
+            expected_commit=$4 PHASE=browser-network-second OBSERVED_BLOCKER=TEST_FAILURE
+            CLEANUP_COMPLETE=true REMAINING_OWNED_OBJECTS=0
+            optional_json_evidence() { echo null; }
+            browser_network_check() { return 0; }
+            browser_network_finalize_report 1
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "browser-network-smoke.json"
+            for stage, scope in [("firefox-native", "Native Firefox ordinary-tab"),
+                                 ("firefox-esr", "Two explicitly scoped Gecko"),
+                                 ("", "Browser network fixture stopped")]:
+                subprocess.run(["sh", "-eu", "-c", shell, "test", HERE / "browser-network-smoke.sh",
+                                temporary, stage, REVISION], check=True)
+                report = CHECK["read"](path)
+                self.assertFalse(report["success"])
+                self.assertIsNone(report["network"])
+                self.assertTrue(report["scope"].startswith(scope))
 
     def test_two_independent_native_owners_source_hash_and_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:

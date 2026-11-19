@@ -1,0 +1,412 @@
+{
+  "bwrap_directory_targets": {
+    "browser_appdata": false,
+    "browser_home": false,
+    "browser_work": false,
+    "device_directory": false,
+    "filesystem_root": false,
+    "proc_directory": false,
+    "sandbox_newroot": false,
+    "sandbox_oldroot": false,
+    "sandbox_proc": false,
+    "temporary_directory": false,
+    "unknown": false
+  },
+  "bwrap_operation_unknown": false,
+  "bwrap_operations": {
+    "destination_lookup": false,
+    "directory_creation": false,
+    "exec": false,
+    "file_creation": false,
+    "identity_mapping": false,
+    "mount_application": false,
+    "path_access": false,
+    "permission_change": false,
+    "proc_access": false,
+    "readonly_remount": false,
+    "root_pivot": false,
+    "security_setup": false,
+    "source_lookup": false
+  },
+  "exit": {
+    "available": true,
+    "events": [
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      },
+      {
+        "code": "io",
+        "stage": "egress"
+      }
+    ],
+    "truncated": false,
+    "unknown_event": false
+  },
+  "gateway": {
+    "available": true,
+    "events": [
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      },
+      {
+        "code": "received",
+        "stage": "connect_header"
+      },
+      {
+        "code": "accepted",
+        "stage": "connect_header"
+      },
+      {
+        "code": "ready",
+        "stage": "route"
+      },
+      {
+        "code": "forwarding_started",
+        "stage": "acknowledgement"
+      }
+    ],
+    "truncated": true,
+    "unknown_event": false
+  },
+  "origin": {
+    "accepted_connections": 2,
+    "error": "request_rejected",
+    "initial_accept_seconds": 270,
+    "kind": "browser-network-origin-diagnostic",
+    "phase": "request",
+    "requests_ready": 1,
+    "status": "failed",
+    "tls_completed": 2,
+    "version": 1
+  },
+  "status": {
+    "attachment": null,
+    "child_exit_code": 1,
+    "errno": null,
+    "error_code": "SCRIPT_FAILED",
+    "kind": "real-gecko-core-gateway-driver-status",
+    "phase": "request-b",
+    "request": null,
+    "version": 1
+  },
+  "status_available": true,
+  "stderr_available": true,
+  "stderr_signals": {
+    "driver_failed": false,
+    "module_missing": false,
+    "mount_setup": false,
+    "namespace_setup": false,
+    "permission_denied": false,
+    "read_only_filesystem": false,
+    "traceback": false,
+    "working_directory": false
+  },
+  "stderr_truncated": false,
+  "version": 1
+}

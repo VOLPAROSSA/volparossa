@@ -70,6 +70,9 @@ EXIT_CODES = {"egress": frozenset(("encrypted_client_hello", "missing_server_nam
 ORIGIN_PHASES = frozenset(("setup", "accept-first", "accept-second", "tls-handshake", "request",
     "wait-release", "transfer", "wait-continue", "complete"))
 ORIGIN_ERRORS = frozenset(("timeout", "tls", "io", "request_rejected", "other"))
+MAX_NATIVE_AUXILIARY_CONNECTIONS = 4
+NATIVE_ORIGIN_ERRORS = frozenset(("empty_request", "incomplete_header", "header_bounds", "header_format",
+    "authority", "proxy_header", "unexpected_target", "auxiliary_limit"))
 ORIGIN_INITIAL_ACCEPT_SECONDS = 270  # 40s browser launch + two 90s route admissions + fixture margin.
 READINESS_ROLES = ("client", *(f"relay{i}" for i in range(6)), "exit", "exit2")
 READINESS_CODES = frozenset((
@@ -194,15 +197,27 @@ def origin_diagnostic(path):
         return None
     require(path.stat().st_size <= 2048, "origin diagnostic exceeds bound")
     value = read(path)
-    require(type(value) is dict and set(value) == {"version", "kind", "phase", "status", "error",
-        "accepted_connections", "tls_completed", "requests_ready", "initial_accept_seconds"}
-        and value["version"] == 1 and value["kind"] == "browser-network-origin-diagnostic"
+    require(type(value) is dict and type(value.get("version")) is int and value["version"] in (1, 2),
+        "origin diagnostic version")
+    native = value["version"] == 2
+    fields = {"version", "kind", "phase", "status", "error", "accepted_connections",
+        "tls_completed", "requests_ready", "initial_accept_seconds"}
+    auxiliary = 0
+    if native:
+        fields.update(("empty_connections", "favicon_requests"))
+        require(all(type(value.get(key)) is int and 0 <= value[key] <= MAX_NATIVE_AUXILIARY_CONNECTIONS
+            for key in ("empty_connections", "favicon_requests")), "origin auxiliary counts")
+        auxiliary = value["empty_connections"] + value["favicon_requests"]
+    limit = len(PHASES) + (MAX_NATIVE_AUXILIARY_CONNECTIONS if native else 0)
+    errors = ORIGIN_ERRORS | NATIVE_ORIGIN_ERRORS if native else ORIGIN_ERRORS
+    require(set(value) == fields and value["kind"] == "browser-network-origin-diagnostic"
         and value["phase"] in ORIGIN_PHASES and value["status"] in ("running", "failed", "complete")
-        and (value["error"] is None or value["error"] in ORIGIN_ERRORS)
+        and (value["error"] is None or value["error"] in errors)
         and value["initial_accept_seconds"] == ORIGIN_INITIAL_ACCEPT_SECONDS
-        and all(type(value[key]) is int and 0 <= value[key] <= 2
+        and all(type(value[key]) is int and 0 <= value[key] <= limit
             for key in ("accepted_connections", "tls_completed", "requests_ready"))
-        and value["requests_ready"] <= value["tls_completed"] <= value["accepted_connections"],
+        and value["requests_ready"] <= len(PHASES) and auxiliary <= MAX_NATIVE_AUXILIARY_CONNECTIONS
+        and value["requests_ready"] + auxiliary <= value["tls_completed"] <= value["accepted_connections"],
         "origin diagnostic is not closed metadata")
     return value
 
@@ -372,6 +387,8 @@ def seed(root, run_id, *, native_tabs=False):
 def origin(root, gates, run_id, report, *, native_tabs=False):
     status = dict(version=1, kind="browser-network-origin-diagnostic", phase="setup", status="running", error=None,
         accepted_connections=0, tls_completed=0, requests_ready=0, initial_accept_seconds=ORIGIN_INITIAL_ACCEPT_SECONDS)
+    if native_tabs:
+        status.update(version=2, empty_connections=0, favicon_requests=0)
     diagnostic = report.with_name("origin-diagnostic.json")
     def observe(phase):
         status["phase"] = phase
@@ -385,10 +402,59 @@ def origin(root, gates, run_id, report, *, native_tabs=False):
         code = ("timeout" if isinstance(error, TimeoutError) else "tls" if isinstance(error, ssl.SSLError)
                 else "io" if isinstance(error, OSError) else "request_rejected" if isinstance(error, ValueError)
                 else "other")
+        if native_tabs and isinstance(error, OriginRequestError):
+            code = error.args[0]
         status.update(status="failed", error=code)
         raise
     finally:
         write(diagnostic, status)
+
+
+class OriginRequestError(ValueError):
+    """Only fixed categories from NATIVE_ORIGIN_ERRORS may leave this local fixture."""
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError("origin phase deadline")
+    return seconds
+
+
+def origin_request(stream, phase, native_tabs, deadline):
+    header = bytearray()
+    while not header.endswith(b"\r\n\r\n"):
+        if len(header) >= 8192:
+            raise OriginRequestError("header_bounds")
+        stream.settimeout(remaining(deadline))
+        chunk = stream.recv(8192 - len(header))
+        if not chunk:
+            if not header and native_tabs:
+                return "empty_connections"
+            raise OriginRequestError("incomplete_header" if header else "empty_request")
+        header.extend(chunk)
+        if b"\r\n\r\n" in header and not header.endswith(b"\r\n\r\n"):
+            raise OriginRequestError("header_format")
+    try:
+        lines = header[:-4].decode("ascii").split("\r\n")
+    except UnicodeDecodeError:
+        raise OriginRequestError("header_format") from None
+    hosts = []
+    for field in lines[1:]:
+        key, sep, value = field.partition(":")
+        if not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+            raise OriginRequestError("header_format")
+        if key.lower() == "host":
+            hosts.append(value.strip())
+        if key.lower() in ("proxy-authorization", "proxy-connection") or "bearer " in value.lower():
+            raise OriginRequestError("proxy_header")
+    if hosts != [f"{HOST}:{PORT}"]:
+        raise OriginRequestError("authority")
+    if lines[0] == f"GET /{phase}.bin HTTP/1.1":
+        return "object"
+    if native_tabs and lines[0] == "GET /favicon.ico HTTP/1.1":
+        return "favicon_requests"
+    raise OriginRequestError("unexpected_target")
 
 
 def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs=False):
@@ -401,55 +467,57 @@ def origin_transfer(root, gates, run_id, report, status, observe, *, native_tabs
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("47.163.4.2", PORT))
         listener.listen(2)
-        listener.settimeout(ORIGIN_INITIAL_ACCEPT_SECONDS)
+        deadline = time.monotonic() + ORIGIN_INITIAL_ACCEPT_SECONDS
         write(gates / "origin.ready", dict(version=1, ready=True))
-        for phase in PHASES:
+        while len(requests) < len(PHASES):
+            phase = PHASES[len(requests)]
             observe("accept-" + phase)
+            listener.settimeout(remaining(deadline))
             accepted, address = listener.accept()
             status["accepted_connections"] += 1
-            listener.settimeout(90)
-            require(address[0] == "47.163.4.1", "origin did not observe selected Exit only")
-            # Bound handshake itself, not only reads after wrap_socket returns.
-            accepted.settimeout(30)
-            observe("tls-handshake")
-            with tls.wrap_socket(accepted, server_side=True) as stream:
-                status["tls_completed"] += 1
-                observe("request")
-                stream.settimeout(30)
-                header = bytearray()
-                while not header.endswith(b"\r\n\r\n") and len(header) < 8192:
-                    chunk = stream.recv(1)
-                    require(chunk, "origin request incomplete")
-                    header.extend(chunk)
-                lines = header.decode("ascii").split("\r\n")
-                require(lines[0] == f"GET /{phase}.bin HTTP/1.1", "unexpected origin request")
-                fields = [line.split(":", 1) for line in lines[1:] if line]
-                require(all(len(row) == 2 for row in fields), "invalid origin headers")
-                headers = {key.lower(): value.strip() for key, value in fields}
-                require(headers.get("host") == f"{HOST}:{PORT}"
-                    and not any(key in headers for key in ("proxy-authorization", "proxy-connection"))
-                    and not any("bearer " in value.lower() for value in headers.values()),
-                    "proxy capability escaped to origin")
-                write(gates / f"{phase}.ready", dict(version=1, ready=True))
-                status["requests_ready"] += 1
-                observe("wait-release")
-                wait_file(gates / f"{phase}.release")
-                observe("transfer")
-                content_type = "text/plain; charset=utf-8" if native_tabs else "application/octet-stream"
-                stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
-                    f"Content-Type: {content_type}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
-                data = block(run_id, native_tabs=native_tabs)
-                for index in range(BODY_BYTES // len(data)):
-                    stream.sendall(data)
-                    if index + 1 == BODY_BYTES // len(data) // 2:
-                        write(gates / f"{phase}.progress-ready", dict(version=1, ready=True))
-                        observe("wait-continue")
-                        wait_file(gates / f"{phase}.continue")
-                        observe("transfer")
-                requests.append(dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs),
-                    peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
-                    alpn=stream.selected_alpn_protocol()))
-                write(report, dict(version=1, run_id=run_id, complete=len(requests) == 2, requests=requests))
+            with accepted:
+                require(address[0] == "47.163.4.1", "origin did not observe selected Exit only")
+                # Each ordinary tab can trigger ancillary sessions on the same destination.
+                # None supplies payload evidence or restarts the current phase's deadline.
+                accepted.settimeout(min(30, remaining(deadline)))
+                observe("tls-handshake")
+                with tls.wrap_socket(accepted, server_side=True) as stream:
+                    status["tls_completed"] += 1
+                    observe("request")
+                    kind = origin_request(stream, phase, native_tabs, min(deadline, time.monotonic() + 30))
+                    if kind != "object":
+                        if status["empty_connections"] + status["favicon_requests"] >= MAX_NATIVE_AUXILIARY_CONNECTIONS:
+                            raise OriginRequestError("auxiliary_limit")
+                        if kind == "favicon_requests":
+                            stream.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        status[kind] += 1
+                        continue
+                    stream.settimeout(30)
+                    write(gates / f"{phase}.ready", dict(version=1, ready=True))
+                    status["requests_ready"] += 1
+                    requests.append(serve_origin_object(stream, gates, run_id, phase, observe, native_tabs))
+                    write(report, dict(version=1, run_id=run_id, complete=len(requests) == len(PHASES), requests=requests))
+            deadline = time.monotonic() + 90
+
+
+def serve_origin_object(stream, gates, run_id, phase, observe, native_tabs):
+    observe("wait-release")
+    wait_file(gates / f"{phase}.release")
+    observe("transfer")
+    content_type = "text/plain; charset=utf-8" if native_tabs else "application/octet-stream"
+    stream.sendall((f"HTTP/1.1 200 OK\r\nContent-Length: {BODY_BYTES}\r\n"
+        f"Content-Type: {content_type}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").encode())
+    data = block(run_id, native_tabs=native_tabs)
+    for index in range(BODY_BYTES // len(data)):
+        stream.sendall(data)
+        if index + 1 == BODY_BYTES // len(data) // 2:
+            write(gates / f"{phase}.progress-ready", dict(version=1, ready=True))
+            observe("wait-continue")
+            wait_file(gates / f"{phase}.continue")
+            observe("transfer")
+    return dict(phase=phase, bytes=BODY_BYTES, sha256=body_hash(run_id, native_tabs=native_tabs),
+        peer_is_exit=True, proxy_credentials_absent=True, tls_version=stream.version(),
+        alpn=stream.selected_alpn_protocol())
 
 
 def helper_members(role):

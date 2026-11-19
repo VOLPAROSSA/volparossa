@@ -82,6 +82,7 @@ SCRIPT = r"""
 const [grants, urls, expectedSha, expectedBytes, certificate, output, done] = arguments;
 let phase="import";
 let navigationFailure=null;
+let verifiedFirstBody=null;
 const checkpoint = async (next, errorCode=null, attachment=null, request=null) => {
   phase=next;
   await IOUtils.writeJSON(output+"/driver-status.json", {version:1,
@@ -185,6 +186,7 @@ const marker=async(name,value)=> {
     catch{ result.wrong_scope_blocked=true; }
     if(!result.wrong_scope_blocked) throw new Error("scope_failure");
     await checkpoint("request-a"); result.a=await navigate(owners[0],tabs[0].linkedBrowser,urls[0]);
+    verifiedFirstBody={bytes:result.a.bytes,sha256:expectedSha};
     await marker("a-complete.json",{version:1,complete:true});
     await checkpoint("request-b");
     const pending=navigate(owners[1],tabs[1].linkedBrowser,urls[1]);
@@ -209,7 +211,8 @@ const marker=async(name,value)=> {
   const code=allowed.includes(error?.code)?error.code:"SCRIPT_FAILED";
   const attachment=error?.diagnostic??null;
   try{await checkpoint(phase,code,attachment,null);}catch{}
-  done({fatal:"native_network_core_driver_failed",phase,code,attachment,navigation:navigationFailure});
+  done({fatal:"native_network_core_driver_failed",phase,code,attachment,navigation:navigationFailure,
+    verified_first_body:verifiedFirstBody});
 });
 """
 

@@ -224,6 +224,7 @@ browser_network_finalize_report() {
     bn_evidence=$(optional_json_evidence "$WORK/browser-network-evidence.json")
     bn_host=$(optional_json_evidence "$WORK/a15-evidence.json")
     jq -n --arg revision "$expected_commit" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
+        --arg runtime "${bn_stage:-}" \
         --argjson status "$bn_status" --argjson network "$bn_evidence" --argjson host "$bn_host" \
         --argjson complete "$CLEANUP_COMPLETE" --argjson remaining "$REMAINING_OWNED_OBJECTS" '
       {schema_version:1,report_kind:"volparossa-browser-network",source_revision:$revision,
@@ -232,9 +233,9 @@ browser_network_finalize_report() {
        success:($status == 0 and $network != null and $complete and $remaining == 0 and $host.unchanged == true),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host|del(.acceptance_id)),
        full_browser_killswitch_claimed:false,http3_claimed:false,direct_fallback:false,
-       scope:(if $network.browser.kind == "native-firefox-core-ordinary-tabs"
-         then "two native Firefox ordinary tabs through separate real WireGuard/MPTCP routes; local reviewed native build with explicit product-JS revision"
-         else "two explicit privileged Gecko HTTPS channels through app-scoped real MPTCP; not general browsing interception" end)}
+       scope:(if $runtime == "firefox-native" then "Native Firefox ordinary-tab test with two separately scoped WireGuard/MPTCP routes."
+         elif $runtime == "firefox-esr" then "Two explicitly scoped Gecko HTTPS channels through app-scoped MPTCP."
+         else "Browser network fixture stopped before runtime selection." end)}
     ' >"$WORK/browser-network-smoke.json" || return 1
     for bn_name in $(browser_network_check export-names); do
         [ ! -f "$WORK/$bn_name" ] || [ -L "$WORK/$bn_name" ] || \

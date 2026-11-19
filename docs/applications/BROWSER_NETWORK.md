@@ -214,6 +214,39 @@ the integration alone does not prove a fix for this or any earlier failed trial.
 Native ordinary-tab payload, full hashes, two carrying paths per route and
 independent detach still require a new exact-source disposable proof.
 
+## Hosted native Firefox trial on 19 November 2026
+
+Core `669e73eab7ea3e19faeb8f6caef8ef726bdbbb2a` compiled Firefox 157.0.1
+offline with Browser `c3311ebedcc02dc45ff9c9822cee62f091609f86`. The resulting
+bundle inventory SHA-256 was
+`ca12c4b65dacc2114797ef43847e9ad4212cb3935dce166cddbc8a0adefc9551`.
+Firefox started in the disposable guest with its built-in controller, created a
+Marionette session and reached the second ordinary-tab navigation. The driver
+enters this phase only after the first tab finishes streaming, commits its
+navigation and verifies the 33,554,432-byte body against SHA-256
+`814f04845a4f2424d6fb8506145a97a7f5818ef1eeeb675256f72c116687febd`.
+The first tab's individual result was lost when the second failed.
+[Build and topology run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416643207)
+· [Build handoff](../development/evidence/browser-native-44416643207/expected.json)
+· [Native browser report](../development/evidence/browser-native-44416643207/browser-network-browser.json)
+
+The second tab selected its authorized route and stopped with Gecko status
+`0x804b0014` after zero body bytes. The origin accepted two TLS connections
+and marked only the first payload request ready. The origin's
+`request_rejected` category covers multiple request checks, so the exact
+reason for rejection is unknown. The guest network state matched before and
+after cleanup, Firefox exited, its profile was removed and zero owned topology
+objects remained. The second hash and independent detach are still outstanding.
+[Origin diagnostic](../development/evidence/browser-native-44416643207/browser-network-driver.json)
+· [Topology and cleanup](../development/evidence/browser-native-44416643207/browser-network-smoke.json)
+
+The revised test origin handles up to four ancillary native-browser connections
+within the original phase deadline. It returns an empty 404 for an exact
+same-origin favicon request and accepts an empty TLS close before any HTTP
+bytes. Each accepted connection still requires the fixture Exit address and
+TLS. Only the two exact object requests can advance the payload gates. Separate
+counters and bounded error codes identify what the next run observes.
+
 ## Build the native browser and run the ordinary-tab proof
 
 The manually selected `browser-native-source` scenario in the Alpha production-helper
