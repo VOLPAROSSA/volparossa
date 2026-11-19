@@ -370,13 +370,13 @@ jq() { return 83; }
         value.update(version=1, kind="vscodium-public-peer-workbench", phase="complete", failure=None,
             owner_check_status="passed", original_source_sha256=C["sha"](C["ORIGINAL"]), original_tests_sha256=C["TEST_SHA"],
             question_sha256=C["QUESTION_SHA"], license="GPL-3.0-only", actual_applied_sha256="a" * 64,
-            replacement_sha256="a" * 64, core_task_id="b" * 32, report_sha256="c" * 64)
+            replacement_sha256="a" * 64, core_task_id="b" * 32, peer_job_id="d" * 32, report_sha256="c" * 64)
         C["workbench_driver"](value, successful=True)
         for flag in C["WORKBENCH_FLAGS"]:
             with self.assertRaises(ValueError):
                 C["workbench_driver"](dict(value, **{flag: False}), successful=True)
         for name, invalid in (("actual_applied_sha256", "d" * 64), ("report_sha256", None),
-                ("core_task_id", "bad"), ("question_sha256", "0" * 64)):
+                ("core_task_id", "bad"), ("peer_job_id", None), ("question_sha256", "0" * 64)):
             with self.assertRaises(ValueError):
                 C["workbench_driver"](dict(value, **{name: invalid}), successful=True)
 
@@ -440,12 +440,12 @@ jq() { return 83; }
                         report_json=raw_report, report_sha256=result["report_sha256"])))
                 return C["retained_result"](task, result, layout, observed)
             self.assertTrue(check(report)["exact_receipt_join"])
-            rendered = dict(core_task_id="b" * 32, report_sha256=result["report_sha256"],
+            rendered = dict(core_task_id="c" * 32, peer_job_id=result["peer_job_id"], report_sha256=result["report_sha256"],
                 replacement_sha256=C["sha"](text.encode()), actual_applied_sha256=C["sha"](text.encode()))
             verified = C["retained_result"](task, rendered, layout, observed, workbench=True)
             self.assertEqual(verified["peer_job_id"], result["peer_job_id"])
             self.assertNotIn("tool_call_id", verified)
-            for key, bad in (("core_task_id", "f" * 32), ("report_sha256", "f" * 64),
+            for key, bad in (("peer_job_id", "f" * 32), ("report_sha256", "f" * 64),
                              ("replacement_sha256", "f" * 64), ("actual_applied_sha256", "f" * 64)):
                 with self.assertRaises(ValueError):
                     C["retained_result"](task, dict(rendered, **{key: bad}), layout, observed, workbench=True)

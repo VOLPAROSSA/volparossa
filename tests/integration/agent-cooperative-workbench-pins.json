@@ -1,5 +1,5 @@
 {
-  "code_revision": "c77af086409ab5d0691b75800037aa824994ca40",
+  "code_revision": "ab7dd3dea1ab6328ff3236dc10c6df0155c62820",
   "files": {
     "code/LICENSE": {
       "bytes": 35149,
@@ -30,8 +30,8 @@
       "sha256": "f3b96a7f45f8188985015fee61af58306377a60e7292e83dae787bb5bcd1cb22"
     },
     "code/scripts/public_peer_editor_ui.cjs": {
-      "bytes": 13436,
-      "sha256": "f3ae42f56285fedd784d9b70b8715eaa628aca74b13888441d6e08724d482621"
+      "bytes": 13618,
+      "sha256": "9dc895bd95b1ab74107034b2207bd4c8ab2b529aa599d44f480f59220594f11c"
     },
     "code/scripts/smoke_editor_ui.cjs": {
       "bytes": 23389,
@@ -54,8 +54,8 @@
       "sha256": "d992200cfea22660020c7429a50401942ba417d09dada67cccbed940c9eb82db"
     },
     "code/src/cooperative-delegation.cjs": {
-      "bytes": 12948,
-      "sha256": "7b25b5defac1c9baa83b3eeae12a8f02583e8b639f463a8427ff7e5aa14605fb"
+      "bytes": 13016,
+      "sha256": "342f60ea4276fd2b5a972c85b55302c512040ef000e4ff2912589b537762a102"
     },
     "code/src/cooperative-tool-client.cjs": {
       "bytes": 3992,
@@ -70,8 +70,8 @@
       "sha256": "feec49e084a348e8c2f8fc791e7391ccb2dcb66da5cddc4eb5de838a7587f0ef"
     },
     "code/src/extension.cjs": {
-      "bytes": 24691,
-      "sha256": "0e7c99dd7728b0e6453475b1d79654ee2b318dac483fdbdf66db27d9d3f6996c"
+      "bytes": 24727,
+      "sha256": "9088554b5888c06050548fc3aa0c69322f888123ae174371d1a21ee44ff14266"
     },
     "code/src/native-coding-fixture.cjs": {
       "bytes": 11359,

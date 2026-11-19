@@ -371,7 +371,7 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
 def workbench_driver(value, successful=False):
     fields = WORKBENCH_FLAGS | {"version", "kind", "phase", "failure", "owner_check_status", "original_source_sha256",
         "original_tests_sha256", "question_sha256", "license", "actual_applied_sha256", "replacement_sha256",
-        "core_task_id", "report_sha256"}
+        "core_task_id", "peer_job_id", "report_sha256"}
     require(type(value) is dict and set(value) == fields and value["version"] == 1
         and value["kind"] == "vscodium-public-peer-workbench"
         and all(type(value[key]) is bool for key in WORKBENCH_FLAGS)
@@ -380,10 +380,11 @@ def workbench_driver(value, successful=False):
         and value["original_source_sha256"] == sha(ORIGINAL) and value["original_tests_sha256"] == TEST_SHA
         and value["question_sha256"] == QUESTION_SHA and value["license"] == "GPL-3.0-only"
         and all(value[key] is None or hex64(value[key]) for key in ("actual_applied_sha256", "replacement_sha256", "report_sha256"))
-        and (value["core_task_id"] is None or re.fullmatch("[0-9a-f]{32}", value["core_task_id"])), "closed workbench report")
+        and all(value[key] is None or re.fullmatch("[0-9a-f]{32}", value[key])
+                for key in ("core_task_id", "peer_job_id")), "closed workbench report")
     if successful:
         require(all(value[key] for key in WORKBENCH_FLAGS) and value["phase"] == "complete" and value["failure"] is None
-            and value["owner_check_status"] == "passed" and value["report_sha256"] and value["core_task_id"]
+            and value["owner_check_status"] == "passed" and value["report_sha256"] and value["core_task_id"] and value["peer_job_id"]
             and value["actual_applied_sha256"] == value["replacement_sha256"] != sha(ORIGINAL)
             and value["actual_applied_sha256"] is not None, "native workbench owner result")
     return value
@@ -488,9 +489,11 @@ def retained_result(task, shown, layout, observed, *, workbench=False):
         dataset_manifest_id=binding["dataset_manifest_id"], peer_job_id=binding["job_id"], provider_key=handle["provider_key"],
         output_sha256=sha(payload), output_bytes=len(payload), generated_tokens=output["generated_tokens"])
     if workbench:
-        require(task.name == "task-" + shown["core_task_id"]
+        # The local journal directory has its own random nonce, independent
+        # of the request correlation ID. The peer owns its actual job ID.
+        require(peer["peer_job_id"] == shown["peer_job_id"]
             and peer["output_sha256"] == shown["replacement_sha256"] == shown["actual_applied_sha256"],
-            "rendered task and applied file must match the original peer")
+            "rendered peer job and applied file must match the original receipt")
         result = dict(peer, core_task_id=shown["core_task_id"], report_sha256=status["report_sha256"], model_profile=PROFILE,
             model_fingerprint=FINGERPRINT, source_sha256=sha(ORIGINAL), stop_reason="eos", proposal_complete=True)
     else:
@@ -535,11 +538,13 @@ def observe(work, pid):
         phase = "owner_result"
         shown = owner_report(work, successful=True)
         require(len(tasks) == 1 and observed is not None, "exactly one observed peer task")
-        phase = "retained_result"
+        phase = "signed_manifests"
         signed_input_binding(tasks[0], read(work / "agent-jobs-publish.json")["publisher_key_hex"])
         workbench = workbench_selected(work)
+        phase = "retained_result"
         result = retained_result(tasks[0], shown if workbench else shown["public_result"], layout, observed,
                                  workbench=workbench)
+        phase = "question_binding"
         require(sha(json.loads(observed["dataset_json"])["inference"][0]["question"].encode()) == shown["question_sha256"], "question join")
         phase = "worker_cleanup"
         BROWSER["check_task_workers_ended"]([observed])
@@ -595,7 +600,8 @@ def capture(work, application_status, observer_status):
     try:
         value = read(work / f"{NAME}-observer.private", 4096)
         require(set(value) == {"version", "phase", "observed_worker", "task_count"}
-            and value["version"] == 1 and value["phase"] in {"worker_scan", "owner_result", "retained_result", "worker_cleanup"}
+            and value["version"] == 1 and value["phase"] in {"worker_scan", "owner_result", "signed_manifests",
+                                                            "retained_result", "question_binding", "worker_cleanup"}
             and type(value["observed_worker"]) is bool and type(value["task_count"]) is int
             and 0 <= value["task_count"] <= 2, "closed observer")
         observer = value
@@ -650,6 +656,7 @@ def check_evidence(value, revision):
             "original_input_observed", "observed_task_processes_ended"}
             and all(hex64(result[key]) for key in ("source_manifest_id", "dataset_sha256", "dataset_manifest_id", "provider_key"))
             and re.fullmatch("[0-9a-f]{32}", result["peer_job_id"])
+            and result["peer_job_id"] == shown["peer_job_id"]
             and result["core_task_id"] == shown["core_task_id"] and result["report_sha256"] == shown["report_sha256"]
             and result["output_sha256"] == shown["actual_applied_sha256"] and result["source_sha256"] == sha(ORIGINAL)
             and result["model_profile"] == PROFILE and result["model_fingerprint"] == FINGERPRINT and result["stop_reason"] == "eos"
