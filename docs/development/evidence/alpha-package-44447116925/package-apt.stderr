@@ -1,0 +1,7 @@
+E: Unable to correct problems, you have held broken packages.
+E: The following information from --solver 3.0 may provide additional context:
+   Unable to satisfy dependencies. Reached two conflicting decisions:
+   1. volparossa:amd64=0.1.0~volparossa.lifecycle1 is selected for install
+   2. volparossa:amd64 Depends volparossa-private-dns-worker (= 0.1.0)
+      but none of the choices are installable:
+      [no choices]

@@ -24,6 +24,15 @@ started. `dns_cache.enabled: false` disables cooperative caching, not private re
 The optional OS resolver requires explicit `fallback.mode: system`; see
 [private Unbound readiness](../docs/network/UNBOUND_FALLBACK.md).
 
+A successful full alpha run publishes the tested Core and private DNS worker packages
+together. In the extracted artifact directory, verify both checksums and install both
+packages on a Debian 13 amd64 test machine with the distribution dependencies available.
+
+```sh
+sha256sum --check --strict ./*.deb.sha256
+sudo apt install ./volparossa_*_amd64.deb ./volparossa-private-dns-worker_*_amd64.deb
+```
+
 The disposable DNS guest also supports `build-deb.sh --stage-built BIN_DIR NATIVE_FILE`,
 with an explicit `VOLPAROSSA_PACKAGE_SOURCE_REVISION`. This development-only staging mode
 uses the same package layout, dependencies, units and maintainer scripts without recompiling

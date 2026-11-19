@@ -91,16 +91,9 @@ on:
         description: Exact reviewed VOLPAROSSA Image commit for image-immich
         type: string
         default: ''
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read
-
-concurrency:
-  group: alpha-production-helper-topology-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}-${{ inputs.scenario || 'datapath' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 defaults:
   run:
@@ -114,7 +107,7 @@ env:
 jobs:
   native-browser-capacity:
     name: Measure Gecko workspace and unprivileged KVM
-    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'browser-native-capacity'
+    if: inputs.scenario == 'browser-native-capacity'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -139,17 +132,14 @@ jobs:
             /usr/bin/python3 -B tests/integration/browser-native-capacity.py "$GITHUB_WORKSPACE" "$GITHUB_SHA"
 
   image-immich:
-    if: github.event_name == 'workflow_dispatch' && inputs.scenario == 'image-immich'
+    if: inputs.scenario == 'image-immich'
     uses: ./.github/workflows/image-immich-peer.yml
     with:
       image_revision: ${{ inputs.image_revision }}
 
   alpha-topology:
     name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'feature/alpha-vertical-runtime')
+    if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
 
@@ -2415,7 +2405,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: alpha-production-helper-topology-${{ github.run_id }}
-          path: ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+            !${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/package/*.deb
           if-no-files-found: warn
           retention-days: 7
 
@@ -2643,6 +2635,20 @@ jobs:
           printf '%s  %s\n' "$tested_sha" "$name" > "$name.sha256"
           sha256sum --check --strict -- "$name.sha256"
 
+          version=$(dpkg-deb -f "$package" Version)
+          [[ "$version" =~ ^[0-9]+([.][0-9]+)*$ ]]
+          worker="volparossa-private-dns-worker_${version}_amd64.deb"
+          source_dir="$VOLPAROSSA_ALPHA_OUTPUT/package"
+          test -f "$source_dir/$worker" && test ! -L "$source_dir/$worker"
+          test -f "$source_dir/$worker.sha256" && test ! -L "$source_dir/$worker.sha256"
+          test "$(dpkg-deb -f "$source_dir/$worker" Package)" = volparossa-private-dns-worker
+          test "$(dpkg-deb -f "$source_dir/$worker" Architecture)" = amd64
+          test "$(dpkg-deb -f "$source_dir/$worker" Version)" = "$version"
+          (cd "$source_dir" && sha256sum -- "$worker") | cmp - "$source_dir/$worker.sha256"
+          install -m 0600 "$source_dir/$worker" "$source_dir/$worker.sha256" .
+          sha256sum --check --strict "$worker.sha256"
+          printf 'VOLPAROSSA_ALPHA_WORKER_PACKAGE=%s/%s\n' "$PWD" "$worker" >> "$GITHUB_ENV"
+
       - name: Upload the tested Debian Core package
         if: inputs.scenario == 'alpha'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -2651,6 +2657,8 @@ jobs:
           path: |
             ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}
             ${{ env.VOLPAROSSA_ALPHA_PACKAGE }}.sha256
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}
+            ${{ env.VOLPAROSSA_ALPHA_WORKER_PACKAGE }}.sha256
           compression-level: 0
           if-no-files-found: error
           retention-days: 7

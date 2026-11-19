@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Load-only shell and synthetic report checks; no networking or product processes."""
+"""Crash-recovery checks using temporary Unix sockets and synthetic reports."""
 
 import copy
 import hashlib
 import json
 import os
+import socket
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,32 @@ def function(name):
     start = source.index(name + "() {\n")
     return source[start:source.index("\n}\n", start) + 3]
 
+
+# Reproduce the 36 socket names present before the topology forces eleven
+# agents, eleven helpers and three MPQUIC services to stop.
+with tempfile.TemporaryDirectory(prefix="vp-a14-") as temporary:
+    root = Path(temporary)
+    nodes = ["client", "bootstrap1", "bootstrap2", *(f"relay{i}" for i in range(6)), "exit", "exit2"]
+    for node in nodes:
+        runtime = root / f"runtime-{node}"
+        (runtime / "control").mkdir(parents=True)
+        (runtime / "native").mkdir()
+        paths = [runtime / "helper.sock", runtime / "control/agent.sock", runtime / "control/agent.sock.apps"]
+        if node in ("client", "exit", "exit2"):
+            paths.append(runtime / "native/mpquic.sock")
+        for path in paths:
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(path))
+    assert sum(path.is_socket() for path in root.rglob("*")) == 36
+    # An unexpected socket must remain visible to the regular inventory.
+    unexpected = root / "runtime-client/control/unexpected.sock"
+    with socket.socket(socket.AF_UNIX) as endpoint:
+        endpoint.bind(str(unexpected))
+        subprocess.run(["sh", "-eu", "-c", function("retire_runtime_sockets") + "\nretire_runtime_sockets"],
+                       env=dict(os.environ, WORK=temporary), check=True, timeout=5)
+        assert [path for path in root.rglob("*") if path.is_socket()] == [unexpected]
+    unexpected.unlink()
+    assert not any(path.is_socket() for path in root.rglob("*"))
 
 sequence = function("run_a14_crash_recovery")
 assert source.count("\nrun_a14_crash_recovery() {\n") == 1
@@ -109,6 +136,10 @@ with tempfile.TemporaryDirectory(prefix="crash-report-test-", dir=HERE) as raw:
     failed["success"] = False
     assert not report(failed, 1, 1)["success"] and not accepted()
     failed["success"] = True  # A forged summary cannot hide an actual remaining reference.
+    report(failed, 0, 0)
+    assert not accepted()
+    failed = copy.deepcopy(a14)
+    failed["cleanup"]["remaining_runtime_sockets"] = 1
     report(failed, 0, 0)
     assert not accepted()
     failed = copy.deepcopy(a14)

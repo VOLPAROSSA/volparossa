@@ -2738,21 +2738,25 @@ fi
 # or installed binaries that could affect the later datapath evidence.
 package_status=0
 if [ "$scenario" = alpha ]; then
-guest_phase package-lifecycle
-mkdir /home/vpci/alpha-output/package
-package_stdout=/home/vpci/package-lifecycle.stdout
-package_stderr=/home/vpci/package-lifecycle.stderr
-set +e
-sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
-    --execute --yes \
-    --package /home/vpci/volparossa.deb \
-    --output /home/vpci/alpha-output/package \
-    >"$package_stdout" 2>"$package_stderr"
-package_status=$?
-set -e
-mv -- "$package_stdout" /home/vpci/alpha-output/package/runner.stdout
-mv -- "$package_stderr" /home/vpci/alpha-output/package/runner.stderr
-printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-status
+    guest_phase package-lifecycle
+    package_output=/home/vpci/alpha-output/package
+    mkdir "$package_output"
+    if [ "$private_dns_status" -eq 0 ]; then
+        package_stdout=/home/vpci/package-lifecycle.stdout
+        package_stderr=/home/vpci/package-lifecycle.stderr
+        sudo -n -- ./tests/packaging/debian13-package-lifecycle.sh \
+            --execute --yes \
+            --package /home/vpci/volparossa.deb \
+            --output "$package_output" \
+            >"$package_stdout" 2>"$package_stderr" || package_status=$?
+        mv -- "$package_stdout" "$package_output/runner.stdout"
+        mv -- "$package_stderr" "$package_output/runner.stderr"
+    else
+        tail -c 32768 /home/vpci/private-unbound-build.log >"$package_output/worker-provision.log"
+        package_status=$private_dns_status
+    fi
+    printf '%s\n' "$private_dns_status" >"$package_output/worker-provision-status"
+    printf '%s\n' "$package_status" >"$package_output/guest-exit-status"
 fi
 
 topology_scenario=alpha
@@ -2837,6 +2841,15 @@ if [ "$scenario" = dns-cache ] || [ "$scenario" = reciprocity-private-dns ]; the
             sudo -n cp -- "/home/vpci/$retained" "/home/vpci/alpha-output/$retained"
         fi
     done
+fi
+if [ "$scenario" = alpha ] && [ "$private_dns_status" -eq 0 ] && [ "$package_status" -eq 0 ] && [ "$topology_status" -eq 0 ]; then
+    core_version=$(dpkg-deb -f /home/vpci/volparossa.deb Version)
+    case $core_version in ''|*[!0-9.]*) exit 65 ;; esac
+    worker=volparossa-private-dns-worker_${core_version}_amd64.deb
+    [ -f "dist/$worker" ] && [ ! -L "dist/$worker" ] && [ "$(stat -c %s "dist/$worker")" -le 16777216 ] || exit 65
+    (cd dist && sha256sum --check --strict /home/vpci/private-unbound-worker.sha256)
+    install -m 0600 "dist/$worker" "/home/vpci/alpha-output/package/$worker"
+    install -m 0600 /home/vpci/private-unbound-worker.sha256 "/home/vpci/alpha-output/package/$worker.sha256"
 fi
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
