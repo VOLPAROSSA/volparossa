@@ -3,6 +3,7 @@
 """Cross-check native observations, grants, route receipts and closed artifact exports."""
 import copy
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -37,6 +38,24 @@ def receipt():
 
 
 class RoutedNativeMailbox(unittest.TestCase):
+    def test_staged_cli_keeps_source_bytes_and_is_executable_only_by_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            work = Path(folder)
+            original = work / "compiled"
+            original.mkdir()
+            (work / "bin").mkdir()
+            (original / "volparossa").write_bytes(b"compiled Core CLI")
+            command = ['sh', '-c', '. "$1"; signal_mailbox_stage_cli', 'check',
+                       str(HERE / 'signal-mailbox-smoke.sh')]
+            env = dict(os.environ, WORK=folder, WORKER_UID=str(os.getuid()), WORKER_GID=str(os.getgid()),
+                       binary_directory=str(original))
+            subprocess.run(command, env=env, check=True)
+            cli = work / 'bin/signal-mailbox-volparossa'
+            self.assertEqual(cli.read_bytes(), (original / 'volparossa').read_bytes())
+            self.assertEqual(cli.stat().st_uid, os.getuid())
+            self.assertEqual(cli.stat().st_mode & 0o777, 0o500)
+            self.assertNotEqual(subprocess.run(command, env=env).returncode, 0)
+
     def test_native_failure_receipt_exposes_only_fixed_local_phases(self):
         observed = runpy.run_path(str(HERE / "signal-mailbox-native.py"))["native_failure_phase"]
         with tempfile.TemporaryDirectory() as directory:

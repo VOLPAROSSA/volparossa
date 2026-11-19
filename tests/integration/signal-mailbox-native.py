@@ -103,6 +103,9 @@ def launch(parent, cli, control, providers):
     os.umask(0o077)
     require(os.geteuid() != 0 and parent.stat().st_uid == os.geteuid() and stat.S_IMODE(parent.stat().st_mode) == 0o700,
             "private worker-owned directory required")
+    cli_state = cli.stat()
+    require(cli_state.st_uid == os.geteuid() and stat.S_ISREG(cli_state.st_mode)
+            and stat.S_IMODE(cli_state.st_mode) == 0o500, "expected the worker-owned Core CLI copy")
     require(control.stat().st_gid in os.getgroups() and stat.S_ISSOCK(control.stat().st_mode),
             "protected client control socket unavailable")
     provision = json.loads((Path(__file__).with_name("signal-mailbox-runtime.json")).read_bytes())

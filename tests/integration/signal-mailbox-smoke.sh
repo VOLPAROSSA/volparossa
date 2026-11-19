@@ -35,6 +35,15 @@ PYTHON
     fi
 }
 
+signal_mailbox_stage_cli() {
+    # The single-user Desktop namespace maps only the worker. Give its read-only
+    # CLI mount a mapped owner. Its source directory stays outside the Desktop.
+    signal_cli="$WORK/bin/signal-mailbox-volparossa"
+    [ ! -e "$signal_cli" ] && [ ! -L "$signal_cli" ] || return 1
+    install -o "$WORKER_UID" -g "$WORKER_GID" -m 0500 "$binary_directory/volparossa" "$signal_cli" \
+        && cmp -s "$binary_directory/volparossa" "$signal_cli"
+}
+
 signal_mailbox_run() {
     PHASE=signal-mailbox-native
     signal_private=$mailbox_user/desktop
@@ -48,6 +57,7 @@ signal_mailbox_run() {
     # The agent's positive mount-isolation probe already excludes the entire mailbox_user tree.
     # Run the provisioning of the two app identities and the complete native case inside this phase.
     install -o root -g root -m 0444 /home/vpci/signal-backup-runtime/provision.json "$WORK/bin/signal-mailbox-runtime.json"
+    signal_mailbox_stage_cli || fail SIGNAL_MAILBOX_CLI_STAGING_FAILED
     content_mailbox_phase_start desktop
     install -o root -g root -m 0555 "$source_directory/tests/integration/signal-mailbox-native.py" \
         "$WORK/bin/signal-mailbox-native.py"
@@ -55,7 +65,7 @@ signal_mailbox_run() {
         "$WORK/bin/signal-mailbox-pins.json"
     timeout --signal=TERM --kill-after=10s 650s ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
         --groups="$mailbox_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -I -B "$WORK/bin/signal-mailbox-native.py" "$signal_private" "$binary_directory/volparossa" \
+        -- python3 -I -B "$WORK/bin/signal-mailbox-native.py" "$signal_private" "$signal_cli" \
         "$WORK/runtime-client/control/agent.sock" "$mailbox_key_a" "$mailbox_key_b" \
         >"$WORK/signal-mailbox-native.json" || fail SIGNAL_MAILBOX_NATIVE_NOT_PROVEN
     content_mailbox_phase_finish 12
