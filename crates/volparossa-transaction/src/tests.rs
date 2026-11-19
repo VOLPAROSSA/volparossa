@@ -42,7 +42,9 @@ fn signed(id: u8, action: Action) -> Vec<u8> {
     signed_with_nonce(id, action, random_nonce())
 }
 fn random_nonce() -> [u8; 32] {
-    std::array::from_fn(|_| OsRng.next_u32().to_le_bytes()[0])
+    let mut nonce = [0; 32];
+    OsRng.fill_bytes(&mut nonce);
+    nonce
 }
 fn signed_with_nonce(id: u8, action: Action, nonce: [u8; 32]) -> Vec<u8> {
     SignedCommand::sign(
@@ -100,11 +102,12 @@ fn external_signer_returns_only_a_public_key_and_signature() {
             units: 7,
         },
     };
+    let nonce = random_nonce();
     let local = |signer: &dyn CommandSigner| {
-        SignedCommand::sign_with([9; 32], signer, command, 100, 200, [3; 32])
+        SignedCommand::sign_with([9; 32], signer, command, 100, 200, nonce)
     };
     let ordered = |signer: &dyn CommandSigner| {
-        SignedCommand::sign_ordered_with([9; 32], signer, command, 100, 200, [3; 32])
+        SignedCommand::sign_ordered_with([9; 32], signer, command, 100, 200, nonce)
     };
     let mut external = External {
         reported: owner(1),
