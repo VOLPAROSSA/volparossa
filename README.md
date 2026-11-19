@@ -111,7 +111,7 @@ automatic software updates also remain in development. The
 tracks the current blockers and next usable milestones without treating feature branches
 as released functionality.
 
-Two independent Debian 13 amd64 runners built identical Core and private DNS worker packages from `428e2899`. Each passed all 15 transport acceptance cases and exercised package installation, service startup, upgrade and removal. [Candidate results and downloads](docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof) · [Install the tested package pair](packaging/README.md#install-the-tested-package-pair)
+The Debian 13 amd64 candidate at `009dc582` passed all 15 transport acceptance cases. Its Core and private DNS worker packages matched on two builds. The installation VM started the services, upgraded them while preserving the node identity and removed the package. [Download the tested pair](https://github.com/VOLPAROSSA/volparossa/actions/runs/44549419011/artifacts/14546019187) · [Results and checksums](docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof) · [Installation](packaging/README.md#install-the-tested-package-pair)
 
 <a id="four-layers-one-network"></a>
 
