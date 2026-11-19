@@ -273,13 +273,23 @@ have separate verification boundaries.
 
 The manually selected `browser-native-source` scenario in the Alpha production-helper
 topology workflow compiles the public Browser revision
-`c3311ebedcc02dc45ff9c9822cee62f091609f86` against Firefox 157.0.1 and uses
+`9e0861687a7ef2a032155edeebcb19bf0fef0712` against Firefox 157.0.1 and uses
 that build in the same job's disposable Debian guest. The builder checks the
 Mozilla source tree, tooling archives and Rust stage before running two offline
 compiler jobs. The current controller is compiled into Firefox. The producer
 records the transformed source, native binaries and bundle inventory. The guest
 receives the expected inventory digest separately and the final check binds the
 two ordinary-tab transfers and cleanup to that compilation receipt.
+
+For this revision the guest starts Firefox on an isolated X11 display. A
+right-click opens the normal tab menu, the native GTK chooser selects an
+existing private grant and Firefox displays its HTTPS authority. The driver
+cancels the first confirmation, then approves each tab individually. After
+the two transfers, it releases both tabs through their menus and reopens each
+menu to verify that ordinary networking is available again. The local desktop
+observation used an official Firefox binary with a test binding for the native
+file reader. The integrated build has its own receipt.
+[Browser source and local desktop observation](https://github.com/VOLPAROSSA/volparossa-browser/blob/9e0861687a7ef2a032155edeebcb19bf0fef0712/docs/evidence/native-tab-controls-01.json)
 
 The manual `browser-native-capacity` option measures free space and the KVM API
 without fetching compilers or building Firefox. On 18 November 2026 the standard

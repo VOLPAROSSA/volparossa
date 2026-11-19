@@ -276,9 +276,14 @@ def inside(args, work, provision):
                            GTK_USE_PORTAL="0", GDK_BACKEND="x11", MOZ_ENABLE_WAYLAND="0")
         with (work / "profile/user.js").open("x") as prefs:
             prefs.write('user_pref("widget.use-xdg-desktop-portal.file-picker", 0);\n'
+                        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+                        'user_pref("browser.startup.homepage_override.mstone", "ignore");\n'
+                        'user_pref("browser.startup.firstrunSkipsHomepage", true);\n'
+                        'user_pref("browser.aboutwelcome.enabled", false);\n'
                         'user_pref("termsofuse.bypassNotification", true);\n'
                         'user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);\n'
-                        'user_pref("datareporting.healthreport.uploadEnabled", false);\n')
+                        'user_pref("datareporting.healthreport.uploadEnabled", false);\n'
+                        'user_pref("toolkit.telemetry.enabled", false);\n')
     report = dict(version=1, kind="native-firefox-core-ordinary-tabs", passed=False,
         core_revision=args.core_revision, browser_revision=provision["browser_revision"],
         runtime_version="157.0.1", runtime_source_stamp=runtime.FIREFOX_REVISION,
