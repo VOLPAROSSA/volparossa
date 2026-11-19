@@ -323,6 +323,63 @@ jq() { return 83; }
             item = manifest(); item["files"][name][key] = value
             with self.assertRaises(ValueError): C["bundle_manifest"](item)
 
+    def test_root_owned_workbench_parents_are_traversable_under_the_topology_private_umask(self):
+        helper = runpy.run_path(str(HERE / "agent-cooperative-workbench.py"))
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            account = staging / "code"
+            projects = account / "projects"
+            projects.mkdir(parents=True, mode=0o700)
+            original = os.umask(0o077)
+            try:
+                command = helper["service"](staging / "root", account, staging / "editor", staging / "public.sock")
+            finally:
+                os.umask(original)
+            for name in (".", "opt", "etc", "usr", "var", "var/lib", "workbench"):
+                self.assertEqual((staging / "root" / name).stat().st_mode & 0o777, 0o755)
+            self.assertEqual((staging / "root/var/lib/volparossa").readlink(), Path("/workbench/session/home"))
+            self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(projects.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
+            self.assertIn("--property=PrivateNetwork=yes", command)
+            self.assertIn("--property=User=volparossa", command)
+            self.assertIn("--property=RootDirectory=" + str(staging / "root"), command)
+            self.assertNotIn("--property=RootEphemeral=yes", command)
+            self.assertIn("--property=WorkingDirectory=/workbench", command)
+            self.assertIn("--property=BindPaths=" + str(projects) + ":/workbench", command)
+
+    def test_workbench_inputs_pin_each_committed_file_and_the_official_editor(self):
+        value = manifest()
+        value.update(version=2, frontend="vscodium", code_revision=C["WORKBENCH_REVISION"])
+        value["files"] = {name: row for name, row in value["files"].items() if name.startswith("runtime/")}
+        value["files"].update({key: dict(pin, mode=0o600) for key, pin in C["WORKBENCH"]["files"].items()})
+        value["files"]["runtime/editor.deb"] = dict(bytes=C["EDITOR_BYTES"], sha256=C["EDITOR_SHA256"], mode=0o600)
+        C["bundle_manifest"](value)
+        for name in ("runtime/editor.deb", "code/src/extension.cjs", "code/scripts/public_peer_editor_ui.cjs"):
+            changed = copy.deepcopy(value)
+            changed["files"][name]["sha256"] = "0" * 64
+            with self.assertRaises(ValueError):
+                C["bundle_manifest"](changed)
+        changed = copy.deepcopy(value)
+        changed["version"] = 1
+        with self.assertRaises(ValueError):
+            C["bundle_manifest"](changed)
+
+    def test_workbench_receipt_requires_every_owner_action_exact_bytes_and_editor_exit(self):
+        value = dict.fromkeys(C["WORKBENCH_FLAGS"], True)
+        value.update(version=1, kind="vscodium-public-peer-workbench", phase="complete", failure=None,
+            owner_check_status="passed", original_source_sha256=C["sha"](C["ORIGINAL"]), original_tests_sha256=C["TEST_SHA"],
+            question_sha256=C["QUESTION_SHA"], license="GPL-3.0-only", actual_applied_sha256="a" * 64,
+            replacement_sha256="a" * 64, core_task_id="b" * 32, peer_job_id="d" * 32, report_sha256="c" * 64)
+        C["workbench_driver"](value, successful=True)
+        for flag in C["WORKBENCH_FLAGS"]:
+            with self.assertRaises(ValueError):
+                C["workbench_driver"](dict(value, **{flag: False}), successful=True)
+        for name, invalid in (("actual_applied_sha256", "d" * 64), ("report_sha256", None),
+                ("core_task_id", "bad"), ("peer_job_id", None), ("question_sha256", "0" * 64)):
+            with self.assertRaises(ValueError):
+                C["workbench_driver"](dict(value, **{name: invalid}), successful=True)
+
     def test_driver_requires_original_tests_true_baseline_and_permissions(self):
         C["driver"](driver(), successful=True)
         for key in ("original_baseline_failed", "original_tests_unchanged", "owner_edit_approved", "owner_test_approved",
@@ -346,7 +403,7 @@ jq() { return 83; }
     def test_raw_receipt_join_rejects_source_model_and_output_mutations(self):
         # Explicit synthetic parser data, not an executed coding result.
         with tempfile.TemporaryDirectory() as tmp:
-            task = Path(tmp); (task / "execution").mkdir()
+            task = Path(tmp) / ("task-" + "b" * 32); (task / "execution").mkdir(parents=True)
             write = lambda path, value: path.write_text(json.dumps(value, separators=(",", ":")))
             source_manifest = b"synthetic source manifest"
             (task / "source.manifest").write_bytes(source_manifest)
@@ -383,6 +440,15 @@ jq() { return 83; }
                         report_json=raw_report, report_sha256=result["report_sha256"])))
                 return C["retained_result"](task, result, layout, observed)
             self.assertTrue(check(report)["exact_receipt_join"])
+            rendered = dict(core_task_id="c" * 32, peer_job_id=result["peer_job_id"], report_sha256=result["report_sha256"],
+                replacement_sha256=C["sha"](text.encode()), actual_applied_sha256=C["sha"](text.encode()))
+            verified = C["retained_result"](task, rendered, layout, observed, workbench=True)
+            self.assertEqual(verified["peer_job_id"], result["peer_job_id"])
+            self.assertNotIn("tool_call_id", verified)
+            for key, bad in (("peer_job_id", "f" * 32), ("report_sha256", "f" * 64),
+                             ("replacement_sha256", "f" * 64), ("actual_applied_sha256", "f" * 64)):
+                with self.assertRaises(ValueError):
+                    C["retained_result"](task, dict(rendered, **{key: bad}), layout, observed, workbench=True)
             for key, value in (("purpose", "document"), ("proposal_complete", False), ("private_data_supported", True)):
                 changed = copy.deepcopy(report); changed[key] = value
                 with self.assertRaises(ValueError): check(changed)

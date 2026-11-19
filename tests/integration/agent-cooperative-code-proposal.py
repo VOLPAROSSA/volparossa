@@ -25,6 +25,10 @@ read, write, require = JOBS["read"], JOBS["write"], JOBS["require"]
 sha, digest, hex64 = OLD["sha"], OLD["digest"], OLD["hex64"]
 NAME = "agent-cooperative-code-proposal"
 CODE_REVISION = "f27576ebd7e7ded2f1319186f34df87f48e970d7"
+WORKBENCH = read(HERE / "agent-cooperative-workbench-pins.json")
+WORKBENCH_REVISION = WORKBENCH["code_revision"]
+EDITOR_BYTES = 168033440
+EDITOR_SHA256 = "5f5c00a9da9d232e4c84e9eee68bbdeb4d8737462022626ce3bdb6948f3d8649"
 PROFILE = "qwen3-0.6b-v1"
 MODEL = dict(model_id="Qwen/Qwen3-0.6B", model_revision="c1899de289a04d12100db370d81485cdf75e47ca",
     base_weights=dict(bytes=1503300328, sha256="f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"),
@@ -38,7 +42,7 @@ ORIGINAL = b"def add(a, b):\n    return a - b\n"
 TEST_SHA = "78a8726db93e31cbe6f87dd58c7cb76d35cd5086d090c40b0e68caf9f0836835"
 QUESTION_SHA = "e1c169f57923c644bcdd3d7ac9ce5796049393c6e2c0ccd9938ad155d9bfdd0e"
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control")) + (
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
@@ -294,17 +298,29 @@ def capacity(work):
 
 
 def bundle_manifest(value):
-    require(set(value) == {"version", "kind", "code_revision", "node_version", "files"}
-        and value["version"] == 1 and value["kind"] == "public-code-proposal-inputs"
-        and value["code_revision"] == CODE_REVISION and re.fullmatch("[0-9a-f]{40}", CODE_REVISION)
-        and value["node_version"] == "24.19.0" and set(value["files"]) == set(BUNDLE_FILES), "exact proposal bundle")
+    fields = {"version", "kind", "code_revision", "node_version", "files"}
+    require(type(value) is dict and value["kind"] == "public-code-proposal-inputs"
+            and value["node_version"] == "24.19.0" and type(value["version"]) is int, "proposal bundle header")
+    workbench = value["version"] == 2
+    if workbench:
+        require(set(value) == fields | {"frontend"} and value["frontend"] == "vscodium"
+                and value["code_revision"] == WORKBENCH_REVISION
+                and set(value["files"]) == set(WORKBENCH["files"]) | {"runtime/node", "runtime/node-LICENSE", "runtime/editor.deb"},
+                "pinned workbench inventory")
+        for name, pin in WORKBENCH["files"].items():
+            require(all(value["files"][name][key] == pin[key] for key in ("bytes", "sha256")), "pinned Code blob")
+        require(value["files"]["runtime/editor.deb"] == dict(bytes=EDITOR_BYTES, sha256=EDITOR_SHA256, mode=0o600),
+                "pinned editor release")
+    else:
+        require(set(value) == fields and value["version"] == 1 and value["code_revision"] == CODE_REVISION
+                and set(value["files"]) == set(BUNDLE_FILES), "exact proposal bundle")
     total = 0
     for name, row in value["files"].items():
-        require(set(row) == {"bytes", "sha256", "mode"} and type(row["bytes"]) is int
-            and 0 < row["bytes"] <= (160 * 1048576 if name == "runtime/node" else 1048576)
+        maximum = {"runtime/node": 160 * 1048576, "runtime/editor.deb": EDITOR_BYTES}.get(name, 1048576)
+        require(set(row) == {"bytes", "sha256", "mode"} and type(row["bytes"]) is int and 0 < row["bytes"] <= maximum
             and row["mode"] == (0o700 if name == "runtime/node" else 0o600) and hex64(row["sha256"]), "bundle file")
         total += row["bytes"]
-    require(total <= 190 * 1048576, "bounded proposal bundle")
+    require(total <= (310 if workbench else 190) * 1048576, "bounded proposal bundle")
     node = read(HERE / "agent-private-conversation-pins.json")["runtime"]["files"]
     for staged, original in (("runtime/node", "bin/node"), ("runtime/node-LICENSE", "LICENSE")):
         require(all(value["files"][staged][key] == node[original][key] for key in ("bytes", "sha256")), "Node pin")
@@ -341,6 +357,48 @@ def provision(work, bundle, expected):
     os.chown(root / "projects", account.pw_uid, account.pw_gid)
     write(work / f"{NAME}-provision.json", dict(version=1, bundle_manifest_sha256=expected, manifest=selected,
         local_model_planner=False, model_profile=PROFILE))
+
+
+WORKBENCH_FLAGS = {"passed", "workspace_trust_granted", "previewed_exact_public_source", "owner_enrolled_public_source",
+    "owner_edit_approved", "owner_test_approved", "result_shown", "original_baseline_failed", "original_tests_unchanged",
+    "independent_test_passed", "only_selected_file_present", "editor_joined", "project_removed"}
+WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_file", "public_task", "license",
+    "publication_preview", "publication_scope", "original_tests", "peer_operation", "owner_result", "edit_scope", "check_scope",
+    "dialog_closed", "peer_deadline", "replacement_binding", "independent_check", "editor_exit", "trust_banner",
+    "trust_page", "trust_grant", "trust_close", "workbench_failed"}
+
+
+def workbench_driver(value, successful=False):
+    fields = WORKBENCH_FLAGS | {"version", "kind", "phase", "failure", "owner_check_status", "original_source_sha256",
+        "original_tests_sha256", "question_sha256", "license", "actual_applied_sha256", "replacement_sha256",
+        "core_task_id", "peer_job_id", "report_sha256"}
+    require(type(value) is dict and set(value) == fields and value["version"] == 1
+        and value["kind"] == "vscodium-public-peer-workbench"
+        and all(type(value[key]) is bool for key in WORKBENCH_FLAGS)
+        and value["phase"] in {"prepare", "workbench", "independent_check", "complete"}
+        and value["failure"] in WORKBENCH_FAILURES and value["owner_check_status"] in {None, "passed"}
+        and value["original_source_sha256"] == sha(ORIGINAL) and value["original_tests_sha256"] == TEST_SHA
+        and value["question_sha256"] == QUESTION_SHA and value["license"] == "GPL-3.0-only"
+        and all(value[key] is None or hex64(value[key]) for key in ("actual_applied_sha256", "replacement_sha256", "report_sha256"))
+        and all(value[key] is None or re.fullmatch("[0-9a-f]{32}", value[key])
+                for key in ("core_task_id", "peer_job_id")), "closed workbench report")
+    if successful:
+        require(all(value[key] for key in WORKBENCH_FLAGS) and value["phase"] == "complete" and value["failure"] is None
+            and value["owner_check_status"] == "passed" and value["report_sha256"] and value["core_task_id"] and value["peer_job_id"]
+            and value["actual_applied_sha256"] == value["replacement_sha256"] != sha(ORIGINAL)
+            and value["actual_applied_sha256"] is not None, "native workbench owner result")
+    return value
+
+
+def workbench_selected(work):
+    return read(work / f"{NAME}-provision.json")["manifest"].get("frontend") == "vscodium"
+
+
+def owner_report(work, successful=False):
+    root, _ = paths(work)
+    if workbench_selected(work):
+        return workbench_driver(read(root / "projects/report.json", 65536), successful)
+    return driver(read(root / "report.json", 65536), successful)
 
 
 def driver(value, successful=False):
@@ -382,7 +440,7 @@ def driver(value, successful=False):
     return value
 
 
-def retained_result(task, shown, layout, observed):
+def retained_result(task, shown, layout, observed, *, workbench=False):
     raw = BROWSER["exact_bytes"](task / "dataset.json")
     data = json.loads(raw)
     handle = read(task / "execution/job-0.json", 65536)
@@ -415,22 +473,35 @@ def retained_result(task, shown, layout, observed):
         and data["inference"][0]["start"] == 0 and data["inference"][0]["end"] == len(ORIGINAL), "original public source")
     source_manifest = BROWSER["exact_bytes"](task / "source.manifest", 65536)
     require(bytes.fromhex(data["source_manifest_hex"]) == source_manifest
-        and sha(raw) == binding["dataset_sha256"] == shown["dataset_sha256"] == report["dataset"]["sha256"]
-        and digest(task / "dataset.manifest") == binding["dataset_manifest_id"] == shown["dataset_manifest_id"]
-        and sha(source_manifest) == shown["source_manifest_id"] == report["dataset"]["source_manifest_sha256"]
-        and report["dataset"]["source_sha256"] == sha(ORIGINAL)
-        and shown["peer_job_id"] == binding["job_id"] and shown["provider_key"] == handle["provider_key"], "source/result join")
+        and sha(raw) == binding["dataset_sha256"] == report["dataset"]["sha256"]
+        and digest(task / "dataset.manifest") == binding["dataset_manifest_id"]
+        and sha(source_manifest) == report["dataset"]["source_manifest_sha256"]
+        and report["dataset"]["source_sha256"] == sha(ORIGINAL), "signed source/result join")
     outputs = report["outputs"]
     require(len(outputs) == 1 and outputs[0]["sample_index"] == 0, "single original output")
     output = outputs[0]
+    payload = output["text"].encode()
     require(output["text_truncated"] is False and output["generation"] == dict(version=1, stop_reason="eos",
             max_new_tokens=1024, model_profile=PROFILE)
-        and sha(output["text"].encode()) == shown["output_sha256"]
-        and len(output["text"].encode()) == shown["output_bytes"]
-        and output["generated_tokens"] == shown["generated_tokens"], "unmodified EOS output")
+        and 0 < len(payload) <= 4096 and type(output["generated_tokens"]) is int
+        and 0 < output["generated_tokens"] <= 1024, "unmodified EOS output")
+    peer = dict(source_manifest_id=sha(source_manifest), dataset_sha256=sha(raw),
+        dataset_manifest_id=binding["dataset_manifest_id"], peer_job_id=binding["job_id"], provider_key=handle["provider_key"],
+        output_sha256=sha(payload), output_bytes=len(payload), generated_tokens=output["generated_tokens"])
+    if workbench:
+        # The local journal directory has its own random nonce, independent
+        # of the request correlation ID. The peer owns its actual job ID.
+        require(peer["peer_job_id"] == shown["peer_job_id"]
+            and peer["output_sha256"] == shown["replacement_sha256"] == shown["actual_applied_sha256"],
+            "rendered peer job and applied file must match the original receipt")
+        result = dict(peer, core_task_id=shown["core_task_id"], report_sha256=status["report_sha256"], model_profile=PROFILE,
+            model_fingerprint=FINGERPRINT, source_sha256=sha(ORIGINAL), stop_reason="eos", proposal_complete=True)
+    else:
+        require(all(shown[key] == value for key, value in peer.items()), "driver fields differ from original worker")
+        result = shown
     require(observed is not None and observed["dataset_file"]["sha256"] == sha(raw)
         and observed["dataset_json"].encode() == raw and observed["node"] == layout["provider_nodes"][0], "actual input not observed")
-    return dict(shown, exact_receipt_join=True, original_input_observed=True, observed_task_processes_ended=True)
+    return dict(result, exact_receipt_join=True, original_input_observed=True, observed_task_processes_ended=True)
 
 
 def signed_input_binding(task, publisher):
@@ -465,11 +536,15 @@ def observe(work, pid):
             time.sleep(0.05)
         require(not JOBS["alive"](owner), "owner deadline")
         phase = "owner_result"
-        shown = driver(read(root / "report.json", 65536), successful=True)
+        shown = owner_report(work, successful=True)
         require(len(tasks) == 1 and observed is not None, "exactly one observed peer task")
-        phase = "retained_result"
+        phase = "signed_manifests"
         signed_input_binding(tasks[0], read(work / "agent-jobs-publish.json")["publisher_key_hex"])
-        result = retained_result(tasks[0], shown["public_result"], layout, observed)
+        workbench = workbench_selected(work)
+        phase = "retained_result"
+        result = retained_result(tasks[0], shown if workbench else shown["public_result"], layout, observed,
+                                 workbench=workbench)
+        phase = "question_binding"
         require(sha(json.loads(observed["dataset_json"])["inference"][0]["question"].encode()) == shown["question_sha256"], "question join")
         phase = "worker_cleanup"
         BROWSER["check_task_workers_ended"]([observed])
@@ -514,7 +589,7 @@ def capture(work, application_status, observer_status):
     require(all(0 <= value <= 255 for value in (application_status, observer_status)), "exit status")
     state = "absent"
     try:
-        shown = driver(read(paths(work)[0] / "report.json", 65536))
+        shown = owner_report(work)
         write(work / f"{NAME}-driver.json", shown)
         state = "valid"
     except FileNotFoundError:
@@ -525,7 +600,8 @@ def capture(work, application_status, observer_status):
     try:
         value = read(work / f"{NAME}-observer.private", 4096)
         require(set(value) == {"version", "phase", "observed_worker", "task_count"}
-            and value["version"] == 1 and value["phase"] in {"worker_scan", "owner_result", "retained_result", "worker_cleanup"}
+            and value["version"] == 1 and value["phase"] in {"worker_scan", "owner_result", "signed_manifests",
+                                                            "retained_result", "question_binding", "worker_cleanup"}
             and type(value["observed_worker"]) is bool and type(value["task_count"]) is int
             and 0 <= value["task_count"] <= 2, "closed observer")
         observer = value
@@ -541,6 +617,8 @@ def evidence(work, revision):
     root, state = paths(work)
     require(not root.exists() and not state.exists() and not (state.parent / "public.sock").exists(), "private state remains")
     value = {key: read(work / f"{NAME}-{key}.json", 1048576) for key in ("provision", "driver", "observation", "result", "discovery", "control")}
+    if workbench_selected(work):
+        value["editor"] = read(work / f"{NAME}-editor.json")
     value["discovery_drain"] = read(work / f"{NAME}-discovery-drain.json")
     value.update(source_revision=revision, layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), private_cleanup=read(work / "agent-jobs-private-cleanup.json"),
@@ -565,13 +643,35 @@ def check_evidence(value, revision):
     require(value["source_revision"] == revision and all(value[key] is True for key in
         ("public_service_stopped", "peer_broker_stopped", "private_state_removed")), "source/cleanup")
     bundle_manifest(value["provision"]["manifest"])
-    shown = driver(value["driver"], successful=True)
-    require(value["result"] == dict(shown["public_result"], exact_receipt_join=True,
-        original_input_observed=True, observed_task_processes_ended=True), "closed original result changed")
+    result = value["result"]
+    if value["provision"]["manifest"].get("frontend") == "vscodium":
+        shown = workbench_driver(value["driver"], successful=True)
+        pin = read(HERE / "agent-native-editor-pins.json")["editor"]
+        require(value["editor"] == dict(version=1, product="VSCodium", release=pin["version"],
+            source_commit=pin["declared_source_commit"], binary_sha256=pin["binary_sha256"],
+            package_bytes=EDITOR_BYTES, package_sha256=EDITOR_SHA256), "original editor release")
+        require(set(result) == {"source_manifest_id", "dataset_sha256", "dataset_manifest_id", "peer_job_id",
+            "provider_key", "output_sha256", "output_bytes", "generated_tokens", "core_task_id", "report_sha256",
+            "model_profile", "model_fingerprint", "source_sha256", "stop_reason", "proposal_complete", "exact_receipt_join",
+            "original_input_observed", "observed_task_processes_ended"}
+            and all(hex64(result[key]) for key in ("source_manifest_id", "dataset_sha256", "dataset_manifest_id", "provider_key"))
+            and re.fullmatch("[0-9a-f]{32}", result["peer_job_id"])
+            and result["peer_job_id"] == shown["peer_job_id"]
+            and result["core_task_id"] == shown["core_task_id"] and result["report_sha256"] == shown["report_sha256"]
+            and result["output_sha256"] == shown["actual_applied_sha256"] and result["source_sha256"] == sha(ORIGINAL)
+            and result["model_profile"] == PROFILE and result["model_fingerprint"] == FINGERPRINT and result["stop_reason"] == "eos"
+            and type(result["output_bytes"]) is int and 0 < result["output_bytes"] <= 4096
+            and type(result["generated_tokens"]) is int and 0 < result["generated_tokens"] <= 1024
+            and all(result[key] is True for key in ("proposal_complete", "exact_receipt_join", "original_input_observed",
+                "observed_task_processes_ended")), "workbench/worker result changed")
+    else:
+        shown = driver(value["driver"], successful=True)
+        require(result == dict(shown["public_result"], exact_receipt_join=True,
+            original_input_observed=True, observed_task_processes_ended=True), "closed original result changed")
     require(value["observation"]["isolated_live_worker"] is True
         and value["observation"]["observed_task_processes_ended"] is True
         and value["observation"]["base_model_sha256"] == MODEL["base_weights"]["sha256"]
-        and value["observation"]["dataset_sha256"] == shown["public_result"]["dataset_sha256"]
+        and value["observation"]["dataset_sha256"] == result["dataset_sha256"]
         and value["layout"]["provider_nodes"] == [value["observation"]["node"]]
         and value["private_cleanup"] == dict(observed_compute_processes_ended=True, model_runtime_removed=True,
             private_job_roots_removed=True, publisher_key_removed=True), "isolated worker/cleanup missing")
@@ -579,7 +679,7 @@ def check_evidence(value, revision):
     control_observation(value["control"], value["layout"], True)
     check_drain(value["discovery_drain"])
     require(value["control"]["discovery"] == value["discovery"]["discovery"]
-        and value["control"]["selected_provider_key"] == shown["public_result"]["provider_key"]
+        and value["control"]["selected_provider_key"] == result["provider_key"]
         and value["discovery_path"]["gates"]["event_baseline_unix_ms"] < value["path"]["gates"]["event_baseline_unix_ms"],
         "discovery and task phases not separately observed")
     # Physical generic-control links retain their actual cp0/cp1 order. They are

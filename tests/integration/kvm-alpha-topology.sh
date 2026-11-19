@@ -1321,7 +1321,8 @@ if [ "$agent_cooperative_code" = yes ]; then
     done
 fi
 if [ "$agent_cooperative_code_proposal" = yes ]; then
-    for proposal_fixture in agent-cooperative-code-proposal.py agent-cooperative-code-proposal.sh; do
+    for proposal_fixture in agent-cooperative-code-proposal.py agent-cooperative-code-proposal.sh \
+        agent-cooperative-workbench.py agent-cooperative-workbench-pins.json agent-native-editor-pins.json; do
         [ -f "$source_directory/tests/integration/$proposal_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$proposal_fixture" ] || exit 69
     done
