@@ -2388,6 +2388,36 @@ mod tests {
     }
 
     #[test]
+    fn loopback_refusal_is_read_from_the_completed_connect_socket() {
+        // Keep the target port bound without listening so another local test cannot claim it.
+        let target = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        target
+            .bind(&"127.0.0.1:0".parse::<SocketAddr>().unwrap().into())
+            .unwrap();
+        let client = Socket::new(
+            Domain::IPV4,
+            Type::STREAM.nonblocking(),
+            Some(Protocol::TCP),
+        )
+        .unwrap();
+        let pending = client.connect(&target.local_addr().unwrap()).unwrap_err();
+        assert_eq!(pending.raw_os_error(), Some(libc::EINPROGRESS));
+        let error = wait_for_connect(
+            &client,
+            HardDeadline::after(Duration::from_secs(5)).unwrap(),
+            HardDeadline::after(Duration::from_secs(2)).unwrap(),
+        )
+        .unwrap_err();
+        let detail = error.diagnostic.expect("socket diagnostic");
+        assert_eq!(
+            detail.operation(),
+            AcquireFailureOperation::ConnectSocketError
+        );
+        assert_eq!(detail.class(), AcquireFailureClass::Io);
+        assert_eq!(detail.errno, Some(libc::ECONNREFUSED));
+    }
+
+    #[test]
     fn connect_poll_preserves_reply_time_and_distinguishes_its_own_timeout() {
         let (mut writer, _peer) = UnixStream::pair().expect("connected socket pair");
         writer.set_nonblocking(true).expect("nonblocking writer");

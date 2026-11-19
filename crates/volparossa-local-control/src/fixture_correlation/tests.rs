@@ -122,6 +122,10 @@ fn fixture_acquire_origins_preserve_allocations_and_require_cleanup_rejection() 
         (Code::AcquireDescriptorState, 17),
         (Code::AcquireDescriptorDeadline, 18),
         (Code::MptcpBindAddressInUse, 19),
+        (Code::MptcpConnectSocketRefused, 20),
+        (Code::MptcpConnectSocketNetworkUnreachable, 21),
+        (Code::MptcpConnectSocketHostUnreachable, 22),
+        (Code::MptcpConnectSocketTimedOut, 23),
     ] {
         assert_eq!(code as i32, number);
         if !(10..=18).contains(&number) {
@@ -170,6 +174,22 @@ fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
             "mptcp_connect_poll_timed_out",
         ),
         (Code::MptcpBindAddressInUse, "mptcp_bind_address_in_use"),
+        (
+            Code::MptcpConnectSocketRefused,
+            "mptcp_connect_socket_refused",
+        ),
+        (
+            Code::MptcpConnectSocketNetworkUnreachable,
+            "mptcp_connect_socket_network_unreachable",
+        ),
+        (
+            Code::MptcpConnectSocketHostUnreachable,
+            "mptcp_connect_socket_host_unreachable",
+        ),
+        (
+            Code::MptcpConnectSocketTimedOut,
+            "mptcp_connect_socket_timed_out",
+        ),
     ] {
         let mut value = acquire_summary();
         value.rounds = 2;

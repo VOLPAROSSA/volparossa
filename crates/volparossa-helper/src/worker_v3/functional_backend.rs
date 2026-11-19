@@ -4000,6 +4000,26 @@ fn classify_acquire_transport_execution(
                         AcquireFailureClass::Io,
                         Some(libc::EADDRINUSE),
                     ) => BackendError::MptcpBindAddressInUse,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ECONNREFUSED),
+                    ) => BackendError::MptcpConnectSocketRefused,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ENETUNREACH),
+                    ) => BackendError::MptcpConnectSocketNetworkUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::EHOSTUNREACH),
+                    ) => BackendError::MptcpConnectSocketHostUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ETIMEDOUT),
+                    ) => BackendError::MptcpConnectSocketTimedOut,
                     _ => BackendError::Kernel,
                 }
             });
@@ -6230,16 +6250,21 @@ pub(super) mod tests {
         assert!(capture.0.lock().expect("captured fields").is_empty());
     }
 
+    fn classifies_as(
+        execution: DiagnosticExecution,
+        request: &InternalAcquireTransportSocket,
+        expected: BackendError,
+    ) {
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, request),
+            AcquireTransportExecution::Definite(error) if error == expected
+        ));
+    }
+
     #[test]
     fn acquire_diagnostic_recognizes_only_the_exact_client_mptcp_bind_collision() {
         let request = mptcp_connected_acquire_request();
         let collision = || acquire_log_execution(Some(libc::EADDRINUSE));
-        let classifies_as = |execution, request: &InternalAcquireTransportSocket, expected| {
-            assert!(matches!(
-                classify_acquire_transport_execution(execution, request),
-                AcquireTransportExecution::Definite(error) if error == expected
-            ));
-        };
         classifies_as(collision(), &request, BackendError::MptcpBindAddressInUse);
         for errno in [None, Some(libc::EADDRNOTAVAIL), Some(libc::EACCES)] {
             classifies_as(acquire_log_execution(errno), &request, BackendError::Kernel);
@@ -6393,6 +6418,55 @@ pub(super) mod tests {
             ]);
             assert_eq!(*capture.0.lock().expect("captured fields"), vec![expected]);
         }
+    }
+
+    #[test]
+    fn acquire_diagnostic_preserves_only_credentialed_mptcp_connect_socket_errors() {
+        let request = mptcp_connected_acquire_request();
+        for (errno, expected) in [
+            (libc::ECONNREFUSED, BackendError::MptcpConnectSocketRefused),
+            (
+                libc::ENETUNREACH,
+                BackendError::MptcpConnectSocketNetworkUnreachable,
+            ),
+            (
+                libc::EHOSTUNREACH,
+                BackendError::MptcpConnectSocketHostUnreachable,
+            ),
+            (libc::ETIMEDOUT, BackendError::MptcpConnectSocketTimedOut),
+        ] {
+            let mut execution = acquire_log_execution(Some(errno));
+            let failure = execution.response.acquire_failure.as_mut().unwrap();
+            failure.operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &request, expected);
+            for operation in [
+                AcquireFailureOperation::Bind,
+                AcquireFailureOperation::Connect,
+            ] {
+                let mut execution = acquire_log_execution(Some(errno));
+                execution
+                    .response
+                    .acquire_failure
+                    .as_mut()
+                    .unwrap()
+                    .operation = operation as i32;
+                classifies_as(execution, &request, BackendError::Kernel);
+            }
+            let mut wrong_kind = request.clone();
+            wrong_kind.descriptor_kind = InternalTransportSocketKind::MptcpListener as i32;
+            let mut execution = acquire_log_execution(Some(errno));
+            execution
+                .response
+                .acquire_failure
+                .as_mut()
+                .unwrap()
+                .operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &wrong_kind, BackendError::Kernel);
+        }
+        let mut unknown = acquire_log_execution(Some(libc::EINVAL));
+        unknown.response.acquire_failure.as_mut().unwrap().operation =
+            AcquireFailureOperation::ConnectSocketError as i32;
+        classifies_as(unknown, &request, BackendError::Kernel);
     }
 
     #[test]
