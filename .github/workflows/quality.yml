@@ -441,7 +441,7 @@ jobs:
 
       - name: Prepare the signed Ubuntu archive
         id: ubuntu_archive
-        uses: VOLPAROSSA/.github/actions/ubuntu-archive@e3f98bbc538f5df580b78c8a0d8bd932dfe3e381
+        uses: VOLPAROSSA/.github/actions/ubuntu-archive@0b26926c9893b01713aded0d331efb1333ddf0c0
 
       - name: Install reviewed Protobuf compiler on the disposable hosted runner
         run: |
@@ -451,7 +451,6 @@ jobs:
           # Official Noble security package; signed apt metadata authenticates it.
           # Compiler and library family from Noble security, published 2026-10-20.
           # https://security.ubuntu.com/ubuntu/dists/noble-security/universe/binary-amd64/Packages.xz
-          sudo apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" update
           sudo apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4 \
             libprotoc32t64=3.21.12-8.2ubuntu0.4 \
