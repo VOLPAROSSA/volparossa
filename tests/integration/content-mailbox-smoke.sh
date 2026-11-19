@@ -241,6 +241,7 @@ content_mailbox_run() {
         --quota-bytes 16777216 --max-entries 64 --lifetime-seconds 1800 \
         >"$WORK/content-mailbox-send.json" 2>"$WORK/content-mailbox-send.err" || fail MAILBOX_SEND_FAILED
     content_mailbox_phase_finish 4
+    if [ "${paired_mail:-no}" = yes ]; then paired_mail_stage send; fi
     content_mailbox_remove_private sender || fail MAILBOX_SENDER_PRIVATE_CLEANUP_FAILED
     if [ -L "$mailbox_user/sender-manifest.bin" ] || [ ! -f "$mailbox_user/sender-manifest.bin" ] \
         || [ "$(stat -Lc '%a:%u:%g' "$mailbox_user/sender-manifest.bin")" != "600:$WORKER_UID:$WORKER_GID" ]; then
@@ -284,6 +285,7 @@ content_mailbox_run() {
         no_manifest_or_message_id_argument:true,agent_mount_positive_control:true,
         agent_cannot_read_user_state:true,client_cannot_read_provider_stores:true}' \
         "$WORK/content-mailbox-output-raw.json" >"$WORK/content-mailbox-output.json"
+    if [ "${paired_mail:-no}" = yes ]; then paired_mail_stage receive; fi
     if [ "${signal_mailbox:-no}" = yes ]; then signal_mailbox_run; fi
     for mailbox_node in "$provider_node_a" "$provider_node_b"; do
         [ "$(stat -Lc '%a:%u:%g' "$WORK/state-$mailbox_node/mailbox-cache")" = "700:$AGENT_UID:$AGENT_GID" ] \

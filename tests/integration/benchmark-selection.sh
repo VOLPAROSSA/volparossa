@@ -109,10 +109,12 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot
-    elif [ "${signal_mailbox:-no}" = yes ]; then
+    elif [ "${signal_mailbox:-no}" = yes ] || [ "${paired_mail:-no}" = yes ]; then
         case ${benchmark_label:-} in
-            content-mailbox-send) benchmark_diagnostic_prefix=signal-mailbox-send ;;
-            content-mailbox-receive) benchmark_diagnostic_prefix=signal-mailbox-receive ;;
+            content-mailbox-send|content-mailbox-receive)
+                benchmark_mailbox=signal-mailbox
+                if [ "${paired_mail:-no}" = yes ]; then benchmark_mailbox=paired-mail; fi
+                benchmark_diagnostic_prefix=$benchmark_mailbox-${benchmark_label#content-mailbox-} ;;
             *) return 1 ;;
         esac
     elif [ "${storage_fixture_driver:-}" = signal-backup-fragments-smoke.py ]; then
