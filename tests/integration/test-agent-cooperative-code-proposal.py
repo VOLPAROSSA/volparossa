@@ -323,6 +323,26 @@ jq() { return 83; }
             item = manifest(); item["files"][name][key] = value
             with self.assertRaises(ValueError): C["bundle_manifest"](item)
 
+    def test_root_owned_workbench_parents_are_traversable_under_the_topology_private_umask(self):
+        helper = runpy.run_path(str(HERE / "agent-cooperative-workbench.py"))
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            account = staging / "code"
+            projects = account / "projects"
+            projects.mkdir(parents=True, mode=0o700)
+            original = os.umask(0o077)
+            try:
+                command = helper["service"](staging / "root", account, staging / "editor", staging / "public.sock")
+            finally:
+                os.umask(original)
+            for name in (".", "opt", "etc", "usr", "workbench"):
+                self.assertEqual((staging / "root" / name).stat().st_mode & 0o777, 0o755)
+            self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(projects.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
+            self.assertIn("--property=PrivateNetwork=yes", command)
+            self.assertIn("--property=User=volparossa", command)
+
     def test_workbench_inputs_pin_each_committed_file_and_the_official_editor(self):
         value = manifest()
         value.update(version=2, frontend="vscodium", code_revision=C["WORKBENCH_REVISION"])

@@ -44,9 +44,14 @@ def prepare(work, temporary, code):
 
 
 def service(root, code, release, owner_socket):
-    for name in ("usr", "etc/fonts", "proc", "sys", "dev", "run", "tmp", "workbench",
-                 "opt/volparossa-editor", "opt/volparossa-code"):
-        (root / name).mkdir(parents=True, exist_ok=True)
+    # The root-owned topology runs with umask 077. The ordinary editor must
+    # traverse the empty system mount parents. The staged data and private
+    # socket retain their same-owner access modes on their own bind mounts.
+    for name in (".", "usr", "etc", "etc/fonts", "proc", "sys", "dev", "run", "tmp", "workbench",
+                 "opt", "opt/volparossa-editor", "opt/volparossa-code"):
+        directory = root / name
+        directory.mkdir(exist_ok=True)
+        directory.chmod(0o755)
     for name in ("bin", "sbin", "lib", "lib64"):
         (root / name).symlink_to("usr/" + name)
     for name in ("etc/passwd", "etc/group", "etc/ld.so.cache", "opt/volparossa-node"):
@@ -76,7 +81,6 @@ def main(work):
         temporary = Path(staging)
         release = prepare(work, temporary, code)
         root = temporary / "root"
-        root.mkdir(mode=0o755)
         return subprocess.run(service(root, code, release, state.parent / "public.sock"), check=False).returncode
 
 

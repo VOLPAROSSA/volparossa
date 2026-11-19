@@ -94,8 +94,17 @@ agent_cooperative_code_proposal_run() {
             >"$WORK/agent-cooperative-code-proposal-driver.log" 2>"$WORK/agent-cooperative-code-proposal-driver.err" &
     fi
     jobs_batch_pid=$!
-    python3 -B "$proposal_script" await-discovery "$WORK" "$jobs_batch_pid" \
-        || fail CODE_PROPOSAL_DISCOVERY_BOUNDARY_FAILED
+    if ! python3 -B "$proposal_script" await-discovery "$WORK" "$jobs_batch_pid"; then
+        # An editor that already exited can have a real isolated startup failure
+        # before any broker request. Retain its original process/report state.
+        if ! kill -0 "$jobs_batch_pid" 2>/dev/null; then
+            code_driver_status=0
+            wait "$jobs_batch_pid" || code_driver_status=$?
+            jobs_batch_pid=
+            python3 -B "$proposal_script" capture "$WORK" "$code_driver_status" 1 || fail CODE_PROPOSAL_CAPTURE_FAILED
+        fi
+        fail CODE_PROPOSAL_DISCOVERY_BOUNDARY_FAILED
+    fi
     content_custody_phase_finish 1
     PHASE=agent-cooperative-code-proposal-native-task
     content_custody_phase_start fetch
