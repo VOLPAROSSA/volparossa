@@ -278,6 +278,13 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   recheck confirmed the same message ID. An independent download of the stored
   MIME matched all 313 original bytes. Profile and server cleanup passed.
   [Joined real-mailbox receipt and reproduction](https://github.com/VOLPAROSSA/volparossa-mail/blob/350c050e5b59c5205af837137de48058fa1f087c/third_party/thunderbird-stalwart-extension-smoke.json)
+  Thunderbird subsequently closed normally after the owner imported the message.
+  The original server returned the message after the client exited. The trial then
+  killed Stalwart, confirmed its listener stopped and reopened the same SQLite
+  database. An incorrect password returned HTTP 401. The owner retrieved the
+  original message ID and all 313 MIME bytes. The receipt records one upload,
+  one import and two metadata reads after the first response was replaced by 503.
+  [Mail integration](https://github.com/VOLPAROSSA/volparossa-mail/pull/15) · [Native client and server receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/4406e3772d22762cae5fcaca6b5ed7b4cc840214/third_party/thunderbird-stalwart-mailbox-crash-recovery)
 - **Chat** now emits a receipt event once per distinct message timestamp
   within one incoming encrypted Signal receipt. Separate envelopes and linked
   devices keep separate events. Three synthetic cases exercised the method
@@ -314,6 +321,14 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   separate evidence.
   [Native trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44412679519)
   · [Main integration and archive digests](https://github.com/VOLPAROSSA/volparossa/pull/350)
+  A separate Debian 13 guest ran the ordinary Core helper, agent and Weather
+  bridge with an owner distinct from the cache provider. A signed ECMWF
+  forecast for Berlin was read twice across a bridge restart. The first HTTP
+  read after its original signed expiry returned 503, 50 ms past the deadline.
+  The direct Core read also refused the expired product. The Weather client
+  had only loopback and the guest had no network card. The guest removed the
+  original plaintext, stopped both services and left its scratch directory empty.
+  [Weather run](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44427401562) · [Original expiry receipt](development/evidence/weather-cache-expiry-44427401562/result.json)
 - **Map** clears an expired positioning-quality result when the Android
   activity or its window regains focus, and when a new assessment is requested.
   Eight synthetic Android/JNI emulator cases passed on `249266a8`, including
@@ -336,14 +351,26 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   [Hosted example](https://github.com/VOLPAROSSA/volparossa-bank/actions/runs/44413979688)
   · [Bank main integration](https://github.com/VOLPAROSSA/volparossa-bank/pull/13)
 
+  Four validators with separate stores subsequently executed the Bank owner's
+  original signed commands. They moved 70 of 100 TEST units once. After the
+  signing seed was removed and a validator restarted, both original commands
+  were executed again at block 24. The receipt sequences remained 1 and 2,
+  balances were unchanged and all four validators converged at height 25.
+  The trial covered 3–1 and 2–2 partitions. Cleanup removed the private keys
+  and namespaces and reaped the processes. The host observer accepted the
+  observed lifetime countdown. Its raw snapshots differed.
+  [Four-validator run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Original build, consensus and cleanup receipts](development/evidence/bank-validators-44426288636)
+
 ### Native Firefox ordinary tabs
 
-The native Firefox 157.0.1 candidate binds the ordinary-tab fixture to Browser
-`c3311ebedcc0`. The last recorded native run stopped at the second attachment
-before the origin received a connection. Acceptance still requires two complete
-body hashes, two carrying paths per route, independent tab detach and cleanup
-in the same disposable run. The scoped Firefox ESR fixture has its own evidence.
-[Native trial history and original receipts](applications/BROWSER_NETWORK.md#native-ordinary-tab-integration-actual-trials-remain-failed)
+Core `669e73ea` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
+The guest verified its first 32 MiB ordinary-tab navigation. The second tab
+selected its route and received zero body bytes. The origin recorded two TLS
+handshakes and one accepted file request. Cleanup removed every owned topology
+object and the guest network snapshots matched. A second full body hash,
+carrying paths on its route and independent detach remain open.
+[Original hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44416643207)
+· [Build, browser and origin evidence](applications/BROWSER_NETWORK.md#hosted-native-firefox-trial-on-19-november-2026)
 
 ### Core project website — 2026-10-30
 
@@ -422,13 +449,13 @@ is removed; behavioral tests and production paths are unchanged.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Original v1 A01–A15 passes on `482e33d0`, run 34047766913; expanded DICN and warm/mixed-link acceptance remain separate. |
-| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined maintenance run reached Image repair. Two subsequent runs stopped at three Cloud reservations. The latest run stopped during Image deposit with four incomplete copies and one outstanding provider reservation. [Storage trials](#storage-consumer-and-provider-evidence) |
-| Protected Compute | Public two-turn execution, corruption rejection and cleanup passed on the tree merged by #332. Private workload execution awaits its own evidence. [Verified trial](#protected-compute-evidence) |
+| Storage / Image / Cloud | The real Immich album recovered from peer storage after one provider went offline. OpenCloud passed both direct upload and owner recovery of an interrupted upload before two cold browser downloads. An earlier combined run reached Image repair. The latest twelve-node trial stopped at an Image reservation. All three providers reported zero usage after cleanup. The owner could not confirm every deletion. [Storage trials](#storage-consumer-and-provider-evidence) |
+| Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](#protected-compute-evidence) |
 | Studio | The Silex export rendered in Firefox with its publisher offline. In a separate four-asset trial an independent holder served the exact restored revision 3 while its publisher was offline. Sustained multi-holder updates, withdrawal, dynamic execution and shared AI remain open. |
 | DPS / Map | Synthetic daemon, quality C ABI and bounded debug JNI slice pass; real sensors, fusion, accuracy/integrity evaluation, navigation and location authority remain open. |
-| Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; real expiry, automatic acquisition, physical devices/iOS and full precipitation/air-quality coverage remain open. |
+| Cache / Weather | Actual Drizz.li/Overmorrow and installed emulator delivery/refresh/resume pass; A separate offline Linux guest served the signed forecast across a restart and refused it after expiry. Automatic acquisition, device/iOS expiry and full precipitation/air-quality coverage remain open. |
 | Code / Browser AI | Pinned native coding and bounded public peer/browser milestones pass; new compositions, general quality/performance, native editor and protected peer execution need their own proof. |
-| Transactions / Bank | Durable owner-local TEST accounting and bounded four-validator partition/replay pass; full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
+| Transactions / Bank | Four validators executed the retained Bank commands, preserved 100 TEST units across partitions, and returned the original receipts after restart and replay. Full finality/Byzantine coverage, protected transport, real assets, settlement and Bank functionality remain open. |
 | Other applications / maintenance | Continue every agreed integration and organization-wide work; component/source checks do not complete consumer scenarios. |
 
 ### Execution priorities and next milestones
@@ -685,6 +712,32 @@ Cloud publication, repair, cold restoration or acknowledged remote deletion.
 [Original evidence archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/44409967365/artifacts/14480386650)
 SHA-256 `a5895c3e122b8559b9703b1bb0b3b9482c90152668cd5b4e850938ae7541a1e4`.
 
+The foreground deposit now allows one new TLS handshake per copy after a
+correlated timeout before READY, within the original exchange deadline.
+The framed owner/provider test reopened its original journal after losing the
+first Reserve confirmation. It retained the first acknowledged chunk, rejected
+a subsequent authentication failure, completed the original lease and read the
+exact bytes back. Deletion returned provider use to zero. The test used the
+real SQLite provider and a controlled local IPC transport. It passed in the
+default-branch change's workspace suite (4,459 passed, zero failed, 21 ignored).
+[Core integration](https://github.com/VOLPAROSSA/volparossa/pull/386)
+· [Quality and test log](https://github.com/VOLPAROSSA/volparossa/actions/runs/44418876629)
+
+The next twelve-node trial on `462581e2` prepared Image and Cloud. Image
+publication stopped at fragment 2, copy 0. The owner had yet to send a signed
+Reserve. The agent spent 90–120 seconds awaiting the response frame length for
+the provider challenge and exhausted its operation deadline. The error report
+does not establish how many length bytes arrived. Separate fixture records
+observed a provider TLS timeout without identifying the affected copy.
+The Image adapter closed. The later owner deletion returned an incomplete
+result. Independent reads found zero leases, reserved bytes and committed
+bytes at all three providers. Local cleanup removed 40 files and 20 directories,
+and the host snapshots matched. Cloud publication and combined repair were
+not reached. The 82,243-byte Actions ZIP has SHA-256
+`12cfd2f78bce34895487d6fb9e116eef7f33adc4c86b8e3f6891928ec8838b56`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44419915713)
+· [Original failure, usage and cleanup reports](development/evidence/storage-maintenance-44419915713)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -710,6 +763,14 @@ turns and removed each request’s files. At shutdown it reaped the child and
 removed private session state. VM, tool and scratch cleanup all passed. The
 corrupted image failed at `verity_read` before entrypoint invocation.
 [Merge](https://github.com/VOLPAROSSA/volparossa/pull/332) · [Public trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/42145544662)
+
+In a separate twelve-node guest on `d375bf79`, the requester selected two
+MPTCP paths and received an authenticated refusal of its versioned
+guest-key confirmation request. The provider reported that the protected
+device was unavailable. No worker was admitted and no private input was
+released. The network observer, host checkpoint and VM cleanup passed.
+A positive hardware appraisal and a private inference result remain open.
+[Protected-quote run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44425796022) · [Original route and VM receipts](development/evidence/protected-quote-44425796022)
 
 The host configuration checkpoint accepted a change in IPv6 reference metadata.
 The raw IPv6 route fingerprint changed. IPv4 routes, resolver configuration and
@@ -826,8 +887,8 @@ and the [service contract](services/DPS.md) retain research and acceptance detai
 - **Weather/cache:** Drizz.li 38228710535 and Overmorrow 38241212407 prove actual
   protected acquisition and initial/refresh UI behavior. Installed Android
   38717988016 passes actual app-triggered delivery, cache refresh and
-  background/resume on Core `aac5be7f` / Weather `3b90442a`. Expiry evidence is
-  synthetic; physical devices, iOS and full source/feature coverage remain open.
+  background/resume on Core `aac5be7f` / Weather `3b90442a`. The separate offline Debian trial 44427401562 now covers real cache expiry.
+  Physical devices, iOS and full source/feature coverage remain open.
 - **Transactions:** actual 37669796654 on `2ea504e399eb` passes four-validator
   TEST conservation/conflict, 3–1/2–2 partitions, rejoin and committed-retry
   replay. Raw parent snapshots differ; the separately bounded expiry-countdown

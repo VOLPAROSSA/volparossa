@@ -23,7 +23,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
     sync::Semaphore,
-    time::timeout,
+    time::{timeout, timeout_at},
 };
 
 use super::{
@@ -322,6 +322,34 @@ pub async fn begin_observed<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    begin_observed_with_idle_limit(stream, grant, observer, None)
+        .await?
+        .ok_or(WireError::Timeout)
+}
+
+/// Foreground challenge waits may yield to a replacement connection within the original budget.
+#[derive(Clone, Copy)]
+pub struct ChallengeIdleLimit {
+    /// Maximum wait for another challenge byte while replacement remains possible.
+    pub idle: Duration,
+    /// Latest instant at which the caller can discard the stalled stream and reconnect.
+    pub retry_before: tokio::time::Instant,
+}
+
+/// Read the original signed challenge. An enabled read returning no progress before its idle
+/// limit returns `None`. The caller must discard that stream before acquiring a fresh challenge.
+///
+/// # Errors
+/// Preserves the framing, authentication and overall timeout failures of [`begin`].
+pub async fn begin_observed_with_idle_limit<S>(
+    stream: &mut S,
+    grant: &VerifiedStorageGrant,
+    observer: &impl begin_observation::Observer,
+    idle_limit: Option<ChallengeIdleLimit>,
+) -> Result<Option<StorageChallenge>, WireError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let result = timeout(IO_TIMEOUT, async {
         grant.current(unix_now()?)?;
         observer.phase(begin_observation::Phase::SelectorWriteFlush);
@@ -339,19 +367,25 @@ where
         write_frame(stream, &grant.signed().encode()).await?;
         observer.phase(begin_observation::Phase::ChallengeReadVerify);
         observer.read_step(begin_observation::ReadStep::LengthRead);
-        let length = stream.read_u32().await? as usize;
+        let mut header = [0; 4];
+        if !read_challenge_bytes(stream, &mut header, idle_limit).await? {
+            return Ok(None);
+        }
+        let length = u32::from_be_bytes(header) as usize;
         if length == 0 || length > MAX_CHALLENGE_BYTES {
             return Err(WireError::Invalid);
         }
         let mut bytes = vec![0; length];
         observer.read_step(begin_observation::ReadStep::BodyRead);
-        stream.read_exact(&mut bytes).await?;
+        if !read_challenge_bytes(stream, &mut bytes, idle_limit).await? {
+            return Ok(None);
+        }
         observer.read_step(begin_observation::ReadStep::Verification);
-        Ok(StorageChallenge::decode_and_verify(
+        Ok(Some(StorageChallenge::decode_and_verify(
             &bytes,
             grant,
             unix_now()?,
-        )?)
+        )?))
     })
     .await
     .unwrap_or(Err(WireError::Timeout));
@@ -369,6 +403,36 @@ where
         observer.read_failure(failure);
     }
     result
+}
+
+async fn read_challenge_bytes<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    mut remaining: &mut [u8],
+    limit: Option<ChallengeIdleLimit>,
+) -> Result<bool, WireError> {
+    if let Some(limit) = limit {
+        while !remaining.is_empty() {
+            let Some(idle_at) = tokio::time::Instant::now().checked_add(limit.idle) else {
+                break;
+            };
+            if idle_at >= limit.retry_before {
+                break;
+            }
+            match timeout_at(idle_at, stream.read(remaining)).await {
+                Ok(count) => {
+                    let count = count?;
+                    if count == 0 {
+                        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+                    }
+                    remaining = &mut remaining[count..];
+                }
+                Err(_) if tokio::time::Instant::now() < limit.retry_before => return Ok(false),
+                Err(_) => break,
+            }
+        }
+    }
+    stream.read_exact(remaining).await?;
+    Ok(true)
 }
 
 /// Finish the sole owner-signed operation on the connection that issued this challenge.

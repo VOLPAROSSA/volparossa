@@ -84,7 +84,7 @@ impl AsFd for OwnedAsyncFd {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::fd::AsRawFd as _};
+    use std::{env, fs::File, os::fd::AsRawFd as _, process::Command};
 
     use nix::{
         fcntl::{Flock, FlockArg, OFlag},
@@ -101,8 +101,36 @@ mod tests {
             .unwrap()
     }
 
+    // A parallel test can fork before close-on-exec takes effect and retain the same
+    // open file description. Create these memfds and pipes only in a single-test child
+    // so flock release, EPIPE and EOF prove that this process dropped its last owner.
+    fn run_isolated(check: fn()) {
+        const CHILD: &str = "VOLPAROSSA_ASYNC_FD_TEST_CHILD";
+        let thread = std::thread::current();
+        let test = thread.name().expect("named Rust test");
+        if env::var(CHILD).as_deref() == Ok(test) {
+            check();
+            return;
+        }
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, test)
+            .output()
+            .expect("run isolated descriptor test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn registration_failure_preserves_error_and_closes_owned_descriptor() {
+        run_isolated(check_registration_failure);
+    }
+
+    fn check_registration_failure() {
         let runtime = runtime();
         let _entered = runtime.enter();
         let descriptor =
@@ -126,6 +154,10 @@ mod tests {
 
     #[test]
     fn registration_drop_closes_descriptor_after_deregistration() {
+        run_isolated(check_registration_drop);
+    }
+
+    fn check_registration_drop() {
         let runtime = runtime();
         let _entered = runtime.enter();
         let (descriptor, writer) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
@@ -138,6 +170,10 @@ mod tests {
 
     #[test]
     fn shared_readiness_retains_owned_descriptor_and_observes_pipe_eof() {
+        run_isolated(check_shared_readiness);
+    }
+
+    fn check_shared_readiness() {
         let runtime = runtime();
         runtime.block_on(async {
             let (descriptor, writer) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();

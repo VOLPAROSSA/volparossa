@@ -56,6 +56,7 @@ struct SelectedProvider {
     provider: DiscoveredContentProvider,
     policy: VerifiedPolicy,
     control: PeerId,
+    idle_limit: Option<wire::ChallengeIdleLimit>,
 }
 
 impl ContentRuntime {
@@ -242,30 +243,33 @@ impl ContentRuntime {
             .maintenance
             .is_none()
             .then(|| self.foreground.enter());
-        let operation = observation.budget(Deadline::Operation, EXCHANGE_TIMEOUT, async {
-            // One actual flow per retained background worker reservation, not just one
-            // allowance calculation at a time. Parallel callers cannot multiply its RAM/FD use.
-            let _maintenance_operation = request
-                .maintenance
-                .as_ref()
-                .map(|turn| turn.operation())
-                .transpose()?;
-            let _retrieval = if request.maintenance.is_none() {
-                Some(super::named_retrieval(&self.retrieval, local).await?)
-            } else {
-                None
-            };
-            Box::pin(remote(
-                &request,
-                context,
-                local,
-                request_id,
-                ready_sent,
-                &observation,
-                &outcome,
-            ))
-            .await
-        });
+        let started = tokio::time::Instant::now();
+        let operation =
+            observation.budget_from(Deadline::Operation, started, EXCHANGE_TIMEOUT, async {
+                // One actual flow per retained background worker reservation, not just one
+                // allowance calculation at a time. Parallel callers cannot multiply its RAM/FD use.
+                let _maintenance_operation = request
+                    .maintenance
+                    .as_ref()
+                    .map(|turn| turn.operation())
+                    .transpose()?;
+                let _retrieval = if request.maintenance.is_none() {
+                    Some(super::named_retrieval(&self.retrieval, local).await?)
+                } else {
+                    None
+                };
+                Box::pin(remote(
+                    &request,
+                    started + EXCHANGE_TIMEOUT,
+                    context,
+                    local,
+                    request_id,
+                    ready_sent,
+                    &observation,
+                    &outcome,
+                ))
+                .await
+            });
         // Reuse the exact original construction-time budget instant, without shifting it.
         outcome.start_operation(observation.operation_started());
         observation
@@ -434,8 +438,13 @@ async fn route_current(
     Ok(policy)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The established local RPC and its original operation deadline must remain bound"
+)]
 async fn remote(
     request: &RemoteRequest,
+    operation_deadline: tokio::time::Instant,
     context: &ControlContext,
     local: &mut UnixStream,
     id: &[u8],
@@ -501,15 +510,24 @@ async fn remote(
                 .ok_or(ContentError::Unavailable)
         })
         .await?;
-    Box::pin(observation.budget(
+    let started = tokio::time::Instant::now();
+    let budget = Duration::from_secs(remaining.min(MAX_AUTH_SECONDS));
+    let idle_limit = challenge_idle_limit(
+        request.maintenance.is_none(),
+        operation_deadline,
+        started + budget,
+    );
+    Box::pin(observation.budget_from(
         Deadline::Exchange,
-        Duration::from_secs(remaining.min(MAX_AUTH_SECONDS)),
+        started,
+        budget,
         exchange(
             request,
             SelectedProvider {
                 provider,
                 policy,
                 control,
+                idle_limit,
             },
             context,
             local,
@@ -520,6 +538,20 @@ async fn remote(
         ),
     ))
     .await
+}
+
+// Reserve one original TLS handshake interval for replacement on the same signed offer.
+fn challenge_idle_limit(
+    foreground: bool,
+    operation_deadline: tokio::time::Instant,
+    exchange_deadline: tokio::time::Instant,
+) -> Option<wire::ChallengeIdleLimit> {
+    let idle = tls::HANDSHAKE_TIMEOUT;
+    let retry_before = operation_deadline
+        .min(exchange_deadline)
+        .checked_sub(idle)?;
+    (foreground && tokio::time::Instant::now() + idle < retry_before)
+        .then_some(wire::ChallengeIdleLimit { idle, retry_before })
 }
 
 #[allow(
@@ -544,52 +576,83 @@ async fn exchange(
         provider,
         policy,
         control,
+        mut idle_limit,
     } = selected;
-    let current = route_current(context, &policy, control, request.peer).await?;
-    let endpoint = provider.offer.endpoint();
-    let mut flow = Box::pin(
-        observation.requester_boundary(Stage::StreamOpen, local, async {
-            context
-                .routes
-                .open_content_stream_diagnosed(
-                    &current,
-                    endpoint.hostname(),
-                    endpoint.port(),
-                    unix_millis(),
+    let mut flow;
+    let mut reconnect_by = None;
+    let (mut remote, challenge) = loop {
+        let current = route_current(context, &policy, control, request.peer).await?;
+        grant_current(&request.grant)?;
+        let offer = provider.offer.validity();
+        if !(offer.created..offer.expires).contains(&now())
+            || reconnect_by.is_some_and(|last| tokio::time::Instant::now() >= last)
+        {
+            return Err(ContentError::Unavailable);
+        }
+        let endpoint = provider.offer.endpoint();
+        flow = Box::pin(
+            observation.requester_boundary(Stage::StreamOpen, local, async {
+                context
+                    .routes
+                    .open_content_stream_diagnosed(
+                        &current,
+                        endpoint.hostname(),
+                        endpoint.port(),
+                        unix_millis(),
+                    )
+                    .await
+                    .map_err(|failure| {
+                        observation
+                            .record_stream_failure(observation::stream_failure(failure.cause()));
+                        observation.record_flow_acquire(failure.flow_acquire());
+                        ContentError::Unavailable
+                    })
+            }),
+        )
+        .await?;
+        let mut remote = observation
+            .requester_boundary(Stage::TlsHandshake, local, async {
+                tls::connect_observed(
+                    super::fixture_correlation::Observed::client(
+                        flow.stream_mut(),
+                        observation.fixture(),
+                    ),
+                    request.peer,
+                    &provider.offer,
                 )
                 .await
-                .map_err(|failure| {
-                    observation.record_stream_failure(observation::stream_failure(failure.cause()));
-                    observation.record_flow_acquire(failure.flow_acquire());
+                .map_err(|(_, failure)| {
+                    observation.record_tls_failure(failure);
                     ContentError::Unavailable
                 })
-        }),
-    )
-    .await?;
-    let mut remote = observation
-        .requester_boundary(Stage::TlsHandshake, local, async {
-            tls::connect_observed(
-                super::fixture_correlation::Observed::client(
-                    flow.stream_mut(),
-                    observation.fixture(),
-                ),
-                request.peer,
-                &provider.offer,
-            )
-            .await
-            .map_err(|(_, failure)| {
-                observation.record_tls_failure(failure);
-                ContentError::Unavailable
             })
-        })
-        .await?;
-    let challenge = observation
-        .requester_boundary(Stage::Challenge, local, async {
-            wire::begin_observed(&mut remote, &request.grant, observation)
+            .await?;
+        let challenge = observation
+            .requester_boundary(Stage::Challenge, local, async {
+                wire::begin_observed_with_idle_limit(
+                    &mut remote,
+                    &request.grant,
+                    observation,
+                    idle_limit,
+                )
                 .await
                 .map_err(|_| ContentError::Unavailable)
-        })
-        .await?;
+            })
+            .await?;
+        if let Some(challenge) = challenge {
+            break (remote, challenge);
+        }
+        // The owner still holds the only signing key and has not received READY. Discard the
+        // entire TLS stream and protected flow, including any partial challenge frame.
+        drop(remote);
+        flow.shutdown();
+        reconnect_by = Some(
+            idle_limit
+                .take()
+                .ok_or(ContentError::Unavailable)?
+                .retry_before,
+        );
+    };
     route_current(context, &policy, control, request.peer).await?;
     grant_current(&request.grant)?;
     outcome.enter(OutcomePhase::ReadyWrite);

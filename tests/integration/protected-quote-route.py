@@ -22,6 +22,9 @@ PINS = {
     "vcek.der": ("vcek_milan.der", "3bbfb6ee259f75a95d13168cfdf2e034181bb93c7c016825731cbe8ea16c95e1"),
     "vendor.crl": ("ark_milan_20260922.crl", "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525"),
 }
+CASE_FAILURES = {"wrong": 1, "device-unavailable": 0, "repeat": 1, "confirmation-unavailable": 0}
+OPERATIONS = ("attach-wrong", "attach-valid", "attach-confirmation", "detach-wrong", "detach-valid",
+    "detach-confirmation", "stop")
 REFUSAL = dict(version=2, provider_claim="fixed_quote_device_unavailable",
     provider_assertion_verified_by="local_agent", quote_exchange=False,
     bound_reference_evidence=False, complete_appraisal=False,
@@ -179,16 +182,17 @@ def validate_evidence(value, revision):
         "independent discovery relay required")
     require(value["control_before"] == value["control_after"] == layout["control_relay_peer_id"],
         "control relay changed")
-    shape(gates, ("wrong", "device_unavailable", "repeat", "grant", "device", "detach_wrong",
-        "detach_valid", "provider_stopped", "client_disconnected"))
-    shape(value["cases"], ("wrong", "device-unavailable", "repeat"))
-    for case, delta in (("wrong", 1), ("device-unavailable", 0), ("repeat", 1)):
+    shape(gates, (*(name.replace("-", "_") for name in CASE_FAILURES), "grant", "device", "detach_wrong",
+        "detach_valid", "detach_confirmation", "provider_stopped", "client_disconnected"))
+    shape(value["cases"], CASE_FAILURES)
+    for case, delta in CASE_FAILURES.items():
         gate = gates[case.replace("-", "_")]
-        shape(gate, ("exit_status", "stdout_empty", "signed_exchange_failures_before", "signed_exchange_failures_after"))
+        shape(gate, ("profile", "exit_status", "stdout_empty", "signed_exchange_failures_before", "signed_exchange_failures_after"))
         before, after = gate["signed_exchange_failures_before"], gate["signed_exchange_failures_after"]
         require(integer(before) and integer(after) and after - before == delta
             and type(gate["exit_status"]) is int and gate["exit_status"] == 1
-            and gate["stdout_empty"] is (case != "device-unavailable"), "wrong failure stage or command status")
+            and gate["stdout_empty"] is (delta == 1)
+            and gate["profile"] == ("key-confirmation-v1" if case == "confirmation-unavailable" else "legacy"), "wrong failure stage or command status")
         case_value = value["cases"][case]
         shape(case_value, ("exit_status", "stdout"))
         require(type(case_value["exit_status"]) is int and case_value["exit_status"] == 1
@@ -200,9 +204,9 @@ def validate_evidence(value, revision):
         and gates["grant"]["wrong_key_distinct"] is True and gates["grant"]["requester_key_bound"] is True,
         "finite exact requester authority required")
     require(same(gates["device"], dict(provider_mount_checked=True, fixed_device_absent=True))
-        and all(gates[key] is True for key in ("detach_wrong", "detach_valid", "provider_stopped", "client_disconnected")),
+        and all(gates[key] is True for key in ("detach_wrong", "detach_valid", "detach_confirmation", "provider_stopped", "client_disconnected")),
         "real device boundary or final cleanup incomplete")
-    shape(value["operations"], ("attach-wrong", "attach-valid", "detach-wrong", "detach-valid", "stop"))
+    shape(value["operations"], OPERATIONS)
     for name, receipt in value["operations"].items():
         require(same(receipt, dict(serving=name != "stop", publications=0)), "quote-only service operation incomplete")
     route = route_projection(value["selected_route"])
@@ -245,17 +249,17 @@ def build_evidence(work, revision):
     def item(name):
         return read(work / ("protected-quote-" + name + ".json"))
     cases = {}
-    for name in ("wrong", "device-unavailable", "repeat"):
+    for name, failures in CASE_FAILURES.items():
         status = bytes_at(work / ("protected-quote-" + name + ".status"), 8)
         require(status in (b"1", b"1\n"), "quote CLI must exit one, not timeout or signal")
         raw = bytes_at(work / ("protected-quote-" + name + ".json"), 4096)
-        require(raw == b"" if name != "device-unavailable" else bool(raw), "unexpected CLI output")
+        require(raw == b"" if failures else bool(raw), "unexpected CLI output")
         cases[name] = dict(exit_status=1, stdout=decode(raw) if raw else None)
     peers = read(work / "a01-expected-peers.json")
     value = dict(source_revision=revision, layout=item("layout"), gates=item("gates"), inputs=item("inputs"), cases=cases,
         expected_peers={name: peers[name] for name in (*ROLES, *PROVIDERS)},
         operations={name: {key: item(name)[key] for key in ("serving", "publications")}
-            for name in ("attach-wrong", "attach-valid", "detach-wrong", "detach-valid", "stop")},
+            for name in OPERATIONS},
         selected_route=route_projection(item("selected-route")), live_route=route_projection(item("live-selection")),
         control_before=item("status-before")["control_relay_peer_id"], control_after=item("status-after")["control_relay_peer_id"],
         privacy={role: capture_projection(item("privacy-" + role)) for role in ROLES},
@@ -267,7 +271,7 @@ def build_evidence(work, revision):
 def validate_report(value, revision):
     shape(value, ("schema_version", "report_kind", "source_revision", "success", "phase", "observed_blocker",
         "runner_exit_status", "cleanup", "host_state", "evidence"))
-    require(type(value["schema_version"]) is int and value["schema_version"] == 1
+    require(type(value["schema_version"]) is int and value["schema_version"] == 2
         and value["report_kind"] == "volparossa-protected-quote-refusal-route" and value["source_revision"] == revision
         and value["success"] is True and type(value["runner_exit_status"]) is int and value["runner_exit_status"] == 0
         and value["phase"] == "protected-quote-complete" and value["observed_blocker"] is None
@@ -288,7 +292,7 @@ def finalize(work, output, revision, status, complete, remaining, phase, blocker
         unchanged = read(work / "a15-evidence.json")["unchanged"] is True
     except (KeyError, TypeError, ValueError, OSError):
         evidence = None
-    value = dict(schema_version=1, report_kind="volparossa-protected-quote-refusal-route", source_revision=revision,
+    value = dict(schema_version=2, report_kind="volparossa-protected-quote-refusal-route", source_revision=revision,
         success=False, phase=phase, observed_blocker=None if blocker == "NONE" else blocker,
         runner_exit_status=int(status), cleanup=dict(complete=complete == "true", remaining_owned_objects=int(remaining)),
         host_state=dict(unchanged=unchanged), evidence=evidence)

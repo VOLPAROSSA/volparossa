@@ -24,7 +24,7 @@ use volparossa_content::provider::VerifiedProviderOffer;
 use volparossa_local_control::{PrivateStorageTlsCloseFailure, PrivateStorageTlsFailure};
 
 const CONTENT_ALPN: &[u8] = b"volparossa-content/1";
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
