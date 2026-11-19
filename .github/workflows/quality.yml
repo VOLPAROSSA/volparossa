@@ -476,6 +476,8 @@ jobs:
           run_contract node --test tests/integration/test-storage-consumer-maintenance.mjs
           run_contract python3 -B tests/integration/test-private-storage-maintenance-smoke.py
           run_contract python3 -B tests/integration/test-private-storage-maintenance-wiring.py
+          run_contract python3 -B tests/integration/test-private-storage-log-sampler.py
+          run_contract python3 -B tests/integration/test-storage-consumer-route-sampler.py
           run_contract python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
           run_contract python3 -B tests/integration/test-storage-provider-activity-sampler.py
           run_contract python3 -B tests/integration/test-storage-consumer-network.py
