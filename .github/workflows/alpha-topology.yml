@@ -38,6 +38,7 @@ on:
           - private-storage-replicas
           - signal-backup
           - signal-backup-fragments
+          - signal-mailbox
           - private-storage-handoff
           - private-storage-fragments
           - private-storage-maintenance
@@ -142,7 +143,7 @@ jobs:
     name: ${{ (inputs.scenario == 'transaction-abci' || inputs.scenario == 'transaction-abci-bank') && 'Debian 13 KVM four-validator TEST interoperability' || 'Debian 13 KVM twelve-node smoke' }}
     if: inputs.scenario != 'image-immich' && inputs.scenario != 'browser-native-capacity'
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'cloud-upload-maintenance' && 270 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
+    timeout-minutes: ${{ inputs.scenario == 'browser-native-source' && 360 || inputs.scenario == 'cloud-upload-maintenance' && 270 || inputs.scenario == 'agent-native-coding' && 240 || inputs.scenario == 'agent-autonomous-aggregation' && 180 || (inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' || inputs.scenario == 'signal-mailbox' || inputs.scenario == 'private-storage-maintenance') && 150 || 120 }}
 
     env:
       # These scenarios validate their own reports. Unlisted scenarios require full A01–A15 evidence.
@@ -153,7 +154,7 @@ jobs:
           "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "content", "content-message",
           "content-https", "content-provider", "protected-quote", "content-custody",
           "private-storage-peer", "private-storage-replicas", "signal-backup",
-          "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments",
+          "signal-backup-fragments", "signal-mailbox", "private-storage-handoff", "private-storage-fragments",
           "private-storage-maintenance", "cloud-upload-maintenance", "image-snapshot", "cloud-private-file",
           "cloud-private-upload", "content-repair", "content-replication", "content-mailbox",
           "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel",
@@ -220,6 +221,8 @@ jobs:
           python3 -B tests/integration/test-signal-backup-smoke.py
           python3 -B tests/integration/test-signal-backup-fragments-smoke.py
           sh -n tests/integration/signal-backup-fragments-smoke.sh
+          sh -n tests/integration/signal-mailbox-smoke.sh
+          python3 -B tests/integration/test-signal-mailbox-smoke.py
           sh -n tests/integration/private-storage-handoff-smoke.sh
           python3 -B tests/integration/test-private-storage-handoff-smoke.py
           python3 -B tests/integration/test-private-storage-handoff-wiring.py
@@ -719,7 +722,7 @@ jobs:
             fi
             exit 0
           fi
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup-fragments; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-backup-fragments || test "$VOLPAROSSA_ALPHA_SCENARIO" = signal-mailbox; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/$VOLPAROSSA_ALPHA_SCENARIO-smoke.json"
             if test -f "$report"; then
               jq '{report_kind,success,phase,observed_blocker,scope,cleanup,host_state}' \
@@ -1372,6 +1375,21 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/signal-backup-fragments-smoke.json"
           python3 -B tests/integration/signal-backup-fragments-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+
+      - name: Verify two native Signal Desktops over protected signed mailbox providers
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'signal-mailbox'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/signal-mailbox-smoke.json"
+          python3 -B tests/integration/signal-mailbox-smoke.py report "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
