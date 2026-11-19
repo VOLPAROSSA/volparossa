@@ -1545,7 +1545,7 @@ else
     WORK=$(mktemp -d "/opt/va.$RUN_ID.XXXXXX")
     case $WORK in /opt/va.*) ;; *) exit 69 ;; esac
 fi
-longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock
+longest_control_socket=$WORK/runtime-bootstrap1/control/agent.sock.apps
 [ "${#longest_control_socket}" -lt 108 ] || exit 69
 chmod 0700 "$WORK"
 
@@ -1959,6 +1959,18 @@ retire_unit() {
     systemctl clean --what=fdstore "$retire_name" >/dev/null 2>&1 || true
     systemctl reset-failed "$retire_name" >/dev/null 2>&1 || true
     return 0
+}
+
+retire_runtime_sockets() {
+    # SIGKILL bypasses the agent's normal guards for both control listeners.
+    # Retire only known endpoint names in this run's per-node runtime tree.
+    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 \
+        relay5 exit exit2; do
+        cleanup_runtime=$WORK/runtime-$cleanup_node
+        rm -f -- "$cleanup_runtime/helper.sock" \
+            "$cleanup_runtime/control/agent.sock" "$cleanup_runtime/control/agent.sock.apps" \
+            "$cleanup_runtime/native/mpquic.sock" "$cleanup_runtime/native/mpquic.sock.exit" || return 1
+    done
 }
 
 mpquic_growth_finalize_report() {
@@ -2487,13 +2499,7 @@ cleanup() {
         original_status=1
         OBSERVED_BLOCKER=A14_REMAINING_INVENTORY_UNAVAILABLE
     fi
-    for cleanup_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 \
-        relay5 exit exit2; do
-        rm -f -- "$WORK/runtime-$cleanup_node/helper.sock" \
-            "$WORK/runtime-$cleanup_node/control/agent.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock" \
-            "$WORK/runtime-$cleanup_node/native/mpquic.sock.exit"
-    done
+    if [ "$REMAINING_UNITS" -eq 0 ]; then retire_runtime_sockets || original_status=1; fi
     remaining_runtime_sockets=$(find "$WORK"/runtime-* -type s -print \
         | awk 'END { print NR + 0 }')
 
@@ -4705,6 +4711,25 @@ def stop(*_unused):
     running = False
 
 
+# The mixed-link capture records received outer bytes independently of QUIC path
+# IDs. The guest wall clock joins the snapshots to the actual HTTP response.
+response_samples = []
+observe_response = role == "client" and os.path.basename(marker_path) in {
+    "mixed-link-single-response.marker", "mixed-link-aggregate-response.marker"}
+next_sample = 0.0
+
+
+def sample_received(now):
+    if observe_response and marker_observed and len(response_samples) < 202:
+        response_samples.append({
+            "unix_us": time.time_ns() // 1000,
+            "relay1_received_bytes": counters["relay1_received_wireguard_data_bytes"] - before_marker["relay1_received_wireguard_data_bytes"],
+            "relay2_received_bytes": counters["relay2_received_wireguard_data_bytes"] - before_marker["relay2_received_wireguard_data_bytes"],
+        })
+        return now + 1.0
+    return now
+
+
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 deadline = time.monotonic() + 300
@@ -4712,6 +4737,10 @@ while running and time.monotonic() < deadline:
     if marker_path != "-" and not marker_observed and os.path.exists(marker_path):
         before_marker = dict(counters)
         marker_observed = True
+    if observe_response and marker_observed:
+        now = time.monotonic()
+        if now >= next_sample and len(response_samples) < 201:
+            next_sample = sample_received(now)
     readable, _, _ = select.select(list(sockets), [], [], 0.2)
     for capture in readable:
         while True:
@@ -4815,6 +4844,8 @@ for capture in sockets:
     _, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
     packet_socket_drops += drops
     capture.close()
+if observe_response and marker_observed:
+    sample_received(time.monotonic())
 after_marker = None
 if before_marker is not None:
     after_marker = {key: counters[key] - before_marker[key] for key in counters}
@@ -4830,6 +4861,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "marker_observed": marker_observed,
             "before_marker": before_marker,
             "after_marker": after_marker,
+            **({"response_received_samples": response_samples} if observe_response else {}),
             "payload_samples": payload_samples,
             "packet_socket_drops": packet_socket_drops,
             **counters,

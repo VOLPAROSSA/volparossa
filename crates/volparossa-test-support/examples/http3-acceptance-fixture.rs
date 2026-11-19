@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::{Buf as _, Bytes};
@@ -516,7 +516,10 @@ async fn run_client(
                 break;
             };
             if first_byte.is_none() {
-                first_byte = Some(Instant::now());
+                first_byte = Some((
+                    Instant::now(),
+                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+                ));
             }
             while data.has_remaining() {
                 let chunk = data.chunk();
@@ -532,11 +535,12 @@ async fn run_client(
             }
         }
         let completed = Instant::now();
+        let completed_unix_us = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
         let received_hash = received_hash.finalize();
         if received_bytes != case.response_bytes() || received_hash.as_slice() != expected_hash {
             return Err("HTTP/3 response payload was incomplete or substituted".into());
         }
-        let first_byte = first_byte.ok_or("HTTP/3 response contained no data")?;
+        let (first_byte, first_unix_us) = first_byte.ok_or("HTTP/3 response contained no data")?;
         let duration = completed.saturating_duration_since(first_byte);
         if duration.is_zero() {
             return Err("HTTP/3 response duration was zero".into());
@@ -556,6 +560,8 @@ async fn run_client(
             "request_sha256": hex::encode(payload_sha256(&request_seed, case.request_bytes())),
             "response_bytes": received_bytes,
             "response_sha256": hex::encode(received_hash),
+            "response_first_byte_unix_us": u64::try_from(first_unix_us)?,
+            "response_complete_unix_us": u64::try_from(completed_unix_us)?,
             "response_duration_ns": u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
             "transfer_elapsed_ns": u64::try_from(completed.saturating_duration_since(started).as_nanos())
                 .unwrap_or(u64::MAX),

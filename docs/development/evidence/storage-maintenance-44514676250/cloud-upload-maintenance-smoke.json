@@ -1,0 +1,26 @@
+{
+  "cleanup": {
+    "complete": true,
+    "remaining_owned_objects": 0
+  },
+  "maintenance_report_sha256": "2a3ab3d4fbdf48907ba8c1dec642483b07911a737710e28d0212b7afe6ef7701",
+  "observed_blocker": "CONSUMER_APPLICATION_FAILED",
+  "phase": "storage-consumer-publish",
+  "report_kind": "volparossa-cloud-upload-maintenance",
+  "run_id": "aaa744eff89b480d936a25e9f667cd6b",
+  "runner_exit_status": 1,
+  "schema_version": 6,
+  "scope": {
+    "automatic_grant_refresh": false,
+    "host_cleanup_proven": false,
+    "io_ordering_measured": false,
+    "node_report_hash_independently_reconstructed": false,
+    "opencloud_account_server_proven": false,
+    "private_keys_exported": false,
+    "synthetic_inputs": true,
+    "upload_enrollment_ordering_source_enforced": true
+  },
+  "source_revision": "cf93b5a25040fc01ae8d75ca8b00d538eb001468",
+  "success": false,
+  "upload_evidence_sha256": null
+}

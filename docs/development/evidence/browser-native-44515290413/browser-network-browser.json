@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "kind": "native-firefox-core-ordinary-tabs",
+  "passed": true,
+  "core_revision": "25c73b4fcc7832e2d7f7ede95ff14d8de8c40fff",
+  "browser_revision": "9e0861687a7ef2a032155edeebcb19bf0fef0712",
+  "runtime_version": "157.0.1",
+  "runtime_source_stamp": "47c5f402c8d3a5369f1fb1b6cd61b0bb92725af1",
+  "native_bundle_sha256": "954af28fb042e15ba43ec248ba5d6b26074d46ea04f15aaa2472f7a3e091bf3d",
+  "original_build_receipt_sha256": "0e8c5b9d4798bc1751bec135d74e418c1ea12c278f586b0e4f6dd751870fe777",
+  "javascript_overlay": null,
+  "profile_ech_grease_disabled": false,
+  "native_ech_wire_proven": false,
+  "full_browser_killswitch": false,
+  "expected_bytes": 33554432,
+  "expected_sha256": "acd3bde5048c74560e650a9d0710c78de1bd40810fa792d0f7a52d9eb1edb6b2",
+  "overlay_kernel_proof_external": true,
+  "namespace": "net:[4026532278]",
+  "socket_access": {
+    "path_type_verified": true,
+    "socket_parent_owner_group_match": true,
+    "peer_uid_matches_socket": true,
+    "unix_connect_verified": true,
+    "capability_sent": false
+  },
+  "control_namespace": {
+    "scope": "client-control-directory",
+    "original_socket_inode_preserved": true,
+    "original_parent_inode_preserved": true,
+    "read_only": true,
+    "grant_unmodified": true
+  },
+  "startup": {
+    "phase": "ready",
+    "marionette_connected": true,
+    "session_created": true,
+    "initial_window_count": 1,
+    "firefox_exit_before_cleanup": 0,
+    "firefox_exit_after_cleanup": 0,
+    "stderr": {
+      "captured_bytes": 30193,
+      "total_bytes": 30193,
+      "truncated": false,
+      "captured_sha256": "d2bbf814e09dba7af8ddb5a94a550d10c13fab451aacc851269a9fa5bba7b023",
+      "eof": true,
+      "observed": {
+        "shared_library_load": false,
+        "xpcom_initialization": false,
+        "display_unavailable": false,
+        "profile_unavailable": false,
+        "permission_denied": false,
+        "read_only_filesystem": true,
+        "user_namespace_warning": false,
+        "marionette_listening": false,
+        "crash_indicator": false
+      },
+      "unclassified_output": false
+    },
+    "stderr_collection_failed": false
+  },
+  "tab_controls": {
+    "physical_tab_menu": true,
+    "native_file_picker": true,
+    "verified_authority_confirmations": 3,
+    "cancelled_without_binding": true,
+    "owner_approved_tabs": 2,
+    "explicit_releases": 2
+  },
+  "result": {
+    "native_ech_abi": true,
+    "builtin_modules": true,
+    "ordinary_tabs": true,
+    "independent_attachments": true,
+    "wrong_scope_blocked": true,
+    "a": {
+      "bytes": 33554432,
+      "sha256_verified": true
+    },
+    "a_detached": true,
+    "b": {
+      "bytes": 33554432,
+      "sha256_verified": true
+    },
+    "b_survives_a_detach": true
+  },
+  "ordinary_tab_bodies_verified": 2,
+  "cleanup": {
+    "browser_exited": true,
+    "profile_removed": true
+  }
+}

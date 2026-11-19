@@ -25,19 +25,24 @@ case $revision in *[!0-9a-f]*|'') exit 65 ;; esac
 [ "${#revision}" -eq 40 ] || exit 65
 mkdir -p "$root/build/private-dns-guest-packages"
 cd "$root/build/private-dns-guest-packages"
-apt-get download libunbound8=1.26.1-0+deb13u1 libunbound-dev=1.26.1-0+deb13u1
-printf '%s\n' \
-    '2331c4c305f68aab91dbe16245bd76c0e0edc532353b3ce52accad71d24dfbb3  libunbound8_1.26.1-0+deb13u1_amd64.deb' \
-    'e909714ea6d39833cf42e8e48f3dbe68a42147d8853850e7848769d7fd5a3d12  libunbound-dev_1.26.1-0+deb13u1_amd64.deb' \
-    | sha256sum --check --strict -
+# The moving Debian suite eventually stops indexing old security revisions.
+# apt verifies the original SHA-256 while downloading the immutable archive.
+snapshot=https://snapshot.debian.org/file
+/usr/lib/apt/apt-helper download-file "$snapshot/fffa33bbd0a61f827ee9179d5cba212a2c47a799" \
+    libunbound8_1.26.1-0+deb13u1_amd64.deb SHA256:2331c4c305f68aab91dbe16245bd76c0e0edc532353b3ce52accad71d24dfbb3
+/usr/lib/apt/apt-helper download-file "$snapshot/a1a39026315f2d89a2cfa2c8e7bebfb49ed7ea81" \
+    libunbound-dev_1.26.1-0+deb13u1_amd64.deb SHA256:e909714ea6d39833cf42e8e48f3dbe68a42147d8853850e7848769d7fd5a3d12
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
     ./libunbound8_1.26.1-0+deb13u1_amd64.deb ./libunbound-dev_1.26.1-0+deb13u1_amd64.deb dns-root-data
 cd "$root"
 SOURCE_DATE_EPOCH=0 sh packaging/build-private-dns-worker-deb.sh --build
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
 case $version in ''|*[!0-9.]*) exit 65 ;; esac
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    "$root/dist/volparossa-private-dns-worker_${version}_amd64.deb"
+worker=volparossa-private-dns-worker_${version}_amd64.deb
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends "$root/dist/$worker"
+test "$(dpkg-query -W -f='${Status} ${Version}' volparossa-private-dns-worker)" = "install ok installed $version"
+dpkg-deb --fsys-tarfile "$root/dist/$worker" | tar -xOf - ./usr/libexec/volparossa-dns-worker | cmp - /usr/libexec/volparossa-dns-worker
+(cd "$root/dist" && sha256sum -- "$worker") >/home/vpci/private-unbound-worker.sha256
 if [ "${3:-}" = --provision-only ]; then
     printf '%s\n' 'Pinned private DNS worker provisioned in disposable guest; no resolution or reciprocal proof claimed.'
     exit 0

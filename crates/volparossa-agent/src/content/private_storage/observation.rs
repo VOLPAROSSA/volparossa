@@ -145,6 +145,12 @@ impl Observation {
         }
     }
 
+    pub(super) fn record_control_rejection(&self) {
+        self.reset();
+        self.stage
+            .store(Stage::ControlSelection as i32, Ordering::Relaxed);
+    }
+
     pub(super) fn detail(&self) -> Option<PrivateStorageRemoteDetail> {
         let stage = self.stage.load(Ordering::Relaxed);
         let deadline_scope = self.deadline.load(Ordering::Relaxed);
