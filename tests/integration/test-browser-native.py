@@ -348,7 +348,10 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
             current = copy.deepcopy(evidence)
             controls = dict(physical_tab_menu=True, native_file_picker=True, verified_authority_confirmations=3,
                             cancelled_without_binding=True, owner_approved_tabs=2, explicit_releases=2)
-            current["browser"].update(browser_revision=pins["revision"], tab_controls=controls)
+            provider = dict(physical_provider_changes=2, native_ask_prefill=True,
+                public_rights_and_consent_clear=True, public_license_empty=True, public_submit_disabled=True, sidebar_closed=True)
+            current["browser"].update(browser_revision=pins["revision"], tab_controls=controls,
+                                      provider_selector=provider)
             current["provision"].update(browser_revision=pins["revision"],
                 tab_controls_driver_sha256=RUNTIME["digest"](HERE / "browser-native-ui.py"))
             record = current["provision"]["source_build"]
@@ -357,6 +360,9 @@ for(const stage of ["stream-data","stream-stop","window-stop","body-integrity"])
                 tab_chrome_patch_sha256=pins["files"]["patches/0004-tab-route-controls.patch"]["sha256"])
             EVIDENCE["validate_browser"](current)
             for group, name, bad in (("browser", "tab_controls", dict(controls, explicit_releases=1)),
+                                     ("browser", "provider_selector", dict(provider, public_submit_disabled=False)),
+                                     ("browser", "provider_selector", dict(provider, physical_provider_changes=True)),
+                                     ("browser", "provider_selector", dict(provider, native_ask_prefill=1)),
                                      ("provision", "tab_controls_driver_sha256", "0" * 64),
                                      ("provision", "source_build", fresh)):
                 changed = copy.deepcopy(current)

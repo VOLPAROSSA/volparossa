@@ -350,6 +350,7 @@ def inside(args, work, provision):
             ui["release_tabs"](client, work)
             report["tab_controls"]["explicit_releases"] = 2
             tab_phase = None
+            ui["exercise_provider_selector"](client, report)
         client.command("Marionette:SetContext", {"value": "content"})
         handles = window_handles(client) - initial_tabs
         require(len(handles) == 2)
