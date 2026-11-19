@@ -3,6 +3,7 @@
 """Inert orchestration contracts; not actual application or network evidence."""
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +29,38 @@ private_storage_consumer_release_known image
         phase = TEXT.split('private_storage_consumer_phase() {', 1)[1].split('\n}', 1)[0]
         self.assertLess(phase.index('storage-consumer-failure-boundary.py'), phase.index('private_storage_consumer_release_known image'))
         self.assertLess(phase.index('private_storage_consumer_release_known cloud'), phase.index('fail CONSUMER_APPLICATION_FAILED'))
+
+    def test_provider_snapshot_after_failed_publish_preserves_the_healthy_upload_continuation(self):
+        script = """
+. "$1"
+WORK=$2
+consumer_user=$WORK/u/m
+storage_consumer_profile_version=$3
+storage_fixture_correlation=$4
+consumer_image_release=$5
+consumer_cloud_release=$6
+private_storage_consumer_usage_snapshot() { echo snapshot; return 1; }
+private_storage_consumer_private() { printf '%s\n' "$@"; }
+private_storage_consumer_cleanup
+private_storage_consumer_cleanup
+"""
+        for profile, correlation, image, cloud, snapshot in [
+                ('10', 'no', 'owner_confirmed', 'unconfirmed', True),
+                ('10', 'no', 'no_archive', 'unavailable', True),
+                ('10', 'no', '', '', False),
+                ('10', 'no', 'owner_confirmed', '', False),
+                ('10', 'yes', '', '', True),
+                ('9', 'no', '', '', False)]:
+            with self.subTest(profile=profile, correlation=correlation, image=image, cloud=cloud), tempfile.TemporaryDirectory() as work:
+                (Path(work) / 'u').mkdir()
+                result = subprocess.run(['sh', '-eu', '-c', script, 'fixture', str(SCRIPT), work,
+                    profile, correlation, image, cloud], capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.splitlines(), ['snapshot'] if snapshot else [])
+                expected = ['cleanup', str(Path(work) / 'u/m')]
+                if image and cloud:
+                    expected.extend([image, cloud])
+                record = Path(work) / 'storage-consumer-private-cleanup.json'
+                self.assertEqual(record.read_text().splitlines(), expected)
 
     def test_catalog_restore_socket_fits_the_guest_root_before_owner_setup(self):
         # Stop at the first install. Only the preflight runs with the real guest path shape.
