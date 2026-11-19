@@ -63,6 +63,7 @@ expected_commit=
 code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
+map_traffic=no
 browser_filter_manifest_sha256=
 browser_filter_directory=
 weather_client_bundle=
@@ -916,6 +917,7 @@ while [ "$#" -gt 0 ]; do
             [ -n "$code_bundle" ] || { usage >&2; exit 64; }
             shift
             ;;
+        --map-traffic) [ "$map_traffic" = no ] || exit 64; map_traffic=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -993,6 +995,10 @@ elif [ -n "$code_bundle$code_manifest_sha256" ]; then
     exit 64
 fi
 
+if [ "$map_traffic" = yes ]; then
+    [ "$mode" = execute ] && [ "$scenario" = content-provider ] && [ "$protected_quote" = no ] \
+        && [ -z "$browser_filter_bundle$weather_client_bundle" ] || exit 64
+fi
 if [ -n "$browser_filter_bundle$browser_filter_manifest_sha256" ]; then
     [ "$scenario" = content-provider ] && [ "$protected_quote" = no ] || exit 64
     case $browser_filter_bundle in /*) ;; *) exit 64 ;; esac

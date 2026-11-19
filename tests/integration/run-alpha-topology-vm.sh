@@ -29,6 +29,7 @@ code_bundle=
 code_manifest_sha256=
 browser_filter_bundle=
 browser_filter_manifest_sha256=
+map_traffic=no
 bank_sha256=
 weather_client_bundle=
 weather_client_manifest_sha256=
@@ -76,6 +77,7 @@ usage() {
         '       image-snapshot optionally accepts --image-handoff DIRECTORY --image-return DIRECTORY --image-revision SHA.' \
         '       cloud-private-upload optionally accepts --cloud-owner-resume to exercise an interrupted real upload.' \
         '       content-repair optionally accepts --studio-handoff DIRECTORY --studio-evidence-sha256 SHA256.' \
+        '       content-provider accepts --map-traffic for signed Map cold, offline and expired delivery.' \
         '       content-provider optionally accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 SHA256.' \
         '       Or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 SHA256 (one joined client per run).' \
         '       transaction-abci optionally accepts --bank-authorizer-sha256 SHA256 for the same-run source-built TEST authorizer.' \
@@ -605,6 +607,7 @@ while [ "$#" -gt 0 ]; do
             case $bank_sha256 in ''|*[!0-9a-f]*) exit 64 ;; esac
             [ "${#bank_sha256}" -eq 64 ] || exit 64
             shift ;;
+        --map-traffic) [ "$map_traffic" = no ] || exit 64; map_traffic=yes ;;
         --browser-filter-bundle)
             if [ "$#" -lt 2 ] || [ -n "$browser_filter_bundle" ] || [ -z "$2" ]; then usage >&2; exit 64; fi
             browser_filter_bundle=$2
@@ -699,6 +702,10 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+if [ "$map_traffic" = yes ]; then
+    [ "$mode" = execute ] && [ "$scenario" = content-provider ] \
+        && [ -z "$browser_filter_bundle$weather_client_bundle" ] || exit 64
+fi
 if [ "$cloud_owner_resume" = yes ] && [ "$scenario" != cloud-private-upload ]; then
     usage >&2
     exit 64
@@ -2206,6 +2213,7 @@ mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
 native_runtime_sha256=none
+map_traffic=no
 bank_sha256=
 code_archive_sha256=none
 code_manifest_sha256=none
@@ -2282,6 +2290,9 @@ case $scenario in
             weather_client_manifest_sha256=$8
             case $weather_client_archive_sha256:$weather_client_manifest_sha256 in *[!0-9a-f:]*) exit 64 ;; esac
             [ "${#weather_client_archive_sha256}" -eq 64 ] && [ "${#weather_client_manifest_sha256}" -eq 64 ] || exit 64
+        elif [ "$#" -eq 6 ]; then
+            [ "$6" = map-traffic ] || exit 64
+            map_traffic=yes
         elif [ "$#" -eq 7 ]; then
             browser_filter_archive_sha256=$6
             browser_filter_manifest_sha256=$7
@@ -2806,6 +2817,9 @@ set +e
 if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative-code-proposal ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --code-bundle /home/vpci/cooperative-code-inputs \
         --code-manifest-sha256 "$code_manifest_sha256"
+elif [ "${map_traffic:-no}" = yes ]; then
+    sh tests/integration/map-traffic-sources.sh download /home/vpci/map-traffic || exit 1
+    set -- ./tests/integration/kvm-alpha-topology.sh --map-traffic
 elif [ "$browser_filter_manifest_sha256" != none ]; then
     set -- ./tests/integration/kvm-alpha-topology.sh --browser-filter-bundle /home/vpci/browser-filter.tar \
         --browser-filter-manifest-sha256 "$browser_filter_manifest_sha256"
@@ -3290,6 +3304,9 @@ case $scenario in
         elif [ -n "$weather_client_bundle" ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" weather-client "$WEATHER_CLIENT_ARCHIVE_SHA256" "$WEATHER_CLIENT_MANIFEST_SHA256"
+        elif [ "${map_traffic:-no}" = yes ]; then
+            ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
+                "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" map-traffic
         elif [ -n "$browser_filter_bundle" ]; then
             ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
                 "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario" "$BROWSER_FILTER_ARCHIVE_SHA256" "$BROWSER_FILTER_MANIFEST_SHA256"
