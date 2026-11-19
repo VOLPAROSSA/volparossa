@@ -842,7 +842,6 @@ dependencies = [
  "digest 0.10.7",
  "fiat-crypto 0.2.9",
  "rustc_version",
- "serde",
  "subtle",
  "zeroize",
 ]
@@ -858,6 +857,7 @@ dependencies = [
  "curve25519-dalek-derive",
  "fiat-crypto 0.3.0",
  "rustc_version",
+ "serde",
  "subtle",
  "zeroize",
 ]
@@ -5136,7 +5136,7 @@ dependencies = [
  "volparossa-routing",
  "volparossa-test-support",
  "volparossa-wireguard",
- "x25519-dalek 2.0.1",
+ "x25519-dalek 3.0.0",
  "zbus",
  "zeroize",
 ]
@@ -5854,7 +5854,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
 dependencies = [
  "curve25519-dalek 5.0.0",
+ "getrandom 0.4.3",
  "rand_core 0.10.1",
+ "serde",
  "zeroize",
 ]
 
@@ -5965,9 +5967,9 @@ dependencies = [
 
 [[package]]
 name = "zbus"
-version = "6.1.0"
+version = "6.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcff5faa63a63d5b81051740f7382017f10b3440b3f401d97f0cf0b3b39c62d9"
+checksum = "6b4aae740b23927ceabed962431abab2cdefb9f7f885e5bbab062da09bf580e4"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -5993,9 +5995,9 @@ dependencies = [
 
 [[package]]
 name = "zbus_macros"
-version = "6.1.0"
+version = "6.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bba6e2bfe19571dc81b3e0be9f8daec6e5422db3e2eea2e766a859553e7bd37"
+checksum = "37c9dd4beaf145c16fcb2902862f50da86e54aed13dd368ddf64a1d17e6b8529"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6005,9 +6007,9 @@ dependencies = [
 
 [[package]]
 name = "zbus_utils"
-version = "6.0.0"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c27a055b114bd9fc3686e90f62bd1fe612d523fc5f620bac3b1d2f42d3f6cab8"
+checksum = "af55e52da295311b368c45bcae221f020e28e97a2420360170ce389218e76ec7"
 dependencies = [
  "proc-macro2",
  "quote",

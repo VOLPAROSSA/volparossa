@@ -49,7 +49,7 @@ def partition(value, members):
             and all(natural(count, 1) for count in value["drop_packets"]))
 
 
-def validate(build, inner, outer, *, revision, driver_exit, guest_exit, phase):
+def validate(build, inner, outer, *, revision, driver_exit, guest_exit, phase, bank_sha256=None):
     require(isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision) is not None)
     require(driver_exit == "0" and guest_exit == "0" and phase == "complete")
     require(isinstance(build, dict) and build.get("schema") == 1
@@ -67,6 +67,10 @@ def validate(build, inner, outer, *, revision, driver_exit, guest_exit, phase):
     require({(child.get("node"), child.get("kind")) for child in children}
             == {(node, kind) for node in range(4) for kind in ("app", "comet")})
     checks = inner["checkpoints"]
+    if bank_sha256 is None:
+        require("bank_authorizer" not in inner)
+    else:
+        require(FIXTURE.bank.validate_receipt(inner.get("bank_authorizer"), bank_sha256, checks))
     setup = checks["setup"]
     require(setup.get("validators") == 4 and setup.get("independent_stores") == 4
             and setup.get("private_sockets") == 4 and digest(setup.get("genesis_sha256")))
@@ -128,12 +132,13 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--driver-exit-code", required=True)
+    parser.add_argument("--bank-authorizer-sha256")
     args = parser.parse_args()
     build, inner, outer = [json.loads(read_file(args.output / name)) for name in (
         "transaction-abci-build.json", "transaction-abci-inner.json", "transaction-abci-acceptance.json")]
     validate(build, inner, outer, revision=args.expected_commit, driver_exit=args.driver_exit_code,
              guest_exit=read_file(args.output / "guest-exit-status", 16).decode().strip(),
-             phase=read_file(args.output / "guest-phase", 64).decode().strip())
+             phase=read_file(args.output / "guest-phase", 64).decode().strip(), bank_sha256=args.bank_authorizer_sha256)
     print("Isolated four-validator TEST evidence accepted; no Byzantine, overlay or real-settlement claim.")
 
 

@@ -40,7 +40,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus) && github.run_id || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+  cancel-in-progress: ${{ github.event_name != 'push' && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
 
 defaults:
   run:
@@ -551,6 +551,9 @@ jobs:
           python3 -B scripts/test-quality-audit-tools.py
           cargo fmt --all -- --check
           ./scripts/check-shell.sh
+
+      - name: Check resident model result publication across cancellation
+        run: python3 -B tests/integration/test-protected-resident-model-run.py TerminalCheckpoint
 
       - name: Check native CPU contracts without loading models
         working-directory: workers/volparossa-ml

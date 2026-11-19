@@ -25,6 +25,7 @@ import socket
 import stat
 import subprocess
 import tarfile
+import tempfile
 import time
 import types
 import urllib.request
@@ -52,6 +53,7 @@ ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.
        'PYTHONDONTWRITEBYTECODE': '1', 'GIT_CONFIG_NOSYSTEM': '1',
        'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0'}
 CANCELLED = False
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 CLEANUP_ACTIVE = contextvars.ContextVar('resident_model_cleanup_active', default=False)
 TOOL_PROCESSES = contextvars.ContextVar('resident_model_tool_processes', default=None)
 REQUESTER_STAGE_PREFIX = b'VP_PUBLIC_REQUESTER_STAGE_V1 '
@@ -261,6 +263,38 @@ def write_new(path, raw, mode=0o600):
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode), 'wb') as out:
         out.write(raw)
         os.fchmod(out.fileno(), mode)
+
+
+def write_result(path, report, success_eligible, deadline):
+    # Stage complete bytes before making any decision visible at the final path.
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.resident-result-') as staged:
+        if success_eligible:
+            passed = dict(report, state='passed', phase='complete', model_execution=True,
+                          host_configuration_checkpoint_accepted=True,
+                          runtime_image_deliberately_corrupted=True)
+            staged.write(encoded(passed))
+            staged.flush()
+            previous = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+            try:
+                try:
+                    remaining(deadline)
+                    # The pending-signal snapshot commits the choice. Later signals
+                    # are delivered after atomic, non-overwriting publication.
+                    pending = signal.sigpending()
+                    require(not CANCELLED and not pending.intersection(CANCEL_SIGNALS), 'controller_cancelled')
+                except ValueError as error:
+                    report.setdefault('failure', str(error) if str(error) in FAILURE_CODES else 'controller_stage_failed')
+                else:
+                    os.link(staged.name, path)
+                    report.update(passed)
+                    return
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+            staged.seek(0)
+            staged.truncate()
+        staged.write(encoded(report))
+        staged.flush()
+        os.link(staged.name, path)
 
 
 def remaining(deadline, cap=MAX_SECONDS):
@@ -1952,16 +1986,9 @@ def execute_owned(args, pending):
             report.setdefault('failure', report['scratch_cleanup_failure'])
         # No workload/host observation is an aggregate success until all owned
         # processes and scratch are gone and late cancellation/expiry is checked.
-        if (workload_complete and 'failure' not in report and scopes_safe and not pending
-                and report['scratch_removed'] and report['host_configuration_checkpoint']['eligible'] is True):
-            try:
-                remaining(deadline)
-                report.update(state='passed', phase='complete', model_execution=True,
-                              host_configuration_checkpoint_accepted=True,
-                              runtime_image_deliberately_corrupted=True)
-            except ValueError as error:
-                report.setdefault('failure', str(error) if str(error) in FAILURE_CODES else 'controller_stage_failed')
-        write_new(evidence / 'result.json', encoded(report))
+        success_eligible = (workload_complete and 'failure' not in report and scopes_safe and not pending
+                            and report['scratch_removed'] and report['host_configuration_checkpoint']['eligible'] is True)
+        write_result(evidence / 'result.json', report, success_eligible, deadline)
     return report
 
 
@@ -1977,7 +2004,7 @@ def main():
     def cancel(_number, _frame):
         global CANCELLED
         CANCELLED = True
-    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for number in CANCEL_SIGNALS:
         signal.signal(number, cancel)
     try:
         result = execute(args)
