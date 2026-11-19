@@ -1413,7 +1413,7 @@ SIGNAL_FRAGMENT_NAMES = {"a01-expected-peers.json", "signal-backup-provision.jso
     "signal-backup-private_cleanup.json", "host-state-before.json", "host-state-after.json",
     "guest-exit-status", "current-phase"} | {
     f"signal-backup-fragments-{name}.json" for name in (
-        "smoke", "evidence", "prepare", "native", "uploaded", "restore", "finish", "withdrawal",
+        "smoke", "evidence", "prepare", "native", "uploaded", "refusal", "restore", "finish", "withdrawal",
         "uploaded_usage", "restored_usage", "deleted_usage", "isolation", "layout", "guard")
 } | {name for phase in ("upload", "restore", "finish") for name in (
     f"private-storage-fragments-{phase}-live-selection.json",

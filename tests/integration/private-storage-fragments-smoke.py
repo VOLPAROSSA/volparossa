@@ -126,7 +126,7 @@ def restore_cli_receipt(stdout):
         return dict(report="unavailable_or_invalid")
 
 
-def restore_invoke(binary, socket, args, expected=0, deadline=700):
+def restore_invoke(binary, socket, args, expected=0, deadline=700, *, incomplete=False):
     global RESTORE_CLI
     RESTORE_CLI = dict(exit_code=None, timed_out=False, stdout_bytes=None, stderr_bytes=None,
                        receipt=None)
@@ -138,7 +138,10 @@ def restore_invoke(binary, socket, args, expected=0, deadline=700):
                            receipt=restore_cli_receipt(stdout))
         require(process.returncode == expected, "private replica CLI operation failed")
         require(len(stdout) <= 16384 and len(stderr) <= 16384, "replica diagnostics exceeded fixture bound")
-        if expected:
+        if incomplete:
+            require(expected == 1 and RESTORE_CLI["receipt"].get("operation_complete") is False,
+                    "incomplete restore requires its original nonzero CLI report")
+        elif expected:
             require(not stdout, "failed no-clobber operation emitted a success response")
             return None
         return json.loads(stdout)

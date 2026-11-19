@@ -20,9 +20,9 @@ read, require, private_file, create, invoke, unlock = (
 NAME = "signal-backup-fragments"
 CAPACITY = 1048576
 FRAGMENT_LIMIT = 262144
-PHASES = dict(upload=32, restore=16, finish=16)
+PHASES = dict(upload=32, restore=20, finish=16)
 FALSE_SCOPE = (*NATIVE["FALSE_SCOPE"], "automatic_repair", "erasure_coding")
-SUMMARY = ("smoke", "evidence", "prepare", "native", "uploaded", "restore", "finish",
+SUMMARY = ("smoke", "evidence", "prepare", "native", "uploaded", "refusal", "restore", "finish",
            "withdrawal", "uploaded_usage", "restored_usage", "deleted_usage", "isolation", "layout", "guard")
 EXPORT_NAMES = ("a01-expected-peers.json", "signal-backup-private_cleanup.json",
     *(f"{NAME}-{name}.json" for name in SUMMARY), *(name for phase in PHASES for name in (
@@ -168,6 +168,32 @@ def confirm_withdrawal(root):
     return dict(confirmation_written=True)
 
 
+def refusal(root, binary, client):
+    _, keys = descriptor(root)
+    require(not (root / "backup/archive.signal").exists(), "original ciphertext remains")
+    same_identity(root)
+    output = root / "second-restore.signal"
+    before = set(root.iterdir())
+    require(output not in before, "restore destination already exists")
+    result = FRAGMENTS["restore_invoke"](binary, client,
+        ["storage", "fragments", "restore", *existing(root), "--output", output],
+        expected=1, deadline=900, incomplete=True)
+    unavailable = "unavailable_or_restore_unverified"
+    require(result["restored"] is False and result["unavailable_fragment"] == 2
+        and result.get("whole_archive_sha256_verified") is not True
+        and result["fragment_outcomes"] == [
+            dict(index=0, restored=True, provider_key=keys[1], copy_outcomes=[unavailable, "restored_and_retained"]),
+            dict(index=1, restored=True, provider_key=keys[1], copy_outcomes=["restored_and_retained"]),
+            dict(index=2, restored=False, provider_key=None, copy_outcomes=[unavailable, unavailable])],
+        "isolated surviving provider did not return just its two original fragments")
+    require(set(root.iterdir()) == before
+        and not list((root / "backup/fragments").glob(".fragment-transfer-*")),
+        "partial archive or private reconstruction staging remains")
+    same_identity(root)
+    return dict(completed_fragments=2, unavailable_fragment=2, serving_provider_index=1,
+        cli_exit=1, output_absent=True, original_state_retained=True)
+
+
 def restore(root, binary, client):
     value, keys = descriptor(root)
     require(not (root / "backup/archive.signal").exists(), "original ciphertext remains")
@@ -217,6 +243,8 @@ def validate_evidence(value, revision=None):
         copies_per_fragment=2, committed_fragment_copies=8, provider_leases=counts, provider_payload_bytes=charges,
         physical_payload_charge=2 * size, owner_signature_verified=True, source_removed_before_restore=True,
         native_export_rendezvous_observed=True), "native fragment deposition proof missing")
+    require(value["refusal"] == dict(completed_fragments=2, unavailable_fragment=2, serving_provider_index=1,
+        cli_exit=1, output_absent=True, original_state_retained=True), "two-provider loss did not refuse publication")
     require(value["restore"] == dict(second_core_restore=True, native_import_already_completed=True,
         fragment_provider_indexes=[1, 1, 2, 1], whole_archive_sha256_verified=True, reads_nonconsuming=True,
         retained_identity_unchanged=True, ciphertext_removed=True), "survivor-only repeat restore missing")
@@ -244,11 +272,13 @@ def validate_evidence(value, revision=None):
     require(set(value["network"]) == set(PHASES), "three complete packet-evidence phases required")
     for phase in PHASES:
         FRAGMENTS["validate_network"](value["network"][phase], value["expected_peers"], value["layout"], phase)
+    returned = value["network"]["restore"]["privacy"]["exit"]["provider_application"]["relay5"]["response_payload_bytes"]
+    require(returned >= 6 * lengths[0] + 2 * lengths[-1], "surviving provider partial reads missing from capture")
 
 
 def evidence(work):
     value = {name: read(work / f"{NAME}-{name}.json") for name in
-        ("prepare", "native", "uploaded", "restore", "finish", "withdrawal", "isolation", "layout", "guard")}
+        ("prepare", "native", "uploaded", "refusal", "restore", "finish", "withdrawal", "isolation", "layout", "guard")}
     value.update(success=True, expected_peers=read(work / "a01-expected-peers.json"),
         private_cleanup=read(work / "signal-backup-private_cleanup.json"), **dict.fromkeys(FALSE_SCOPE, False))
     for name in ("uploaded_usage", "restored_usage", "deleted_usage"):
@@ -264,7 +294,7 @@ def evidence(work):
 
 def validate_report(value, revision):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and value["source_revision"] == revision
-        and value["schema_version"] == 1 and value["report_kind"] == "volparossa-signal-backup-fragments"
+        and value["schema_version"] == 2 and value["report_kind"] == "volparossa-signal-backup-fragments"
         and value["success"] is True and value["runner_exit_status"] == 0
         and value["phase"] == "signal-backup-fragments-complete" and value["observed_blocker"] is None
         and value["cleanup"] == dict(complete=True, remaining_owned_objects=0)
@@ -280,7 +310,7 @@ def main(args):
         print("\n".join(EXPORT_NAMES)); return
     if command == "prepare" and len(args) == 10:
         result = prepare(NATIVE["owner_root"](args[1]), *args[2:])
-    elif command in ("uploaded", "restore", "finish") and len(args) == 4:
+    elif command in ("uploaded", "refusal", "restore", "finish") and len(args) == 4:
         result = globals()[command](NATIVE["owner_root"](args[1]), *args[2:])
     elif command == "confirm-withdrawal" and len(args) == 2:
         result = confirm_withdrawal(NATIVE["owner_root"](args[1]))

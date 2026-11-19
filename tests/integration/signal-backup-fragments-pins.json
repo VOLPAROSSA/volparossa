@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "chat_revision": "78d3cb43ba10ce46cb60ea0a4ec18d962e64d190",
+  "chat_revision": "71a9017a80e26aaf6496a8375a70808dd26ad415",
   "signal_revision": "ef3872cb0249ec939d8aff857568a0e87a6b5075",
   "files": {
     "LICENSE": {
@@ -40,8 +40,8 @@
       "sha256": "f2fae84721aae441d50086b57e4daa0c4b984b31c9aee9e0d55eb14ebc2113d2"
     },
     "scripts/apply_signal_overlay.py": {
-      "bytes": 5582,
-      "sha256": "b24d5a9848d225e0b0273363a098780a4d5501f93fa968c686dd0a8885268cb5"
+      "bytes": 5977,
+      "sha256": "438f922a5445c4d46519e2936eca5d67c9ad89dbad94cc14d7975c2faa7913bf"
     },
     "patches/signal-backup-test.txt": {
       "bytes": 2179,
