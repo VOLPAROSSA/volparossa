@@ -916,6 +916,7 @@ def task_roots(state):
 
 
 def scan_workers(work, document, layout, brokers, observed):
+    pending = {}
     for path in sorted(document.glob("**/attempt-????/job-?.json")):
         handle = read(path, 16384)
         binding = handle["binding"]
@@ -925,8 +926,22 @@ def scan_workers(work, document, layout, brokers, observed):
         require(re.fullmatch(r"[0-9a-f]{32}", key), "invalid retained job identity")
         node = next((n for n in layout["provider_nodes"] if layout["provider_keys"][n] == handle["provider_key"]), None)
         require(node is not None, "unexpected task executor")
-        current = JOBS["worker_snapshot"](work, node, brokers[node], binding["dataset_sha256"])
-        if current and JOBS["alive"](current["worker"]):
+        candidates = pending.setdefault(node, {})
+        digest = binding["dataset_sha256"]
+        # A live dataset cannot distinguish two attempts on the same provider.
+        candidates[digest] = None if digest in candidates else (path, handle)
+    for node, candidates in pending.items():
+        unique = {digest: match for digest, match in candidates.items() if match is not None}
+        if not unique:
+            continue
+        # One /proc tree walk and systemd query per provider in this scan,
+        # regardless of how many history files are still on disk.
+        current = JOBS["worker_snapshot_for_datasets"](work, node, brokers[node], unique)
+        if (current and JOBS["alive"](current["worker"])
+                and all(entry["worker"] != current["worker"] for entry in observed.values())):
+            path, handle = unique[current["dataset_file"]["sha256"]]
+            binding = handle["binding"]
+            key = binding["job_id"]
             relative = path.relative_to(document).as_posix()
             match = re.match(r"synthesis/level-([0-9]{2})-group-[0-9]{4}/", relative)
             data = json.loads(current["dataset_json"])
@@ -1418,7 +1433,7 @@ def validate_sampled_routes(sampler, peers, layout, selected, gates):
                 for route in gates["observed_context_routes"]), "cooperative control relay changed")
 
 
-def observe_routes(work, pid, baseline):
+def observe_routes(work, pid, baseline, driver_seconds=2400):
     JOBS["guest_work"](work)
     require(TRIAL == "discovered-360m", "unexpected sampled route trial")
     sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
@@ -1433,7 +1448,7 @@ def observe_routes(work, pid, baseline):
                     and initial["control_relay_peer_id"] == layout["control_relay_peer_id"],
                     "cooperative starting route differs")
             # The panel waits for the independent observer's pre-consent gate.
-            observe(work, pid)
+            observe(work, pid, driver_seconds)
         write(work / "content-custody-fetch-gates.json", coverage.report(True))
     finally:
         if diagnostic:
@@ -1441,13 +1456,14 @@ def observe_routes(work, pid, baseline):
             write(work / f"{NAME}-flow-diagnostic.json", diagnostic)
 
 
-def observe(work, pid):
+def observe(work, pid, driver_seconds=2400):
+    require(type(driver_seconds) is int and 1 <= driver_seconds <= 3600, "invalid cooperative driver duration")
     JOBS["guest_work"](work)
     progress = dict(version=1, phase="setup", failure=None, invariant_reason=None, task_count=0,
                     observed_workers=0, cancel_workers=0, counts_saturated=False, driver_alive=None)
     tracked = dict(owner=None, tasks=[], observed={}, cancelled={})
     try:
-        observe_inner(work, pid, progress, tracked)
+        observe_inner(work, pid, progress, tracked, driver_seconds)
     except (Exception, KeyboardInterrupt) as error:
         progress["failure"] = observer_error(error)
         progress["invariant_reason"] = observer_invariant_reason(error)
@@ -1471,7 +1487,7 @@ def observe(work, pid):
             pass
 
 
-def observe_inner(work, pid, progress, tracked):
+def observe_inner(work, pid, progress, tracked, driver_seconds):
     root, state = paths(work)
     output = root / "build/cooperative-proof"
     progress["phase"] = "owner_binding"
@@ -1480,7 +1496,7 @@ def observe_inner(work, pid, progress, tracked):
     layout = read(work / "agent-jobs-layout.json")
     progress["phase"] = "broker_binding"
     brokers = {node: JOBS["identity"](JOBS["broker_pid"](node)) for node in layout["provider_nodes"]}
-    deadline = time.monotonic() + 2400
+    deadline = time.monotonic() + driver_seconds
     consent = False
     observed, cancelled = tracked["observed"], tracked["cancelled"]
     first = None
@@ -1726,8 +1742,8 @@ def main(args):
         provision(Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
-    elif len(args) == 4 and args[0] == "observe-routes":
-        observe_routes(Path(args[1]), int(args[2]), int(args[3]))
+    elif len(args) in (4, 5) and args[0] == "observe-routes":
+        observe_routes(Path(args[1]), int(args[2]), *map(int, args[3:]))
     elif len(args) == 6 and args[0] == "diagnostic":
         diagnostic(Path(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5]))
     elif len(args) == 3 and args[0] == "collect":

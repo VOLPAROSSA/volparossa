@@ -3,8 +3,8 @@
   "repository": "https://github.com/VOLPAROSSA/volparossa-browser",
   "revision": "326ce0f2de2b72ce2769e95ddb8b009d6266f2ae",
   "discovered_driver": {
-    "revision": "cb8f129fb98e4cdc1bc477e305c6093d56118083",
-    "file": {"bytes": 23212, "sha256": "61a9729ea8283260ca0f4ff2c524f5dca7c062d8b0ab5cd88fabe1481bb96660"}
+    "revision": "7ca361bef50d77dc424d93204a71969a76197abf",
+    "file": {"bytes": 24394, "sha256": "4e986976eb025a2538e93d00469da4d522317c2232351e85bdd54e6783098f9d"}
   },
   "files": {
     "scripts/smoke_cooperative_compute.py": {"bytes": 22437, "sha256": "a10a65e1c2a38e68360e353c1dbe1c68145d79815fe0d46e66ebc21d85389f67"},

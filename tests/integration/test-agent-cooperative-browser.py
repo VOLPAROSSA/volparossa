@@ -515,6 +515,43 @@ benchmark_select_route() { printf 'connect\n'; }
 
 
 class CooperativeBrowserProof(unittest.TestCase):
+    def test_worker_scan_groups_retained_handles_by_provider_and_keeps_live_identity_unique(self):
+        scan = CHECK["scan_workers"]
+        nodes = ["relay4", "relay5"]
+        layout = {"provider_nodes": nodes, "provider_keys": {node: node for node in nodes}}
+        brokers = dict.fromkeys(nodes, {"pid": 2})
+        calls, observed = [], {}
+        worker = {"pid": 20, "start_ticks": 300}
+        with tempfile.TemporaryDirectory() as directory:
+            doc = Path(directory)
+            for ordinal in range(24):
+                path = doc / f"part-{ordinal:04d}/attempt-0000/job-0.json"
+                path.parent.mkdir(parents=True)
+                # Two indistinguishable attempts for the first provider must
+                # never receive independent live-worker credit.
+                dataset = f"{1 if ordinal == 22 else ordinal + 1:064x}"
+                record = dict(binding=dict(job_id=f"{ordinal + 1:032x}", dataset_sha256=dataset),
+                    provider_key=nodes[ordinal % 2],
+                    capabilities=dict(public_inference_only=True, model=dict(base_weights=dict(sha256="a" * 64))))
+                path.write_text(json.dumps(record))
+            def snapshot(_work, node, broker, candidates):
+                self.assertEqual(broker, brokers[node])
+                calls.append((node, set(candidates)))
+                if node == nodes[1]:
+                    return None
+                self.assertNotIn(f"{1:064x}", candidates)
+                digest = min(candidates)
+                return dict(dataset_file=dict(sha256=digest), dataset_json='{"version":2}',
+                            worker=worker, owned_processes=[broker, worker], broker=broker)
+            with mock.patch.dict(scan.__globals__["JOBS"], worker_snapshot_for_datasets=snapshot,
+                                 alive=lambda _: True):
+                scan(doc, doc, layout, brokers, observed)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(observed), 1)
+                scan(doc, doc, layout, brokers, observed)
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(observed), 1)
+
     def test_long_fetch_joins_every_exit_flow_to_the_observed_physical_route(self):
         check, evidence = discovered_fixture()
         sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))

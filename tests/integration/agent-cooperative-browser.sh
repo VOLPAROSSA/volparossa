@@ -45,8 +45,14 @@ agent_cooperative_browser_run() {
     for cooperative_node in relay3 relay4 relay5; do
         cooperative_hidden="$cooperative_hidden $WORK/state-$cooperative_node"
     done
+    cooperative_task_seconds=2400
+    cooperative_driver_seconds=2520
+    cooperative_service_seconds=2700
     set -- --model-profile smollm2-135m-v1 --provider-key "$jobs_key_a" --provider-key "$jobs_key_b"
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        # Allow the first task its full owner budget, followed by independent result and live cancellation checks.
+        cooperative_driver_seconds=$((cooperative_task_seconds + 1200))
+        cooperative_service_seconds=$((cooperative_driver_seconds + 180))
         set -- --model-profile smollm2-360m-v1 --discover-peers --refine-incomplete --refinement-levels 4
     fi
     PHASE=agent-cooperative-browser-service
@@ -58,7 +64,7 @@ agent_cooperative_browser_run() {
         --property=PrivateMounts=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
         --property=ProtectSystem=strict --property=ProtectHome=yes \
         --property="ReadWritePaths=$jobs_source" --property="InaccessiblePaths=$cooperative_hidden" \
-        --property=KillMode=control-group --property=TimeoutStopSec=20s --property=RuntimeMaxSec=2700s \
+        --property=KillMode=control-group --property=TimeoutStopSec=20s --property="RuntimeMaxSec=${cooperative_service_seconds}s" \
         --property="StandardOutput=append:$WORK/agent-cooperative-browser-service.log" \
         --property="StandardError=append:$WORK/agent-cooperative-browser-service.err" \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
@@ -66,7 +72,7 @@ agent_cooperative_browser_run() {
         --runtime-root "$jobs_source/document-runtime" --model-root "$jobs_source/document-model" \
         "$@" --identity "$jobs_source/identity.key" \
         --passphrase-file "$jobs_source/passphrase" --publisher-key "$jobs_publisher" \
-        --max-seconds 600 --max-task-seconds 2400 --threads 2 --execute \
+        --max-seconds 600 --max-task-seconds "$cooperative_task_seconds" --threads 2 --execute \
         || fail COOPERATIVE_BROWSER_SERVICE_FAILED
     cooperative_attempt=0
     while [ ! -S "$cooperative_socket" ]; do
@@ -84,20 +90,24 @@ agent_cooperative_browser_run() {
     cooperative_driver_unit=volparossa-alpha-cooperative-browser.service
     [ "$(unit_load_state "$cooperative_driver_unit")" = not-found ] || fail COOPERATIVE_BROWSER_DRIVER_COLLISION
     jobs_units="$jobs_units $cooperative_driver_unit"
-    timeout --signal=INT --kill-after=15s 2520s systemd-run --quiet --wait --collect \
+    set --
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        set -- --owner-task-seconds "$cooperative_task_seconds"
+    fi
+    timeout --signal=INT --kill-after=15s "${cooperative_driver_seconds}s" systemd-run --quiet --wait --collect \
         --unit="$cooperative_driver_unit" --service-type=exec --property=User=volparossa --property=Group=volparossa \
         --property=SetLoginEnvironment=yes --property=NoNewPrivileges=yes --property=UMask=0077 \
         --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=KillMode=control-group \
-        --property=TimeoutStopSec=20s --property=RuntimeMaxSec=2520s \
+        --property=TimeoutStopSec=20s --property="RuntimeMaxSec=${cooperative_driver_seconds}s" \
         -- python3 -B "$cooperative_root/scripts/smoke_cooperative_compute.py" \
         --stage "$cooperative_root/build/firefox-esr" --output "$cooperative_root/build/cooperative-proof" \
-        --socket "$cooperative_socket" --input "$cooperative_root/input.json" --core-revision "$expected_commit" \
+        --socket "$cooperative_socket" --input "$cooperative_root/input.json" --core-revision "$expected_commit" "$@" \
         >"$WORK/agent-cooperative-browser-driver.log" 2>"$WORK/agent-cooperative-browser-driver.err" &
     jobs_batch_pid=$!
     cooperative_observer_status=0
     set -- observe "$WORK" "$jobs_batch_pid"
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
-        set -- observe-routes "$WORK" "$jobs_batch_pid" "$provider_baseline_ms"
+        set -- observe-routes "$WORK" "$jobs_batch_pid" "$provider_baseline_ms" "$cooperative_driver_seconds"
     fi
     agent_cooperative_browser_python "$@" \
         >"$WORK/agent-cooperative-browser-observer.log" 2>"$WORK/agent-cooperative-browser-observer.err" \
