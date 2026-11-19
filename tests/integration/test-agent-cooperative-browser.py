@@ -1145,6 +1145,36 @@ class CooperativeBrowserProof(unittest.TestCase):
             self.assertTrue(CHECK['DISCOVERY_FAILURE_EVENT_CODES'].isdisjoint(CHECK['RPC_EVENT_CODES']))
             self.assertTrue(CHECK['PROVIDER_LIFECYCLE_EVENT_CODES'].isdisjoint(CHECK['DISCOVERY_FAILURE_EVENT_CODES']))
 
+    def test_missing_original_attempts_join_the_exact_batch_and_lease_without_exporting_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            task = Path(temp)
+            finish = task / 'execution-diagnostic.json'
+            finish.write_text('{}')
+            os.utime(finish, (1000, 1000))
+            first = task / 'document/package-0000/attempt-0000'
+            second = task / 'document/refinement/leaf-0001/attempt-0002'
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            one = dict(binding=dict(job_id='a' * 32, expires_unix_seconds=990))
+            two = dict(binding=dict(job_id='b' * 32, expires_unix_seconds=1100))
+            (first / 'job-0.json').write_text(json.dumps(one))
+            (second / 'job-0.json').write_text(json.dumps(two))
+            receipt = dict(handle=one, status=dict(state='complete', binding=one['binding']))
+            (first / ('receipt-' + 'a' * 32 + '.json')).write_text(json.dumps(receipt))
+            rpc = dict(phase='poll', category='broker_rejected', code='missing')
+            result = dict(jobs=[dict(handle=two, state='unconfirmed', diagnostic=rpc)], outputs=['PRIVATE_TEXT'])
+            (second / 'result.json').write_text(json.dumps(result))
+            os.utime(second / 'result.json', (999, 999))
+            status = dict(receipts=dict(phase='missing_terminal', handles=2, terminal=1))
+            observed = CHECK['missing_attempts'](task, status)
+            self.assertEqual(observed, dict(state='valid', jobs=[dict(stage='refinement', attempt=2,
+                expired_at_cleanup=False, expired_at_batch_record=False, result='unconfirmed', rpc=rpc)]))
+            os.utime(finish, (1200, 1200))
+            self.assertTrue(CHECK['missing_attempts'](task, status)['jobs'][0]['expired_at_cleanup'])
+            rpc['code'] = 'PRIVATE_ERROR'
+            (second / 'result.json').write_text(json.dumps(result))
+            self.assertEqual(CHECK['missing_attempts'](task, status), dict(state='invalid'))
+
     def test_coordinator_diagnostic_retains_only_closed_stage_and_cleanup_facts(self):
         value = dict(version=1, phase='tokenization', execution_ok=False,
             error_class='io_permission', rpc=None, local_cleanup_confirmed=False,

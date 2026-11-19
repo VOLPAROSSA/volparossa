@@ -496,6 +496,19 @@ def closed_status(path):
         return dict(state="invalid")
 
 
+def closed_rpc(rpc, error):
+    if rpc is None:
+        return
+    require(type(rpc) is dict and rpc.get('category') in
+        ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
+        and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
+    expected = {'category', 'phase'}
+    if rpc['category'] == 'broker_rejected':
+        expected.add('code')
+        require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
+    require(set(rpc) == expected and error == 'peer_rpc', 'invalid closed RPC fields')
+
+
 def check_execution_diagnostic(value):
     require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1, 2),
             'invalid closed coordinator version')
@@ -513,18 +526,7 @@ def check_execution_diagnostic(value):
         and receipt['terminal'] <= receipt['handles']
         and value['cleanup_confirmed'] == (value['local_cleanup_confirmed'] and receipt['confirmed']),
         'invalid closed receipt diagnostic')
-    def check_rpc(rpc, error):
-        if rpc is None:
-            return
-        require(type(rpc) is dict and rpc.get('category') in
-            ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
-            and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
-        expected = {'category', 'phase'}
-        if rpc['category'] == 'broker_rejected':
-            expected.add('code')
-            require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
-        require(set(rpc) == expected and error == 'peer_rpc', 'invalid closed RPC fields')
-    check_rpc(value['rpc'], value['error_class'])
+    closed_rpc(value['rpc'], value['error_class'])
     if value['version'] == 2:
         require(all(value[name] is None or type(value[name]) is bool for name in ('execution_complete', 'answer_complete'))
                 and (value['answer_complete'] is not True or value['execution_complete'] is True),
@@ -536,7 +538,7 @@ def check_execution_diagnostic(value):
                 and recovery['terminal_persisted'] <= recovery['attempted']
                 and type(recovery['deadline_reached']) is bool and recovery['error'] in EXECUTION_ERRORS,
                 'invalid reconciliation observations')
-        check_rpc(recovery['rpc'], recovery['error'])
+        closed_rpc(recovery['rpc'], recovery['error'])
     return value
 
 
@@ -710,11 +712,76 @@ def closed_answer_diagnostic(task):
         return dict(state="invalid")
 
 
+def missing_attempts(task, status):
+    """Classify original journal records before teardown without exporting job IDs or payloads."""
+    try:
+        receipt = status['receipts']
+        require(receipt['phase'] == 'missing_terminal' and receipt['handles'] <= 128, 'receipt count')
+        finished = int((task / 'execution-diagnostic.json').stat().st_mtime)
+        handles = {}
+        for path in (task / 'document').glob('**/attempt-[0-9][0-9][0-9][0-9]/job-[0-3].json'):
+            handle = read(path, 65536)
+            key = handle['binding']['job_id']
+            require(isinstance(key, str) and re.fullmatch('[0-9a-f]{32}', key)
+                    and key not in handles and len(handles) < 128, 'original handle')
+            handles[key] = (path, handle)
+        require(len(handles) == receipt['handles'], 'incomplete handle inventory')
+        terminal = set()
+        for count, path in enumerate(task.glob('**/receipt-*.json'), 1):
+            require(count <= 512, 'bounded receipt inventory')
+            record = read(path, 262144)
+            key = record['handle']['binding']['job_id']
+            require(key in handles and path.name == f'receipt-{key}.json' and record['handle'] == handles[key][1]
+                    and record['status']['binding'] == record['handle']['binding'], 'unbound receipt')
+            if record['status']['state'] in ('complete', 'failed', 'cancelled'):
+                terminal.add(key)
+        require(len(terminal) == receipt['terminal'], 'incomplete terminal inventory')
+        rows = []
+        for key, (path, handle) in sorted(handles.items(), key=lambda item: item[1][0]):
+            if key in terminal:
+                continue
+            part = path.relative_to(task / 'document').parts[0]
+            stage = part if part in ('refinement', 'synthesis') else 'original' if re.fullmatch('package-[0-9]{4}', part) else 'other'
+            expiry = handle['binding']['expires_unix_seconds']
+            require(type(expiry) is int and expiry > 0, 'original lease')
+            row = dict(stage=stage, attempt=int(path.parent.name[8:]), expired_at_cleanup=expiry <= finished,
+                       expired_at_batch_record=None, result='absent', rpc=None)
+            result_path = path.parent / 'result.json'
+            if result_path.exists():
+                jobs = read(result_path, 1048576)['jobs']
+                row['expired_at_batch_record'] = expiry <= int(result_path.stat().st_mtime)
+                require(type(jobs) is list and len(jobs) <= 32 and all(type(job) is dict for job in jobs),
+                        'bounded original batch')
+                original = [entry for entry in jobs if entry.get('handle') == handle]
+                require(len(original) <= 1, 'ambiguous original attempt')
+                if original:
+                    item = original[0]
+                    require(item['state'] in ('unconfirmed', 'running', 'complete', 'failed', 'cancelled'), 'original state')
+                    row['result'] = item['state']
+                    diagnostic = item.get('diagnostic')
+                    if diagnostic is not None:
+                        closed_rpc(diagnostic, 'peer_rpc')
+                        row['rpc'] = diagnostic
+                else:
+                    row['result'] = 'unlisted'
+            rows.append(row)
+        return dict(state='valid', jobs=rows)
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state='invalid')
+
+
 def coordinator_diagnostic(state):
     try:
         tasks = task_roots(state)
-        return dict(state='valid', tasks=[dict(ordinal=index + 1, answer_diagnostic=closed_answer_diagnostic(task),
-            **closed_execution(task / 'execution-diagnostic.json')) for index, task in enumerate(tasks)])
+        entries = []
+        for index, task in enumerate(tasks):
+            entry = dict(ordinal=index + 1, answer_diagnostic=closed_answer_diagnostic(task),
+                         **closed_execution(task / 'execution-diagnostic.json'))
+            status = entry.get('status', {})
+            if status.get('receipts', {}).get('phase') == 'missing_terminal':
+                entry['missing_attempts'] = missing_attempts(task, status)
+            entries.append(entry)
+        return dict(state='valid', tasks=entries)
     except FileNotFoundError:
         return dict(state='absent')
     except (OSError, ValueError, KeyError, TypeError):
