@@ -1758,6 +1758,9 @@ fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
         "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpConnectSocketHostUnreachable
         }
+        "MPTCP_CONNECT_OPERATION_DEADLINE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectOperationDeadline
+        }
         "MPTCP_CONNECT_SOCKET_TIMED_OUT" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpConnectSocketTimedOut
         }
@@ -3921,6 +3924,14 @@ mod tests {
                 AcquireDiagnostic::MptcpConnectPollTimedOut,
             ),
             (
+                "MPTCP_CONNECT_OPERATION_DEADLINE",
+                AcquireDiagnostic::MptcpConnectOperationDeadline,
+            ),
+            (
+                "MPTCP_CONNECT_OPERATION_DEADLINE_EXTRA",
+                AcquireDiagnostic::Unknown,
+            ),
+            (
                 "MPTCP_CONNECT_POLL_TIMED_OUT_EXTRA",
                 AcquireDiagnostic::Unknown,
             ),
@@ -3945,6 +3956,7 @@ mod tests {
                 "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE",
                 "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE",
                 "MPTCP_CONNECT_SOCKET_TIMED_OUT",
+                "MPTCP_CONNECT_OPERATION_DEADLINE",
             ] {
                 assert_eq!(acquire_diagnostic(code, result), AcquireDiagnostic::Unknown);
             }
