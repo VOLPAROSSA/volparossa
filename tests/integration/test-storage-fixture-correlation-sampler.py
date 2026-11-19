@@ -245,6 +245,20 @@ class FixtureV2(unittest.TestCase):
             'validate-stdin'], input=raw, capture_output=True, timeout=5)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b'', b''))
 
+    def test_current_connect_socket_errors_require_the_exact_kernel_acquire_pair(self):
+        for code in ('mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
+                     'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out'):
+            client = self.client()
+            client['flow_acquire'] = dict(rounds=2,
+                first=dict(stage='helper_acquire', reason='helper_kernel', helper_diagnostic=code),
+                last=dict(stage='helper_acquire', reason='helper_kernel', helper_diagnostic=code))
+            client['phase'] = 'flow_acquire'
+            client['terminal'] = 'operation_error'
+            M['reply'](reply(records=[client], version=2), 'clients', [], version=2)
+            client['flow_acquire']['last']['reason'] = 'helper_unavailable'
+            with self.assertRaises(ValueError):
+                M['reply'](reply(records=[client], version=2), 'clients', [], version=2)
+
     def test_closed_matrix_all_codes_and_unknown_are_not_raw_strings(self):
         self.assertEqual(len(M['ACQUIRE_PAIRS']), 35)
         for stage, reason in M['ACQUIRE_PAIRS']:
@@ -254,7 +268,7 @@ class FixtureV2(unittest.TestCase):
             for code in M['HELPER_DIAGNOSTICS']:
                 failure['helper_diagnostic'] = code
                 if (stage == 'helper_acquire' and reason in M['HELPER_REASONS'][:6]
-                        and (code != 'mptcp_connect_poll_timed_out' or reason == 'helper_kernel')):
+                        and (code not in M['KERNEL_DIAGNOSTICS'] or reason == 'helper_kernel')):
                     M['acquire_summary'](value, 'flow_acquire', 'operation_error')
                 else:
                     with self.assertRaises(ValueError): M['acquire_summary'](value, 'flow_acquire', 'operation_error')
@@ -317,7 +331,7 @@ class FixtureV2(unittest.TestCase):
         samples = M['Samples']('publish', version=2)
         for first in M['HELPER_DIAGNOSTICS']:
             for last in M['HELPER_DIAGNOSTICS']:
-                if last == 'mptcp_connect_poll_timed_out': continue
+                if last in M['KERNEL_DIAGNOSTICS']: continue
                 client = self.client()
                 client['flow_acquire']['first']['helper_diagnostic'] = first
                 client['flow_acquire']['last']['helper_diagnostic'] = last

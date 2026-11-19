@@ -138,6 +138,14 @@ pub enum StorageFixtureHelperDiagnostic {
     ExpiredExtensionCleanupIncomplete = 8,
     /// The connected MPTCP poll elapsed without readiness; no kernel errno was reported.
     MptcpConnectPollTimedOut = 9,
+    /// Client MPTCP connect socket status: connection refused.
+    MptcpConnectSocketRefused = 20,
+    /// Client MPTCP connect socket status: network unreachable.
+    MptcpConnectSocketNetworkUnreachable = 21,
+    /// Client MPTCP connect socket status: host unreachable.
+    MptcpConnectSocketHostUnreachable = 22,
+    /// Client MPTCP connect socket status: connection timed out.
+    MptcpConnectSocketTimedOut = 23,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -186,8 +194,14 @@ impl StorageFixtureAcquireSummary {
                 let code = StorageFixtureHelperDiagnostic::try_from(code).map_err(|_| invalid())?;
                 let failure = value.failure.ok_or_else(invalid)?;
                 if failure.stage != Stage::HelperAcquire as i32
-                    || (code == StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
-                        && failure.reason != Reason::HelperKernel as i32)
+                    || (matches!(
+                        code,
+                        StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketRefused
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketNetworkUnreachable
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketHostUnreachable
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketTimedOut
+                    ) && failure.reason != Reason::HelperKernel as i32)
                     || !matches!(
                         Reason::try_from(failure.reason),
                         Ok(Reason::HelperKernel

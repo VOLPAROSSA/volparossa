@@ -3933,25 +3933,42 @@ fn classify_acquire_transport_execution(
             AcquireTransportExecution::Definite(BackendError::Invalid)
         }
         Some(InternalWorkerResult::Kernel) => {
-            // The coordinator has authenticated this exact request-bound, descriptor-free
-            // failure. Preserve only the precise existing connect-poll timeout, never infer
-            // it from a log, missing errno, a generic Kernel result or another socket kind.
-            let poll_timed_out = request.role == InternalEndpointRole::Client as i32
-                && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
-                && execution
-                    .response
-                    .acquire_failure
-                    .is_some_and(|diagnostic| {
-                        diagnostic.validate().is_ok()
-                            && diagnostic.operation == AcquireFailureOperation::Poll as i32
-                            && diagnostic.class == AcquireFailureClass::TimedOut as i32
-                            && diagnostic.errno.is_none()
-                    });
-            AcquireTransportExecution::Definite(if poll_timed_out {
-                BackendError::MptcpConnectPollTimedOut
-            } else {
-                BackendError::Kernel
-            })
+            // Only a correlated, descriptor-free client connect rejection can supply these
+            // closed diagnostics. They retain the existing definite Kernel failure category.
+            let diagnostic = execution.response.acquire_failure.filter(|failure| {
+                request.role == InternalEndpointRole::Client as i32
+                    && request.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+                    && failure.validate().is_ok()
+            });
+            let error = diagnostic.map_or(BackendError::Kernel, |failure| {
+                match (failure.operation(), failure.class(), failure.errno) {
+                    (AcquireFailureOperation::Poll, AcquireFailureClass::TimedOut, None) => {
+                        BackendError::MptcpConnectPollTimedOut
+                    }
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ECONNREFUSED),
+                    ) => BackendError::MptcpConnectSocketRefused,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ENETUNREACH),
+                    ) => BackendError::MptcpConnectSocketNetworkUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::EHOSTUNREACH),
+                    ) => BackendError::MptcpConnectSocketHostUnreachable,
+                    (
+                        AcquireFailureOperation::ConnectSocketError,
+                        AcquireFailureClass::Io,
+                        Some(libc::ETIMEDOUT),
+                    ) => BackendError::MptcpConnectSocketTimedOut,
+                    _ => BackendError::Kernel,
+                }
+            });
+            AcquireTransportExecution::Definite(error)
         }
         Some(
             InternalWorkerResult::Conflict
@@ -6219,6 +6236,66 @@ pub(super) mod tests {
             expected_local: None,
             expected_remote: None,
         }
+    }
+
+    fn classifies_as(
+        execution: DiagnosticExecution,
+        request: &InternalAcquireTransportSocket,
+        expected: BackendError,
+    ) {
+        assert!(matches!(
+            classify_acquire_transport_execution(execution, request),
+            AcquireTransportExecution::Definite(error) if error == expected
+        ));
+    }
+
+    #[test]
+    fn acquire_diagnostic_preserves_only_credentialed_mptcp_connect_socket_errors() {
+        let request = mptcp_connected_acquire_request();
+        for (errno, expected) in [
+            (libc::ECONNREFUSED, BackendError::MptcpConnectSocketRefused),
+            (
+                libc::ENETUNREACH,
+                BackendError::MptcpConnectSocketNetworkUnreachable,
+            ),
+            (
+                libc::EHOSTUNREACH,
+                BackendError::MptcpConnectSocketHostUnreachable,
+            ),
+            (libc::ETIMEDOUT, BackendError::MptcpConnectSocketTimedOut),
+        ] {
+            let mut execution = acquire_log_execution(Some(errno));
+            let failure = execution.response.acquire_failure.as_mut().unwrap();
+            failure.operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &request, expected);
+            for operation in [
+                AcquireFailureOperation::Bind,
+                AcquireFailureOperation::Connect,
+            ] {
+                let mut execution = acquire_log_execution(Some(errno));
+                execution
+                    .response
+                    .acquire_failure
+                    .as_mut()
+                    .unwrap()
+                    .operation = operation as i32;
+                classifies_as(execution, &request, BackendError::Kernel);
+            }
+            let mut wrong_kind = request.clone();
+            wrong_kind.descriptor_kind = InternalTransportSocketKind::MptcpListener as i32;
+            let mut execution = acquire_log_execution(Some(errno));
+            execution
+                .response
+                .acquire_failure
+                .as_mut()
+                .unwrap()
+                .operation = AcquireFailureOperation::ConnectSocketError as i32;
+            classifies_as(execution, &wrong_kind, BackendError::Kernel);
+        }
+        let mut unknown = acquire_log_execution(Some(libc::EINVAL));
+        unknown.response.acquire_failure.as_mut().unwrap().operation =
+            AcquireFailureOperation::ConnectSocketError as i32;
+        classifies_as(unknown, &request, BackendError::Kernel);
     }
 
     #[test]
