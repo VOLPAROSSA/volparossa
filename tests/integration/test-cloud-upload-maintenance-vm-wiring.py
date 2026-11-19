@@ -114,11 +114,11 @@ class Wiring(unittest.TestCase):
             calls = result.stdout.splitlines()
             self.assertEqual(len(calls), expected)
             self.assertEqual(calls[:2], [
-                'sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10',
+                'sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10 --current-apps',
                 'node --test tests/integration/test-storage-consumer-maintenance.mjs'])
             if scenario == SCENARIO:
                 self.assertEqual(calls[2:], [
-                    'sudo -n python3 -B tests/integration/cloud-upload-maintenance-provision.py provision --download --profile-version 6',
+                    'sudo -n python3 -B tests/integration/cloud-upload-maintenance-provision.py provision --download --profile-version 6 --current-apps',
                     'node --test tests/integration/test-cloud-upload-maintenance.mjs'])
         self.assertIn('private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then', GUEST)
         self.assertIn('export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0\n    guest_phase storage-maintenance-targeted-tests', GUEST)

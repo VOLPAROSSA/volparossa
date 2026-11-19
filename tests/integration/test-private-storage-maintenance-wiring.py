@@ -190,6 +190,7 @@ class Wiring(unittest.TestCase):
             'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
             'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
             'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
+            'storage-consumer-maintenance-pins-v10-current.json',
             'storage-consumer-control-underlay.sh', 'storage-consumer-control-underlay.py',
             'storage-consumer-network.sh', 'storage-consumer-network.py', 'storage-consumer-route-sampler.py',
             'storage-consumer-maintenance-evidence.py', 'storage-consumer-maintenance-provision.py',

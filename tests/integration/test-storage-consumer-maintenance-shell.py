@@ -112,7 +112,8 @@ private_storage_replicas_serve relay4 "$3"
                 'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
                 'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
                 'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
-                'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json'):
+                'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
+                'storage-consumer-maintenance-pins-v10-current.json'):
             self.assertIn(f'"$source_directory/tests/integration/{name}"', guest)
             self.assertIn(f'"$WORK/bin/{name}"', guest)
 

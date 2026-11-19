@@ -2682,11 +2682,11 @@ elif [ "$scenario" = image-snapshot ]; then
     fi
 elif [ "$scenario" = private-storage-maintenance ] || [ "$scenario" = cloud-upload-maintenance ]; then
     guest_phase storage-consumer-runtime-provision
-    sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10
+    sudo -n python3 -B tests/integration/storage-consumer-maintenance-provision.py provision --download --profile-version 10 --current-apps
     /opt/volparossa-node/bin/node --test tests/integration/test-storage-consumer-maintenance.mjs
     if [ "$scenario" = cloud-upload-maintenance ]; then
         guest_phase cloud-upload-maintenance-runtime-provision
-        sudo -n python3 -B tests/integration/cloud-upload-maintenance-provision.py provision --download --profile-version 6
+        sudo -n python3 -B tests/integration/cloud-upload-maintenance-provision.py provision --download --profile-version 6 --current-apps
         /opt/volparossa-node/bin/node --test tests/integration/test-cloud-upload-maintenance.mjs
     fi
 elif [ "$scenario" = cloud-private-upload ]; then

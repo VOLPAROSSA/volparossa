@@ -12,6 +12,8 @@ import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { CURRENT_REVISIONS } from './storage-consumer-maintenance.mjs';
+
 export const PHASES = Object.freeze(['prepare', 'upload', 'exercise', 'finish']);
 export const F = 262144, MAX_CIPHER = 1048576, PLAIN_BYTES = 786433;
 const CLOUD = '/opt/volparossa-cloud-upload', IMAGE = '/opt/volparossa-image-upload';
@@ -44,8 +46,12 @@ const identity = value => sha(JSON.stringify(canonical(value)));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fragmentPath = (object, i) => join(object, 'journal', `fragment-${String(i).padStart(4, '0')}`);
 
-export function sourceProfile(version = 1) {
-  check(version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6, 'arguments');
+export function sourceProfile(version = 1, current = false) {
+  check(typeof current === 'boolean' && [1, 2, 3, 4, 5, 6].includes(version), 'arguments');
+  if (current) {
+    check(version === 6, 'arguments');
+    return { pinsFile: './cloud-upload-maintenance-pins-v6-current.json', revisions: { ...CURRENT_REVISIONS }, previousVersion: [10] };
+  }
   if (version === 6) return { pinsFile: './cloud-upload-maintenance-pins-v6.json', revisions: { ...CLOSE_REVISIONS }, previousVersion: [10] };
   if (version === 5) return { pinsFile: './cloud-upload-maintenance-pins-v5.json', revisions: { ...FLOW_REVISIONS }, previousVersion: [9] };
   if (version === 4) return { pinsFile: './cloud-upload-maintenance-pins-v4.json', revisions: { ...APPEND_REVISIONS }, previousVersion: [8] };
@@ -129,11 +135,12 @@ async function verifyPublic(path, record) {
   } finally { await fd.close(); }
 }
 async function guard(root, profileVersion = 1) {
-  const profile = sourceProfile(profileVersion);
   check(process.platform === 'linux' && process.getuid() !== 0 && hostname() === 'volparossa-alpha'
     && process.execPath === NODE && /^\/opt\/va\.[a-f0-9]{32}\.[A-Za-z0-9]{6}\/u\/a$/u.test(root), 'guest_only');
   await directory(root);
   const raw = await boundedFile(PROVISION, 65536, true), p = JSON.parse(raw);
+  const current = profileVersion === 6 && p.pins?.sources?.image?.revision === CURRENT_REVISIONS.image;
+  const profile = sourceProfile(profileVersion, current);
   const pinRaw = await boundedFile(fileURLToPath(new URL(profile.pinsFile, import.meta.url)), 65536, true);
   const pins = JSON.parse(pinRaw);
   check(p.version === profileVersion && pins.version === profileVersion
@@ -145,7 +152,8 @@ async function guard(root, profileVersion = 1) {
   const previousRaw = await boundedFile('/opt/volparossa-storage-consumers/provision.json', 65536, true);
   const previous = JSON.parse(previousRaw);
   check(sha(previousRaw) === p.previous_consumer_provision_sha256
-    && profile.previousVersion.includes(previous.version), 'provision');
+    && profile.previousVersion.includes(previous.version)
+    && (profileVersion !== 6 || current === (previous.pins?.sources?.image?.revision === CURRENT_REVISIONS.image)), 'provision');
   for (const [name, source] of Object.entries(pins.sources)) {
     check(source.revision === profile.revisions[name], 'provision');
     for (const [file, record] of Object.entries(source.files)) {

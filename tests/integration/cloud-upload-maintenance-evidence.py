@@ -204,6 +204,8 @@ def validate_evidence(value):
     require(value['previous_consumers']['schema_version'] == (10 if close_profile else 9 if flow_profile else 8 if append_profile else 7 if challenge_profile else 6 if stream_profile else 5 if dynamic else 2),
         'upload_previous_profile')
     PROVISIONER['validate_provision'](value['provision'])
+    PROVISIONER['require_source_pair'](value['previous_consumers']['provision']['pins'],
+        value['provision']['pins'], value['provision']['version'])
     require(value['provision']['version'] == (6 if close_profile else 5 if flow_profile else 4 if append_profile else 3 if challenge_profile else 2 if stream_profile else 1), 'upload_source_profile')
     provision_sha = hashlib.sha256(encoded(value['provision'])).hexdigest()
     require(value['provision_sha256'] == provision_sha

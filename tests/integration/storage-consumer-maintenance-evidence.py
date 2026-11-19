@@ -284,8 +284,7 @@ def validate_provision(value):
     keys(value, ('version', 'kind', 'success', 'pins', 'pins_sha256', 'tools', *true, *false))
     require(type(value['version']) is int and value['version'] in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         and value['kind'] == 'storage-consumer-maintenance-runtime-provision' and value['success'] is True
-        and encoded(value['pins']) == encoded(PROVISIONER['load_pins'](value['version']))
-        and value['pins_sha256'] == hashlib.sha256(PROVISIONER['pins_path'](value['version']).read_bytes()).hexdigest()
+        and encoded(value['pins']) == encoded(PROVISIONER['receipt_pins'](value['version'], value['pins_sha256']))
         and all(value[k] is True for k in true) and all(value[k] is False for k in false), 'consumer_provision')
     keys(value['tools'], ('gpg', 'gpg-agent', 'gpgconf', 'tar'))
     for name, tool in value['tools'].items():

@@ -44,6 +44,13 @@ test('source generations bind exact separate pins and predecessor versions witho
     assert.equal(pins[i].version, i + 1);
     for (const name of ['cloud', 'image']) assert.equal(pins[i].sources[name].revision, profile.revisions[name]);
   }
+  const current = sourceProfile(6, true);
+  const candidate = JSON.parse(await readFile(new URL(current.pinsFile, import.meta.url)));
+  assert.deepEqual(current.previousVersion, [10]);
+  assert.deepEqual(candidate.runtime, pins[5].runtime);
+  assert.deepEqual(Object.fromEntries(Object.entries(candidate.sources).map(([name, source]) => [name, source.revision])), current.revisions);
+  assert.throws(() => sourceProfile(5, true), /arguments/u);
+  assert.throws(() => sourceProfile(6, 1), /arguments/u);
   for (const bad of [true, '2', 0, 7, null]) assert.throws(() => sourceProfile(bad), /arguments/u);
 });
 

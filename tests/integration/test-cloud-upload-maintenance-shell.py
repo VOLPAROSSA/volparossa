@@ -314,6 +314,7 @@ private_cloud_upload_cleanup
             'cloud-upload-maintenance-pins-v4.json',
             'cloud-upload-maintenance-pins-v5.json',
             'cloud-upload-maintenance-pins-v6.json',
+            'cloud-upload-maintenance-pins-v6-current.json',
             'cloud-upload-maintenance-evidence.py', 'cloud-upload-maintenance-provision.py')
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

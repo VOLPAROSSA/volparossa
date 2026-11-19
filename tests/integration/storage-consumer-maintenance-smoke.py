@@ -171,13 +171,12 @@ def digest_public(path, record):
 
 
 def tools():
-    pins = PROVISIONER['load_pins'](PROFILE_VERSION)
     raw = file_bytes(PROVISION, 65536, public=True)
     value = json.loads(raw)
+    pins = PROVISIONER['receipt_pins'](PROFILE_VERSION, value['pins_sha256'])
     require(type(value['version']) is int and value['version'] == PROFILE_VERSION
         and value['kind'] == 'storage-consumer-maintenance-runtime-provision'
         and value['success'] is True and value['pins'] == pins
-        and value['pins_sha256'] == hashlib.sha256(PROVISIONER['pins_path'](PROFILE_VERSION).read_bytes()).hexdigest()
         and all(value[key] is True for key in ('guest_only', 'source_files_verified', 'runtime_files_verified',
             'shared_adapter_verified', 'original_licenses_retained'))
         and all(value[key] is False for key in ('storage_enrollment_created', 'peer_storage_proven',
