@@ -4,7 +4,7 @@
 # shellcheck disable=SC2154,SC2034
 
 signal_backup_fragments_private() {
-    timeout --signal=TERM --kill-after=10s 2800s setpriv \
+    ip netns exec "$CLIENT" timeout --signal=TERM --kill-after=10s 2800s setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/signal-backup-fragments-smoke.py" "$@"
@@ -69,12 +69,21 @@ EOF
     signal_backup_fragments_private confirm-withdrawal "$storage_user" >/dev/null \
         || fail SIGNAL_FRAGMENTS_WITHDRAWAL_CONFIRMATION_FAILED
     if wait "$DOWNLOAD_CLIENT_PID"; then DOWNLOAD_CLIENT_PID=; else DOWNLOAD_CLIENT_PID=; fail SIGNAL_FRAGMENTS_NATIVE_TEST_FAILED; fi
+    # Only provider B now remains. It holds fragments 0 and 1, but neither
+    # original copy of fragment 2. The CLI must refuse to publish an archive.
+    PHASE=signal-backup-fragments-route-loss
+    private_storage_fragments_stop relay3
+    signal_backup_fragments_private refusal "$storage_user" "$binary_directory/volparossa" \
+        "$WORK/runtime-client/control/agent.sock" >"$WORK/signal-backup-fragments-refusal.json" \
+        || fail SIGNAL_FRAGMENTS_INCOMPLETE_RESTORE_NOT_REFUSED
+    private_storage_fragments_reopen relay3
+    PHASE=signal-backup-fragments-route-recovery
     # A second real core reconstruction after native import proves reading did not
     # consume the archive. Its retained receipts name the actual surviving peers.
     signal_backup_fragments_private restore "$storage_user" "$binary_directory/volparossa" \
         "$WORK/runtime-client/control/agent.sock" >"$WORK/signal-backup-fragments-restore.json" \
         || fail SIGNAL_FRAGMENTS_REPEAT_RESTORE_FAILED
-    private_storage_fragments_phase_finish 16
+    private_storage_fragments_phase_finish 20
     private_storage_fragments_usage restored_usage
     cp -- "$WORK/private-storage-fragments-restored_usage.json" "$WORK/signal-backup-fragments-restored_usage.json"
     private_storage_fragments_reopen relay4 relay5 relay3
@@ -109,12 +118,12 @@ signal_backup_fragments_finalize_report() {
         --argjson status "$storage_status" --slurpfile evidence "$WORK/signal-report-evidence.part" \
         --slurpfile host "$WORK/signal-report-host.part" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
-      {schema_version:1,report_kind:"volparossa-signal-backup-fragments",source_revision:$revision,run_id:$run,
+      {schema_version:2,report_kind:"volparossa-signal-backup-fragments",source_revision:$revision,run_id:$run,
        phase:$phase,runner_exit_status:$status,backup:$evidence[0],
        success:($status == 0 and $evidence[0].success == true and $complete and $remaining == 0 and $host[0].unchanged == true),
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host[0] | del(.acceptance_id)),
-       scope:"native Signal encrypted export/import and repeated actual fragment restore after first provider loss; three providers, eight charged fragment copies; no server-free messaging or independent hardware/contribution proof"}' \
+       scope:"native Signal encrypted export/import and fragment restore, refusal after two providers stop and recovery when one returns; three providers, eight charged fragment copies; no server-free messaging or independent hardware/contribution proof"}' \
         >"$WORK/signal-backup-fragments-smoke.json" || return 1
     storage_exports=$(python3 -B "$source_directory/tests/integration/signal-backup-fragments-smoke.py" export-names) || return 1
     for storage_name in $storage_exports; do
