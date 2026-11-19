@@ -37,6 +37,18 @@ def receipt():
 
 
 class RoutedNativeMailbox(unittest.TestCase):
+    def test_native_failure_receipt_exposes_only_fixed_local_phases(self):
+        observed = runpy.run_path(str(HERE / "signal-mailbox-native.py"))["native_failure_phase"]
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "phase"
+            self.assertEqual(observed(marker), "bootstrap")
+            for value in ("offline-compose", "outgoing-row", "private-outbox", "outbox-binding"):
+                marker.write_text(value)
+                self.assertEqual(observed(marker), value)
+            for value in (b"unrelated detail", b"x" * 70, bytes([255])):
+                marker.write_bytes(value)
+                self.assertEqual(observed(marker), "unknown")
+
     def test_actual_two_phase_contract(self):
         record = receipt()
         SMOKE["verified"](record, SOURCE)

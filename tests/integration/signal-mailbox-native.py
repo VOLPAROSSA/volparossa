@@ -81,6 +81,24 @@ def prepare(root, cli, control, providers):
     write_private(root / "ready", b"ready\n")
 
 
+
+def native_failure_phase(path):
+    phases = {
+        "bootstrap", "register-a", "register-b", "open-before", "warm-send", "warm-receive", "warm-reply",
+        "stock-acknowledgements", "pair", "offline-send", "offline-compose", "outgoing-row",
+        "private-outbox", "outbox-binding", "provider-custody", "offline-fetch", "recipient-reopen",
+        "confirm-native-import", "peer-receipt", "sender-reopen", "complete",
+    }
+    try:
+        with path.open("rb") as source:
+            phase = source.read(65).decode("ascii")
+    except FileNotFoundError:
+        return "bootstrap"
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+    return phase if phase in phases else "unknown"
+
+
 def launch(parent, cli, control, providers):
     os.umask(0o077)
     require(os.geteuid() != 0 and parent.stat().st_uid == os.geteuid() and stat.S_IMODE(parent.stat().st_mode) == 0o700,
@@ -113,12 +131,7 @@ def launch(parent, cli, control, providers):
         with (private / "desktop.log").open("xb") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=420)
         if result.returncode:
-            phase_file = private / "phase"
-            phase = phase_file.read_text() if phase_file.is_file() and phase_file.stat().st_size <= 64 else "bootstrap"
-            allowed = {"bootstrap", "register-a", "register-b", "open-before", "warm-send", "warm-receive", "warm-reply",
-                       "stock-acknowledgements", "pair", "offline-send", "provider-custody", "offline-fetch", "recipient-reopen",
-                       "confirm-native-import", "peer-receipt", "sender-reopen", "complete"}
-            print(json.dumps({"native_trial_completed": False, "phase": phase if phase in allowed else "unknown"}))
+            print(json.dumps({"native_trial_completed": False, "phase": native_failure_phase(private / "phase")}))
             raise ValueError("native Desktop trial failed")
         observed = json.loads((private / "result.json").read_bytes())
         require(json.dumps(observed, sort_keys=True) == json.dumps(runner["OBSERVATIONS"], sort_keys=True),
