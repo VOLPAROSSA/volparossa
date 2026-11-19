@@ -14,7 +14,6 @@ use rsa::{
     signature::Verifier as _,
     traits::PublicKeyParts as _,
 };
-use sev::certs::snp::builtin::milan;
 use sha2::{Digest as _, Sha256, Sha384};
 use x509_cert::{
     Certificate, Version,
@@ -27,10 +26,7 @@ use x509_cert::{
     spki::ObjectIdentifier,
 };
 
-use super::{
-    EvidenceError, MAX_CRL_BYTES, SignatureFacts, cert_path, cert_profile,
-    verify_milan_v2_signature_facts,
-};
+use super::{EvidenceError, MAX_CRL_BYTES, SignatureFacts, cert_path, cert_profile, snp};
 
 const NUMBER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.20");
 const REASON: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.21");
@@ -80,11 +76,8 @@ pub(super) fn verify(
 ) -> Result<(SignatureFacts, VendorCrlFacts), EvidenceError> {
     // Bound all attacker-controlled inputs before expensive verification.
     let crl = parse_crl(crl_der)?;
-    let facts = verify_milan_v2_signature_facts(report, vcek_der)?;
+    let (facts, [root, intermediate, leaf]) = snp::signature_facts_and_chain(report, vcek_der)?;
     facts.check_time(now)?;
-    let root: Certificate = milan::ark().map_err(|_| EvidenceError::Encoding)?.into();
-    let intermediate: Certificate = milan::ask().map_err(|_| EvidenceError::Encoding)?.into();
-    let leaf = Certificate::from_der(vcek_der).map_err(|_| EvidenceError::Encoding)?;
     cert_path::check(&root, &intermediate, &leaf)?;
     // Keep the fixed 4096-bit key profile explicit, independent of signature API.
     public_key(&intermediate)?;

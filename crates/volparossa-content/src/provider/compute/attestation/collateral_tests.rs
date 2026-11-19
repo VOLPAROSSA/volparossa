@@ -7,6 +7,7 @@ use super::super::{
     tests::test_policy,
 };
 use super::*;
+use sev::certs::snp::builtin::milan;
 use std::time::{Duration, Instant};
 use x509_cert::{
     crl::RevokedCert,
