@@ -1946,6 +1946,27 @@ jobs:
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
 
+      - name: Obtain the Citizen verifier for the received public referendum
+        if: success() && inputs.scenario == 'content-replication'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: VOLPAROSSA/volparossa-citizen
+          ref: 30f1fa9c99f751dbf0a93489fa86d305b02a3021
+          path: citizen-verifier
+          persist-credentials: false
+      - name: Replay the peer-delivered proof with Belenios and the retained setup
+        if: success() && inputs.scenario == 'content-replication'
+        run: |
+          set -euo pipefail
+          test "$(git -C citizen-verifier rev-parse HEAD)" = 30f1fa9c99f751dbf0a93489fa86d305b02a3021
+          citizen_input=tests/integration/citizen-referendum
+          python3 -B "$citizen_input/peer.py" verify "$VOLPAROSSA_ALPHA_OUTPUT" "$RUNNER_TEMP/citizen-received.zip"
+          python3 -B citizen-verifier/integrations/belenios/prepare.py "$RUNNER_TEMP/citizen-belenios"
+          sudo -n unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups \
+            python3 -B citizen-verifier/citizen.py belenios-replay "$RUNNER_TEMP/citizen-received.zip" \
+            --setup-pin "$citizen_input/public-setup.json" --tool "$RUNNER_TEMP/citizen-belenios/belenios-tool" \
+            | tee "$VOLPAROSSA_ALPHA_OUTPUT/content-replication-citizen-belenios.txt"
+
       - name: Require genuine protected upstream peer and local DNS cache evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'dns-cache'
         env:
