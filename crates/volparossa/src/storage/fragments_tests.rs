@@ -376,3 +376,71 @@ async fn three_real_stores_hold_only_subsets_resume_then_restore_without_origina
         assert_eq!(store.usage().unwrap().committed_bytes, 0);
     }
 }
+
+#[tokio::test]
+async fn pre_ready_reserve_rejection_only_releases_a_provably_unsent_first_copy() {
+    for lost_terminal in [false, true] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let (owner, providers, grants) = keys_and_grants(16);
+        let bytes = b"synthetic";
+        let source = root.join("ciphertext");
+        fs::write(&source, bytes).unwrap();
+        let (mut input, _) = transfer::checked_input(&source, plan(bytes).sha256).unwrap();
+        let state = root.join("fragments");
+        let set =
+            LockedFragments::create(&state, &owner, &mut input, plan(bytes), &grants, 600).unwrap();
+        let peers = LocalProviders::start(root, &providers, &grants, true);
+        let length = set.data.fragments[0].length;
+        if lost_terminal {
+            peers.lose_terminal[0].store(true, Ordering::SeqCst);
+            let first = operations::deposit(&set, &peers.socket, &owner, &mut input)
+                .await
+                .unwrap();
+            assert_eq!(first["operation_complete"], false);
+            assert_eq!(first["uncertain_payload_bytes"], length);
+        }
+        drop(set);
+        let set = LockedFragments::open(&state).unwrap();
+        peers.reject_before_ready[0].store(true, Ordering::SeqCst);
+        let report = operations::deposit(&set, &peers.socket, &owner, &mut input)
+            .await
+            .unwrap();
+        assert_eq!(report["operation_complete"], false);
+        assert_eq!(
+            report["fragment_outcomes"][0]["copy_outcomes"][0],
+            "incomplete_retained_for_retry"
+        );
+        let pending = if lost_terminal { length } else { 0 };
+        assert_eq!(report["uncertain_payload_bytes"], pending);
+        assert_eq!(
+            report["committed_payload_bytes"],
+            2 * bytes.len() as u64 - length
+        );
+        drop(set);
+
+        let set = LockedFragments::open(&state).unwrap();
+        let cleanup = operations::delete(&set, &peers.socket, &owner)
+            .await
+            .unwrap();
+        assert_eq!(cleanup["operation_complete"], !lost_terminal);
+        assert_eq!(
+            cleanup["fragment_outcomes"][0]["copy_outcomes"][0],
+            if lost_terminal {
+                "unconfirmed_retained"
+            } else {
+                "never_reserved"
+            }
+        );
+        assert_eq!(cleanup["physical_payload_charge_upper_bound"], pending);
+        peers.stop().await;
+        for index in 0..3 {
+            let store = PrivateStorageStore::open_existing(&root.join(format!("provider-{index}")))
+                .unwrap();
+            let usage = store.usage().unwrap();
+            assert_eq!(usage.leases, u64::from(lost_terminal && index == 0));
+            assert_eq!(usage.reserved_bytes, if index == 0 { pending } else { 0 });
+            assert_eq!(usage.committed_bytes, 0);
+        }
+    }
+}
