@@ -531,6 +531,8 @@ jobs:
       - name: Build the exact offline Bank TEST authorizer
         if: inputs.scenario == 'transaction-abci-bank'
         id: bank
+        env:
+          UBUNTU_ARCHIVE_CONFIG: ${{ steps.ubuntu_archive.outputs.config }}
         run: bash tests/integration/transaction-abci-bank-build.sh
 
       - name: Run disposable production-helper topology
