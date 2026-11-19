@@ -57,6 +57,14 @@ if [ "$stage" = build ]; then
         sha256sum --check --strict "$tools/module-before.sha256"
         git diff --exit-code -- go.mod go.sum
     )
+    # The transient systemd service has its own environment. Use the compiler and
+    # public Cargo source policy already provisioned by this VM's verified driver.
+    rust_bin=/home/vpci/.local/volparossa-rust-1.89.0/bin
+    export PATH="$rust_bin:/usr/bin:/bin" CARGO_HOME=/home/vpci/.local/volparossa-cargo-public-v1
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_ALLOW_PROTOCOL=https GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false
+    [ "$(command -v cargo)" = "$rust_bin/cargo" ]
+    [ "$(rustc --version)" = 'rustc 1.89.0 (29483883e 2025-08-04)' ]
     CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/home/vpci/target \
         cargo build --locked -p volparossa-transaction-abci --bin volparossa-transaction-abci
     install -m 0755 /home/vpci/target/debug/volparossa-transaction-abci "$tools/bin/volparossa-transaction-abci"
@@ -132,7 +140,7 @@ trap 'exit 143' TERM
 
 timeout --kill-after=10s 240s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 timeout --kill-after=10s 240s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-    build-essential ca-certificates cargo curl git iproute2 nftables pkg-config protobuf-compiler python3 rustc util-linux
+    build-essential ca-certificates curl git iproute2 nftables pkg-config protobuf-compiler python3 util-linux
 phase=source-build
 # Combined build phase remains bounded even if one dependency fetch hangs. These
 # are guest services, not persistent host services. The VM's overall 2400s cap
@@ -144,6 +152,13 @@ sudo -n systemd-run --quiet --wait --pipe --collect --unit "$build_unit" \
     --property KillMode=control-group \
     /bin/sh /home/vpci/source/tests/integration/transaction-abci-vm-guest.sh "$revision" build
 phase=real-consensus-trial
+if [ -n "${3:-}" ]; then
+    case $3 in *[!0-9a-f]*) exit 64 ;; esac
+    [ "${#3}" -eq 64 ] || exit 64
+    set -- --bank-authorizer-sha256 "$3"
+else
+    set --
+fi
 # Keep logs in the private guest journal, not in exported evidence. Only closed
 # receipts are exported; no private keys, signed command payloads or raw stores.
 sudo -n systemd-run --quiet --wait --collect --unit "$trial_unit" \
@@ -154,5 +169,5 @@ sudo -n systemd-run --quiet --wait --collect --unit "$trial_unit" \
     /usr/bin/python3 -B /home/vpci/source/tests/integration/transaction-abci-smoke.py \
     --execute --yes --expected-commit "$revision" \
     --comet "$tools/bin/cometbft" --adapter "$tools/bin/volparossa-transaction-abci" \
-    --build-receipt "$tools/build-receipt.json" --output "$output"
+    --build-receipt "$tools/build-receipt.json" --output "$output" "$@"
 phase=complete
