@@ -20,7 +20,7 @@ mail="$scratch/mail"
 build="$browser/build/native-firefox-157"
 rust_stage="$mail/build/stalwart-rust-1.98.1"
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-browser_revision=c3311ebedcc02dc45ff9c9822cee62f091609f86
+browser_revision=$(jq -er .revision "$here/browser-native-tab-pins.json")
 mail_revision=92dac0280ab741000199f342876644341c83f127
 
 public_checkout() {
