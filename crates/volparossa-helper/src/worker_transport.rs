@@ -14,7 +14,7 @@ use std::{
 
 use nix::{
     fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
-    poll::{PollFd, PollFlags, poll},
+    poll::PollFlags,
     sys::socket::{
         ControlMessage, ControlMessageOwned, MsgFlags, SockType, UnixCredentials, getsockopt,
         recvmsg, sendmsg, setsockopt, sockopt,
@@ -30,7 +30,7 @@ use volparossa_linux_uapi::{
 };
 
 use crate::{
-    deadline::{HardDeadline, wait_for_fd, wait_for_readable_fd},
+    deadline::{HardDeadline, poll_fd_until, wait_for_fd, wait_for_readable_fd},
     internal_protocol::{
         AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireFailureClass,
         AcquireFailureDiagnostic, AcquireFailureOperation, AcquireTransportSocket,
@@ -48,7 +48,9 @@ use crate::{
 };
 
 const WORKER_IPC_TIMEOUT: Duration = Duration::from_secs(10);
-const MPTCP_CONNECT_TIMEOUT_MILLISECONDS: u16 = 5_000;
+const MPTCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+// Leave the authenticated response and descriptor handoff inside the worker transaction.
+const MPTCP_ACQUIRE_REPLY_TAIL: Duration = Duration::from_millis(250);
 const MPTCP_LISTEN_BACKLOG: i32 = 128;
 const MAX_CREDENTIAL_BINDING_BYTES: usize = 256;
 // Linux rejects SCM_RIGHTS messages above SCM_MAX_FD (253). Reserving the complete maximum plus
@@ -1332,18 +1334,23 @@ pub(crate) fn create_transport_socket(
     lease: CommittedSocketLease,
     request: &AcquireTransportSocket,
 ) -> Result<OwnedFd, WorkerTransportError> {
-    create_transport_socket_diagnosed(lease, request).map_err(|failure| failure.error)
+    let deadline = HardDeadline::after(WORKER_IPC_TIMEOUT)?;
+    create_transport_socket_diagnosed(lease, request, deadline).map_err(|failure| failure.error)
 }
 
 /// Only connected MPTCP has a typed diagnostic; all other original errors stay unchanged.
 pub(crate) fn create_transport_socket_diagnosed(
     lease: CommittedSocketLease,
     request: &AcquireTransportSocket,
+    deadline: HardDeadline,
 ) -> Result<OwnedFd, AcquireTransportFailure> {
     validate_committed_request(lease, request)?;
     match transport_socket_expectation(request)? {
         TransportSocketExpectation::MptcpConnected { local, remote } => {
-            create_connected_mptcp(local, remote)
+            let operation_deadline = deadline
+                .before_tail(MPTCP_ACQUIRE_REPLY_TAIL)
+                .map_err(WorkerTransportError::Io)?;
+            create_connected_mptcp(local, remote, operation_deadline)
         }
         TransportSocketExpectation::MptcpListener { local } => {
             create_mptcp_listener(local).map_err(Into::into)
@@ -1544,6 +1551,7 @@ fn role_allows_socket(role: InternalEndpointRole, kind: InternalTransportSocketK
 fn create_connected_mptcp(
     local: SocketAddr,
     remote: SocketAddr,
+    operation_deadline: HardDeadline,
 ) -> Result<OwnedFd, AcquireTransportFailure> {
     use AcquireFailureOperation as Operation;
 
@@ -1571,8 +1579,13 @@ fn create_connected_mptcp(
             ) => {}
         Err(error) => return acquire_io(Operation::Connect, Err(error)),
     }
-    wait_for_connect(&socket)?;
+    let connect_deadline =
+        HardDeadline::after(MPTCP_CONNECT_TIMEOUT).map_err(WorkerTransportError::Io)?;
+    wait_for_connect(&socket, operation_deadline, connect_deadline)?;
     validate_connected_mptcp_diagnosed(&socket, local, remote)?;
+    operation_deadline
+        .ensure_remaining()
+        .map_err(WorkerTransportError::Io)?;
     Ok(socket.into())
 }
 
@@ -1619,39 +1632,47 @@ fn create_connected_udp(
     Ok(socket.into())
 }
 
-fn wait_for_connect(socket: &Socket) -> Result<(), AcquireTransportFailure> {
+fn wait_for_connect(
+    socket: &Socket,
+    operation_deadline: HardDeadline,
+    connect_deadline: HardDeadline,
+) -> Result<(), AcquireTransportFailure> {
     use AcquireFailureOperation as Operation;
 
-    let mut descriptors = [PollFd::new(socket.as_fd(), PollFlags::POLLOUT)];
-    if acquire_io(
-        Operation::Poll,
-        poll(&mut descriptors, MPTCP_CONNECT_TIMEOUT_MILLISECONDS).map_err(errno_io),
-    )? == 0
-    {
-        return Err(AcquireTransportFailure {
-            error: WorkerTransportError::Timeout,
-            diagnostic: Some(AcquireFailureDiagnostic {
-                operation: Operation::Poll as i32,
-                class: AcquireFailureClass::TimedOut as i32,
-                errno: None,
-            }),
-        });
+    let poll_deadline = if operation_deadline.expires_at() <= connect_deadline.expires_at() {
+        operation_deadline
+    } else {
+        connect_deadline
+    };
+    let readiness = poll_fd_until(socket, PollFlags::POLLOUT, poll_deadline)
+        .and_then(|events| poll_deadline.complete(events));
+    // An exhausted caller budget does not establish a full connect timeout.
+    operation_deadline
+        .ensure_remaining()
+        .map_err(WorkerTransportError::Io)?;
+    let events = match readiness {
+        Err(error) if error.kind() == io::ErrorKind::TimedOut && error.raw_os_error().is_none() => {
+            return Err(AcquireTransportFailure {
+                error: WorkerTransportError::Timeout,
+                diagnostic: Some(AcquireFailureDiagnostic {
+                    operation: Operation::Poll as i32,
+                    class: AcquireFailureClass::TimedOut as i32,
+                    errno: None,
+                }),
+            });
+        }
+        result => acquire_io(Operation::Poll, result)?
+            .ok_or_else(|| ambiguous_connect_readiness("poll returned no MPTCP events"))?,
+    };
+    if let Some(error) = acquire_io(Operation::ConnectSocketError, socket.take_error())? {
+        return acquire_io(Operation::ConnectSocketError, Err(error));
     }
-    let events = descriptors[0]
-        .revents()
-        .ok_or_else(|| ambiguous_connect_readiness("poll returned no MPTCP events"))?;
     if events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
         || !events.contains(PollFlags::POLLOUT)
     {
-        if let Some(error) = acquire_io(Operation::ConnectSocketError, socket.take_error())? {
-            return acquire_io(Operation::ConnectSocketError, Err(error));
-        }
         return Err(ambiguous_connect_readiness(
             "MPTCP connect readiness is ambiguous",
         ));
-    }
-    if let Some(error) = acquire_io(Operation::ConnectSocketError, socket.take_error())? {
-        return acquire_io(Operation::ConnectSocketError, Err(error));
     }
     Ok(())
 }
@@ -2381,7 +2402,12 @@ mod tests {
         .unwrap();
         let pending = client.connect(&target.local_addr().unwrap()).unwrap_err();
         assert_eq!(pending.raw_os_error(), Some(libc::EINPROGRESS));
-        let error = wait_for_connect(&client).unwrap_err();
+        let error = wait_for_connect(
+            &client,
+            HardDeadline::after(Duration::from_secs(5)).unwrap(),
+            HardDeadline::after(Duration::from_secs(2)).unwrap(),
+        )
+        .unwrap_err();
         let detail = error.diagnostic.expect("socket diagnostic");
         assert_eq!(
             detail.operation(),
@@ -2389,6 +2415,68 @@ mod tests {
         );
         assert_eq!(detail.class(), AcquireFailureClass::Io);
         assert_eq!(detail.errno, Some(libc::ECONNREFUSED));
+    }
+
+    #[test]
+    fn connect_poll_preserves_reply_time_and_distinguishes_its_own_timeout() {
+        let (mut writer, _peer) = UnixStream::pair().expect("connected socket pair");
+        writer.set_nonblocking(true).expect("nonblocking writer");
+        let chunk = [0; 4096];
+        loop {
+            match writer.write_all(&chunk) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill send buffer: {error}"),
+            }
+        }
+        let blocked = Socket::from(OwnedFd::from(writer));
+        let (parent, child) = private_credential_worker_channel().expect("worker channel");
+        let request = acquire_request(InternalTransportSocketKind::MptcpConnected);
+
+        let worker = HardDeadline::after(MPTCP_ACQUIRE_REPLY_TAIL + Duration::from_millis(100))
+            .expect("worker deadline");
+        let operation = worker
+            .before_tail(MPTCP_ACQUIRE_REPLY_TAIL)
+            .expect("reply budget");
+        let cap = HardDeadline::after(MPTCP_CONNECT_TIMEOUT).expect("connect cap");
+        let failure = acquire_failure(wait_for_connect(&blocked, operation, cap));
+        assert!(matches!(failure.error, WorkerTransportError::Io(ref error)
+            if error.kind() == io::ErrorKind::TimedOut));
+        assert!(failure.diagnostic.is_none());
+        let reply = response(&request, InternalWorkerResult::Kernel);
+        send_credential_worker_response_with_deadline(&child, &request, &reply, None, worker)
+            .expect("send failure in the original budget");
+        let execution = receive_credential_worker_response_with_deadline(
+            &parent,
+            &request,
+            current_expected_credentials(),
+            worker,
+        )
+        .expect("receive and authenticate the failure");
+        assert_eq!(execution.response, reply);
+        assert!(execution.descriptor.is_none());
+
+        // A shorter connect cap still reports the original finite poll diagnostic.
+        let operation = HardDeadline::after(WORKER_IPC_TIMEOUT).expect("live operation");
+        let cap = HardDeadline::after(Duration::from_millis(10)).expect("brief connect cap");
+        let failure = acquire_failure(wait_for_connect(&blocked, operation, cap));
+        assert!(matches!(failure.error, WorkerTransportError::Timeout));
+        assert_eq!(
+            failure.diagnostic,
+            Some(AcquireFailureDiagnostic {
+                operation: AcquireFailureOperation::Poll as i32,
+                class: AcquireFailureClass::TimedOut as i32,
+                errno: None,
+            })
+        );
+
+        // Even immediately writable sockets cannot turn elapsed caps into success.
+        let (ready, _peer) = UnixStream::pair().expect("writable pair");
+        let ready = Socket::from(OwnedFd::from(ready));
+        assert!(matches!(
+            acquire_failure(wait_for_connect(&ready, operation, cap)).error,
+            WorkerTransportError::Timeout
+        ));
     }
 
     #[test]
