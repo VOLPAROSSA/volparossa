@@ -127,7 +127,7 @@
       "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
       "applies_after": "patches/volparossa-xquic.patch",
       "file": "patches/volparossa-xquic-edt.patch",
-      "sha256": "21472637e2b8e48c16af835a10137a67f450e07b565bb87241aa3f8895452a80",
+      "sha256": "de7ba38caf20335f7ac2af7d448be638b76b88b6509cac6097bccb3f59b07b33",
       "purpose": [
         "select exactly one writable path by bounded estimated delivery time",
         "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
@@ -136,7 +136,7 @@
         "stop initial exploration after 8 MiB attempted debt plus one scheduled packet without sufficient ACK progress",
         "exclude congestion-blocked paths without reinjection, duplication or FEC",
         "exercise post-warm-up EDT selection, bounded startup debt, active-blackhole selection and measured stale-fast-LAN low-rate regression with ACK recovery and idle-path handling in the exact scheduler callback",
-        "provide an explicit default-off VMP_DEV_EDT_TRACE fixture diagnostic capped at 64 sparse samples in seconds 10 through 20 after first non-startup application scheduling, with only local path numbers and cost metrics and no selection changes"
+        "provide an explicit default-off VMP_DEV_EDT_TRACE fixture diagnostic capped at 64 sparse samples in seconds 1 through 65 after first non-startup application scheduling, with a guest-clock timestamp, local path numbers and cost metrics and no selection changes"
       ]
     },
     {
