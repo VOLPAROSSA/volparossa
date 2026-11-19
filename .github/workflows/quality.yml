@@ -498,6 +498,10 @@ jobs:
             command -v "$tool"
           done
 
+      - name: Prepare the signed Ubuntu archive
+        id: ubuntu_archive
+        uses: VOLPAROSSA/.github/actions/ubuntu-archive@e3f98bbc538f5df580b78c8a0d8bd932dfe3e381
+
       - name: Install reviewed Protobuf compiler on the disposable hosted runner
         run: |
           test "$GITHUB_ACTIONS" = true
@@ -506,8 +510,8 @@ jobs:
           # Official Noble security package; signed apt metadata authenticates it.
           # Compiler and library family from Noble security, published 2026-10-20.
           # https://security.ubuntu.com/ubuntu/dists/noble-security/universe/binary-amd64/Packages.xz
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
+          sudo apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" update
+          sudo apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends \
             protobuf-compiler=3.21.12-8.2ubuntu0.4 \
             libprotoc32t64=3.21.12-8.2ubuntu0.4 \
             libprotobuf32t64=3.21.12-8.2ubuntu0.4
@@ -534,7 +538,7 @@ jobs:
           fi
           if ((${#packages[@]})); then
             # The preceding setup refreshed authenticated official apt metadata.
-            sudo -n apt-get install --yes --no-install-recommends "${packages[@]}"
+            sudo -n apt-get -c "${{ steps.ubuntu_archive.outputs.config }}" install --yes --no-install-recommends "${packages[@]}"
           fi
           for tool in ip nft iptables-legacy-save ip6tables-legacy-save awk sudo; do
             command -v "$tool" >/dev/null || { printf 'Required DPS proof tool unavailable: %s\n' "$tool"; exit 1; }
