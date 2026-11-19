@@ -662,6 +662,14 @@ pub(crate) enum BackendError {
     MptcpConnectPollTimedOut,
     /// The authenticated client MPTCP worker failed to bind its selected address.
     MptcpBindAddressInUse,
+    /// Credentialed client MPTCP connect socket status: connection refused.
+    MptcpConnectSocketRefused,
+    /// Credentialed client MPTCP connect socket status: network unreachable.
+    MptcpConnectSocketNetworkUnreachable,
+    /// Credentialed client MPTCP connect socket status: host unreachable.
+    MptcpConnectSocketHostUnreachable,
+    /// Credentialed client MPTCP connect socket status: connection timed out.
+    MptcpConnectSocketTimedOut,
     CleanupIncomplete,
     /// Acquire-only origin; identical cleanup authority and public result to `CleanupIncomplete`.
     AcquireCleanupIncomplete(AcquireCleanupOrigin),
@@ -4514,6 +4522,18 @@ impl HelperEngine {
                                 "MPTCP_CONNECT_POLL_TIMED_OUT"
                             }
                             BackendError::MptcpBindAddressInUse => "MPTCP_BIND_ADDRESS_IN_USE",
+                            BackendError::MptcpConnectSocketRefused => {
+                                "MPTCP_CONNECT_SOCKET_REFUSED"
+                            }
+                            BackendError::MptcpConnectSocketNetworkUnreachable => {
+                                "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE"
+                            }
+                            BackendError::MptcpConnectSocketHostUnreachable => {
+                                "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE"
+                            }
+                            BackendError::MptcpConnectSocketTimedOut => {
+                                "MPTCP_CONNECT_SOCKET_TIMED_OUT"
+                            }
                             _ => "TRANSPORT_SOCKET_UNAVAILABLE",
                         },
                     ),
@@ -6336,7 +6356,11 @@ fn backend_response(
         BackendError::Invalid => HelperResult::InvalidRequest,
         BackendError::Kernel
         | BackendError::MptcpConnectPollTimedOut
-        | BackendError::MptcpBindAddressInUse => HelperResult::Kernel,
+        | BackendError::MptcpBindAddressInUse
+        | BackendError::MptcpConnectSocketRefused
+        | BackendError::MptcpConnectSocketNetworkUnreachable
+        | BackendError::MptcpConnectSocketHostUnreachable
+        | BackendError::MptcpConnectSocketTimedOut => HelperResult::Kernel,
         BackendError::CleanupIncomplete | BackendError::AcquireCleanupIncomplete(_) => {
             HelperResult::CleanupIncomplete
         }
@@ -9180,6 +9204,30 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn mptcp_connect_socket_errors_preserve_the_same_committed_route() {
+        for (error, code) in [
+            (
+                BackendError::MptcpConnectSocketRefused,
+                "MPTCP_CONNECT_SOCKET_REFUSED",
+            ),
+            (
+                BackendError::MptcpConnectSocketNetworkUnreachable,
+                "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE",
+            ),
+            (
+                BackendError::MptcpConnectSocketHostUnreachable,
+                "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE",
+            ),
+            (
+                BackendError::MptcpConnectSocketTimedOut,
+                "MPTCP_CONNECT_SOCKET_TIMED_OUT",
+            ),
+        ] {
+            assert_definite_mptcp_acquire(error, code).await;
+        }
+    }
+
     async fn assert_definite_mptcp_acquire(error: BackendError, code: &str) {
         let backend = Arc::new(FakeBackend::default());
         let engine = fake_engine(
@@ -9232,6 +9280,10 @@ mod tests {
         for error in [
             BackendError::MptcpConnectPollTimedOut,
             BackendError::MptcpBindAddressInUse,
+            BackendError::MptcpConnectSocketRefused,
+            BackendError::MptcpConnectSocketNetworkUnreachable,
+            BackendError::MptcpConnectSocketHostUnreachable,
+            BackendError::MptcpConnectSocketTimedOut,
         ] {
             let reply = backend_response(&original, error, "COMMIT_PROBE_FAILED");
             assert_eq!(reply.result, HelperResult::Kernel as i32);

@@ -158,6 +158,14 @@ pub enum StorageFixtureHelperDiagnostic {
     AcquireDescriptorDeadline = 18,
     /// The kernel rejected the client MPTCP bind because the address was already in use.
     MptcpBindAddressInUse = 19,
+    /// Client MPTCP connect socket status: connection refused.
+    MptcpConnectSocketRefused = 20,
+    /// Client MPTCP connect socket status: network unreachable.
+    MptcpConnectSocketNetworkUnreachable = 21,
+    /// Client MPTCP connect socket status: host unreachable.
+    MptcpConnectSocketHostUnreachable = 22,
+    /// Client MPTCP connect socket status: connection timed out.
+    MptcpConnectSocketTimedOut = 23,
 }
 
 /// One request's first/last acquisition failure, not a provider or copy binding.
@@ -210,6 +218,10 @@ impl StorageFixtureAcquireSummary {
                         code,
                         StorageFixtureHelperDiagnostic::MptcpConnectPollTimedOut
                             | StorageFixtureHelperDiagnostic::MptcpBindAddressInUse
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketRefused
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketNetworkUnreachable
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketHostUnreachable
+                            | StorageFixtureHelperDiagnostic::MptcpConnectSocketTimedOut
                     ) && failure.reason != Reason::HelperKernel as i32)
                     || (matches!(
                         code,

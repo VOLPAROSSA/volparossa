@@ -1752,6 +1752,18 @@ fn acquire_diagnostic(code: &str, result: HelperResult) -> AcquireDiagnostic {
         "MPTCP_BIND_ADDRESS_IN_USE" if result == HelperResult::Kernel => {
             AcquireDiagnostic::MptcpBindAddressInUse
         }
+        "MPTCP_CONNECT_SOCKET_REFUSED" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketRefused
+        }
+        "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketNetworkUnreachable
+        }
+        "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketHostUnreachable
+        }
+        "MPTCP_CONNECT_SOCKET_TIMED_OUT" if result == HelperResult::Kernel => {
+            AcquireDiagnostic::MptcpConnectSocketTimedOut
+        }
         "ACQUIRE_WORKER_BUDGET" if result == HelperResult::CleanupIncomplete => {
             AcquireDiagnostic::AcquireWorkerBudget
         }
@@ -3957,7 +3969,14 @@ mod tests {
             HelperResult::InvalidRequest,
             HelperResult::Expired,
         ] {
-            for code in ["MPTCP_CONNECT_POLL_TIMED_OUT", "MPTCP_BIND_ADDRESS_IN_USE"] {
+            for code in [
+                "MPTCP_CONNECT_POLL_TIMED_OUT",
+                "MPTCP_BIND_ADDRESS_IN_USE",
+                "MPTCP_CONNECT_SOCKET_REFUSED",
+                "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE",
+                "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE",
+                "MPTCP_CONNECT_SOCKET_TIMED_OUT",
+            ] {
                 assert_eq!(acquire_diagnostic(code, result), AcquireDiagnostic::Unknown);
             }
         }
@@ -4068,6 +4087,26 @@ mod tests {
             (
                 |response| response.diagnostic_code = "MPTCP_BIND_ADDRESS_IN_USE".into(),
                 AcquireDiagnostic::MptcpBindAddressInUse,
+            ),
+            (
+                |response| response.diagnostic_code = "MPTCP_CONNECT_SOCKET_REFUSED".into(),
+                AcquireDiagnostic::MptcpConnectSocketRefused,
+            ),
+            (
+                |response| {
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_NETWORK_UNREACHABLE".into();
+                },
+                AcquireDiagnostic::MptcpConnectSocketNetworkUnreachable,
+            ),
+            (
+                |response| {
+                    response.diagnostic_code = "MPTCP_CONNECT_SOCKET_HOST_UNREACHABLE".into();
+                },
+                AcquireDiagnostic::MptcpConnectSocketHostUnreachable,
+            ),
+            (
+                |response| response.diagnostic_code = "MPTCP_CONNECT_SOCKET_TIMED_OUT".into(),
+                AcquireDiagnostic::MptcpConnectSocketTimedOut,
             ),
         ] {
             let (error, diagnostic) =

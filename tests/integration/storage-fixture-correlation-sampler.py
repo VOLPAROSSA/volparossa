@@ -42,7 +42,9 @@ MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete'
 ACQUIRE_ORIGINS = ('acquire_worker_budget', 'acquire_worker_state', 'acquire_coordinator_deadline',
     'acquire_coordinator_ambiguous', 'acquire_coordinator_unavailable', 'acquire_coordinator_other',
     'acquire_worker_response', 'acquire_descriptor_state', 'acquire_descriptor_deadline')
-KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out', 'mptcp_bind_address_in_use')
+KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out', 'mptcp_bind_address_in_use',
+    'mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
+    'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
     'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS + ACQUIRE_ORIGINS
