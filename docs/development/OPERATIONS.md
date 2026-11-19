@@ -100,17 +100,11 @@ The dependency gate is offline and requires `cargo-deny >= 0.18.6`, `cargo-audit
 
 The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp, root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary staging directory. It must fail if any required runtime binary is absent. Reproducibility is proven only by comparing two clean Debian 13 builds, not by these flags alone.
 
-A successful manual `alpha` run of [Alpha production-helper topology](https://github.com/VOLPAROSSA/volparossa/actions/workflows/alpha-topology.yml) keeps the tested Debian 13 amd64 Core package for seven days. Under **Artifacts**, download `volparossa-core-debian13-amd64-<commit>-<attempt>` and extract it. Run `sha256sum --check volparossa_0.1.0_amd64.deb.sha256` from the extracted directory to compare the package with the checksum recorded by the installation VM. The run also contains the A01–A15 acceptance and package lifecycle reports.
+A successful full `alpha` run retains the tested Debian 13 amd64 Core and private DNS worker packages together for seven days. The same run publishes the A01–A15 acceptance and install, upgrade and removal reports. [Current candidate and download](../IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof)
 
 ### Inspect, then explicitly install
 
-The first two commands inspect the package. The final `sudo apt install` command installs it and creates the accounts/directories described below. Review the inspection results before choosing to run that last command:
-
-```sh
-dpkg-deb --info dist/volparossa_0.1.0_amd64.deb
-dpkg-deb --contents dist/volparossa_0.1.0_amd64.deb
-sudo apt install ./dist/volparossa_0.1.0_amd64.deb
-```
+Extract the package artifact in an empty directory. Follow the [Debian package instructions](../../packaging/README.md#install-the-tested-package-pair) there to verify both checksums, inspect each package and install the matching pair. Source builds produce the same layout under `dist/`.
 
 ### What installation changes
 

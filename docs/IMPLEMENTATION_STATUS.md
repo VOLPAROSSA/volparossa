@@ -1082,6 +1082,9 @@ before/after host snapshots matched.
 [Second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130) ·
 [Download the tested packages](https://github.com/VOLPAROSSA/volparossa/actions/runs/44530323130/artifacts/14537641263)
 
+The combined candidate `009dc5821d1e0d6d498381b9fbf0272ea38e9a5c` includes the Bank signing interface and validator trial. GitHub Actions built the Core and worker packages twice on one runner and compared each pair byte for byte. The twelve-node Debian 13 KVM passed all 15 transport cases. The installation VM started the Core services, preserved the identity through an upgrade and removed the package. Its network state matched before and after installation. The downloaded Core package is 26,105,172 bytes and the worker is 52,824 bytes. The candidate ZIP expires on 26 November 2026.
+[Download the tested package pair](https://github.com/VOLPAROSSA/volparossa/actions/runs/44549419011/artifacts/14546019187) · [All fifteen case reports](development/evidence/alpha-package-44549419011) · [Installation, upgrade and removal](development/evidence/alpha-package-44549419011/package-lifecycle.json) · [Core checksum](development/evidence/alpha-package-44549419011/volparossa_0.1.0_amd64.deb.sha256) · [Worker checksum](development/evidence/alpha-package-44549419011/volparossa-private-dns-worker_0.1.0_amd64.deb.sha256) · [Original run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44549419011)
+
 ## Fixed alpha v1 scorecard
 
 The frozen original twenty-row, 100-point criteria and AV1/A01–A15 definitions
