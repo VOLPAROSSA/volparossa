@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "environment": {
+    "debian_version": "13",
+    "architecture": "amd64",
+    "virtualization": "kvm"
+  },
+  "package": {
+    "version": "0.1.0",
+    "sha256": "c6c766d382ccf454c4ffaefc701fe07a3b1ff9089e67bddd90d72f9f4b601db7"
+  },
+  "fresh_install": {
+    "services_enabled": false,
+    "filesystem_contract": true
+  },
+  "doctor_before_upgrade": true,
+  "service_start": {
+    "helper": true,
+    "native_mpquic_running": false,
+    "native_mpquic_roles_off_idle": true,
+    "agent": true,
+    "live_status": true
+  },
+  "upgrade": {
+    "maintainer_path_exercised": true,
+    "active_processes_restarted": true,
+    "active_services": [
+      "volparossa-helper.service",
+      "volparossa-agent.service"
+    ],
+    "native_mpquic_roles_off_idle": true,
+    "identity_preserved": true
+  },
+  "doctor_after_upgrade": true,
+  "uninstall": {
+    "active_services_stopped": true,
+    "package_files_absent": true,
+    "identity_preserved": true,
+    "config_preserved": true
+  },
+  "network_state_unchanged": true,
+  "overall": "PASS"
+}
