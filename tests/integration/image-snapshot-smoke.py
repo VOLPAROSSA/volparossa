@@ -24,6 +24,8 @@ SOURCE_HASHES = {
     "scripts/snapshot-storage.mjs": "21a2cfe3527a958151be3ea0d7223f366a45d2fe18b09599dae217b83fcc8d4c",
     "src/core-storage.mjs": "5444e9b6e9926f63360ca9ade26bbc0484b5150ba9eb3ea453fc436f5a44d41b",
 }
+OWNER_REVISION = "0da0c35e9372a828553f376c3eb404a6081e0bb8"
+HANDOFF = Path("/run/volparossa-image-handoff")
 CHUNK = FRAGMENTS["CHUNK"]
 SOURCE_FILES = {
     # Fixed synthetic gzip bytes: gzip.compress(mtime=0) emits different OS
@@ -62,12 +64,30 @@ def owner_root(path, missing=False):
     return root
 
 
+def owner_tools():
+    return runpy.run_path(str(Path(__file__).with_name("image-topology-input.py")))
+
+
+def pins_path(joined):
+    return Path(__file__).with_name("image-snapshot-owner-pins.json" if joined else "image-snapshot-pins.json")
+
+
+def revision_hashes(joined):
+    if not joined:
+        return REVISION, SOURCE_HASHES
+    pins = json.loads(pins_path(True).read_bytes())
+    require(pins["revision"] == OWNER_REVISION and set(pins["files"]) == {*SOURCE_HASHES, "LICENSE"},
+            "reviewed owner Image sources required")
+    return OWNER_REVISION, {name: pins["files"][name]["sha256"] for name in SOURCE_HASHES}
+
+
 def tools():
     source = Path(os.environ["IMAGE_SOURCE"])
     node = Path(os.environ["IMAGE_NODE"])
+    revision, hashes = revision_hashes(os.environ["IMAGE_REVISION"] == OWNER_REVISION)
     require(source == Path("/opt/volparossa-image") and node == Path("/opt/volparossa-node/bin/node")
-            and os.environ["IMAGE_REVISION"] == REVISION, "image provisioning identity differs")
-    for name, digest in SOURCE_HASHES.items():
+            and os.environ["IMAGE_REVISION"] == revision, "image provisioning identity differs")
+    for name, digest in hashes.items():
         path = source / name
         info = path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_mode & 0o022 == 0
@@ -130,10 +150,19 @@ def fixture(root):
 
 
 def configure(value):
-    require(value["image_revision"] == REVISION and value["source_sha256"] == SOURCE_HASHES
-        and value["plaintext_sha256"] == SOURCE_DIGESTS and value["plaintext_bytes"] == SOURCE_BYTES
-        and re.fullmatch(r"[0-9a-f]{64}", value["cipher_sha256"]), "synthetic snapshot identity differs")
-    FRAGMENTS["configure_payload_geometry"](value["ciphertext_bytes"])
+    require("input_kind" not in value or value["input_kind"] == "owner-immich", "unrecognised Image input")
+    joined = "input_kind" in value
+    revision, hashes = revision_hashes(joined)
+    require(value["image_revision"] == revision and value["source_sha256"] == hashes
+        and re.fullmatch(r"[0-9a-f]{64}", value["cipher_sha256"]), "Image snapshot identity differs")
+    size = value["ciphertext_bytes"]
+    if joined:
+        require(type(size) is int and 16 <= size <= 4 * CHUNK and not {"plaintext_sha256", "plaintext_bytes"} & value.keys(),
+                "owner image ciphertext geometry or privacy differs")
+    else:
+        require(value["plaintext_sha256"] == SOURCE_DIGESTS and value["plaintext_bytes"] == SOURCE_BYTES,
+                "synthetic snapshot identity differs")
+    FRAGMENTS["configure_payload_geometry"](size, (size + 3) // 4 if joined else CHUNK)
     return FRAGMENTS["configure_payload_geometry"].__globals__
 
 
@@ -149,12 +178,26 @@ def verify_plain(root):
             "restored synthetic database dump differs")
 
 
-def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key_b, key_c):
+def admit_owner_bundle(root, handoff, expected_hash):
     global STAGE
-    STAGE = "prepare_plaintext"
-    tools()
-    keys = (key_a, key_b, key_c)
-    require(not list(root.iterdir()) and len(set(keys)) == 3, "new owner and distinct providers required")
+    STAGE = "admit_owner_ciphertext"
+    secure = owner_tools()
+    receipt = secure["verify"](handoff)
+    require(receipt["cipher_sha256"] == expected_hash, "owner input digest differs")
+    (root / "bundle").mkdir(mode=0o700)
+    for filename, limit in (("snapshot.pgp", 4 * CHUNK), ("receipt.json", 4096)):
+        create(root / "bundle" / filename, secure["private_bytes"](handoff / filename, limit))
+    require(secure["verify"](root / "bundle") == receipt, "copied input differs")
+    for filename in ("snapshot.pgp", "receipt.json"):
+        (handoff / filename).unlink()
+    secure["directory"](handoff, ())
+    revision, hashes = revision_hashes(True)
+    return dict(input_kind="owner-immich", image_revision=revision, source_sha256=hashes,
+                 ciphertext_bytes=receipt["cipher_bytes"], cipher_sha256=receipt["cipher_sha256"])
+
+
+def encrypt_synthetic_snapshot(root):
+    global STAGE
     (root / "source").mkdir(mode=0o700)
     for name, data in SOURCE_FILES.items():
         path = root / "source" / name
@@ -168,8 +211,21 @@ def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key
     ciphertext = root / "bundle/snapshot.pgp"
     require(private_file(ciphertext).st_size == receipt["cipher_bytes"]
         and hashlib.sha256(ciphertext.read_bytes()).hexdigest() == receipt["cipher_sha256"], "ciphertext receipt differs")
-    value = dict(image_revision=REVISION, source_sha256=SOURCE_HASHES, plaintext_sha256=SOURCE_DIGESTS,
+    return dict(image_revision=REVISION, source_sha256=SOURCE_HASHES, plaintext_sha256=SOURCE_DIGESTS,
         plaintext_bytes=SOURCE_BYTES, ciphertext_bytes=receipt["cipher_bytes"], cipher_sha256=receipt["cipher_sha256"])
+
+
+def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key_b, key_c):
+    global STAGE
+    STAGE = "prepare_plaintext"
+    tools()
+    keys = (key_a, key_b, key_c)
+    require(not list(root.iterdir()) and len(set(keys)) == 3, "new owner and distinct providers required")
+    joined = os.environ["IMAGE_REVISION"] == OWNER_REVISION
+    if joined:
+        value = admit_owner_bundle(root, HANDOFF, os.environ.get("IMAGE_HANDOFF_SHA256"))
+    else:
+        value = encrypt_synthetic_snapshot(root)
     geometry = configure(value)
     create(root / "fixture.json", json.dumps(value).encode())
     create(root / "passphrase", base64.b64encode(os.urandom(48)) + b"\n")
@@ -189,10 +245,10 @@ def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key
     config = dict(version=1, coreBinary=binary, controlSocket=client, identity=str(root / "identity.key"),
         passphraseFile=str(root / "passphrase"), stateDirectory=str(root / "fragment-set"),
         providers=[dict(key=key, grant=str(root / f"grant-{label}.bin")) for label, key in zip("abc", keys)],
-        copies=2, fragmentBytes=CHUNK, lifetimeSeconds=1800, deadlineMs=900000)
+        copies=2, fragmentBytes=geometry["CHUNK"], lifetimeSeconds=1800, deadlineMs=900000)
     create(root / "storage.json", json.dumps(config).encode())
-    verify_plain(root / "source")
-    return dict(**value, archive_encryption_proven=True, original_plaintext_preserved=True,
+    verify_source(root, value)
+    return dict(**value, archive_encryption_proven=not joined, original_plaintext_preserved=not joined,
         owner_distinct_from_all_providers=True, grant_payload_bytes=list(geometry["PROVIDER_BYTES"]),
         grant_max_leases=list(geometry["PROVIDER_LEASES"]), owner_secrets_exported=False)
 
@@ -213,6 +269,14 @@ def check_bridge(value, metadata, phase):
         and storage["read_consumes_archive"] is False, "image fragment summary differs")
 
 
+def verify_source(root, metadata):
+    if metadata.get("input_kind") == "owner-immich":
+        require(not (root / "source").exists() and not (root / "bundle/recovery.key").exists(),
+                "guest received owner plaintext or recovery key")
+    else:
+        verify_plain(root / "source")
+
+
 def upload(root, binary, client, keys):
     global STAGE
     metadata = fixture(root)
@@ -230,13 +294,13 @@ def upload(root, binary, client, keys):
         FRAGMENTS["check_identity"](root)
     raw_status(root, binary, client, keys, "committed")
     FRAGMENTS["staged_files_absent"](root)
-    verify_plain(root / "source")
+    verify_source(root, metadata)
     private_file(root / "bundle/snapshot.pgp")
     (root / "bundle/snapshot.pgp").unlink()
     return dict(actual_image_cli=True, committed_fragment_copies=8,
         logical_ciphertext_bytes=metadata["ciphertext_bytes"], physical_payload_charge=2 * metadata["ciphertext_bytes"],
         committed_retry_same_identities=True, renewal_confirmed=True, source_ciphertext_removed=True,
-        original_plaintext_preserved=True, temporary_transfer_files_removed=True)
+        original_plaintext_preserved="input_kind" not in metadata, temporary_transfer_files_removed=True)
 
 
 def restore(root, binary, client, keys):
@@ -254,26 +318,36 @@ def restore(root, binary, client, keys):
         raw_status(root, binary, client, keys, "restore")
         require(hashlib.sha256((output / "snapshot.pgp").read_bytes()).hexdigest() == metadata["cipher_sha256"],
                 "restored ciphertext differs")
-        private_file(root / "bundle/recovery.key")
-        create(output / "recovery.key", (root / "bundle/recovery.key").read_bytes())
-        STAGE = f"decrypt_verify_{number}"
-        decrypted = snapshot("restore", "--bundle", output, "--output", root / f"plain-{number}",
-                             "--expected-sha256", metadata["cipher_sha256"])
-        require(decrypted["restored"] is True and decrypted["openpgp_integrity_verified"] is True
-            and decrypted["manifest_verified"] is True and decrypted["bytes"] == SOURCE_BYTES,
-            "actual authenticated GPG recovery failed")
-        verify_plain(root / f"plain-{number}")
-        verify_plain(root / "source")
+        if "input_kind" not in metadata:
+            private_file(root / "bundle/recovery.key")
+            create(output / "recovery.key", (root / "bundle/recovery.key").read_bytes())
+            STAGE = f"decrypt_verify_{number}"
+            decrypted = snapshot("restore", "--bundle", output, "--output", root / f"plain-{number}",
+                                 "--expected-sha256", metadata["cipher_sha256"])
+            require(decrypted["restored"] is True and decrypted["openpgp_integrity_verified"] is True
+                and decrypted["manifest_verified"] is True and decrypted["bytes"] == SOURCE_BYTES,
+                "actual authenticated GPG recovery failed")
+            verify_plain(root / f"plain-{number}")
+        verify_source(root, metadata)
         FRAGMENTS["check_identity"](root)
-        hashes.append(dict(SOURCE_DIGESTS))
+        if "input_kind" not in metadata:
+            hashes.append(dict(SOURCE_DIGESTS))
     STAGE = "existing_output"
     bridge(root, "restore", "--receipt", root / "bundle/receipt.json", "--output", root / "restore-1", expected=1)
     require(hashlib.sha256((root / "restore-1/snapshot.pgp").read_bytes()).hexdigest() == metadata["cipher_sha256"],
             "existing restored ciphertext was replaced")
     FRAGMENTS["staged_files_absent"](root)
-    return dict(actual_image_cli=True, restores=2, actual_gpg_decryptions=2, plaintext_sha256=hashes,
-        source_ciphertext_absent=True, original_plaintext_preserved=True, openpgp_integrity_verified=True,
-        manifest_verified=True, whole_archive_sha256_verified=True, reads_nonconsuming=True,
+    joined = "input_kind" in metadata
+    if joined:
+        secure = owner_tools()
+        secure["directory"](HANDOFF, ())
+        recovered = secure["private_bytes"](root / "restore-1/snapshot.pgp", 4 * CHUNK)
+        require(len(recovered) == metadata["ciphertext_bytes"] and hashlib.sha256(recovered).hexdigest() == metadata["cipher_sha256"],
+                "recovered handoff bytes differ")
+        create(HANDOFF / "snapshot.pgp", recovered)
+    return dict(actual_image_cli=True, restores=2, actual_gpg_decryptions=len(hashes), plaintext_sha256=hashes,
+        source_ciphertext_absent=True, original_plaintext_preserved=not joined, openpgp_integrity_verified=not joined,
+        manifest_verified=not joined, whole_archive_sha256_verified=True, reads_nonconsuming=True,
         existing_output_preserved=True, retained_identity_unchanged=True,
         physical_payload_charge=2 * metadata["ciphertext_bytes"])
 
@@ -289,9 +363,9 @@ def finish(root, binary, client, keys):
         FRAGMENTS["check_identity"](root)
         raw_status(root, binary, client, keys, "deleted")
     FRAGMENTS["staged_files_absent"](root)
-    verify_plain(root / "source")
+    verify_source(root, metadata)
     return dict(actual_image_cli=True, reopened_copies_confirmed=True, all_eight_copies_deleted=True,
-        delete_retry_idempotent=True, original_plaintext_preserved=True, final_payload_charge=0)
+        delete_retry_idempotent=True, original_plaintext_preserved="input_kind" not in metadata, final_payload_charge=0)
 
 
 def cleanup(path):
@@ -312,8 +386,9 @@ def cleanup(path):
         for entry in sorted(entries, key=lambda p: len(p.parts), reverse=True):
             entry.rmdir() if entry.is_dir() else entry.unlink()
         root.rmdir()
+    had_plaintext = os.environ.get("IMAGE_REVISION") != OWNER_REVISION
     return dict(owner_identity_removed=True, passphrase_removed=True, grants_removed=True,
-        recovery_keys_removed=True, private_plaintext_removed=True, ciphertext_removed=True,
+        recovery_keys_removed=had_plaintext, private_plaintext_removed=had_plaintext, ciphertext_removed=True,
         fragment_journal_removed=True, user_directory_removed=True)
 
 
@@ -322,23 +397,26 @@ def build_evidence(work):
     value = {name: read(work / f"private-storage-fragments-{name}.json") for name in names}
     for name in ("uploaded_usage", "restored_usage", "deleted_usage"):
         value[name] = FRAGMENTS["read_usage"](work / f"private-storage-fragments-{name}.json")
-    value.update(success=True, archive_encryption_proven=True, expected_peers=read(work / "a01-expected-peers.json"),
+    joined = value["prepare"].get("input_kind") == "owner-immich"
+    value.update(success=True, archive_encryption_proven=not joined, expected_peers=read(work / "a01-expected-peers.json"),
         provision=read(work / "image-snapshot-provision.json"), **dict.fromkeys(FALSE_CLAIMS, False))
     value["network"] = {name: dict(selected_route=read(work / f"private-storage-fragments-{name}-live-selection.json"),
         privacy={role: read(work / f"private-storage-fragments-{name}-privacy-{role}.json") for role in FRAGMENTS["ROLES"]},
         control_privacy=read(work / f"content-provider-adaptive-private-storage-fragments-{name}-control.json"),
         gates=read(work / f"private-storage-fragments-{name}-gates.json")) for name in FRAGMENTS["PHASES"]}
-    validate_evidence(value)
+    validate_evidence(value, joined=joined)
     return value
 
 
-def validate_evidence(value):
-    require(value["success"] is True and value["archive_encryption_proven"] is True
+def validate_evidence(value, *, joined=False):
+    require((value["prepare"].get("input_kind") == "owner-immich") is joined, "unexpected Image fixture profile")
+    require(value["success"] is True and value["archive_encryption_proven"] is (not joined)
         and all(value[field] is False for field in FALSE_CLAIMS), "image scope overstated")
     provision = value["provision"]
-    pin_path = Path(__file__).with_name("image-snapshot-pins.json")
+    pin_path = pins_path(joined)
+    expected_revision, hashes = revision_hashes(joined)
     pins = json.loads(pin_path.read_text())
-    require(pins["revision"] == REVISION and {name: pins["files"][name]["sha256"] for name in SOURCE_HASHES} == SOURCE_HASHES
+    require(pins["revision"] == expected_revision and {name: pins["files"][name]["sha256"] for name in hashes} == hashes
         and provision["version"] == 1 and provision["kind"] == "image-snapshot-runtime-provision"
         and provision["pins"] == pins and provision["pins_sha256"] == hashlib.sha256(pin_path.read_bytes()).hexdigest()
         and all(provision[key] is True for key in ("success", "guest_only", "source_files_verified",
@@ -353,21 +431,21 @@ def validate_evidence(value):
     prepare = value["prepare"]
     geometry = configure(prepare)
     size = prepare["ciphertext_bytes"]
-    require(prepare["archive_encryption_proven"] is True and prepare["original_plaintext_preserved"] is True
+    require(prepare["archive_encryption_proven"] is (not joined) and prepare["original_plaintext_preserved"] is (not joined)
         and prepare["owner_distinct_from_all_providers"] is True and prepare["owner_secrets_exported"] is False
         and prepare["grant_payload_bytes"] == list(geometry["PROVIDER_BYTES"])
         and prepare["grant_max_leases"] == list(geometry["PROVIDER_LEASES"]), "image encryption or grants absent")
     require(value["upload"] == dict(actual_image_cli=True, committed_fragment_copies=8,
         logical_ciphertext_bytes=size, physical_payload_charge=2 * size, committed_retry_same_identities=True,
-        renewal_confirmed=True, source_ciphertext_removed=True, original_plaintext_preserved=True,
+        renewal_confirmed=True, source_ciphertext_removed=True, original_plaintext_preserved=not joined,
         temporary_transfer_files_removed=True), "image upload not complete")
-    require(value["restore"] == dict(actual_image_cli=True, restores=2, actual_gpg_decryptions=2,
-        plaintext_sha256=[SOURCE_DIGESTS, SOURCE_DIGESTS], source_ciphertext_absent=True,
-        original_plaintext_preserved=True, openpgp_integrity_verified=True, manifest_verified=True,
+    require(value["restore"] == dict(actual_image_cli=True, restores=2, actual_gpg_decryptions=0 if joined else 2,
+        plaintext_sha256=[] if joined else [SOURCE_DIGESTS, SOURCE_DIGESTS], source_ciphertext_absent=True,
+        original_plaintext_preserved=not joined, openpgp_integrity_verified=not joined, manifest_verified=not joined,
         whole_archive_sha256_verified=True, reads_nonconsuming=True, existing_output_preserved=True,
         retained_identity_unchanged=True, physical_payload_charge=2 * size), "actual Image recovery absent")
     require(value["finish"] == dict(actual_image_cli=True, reopened_copies_confirmed=True,
-        all_eight_copies_deleted=True, delete_retry_idempotent=True, original_plaintext_preserved=True,
+        all_eight_copies_deleted=True, delete_retry_idempotent=True, original_plaintext_preserved=not joined,
         final_payload_charge=0), "Image deletion absent")
     retained = [dict(reserved_bytes=0, committed_bytes=n, leases=c)
                 for n, c in zip(geometry["PROVIDER_BYTES"], geometry["PROVIDER_LEASES"])]
@@ -376,7 +454,7 @@ def validate_evidence(value):
         and value["deleted_usage"] == [dict(reserved_bytes=0, committed_bytes=0, leases=0)] * 3,
         "physical Image fragment accounting differs")
     require(value["private_cleanup"] == dict(owner_identity_removed=True, passphrase_removed=True,
-        grants_removed=True, recovery_keys_removed=True, private_plaintext_removed=True,
+        grants_removed=True, recovery_keys_removed=not joined, private_plaintext_removed=not joined,
         ciphertext_removed=True, fragment_journal_removed=True, user_directory_removed=True), "private cleanup incomplete")
     require(value["withdrawal"] == dict(first_provider_stopped_before_restore=True, first_store_retained=True,
         other_two_providers_serving=True, same_three_stores_reopened=True, all_usage_snapshots_with_services_stopped=True,
@@ -391,14 +469,14 @@ def validate_evidence(value):
         FRAGMENTS["validate_network"](phase, value["expected_peers"], value["layout"], name)
 
 
-def validate_report(report, revision):
+def validate_report(report, revision, *, joined=False):
     require(re.fullmatch(r"[0-9a-f]{40}", revision) and report["source_revision"] == revision
-        and report["schema_version"] == 1 and report["report_kind"] == "volparossa-image-snapshot"
+        and report["schema_version"] == (2 if joined else 1) and report["report_kind"] == "volparossa-image-snapshot"
         and report["success"] is True and report["runner_exit_status"] == 0
         and report["phase"] == "image-snapshot-complete" and report["observed_blocker"] is None
         and report["cleanup"]["complete"] is True and report["cleanup"]["remaining_owned_objects"] == 0
         and report["host_state"]["unchanged"] is True, "source-bound host/guest cleanup incomplete")
-    validate_evidence(report["image"])
+    validate_evidence(report["image"], joined=joined)
 
 
 def main(arguments):
@@ -415,8 +493,8 @@ def main(arguments):
     elif command == "evidence" and len(arguments) == 3:
         result = build_evidence(Path(arguments[1]))
         Path(arguments[2]).write_text(json.dumps(result, sort_keys=True) + "\n")
-    elif command == "report" and len(arguments) == 3:
-        validate_report(read(Path(arguments[1])), arguments[2])
+    elif command in ("report", "report-owner") and len(arguments) == 3:
+        validate_report(read(Path(arguments[1])), arguments[2], joined=command == "report-owner")
         result = dict(success=True, report_kind="volparossa-image-snapshot")
     else:
         raise ValueError("unknown image snapshot fixture command")
