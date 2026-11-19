@@ -1837,6 +1837,7 @@ impl ClientRouteControl {
         })?;
         let mut helper_route_was_lost = false;
         let mut history = History::default();
+        let retire = |prior| self.start_tcp_flow_retirement(prior);
         for attempt in 0..8 {
             let failure = if attempt == 0 {
                 busy
@@ -1865,11 +1866,19 @@ impl ClientRouteControl {
                     ContentStreamOpenFailure::from_flow_acquire(error, history.summary())
                 })?;
             let mut observation = Observation::default();
+            let expiry = established.expiry;
             match transport
-                .acquire_flow(&established.helper, local_port, &mut observation)
+                .acquire_flow(&established.helper, local_port, &mut observation, || {
+                    !expiry.is_expired(crate::unix_millis().max(now_ms), Instant::now())
+                })
                 .await
             {
-                Ok(flow) => {
+                Ok(None) => {
+                    return Err(self
+                        .finish_flow_acquire_failure(state, true, failure, retire)
+                        .await);
+                }
+                Ok(Some(flow)) => {
                     let (flow, activation_at_ms) = self
                         .complete_tcp_flow_acquire(
                             state,
@@ -1881,13 +1890,7 @@ impl ClientRouteControl {
                                 }
                                 _ => None,
                             },
-                            |prior| {
-                                let ClientRouteControlState::Established(established) = prior
-                                else {
-                                    unreachable!("expired acquired TCP route owner remains locked")
-                                };
-                                self.start_retirement(established)
-                            },
+                            retire,
                             failure,
                         )
                         .await?;
@@ -1907,12 +1910,7 @@ impl ClientRouteControl {
             history.summary(),
         );
         Err(self
-            .finish_flow_acquire_failure(state, helper_route_was_lost, failure, |prior| {
-                let ClientRouteControlState::Established(established) = prior else {
-                    unreachable!("validated failed flow route owner")
-                };
-                self.start_retirement(established)
-            })
+            .finish_flow_acquire_failure(state, helper_route_was_lost, failure, retire)
             .await)
     }
 
@@ -1932,15 +1930,17 @@ impl ClientRouteControl {
                 }
                 _ => None,
             },
-            |prior| {
-                let ClientRouteControlState::Established(established) = prior else {
-                    unreachable!("expired TCP route owner remains locked")
-                };
-                self.start_retirement(established)
-            },
+            |prior| self.start_tcp_flow_retirement(prior),
             failure,
         )
         .await
+    }
+
+    fn start_tcp_flow_retirement(&self, prior: ClientRouteControlState) -> ClientRouteControlState {
+        let ClientRouteControlState::Established(established) = prior else {
+            unreachable!("validated TCP flow route remains locked")
+        };
+        self.start_retirement(established)
     }
 
     /// Sample both clocks only after admission owns the route slot. Subsequent attempts retain

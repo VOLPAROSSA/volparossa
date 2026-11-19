@@ -102,7 +102,7 @@ class NativeBrowserTests(unittest.TestCase):
                 self.assertEqual(guest.returncode, 0, guest.stderr)
         self.assertEqual(source.count("        --host-tools-directory)"), 1)
         argument_loop = 'while [ "$#" -gt 0 ]; do\n' + source.split('while [ "$#" -gt 0 ]; do\n', 1)[1]
-        argument_loop = argument_loop.split('\nif [ "$mode" = preview ]; then\n', 1)[0]
+        argument_loop = argument_loop.split("\ndone\n", 1)[0] + "\ndone\n"
         parse_only = 'set -eu\nhost_tools_directory=\nusage() { :; }\n' + argument_loop
         parse_only += '\nprintf "%s\\n" "$host_tools_directory"\n'
         single = subprocess.run(["sh", "-c", parse_only, "test", "--host-tools-directory",

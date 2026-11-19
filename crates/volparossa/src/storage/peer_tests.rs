@@ -22,6 +22,8 @@ use volparossa_content::{
     },
 };
 
+use volparossa_local_control::PrivateStorageTlsFailure;
+
 use super::{
     state::{Journal, LockedJournal},
     transfer,
@@ -374,6 +376,7 @@ async fn fake_agent(
     listener: tokio::net::UnixListener,
     service: Arc<StorageService>,
     grant: VerifiedStorageGrant,
+    mut tls_failures: tokio::sync::mpsc::UnboundedReceiver<Option<PrivateStorageTlsFailure>>,
 ) {
     use volparossa_content::{
         provider::{PublicationRegistry, serve_publication},
@@ -384,7 +387,8 @@ async fn fake_agent(
         control_request::Operation, control_response::Payload, read_request, write_response,
     };
     let mut index = 0;
-    while index < 11 {
+    // Twelve deposit attempts, eleven restore attempts, one renewal and two deletes.
+    while index < 26 {
         let (mut local, _) = listener.accept().await.unwrap();
         let request = read_request(&mut local).await.unwrap();
         if matches!(request.operation, Some(Operation::PrivateStorageOutcome(_))) {
@@ -398,6 +402,29 @@ async fn fake_agent(
         index += 1;
         assert_eq!(requested.provider_key, grant.provider_key().as_bytes());
         assert_eq!(requested.grant, grant.signed().encode());
+        if let Ok(Some(failure)) = tls_failures.try_recv() {
+            write_response(
+                &mut local,
+                &ControlResponse {
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    result: volparossa_local_control::ControlResult::Unavailable as i32,
+                    diagnostic_code: "CONTENT_UNAVAILABLE".into(),
+                    private_storage_remote_detail: Some(
+                        volparossa_local_control::PrivateStorageRemoteDetail {
+                            stage: volparossa_local_control::PrivateStorageRemoteStage::TlsHandshake
+                                as i32,
+                            tls_failure: Some(failure as i32),
+                            ..Default::default()
+                        },
+                    ),
+                    payload: Some(Payload::Ack(volparossa_local_control::Empty {})),
+                },
+            )
+            .await
+            .unwrap();
+            continue;
+        }
         let (mut remote, mut provider) = tokio::io::duplex(4096);
         let mut registry = PublicationRegistry::new();
         registry.set_private_storage(Arc::clone(&service));
@@ -461,97 +488,122 @@ async fn peer_ipc_requires_terminal_and_streams_resumable_private_copy() {
     .unwrap();
     let backend = PrivateStorageProvider::new(store, provider.verifying_key()).unwrap();
     let service = Arc::new(StorageService::new(Arc::new(provider), backend));
-    let server = tokio::spawn(fake_agent(listener, Arc::clone(&service), grant.clone()));
+    let (inject, tls_failures) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(fake_agent(
+        listener,
+        Arc::clone(&service),
+        grant.clone(),
+        tls_failures,
+    ));
     let bytes = vec![43_u8; CHUNK_BYTES + 31];
-    let mut target = StorageTarget {
-        archive_id: [9; 32],
-        lease_id: None,
-        ciphertext_bytes: bytes.len() as u64,
-        sha256: Sha256::digest(&bytes).into(),
-    };
-    let reserve = StorageOperation::Reserve {
-        expires_at: super::super::now().unwrap() + 600,
-    };
+    let journal = Journal::new(
+        &grant,
+        bytes.len() as u64,
+        Sha256::digest(&bytes).into(),
+        super::super::now().unwrap() + 600,
+    )
+    .unwrap();
+    let archive = journal.archive_id;
+    let path = directory.path().join("journal");
+    let mut retained = LockedJournal::create(&path, journal).unwrap();
+    let input_path = directory.path().join("ciphertext");
+    fs::write(&input_path, &bytes).unwrap();
+    let mut input = fs::File::open(input_path).unwrap();
+    // The provider accepted Reserve but the agent lost its terminal response.
     assert!(
-        transfer::remote(&socket, &grant, &owner, target, reserve, &[])
+        transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
             .await
             .is_err()
     );
-    let reserved = transfer::remote(&socket, &grant, &owner, target, reserve, &[])
-        .await
-        .unwrap();
-    assert_eq!(reserved.receipt.result().state, ReceiptState::Reserved);
-    target.lease_id = Some(reserved.receipt.result().lease_id);
-    let chunk = &bytes[..CHUNK_BYTES];
-    transfer::remote(
-        &socket,
-        &grant,
-        &owner,
-        target,
-        StorageOperation::Append {
-            offset: 0,
-            length: u32::try_from(chunk.len()).unwrap(),
-            sha256: Sha256::digest(chunk).into(),
-        },
-        chunk,
-    )
-    .await
-    .unwrap();
-    let progress = transfer::remote(
-        &socket,
-        &grant,
-        &owner,
-        target,
-        StorageOperation::Progress,
-        &[],
-    )
-    .await
-    .unwrap();
-    assert_eq!(progress.receipt.result().stored_bytes, CHUNK_BYTES as u64);
-    assert_eq!(progress.receipt.result().state, ReceiptState::Partial);
-    let chunk = &bytes[CHUNK_BYTES..];
-    transfer::remote(
-        &socket,
-        &grant,
-        &owner,
-        target,
-        StorageOperation::Append {
-            offset: CHUNK_BYTES as u64,
-            length: u32::try_from(chunk.len()).unwrap(),
-            sha256: Sha256::digest(chunk).into(),
-        },
-        chunk,
-    )
-    .await
-    .unwrap();
-    let committed = transfer::remote(
-        &socket,
-        &grant,
-        &owner,
-        target,
-        StorageOperation::Finalize,
-        &[],
-    )
-    .await
-    .unwrap();
-    assert_eq!(committed.receipt.result().state, ReceiptState::Committed);
-    for _ in 0..2 {
-        let result = transfer::remote(
-            &socket,
-            &grant,
-            &owner,
-            target,
-            StorageOperation::ReadRange {
-                offset: 0,
-                length: bytes.len() as u64,
-            },
-            &[],
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.ciphertext, bytes);
-        assert_eq!(result.receipt.result().lease_id, target.lease_id.unwrap());
+    assert!(retained.journal.lease.is_none());
+    let timeout = Some(PrivateStorageTlsFailure::HandshakeDeadline);
+    let authentication = Some(PrivateStorageTlsFailure::Authentication);
+    // Reconcile Reserve, reopen the first Append before sending its bytes, then
+    // retain the acknowledged prefix when the next chunk cannot open its TLS session.
+    for event in [None, timeout, None, timeout] {
+        inject.send(event).unwrap();
     }
+    assert!(
+        transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
+            .await
+            .is_err()
+    );
+    assert_eq!(retained.journal.last_stored_bytes, CHUNK_BYTES as u64);
+    let target = transfer::known_target(&retained.journal).unwrap();
+    assert_eq!(target.archive_id, archive);
+    drop(retained);
+    let mut retained = LockedJournal::open(&path).unwrap();
+    for (failure, background) in [(authentication, false), (timeout, true)] {
+        inject.send(None).unwrap(); // Progress returns the original lease and prefix.
+        inject.send(failure).unwrap();
+        let attempt =
+            transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input);
+        let result = if background {
+            transfer::with_maintenance_turn(vec![1; 32], attempt).await
+        } else {
+            attempt.await
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<crate::control::AgentRejected>()
+                .is_some()
+        );
+        assert_eq!(retained.journal.last_stored_bytes, CHUNK_BYTES as u64);
+    }
+    transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
+        .await
+        .unwrap();
+    assert_eq!(transfer::known_target(&retained.journal).unwrap(), target);
+    assert_eq!(
+        retained.journal.last_state,
+        Some(ReceiptState::Committed as i32)
+    );
+    assert_eq!(retained.journal.last_stored_bytes, bytes.len() as u64);
+    // Each script describes successive pre-READY outcomes, starting at Progress.
+    for (name, script, success) in [
+        ("recover-range", vec![None, timeout, None], true),
+        ("only-one-retry", vec![timeout, None, timeout], false),
+        (
+            "preserve-authentication-error",
+            vec![None, authentication],
+            false,
+        ),
+        ("ordinary-restore", vec![None, None], true),
+    ] {
+        for event in script {
+            inject.send(event).unwrap();
+        }
+        let output = directory.path().join(name);
+        let result =
+            transfer::restore_retained(&socket, &grant, &owner, &mut retained, &output).await;
+        assert_eq!(result.is_ok(), success, "{name}");
+        if success {
+            assert_eq!(fs::read(output).unwrap(), bytes);
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::control::AgentRejected>()
+                    .is_some()
+            );
+            assert!(!output.exists());
+        }
+    }
+    inject.send(timeout).unwrap();
+    let output = directory.path().join("background");
+    let result = transfer::with_maintenance_turn(
+        vec![1; 32],
+        transfer::restore_retained(&socket, &grant, &owner, &mut retained, &output),
+    )
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .downcast_ref::<crate::control::AgentRejected>()
+            .is_some()
+    );
+    assert!(!output.exists());
     let renewed = transfer::remote(
         &socket,
         &grant,

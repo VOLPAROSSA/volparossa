@@ -1,3 +1,6 @@
+#[path = "admission_tests.rs"]
+mod admission_tests;
+
 use std::{io, path::PathBuf};
 
 use volparossa_routing::HelperProtocolError;
@@ -250,7 +253,7 @@ async fn flow_acquire_real_local_branches_preserve_metadata_capacity_and_poison_
     observation.record(Stage::HelperAcquire, Reason::HelperTimeout);
     assert!(matches!(
         transport
-            .acquire_flow(&helper, 50_000, &mut observation)
+            .acquire_flow(&helper, 50_000, &mut observation, || true)
             .await,
         Err(MptcpTransportError::InvalidMetadata),
     ));
@@ -263,7 +266,7 @@ async fn flow_acquire_real_local_branches_preserve_metadata_capacity_and_poison_
         .collect::<Vec<_>>();
     assert!(matches!(
         transport
-            .acquire_flow(&helper, 50_000, &mut observation)
+            .acquire_flow(&helper, 50_000, &mut observation, || true)
             .await,
         Err(MptcpTransportError::Io(error)) if error.kind() == io::ErrorKind::Other,
     ));
@@ -276,7 +279,7 @@ async fn flow_acquire_real_local_branches_preserve_metadata_capacity_and_poison_
     drop(unknown);
     assert!(matches!(
         transport
-            .acquire_flow(&helper, 50_000, &mut observation)
+            .acquire_flow(&helper, 50_000, &mut observation, || true)
             .await,
         Err(MptcpTransportError::AcquireUnconfirmed),
     ));
