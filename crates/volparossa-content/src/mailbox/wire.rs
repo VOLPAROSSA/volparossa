@@ -189,6 +189,35 @@ pub struct MailboxReceipt {
 }
 
 impl MailboxReceipt {
+    /// Verify a previously received provider ACK for the owner's original grant and message.
+    /// The signature attests its issuance, including the original request digest.
+    ///
+    /// # Errors
+    /// Rejects an unexpected provider, altered evidence, or an ACK issued outside the grant.
+    pub fn verify_stored_ack(
+        bytes: &[u8],
+        handoff: &super::import::VerifiedImportReceipt,
+        provider: &[u8; 32],
+        observed: u64,
+    ) -> Result<Self, MailboxError> {
+        let envelope: Envelope = decode_canonical(bytes, MAX_WIRE_FRAME)?;
+        let issued = envelope.body.as_ref().ok_or(MailboxError::Invalid)?.created;
+        let grant = handoff.grant();
+        if issued > observed
+            || issued >= handoff.expires()
+            || !grant.provider_keys().contains(provider)
+        {
+            return Err(MailboxError::Invalid);
+        }
+        grant.check_time(issued)?;
+        let command = MailboxCommand {
+            operation: MailboxOperation::Acknowledge,
+            message_id: Some(*handoff.message_id()),
+            manifest: None,
+        };
+        check_receipt(envelope, None, grant, &command, provider, issued)
+    }
+
     /// Original provider signature, retaining exact request and grant correlation.
     pub fn encode(&self) -> Vec<u8> {
         self.envelope.encode_to_vec()
@@ -726,11 +755,29 @@ fn decode_receipt(
     provider: &[u8; 32],
     now: u64,
 ) -> Result<MailboxReceipt, MailboxError> {
-    let envelope: Envelope = decode_canonical(bytes, MAX_WIRE_FRAME)?;
+    check_receipt(
+        decode_canonical(bytes, MAX_WIRE_FRAME)?,
+        Some(request_id),
+        grant,
+        command,
+        provider,
+        now,
+    )
+}
+
+fn check_receipt(
+    envelope: Envelope,
+    request_id: Option<&[u8; 32]>,
+    grant: &VerifiedMailboxGrant,
+    command: &MailboxCommand,
+    provider: &[u8; 32],
+    now: u64,
+) -> Result<MailboxReceipt, MailboxError> {
     let key = VerifyingKey::from_bytes(provider).map_err(|_| MailboxError::Invalid)?;
     let body = verify_envelope(&envelope, &key, RECEIPT_TYPE, AUTH_LIFETIME, now)?;
     let payload: ReceiptPayload = decode_canonical(&body.payload, MAX_WIRE_FRAME)?;
-    if payload.request_id.as_slice() != request_id
+    let signed_request: [u8; 32] = fixed(&payload.request_id)?;
+    if request_id.is_some_and(|expected| *expected != signed_request)
         || payload.grant_id.as_slice() != grant.grant_id()
         || payload.operation != command.operation as i32
         || payload.retained_until > grant.validity().expires
