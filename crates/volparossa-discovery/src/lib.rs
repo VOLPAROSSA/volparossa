@@ -968,8 +968,26 @@ impl AddressAdmissions {
     }
 }
 
+/// Locally issued application operations, excluding autonomous DHT and Identify traffic.
+#[cfg(feature = "internal-test-hooks")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExplicitPeerActionsForTest {
+    /// Direct dials requested explicitly by the application.
+    pub dials: usize,
+    /// Peer addresses the application asked to remember.
+    pub addresses: usize,
+    /// Exact provider identity lookups requested by the application.
+    pub provider_lookups: usize,
+    /// Broker discovery requests attempted by the application.
+    pub discovery_requests: usize,
+    /// Requests attempted on the provider service protocol.
+    pub provider_requests: usize,
+}
+
 /// Running decentralised discovery service.
 pub struct DiscoveryService {
+    #[cfg(feature = "internal-test-hooks")]
+    explicit_peer_actions: ExplicitPeerActionsForTest,
     swarm: Swarm<ScopedBehaviour>,
     configured_listeners: ConfiguredListeners,
     local_advertisement: Option<Vec<u8>>,
@@ -1054,6 +1072,8 @@ impl DiscoveryService {
             protocol_roles,
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
+            #[cfg(feature = "internal-test-hooks")]
+            explicit_peer_actions: ExplicitPeerActionsForTest::default(),
             content_provider: ContentProviderState::default(),
             dns_cache: DnsCacheState::default(),
             address_admissions: AddressAdmissions::default(),
@@ -1106,6 +1126,13 @@ impl DiscoveryService {
             .listen_on(&mut self.swarm, address)
     }
 
+    /// Test-only local counters. No peer identities, addresses or request data are retained.
+    #[cfg(feature = "internal-test-hooks")]
+    #[must_use]
+    pub const fn explicit_peer_actions_for_test(&self) -> ExplicitPeerActionsForTest {
+        self.explicit_peer_actions
+    }
+
     /// Permanently disable listener recovery without interrupting established connections.
     ///
     /// Call this before graceful actor retirement, then [`Self::stop_listening`] after draining
@@ -1128,6 +1155,10 @@ impl DiscoveryService {
     ///
     /// Returns an error when libp2p rejects the peer-bound dial address.
     pub fn dial_peerlink(&mut self, peerlink: &PeerLink) -> Result<(), DiscoveryError> {
+        #[cfg(feature = "internal-test-hooks")]
+        {
+            self.explicit_peer_actions.dials += 1;
+        }
         if !private_address_is_local(&peerlink.dial_address()) {
             return Err(DiscoveryError::PeerAddress);
         }
@@ -1146,6 +1177,10 @@ impl DiscoveryService {
         peer_id: PeerId,
         address: &Multiaddr,
     ) -> Result<(), DiscoveryError> {
+        #[cfg(feature = "internal-test-hooks")]
+        {
+            self.explicit_peer_actions.addresses += 1;
+        }
         self.add_kademlia_address(peer_id, address, AddressSource::Known)
             .map(|_| ())
     }

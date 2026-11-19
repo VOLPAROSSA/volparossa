@@ -305,6 +305,7 @@ impl DiscoveryRuntime {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{BehaviourEvent, SwarmEvent};
     use super::*;
     use crate::discovery::{AdvertisementPayloadHash, DirectRelayCapability};
     use volparossa_discovery::DiscoveryEvent;
@@ -328,16 +329,27 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one real four-swarm lookup and withdrawal lifecycle"
-    )]
     async fn exact_content_lookup_reaches_unknown_provider_through_broker_and_rejects_empty() {
         if isolate() {
             return;
         }
-        let (mut client, state, _client_dir) =
-            crate::discovery::tests::retirement_runtime_fixture();
+        // Both a reciprocal participant and a client-only node use the same protected RPC.
+        for reciprocal in [true, false] {
+            Box::pin(check_exact_lookup(reciprocal)).await;
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep the four real actors and withdrawal in one lifecycle"
+    )]
+    async fn check_exact_lookup(reciprocal: bool) {
+        let (mut client, state, _client_dir) = if reciprocal {
+            crate::discovery::tests::retirement_runtime_fixture()
+        } else {
+            crate::discovery::tests::client_only_runtime_fixture()
+        };
+        let client_peer = *client.service.local_peer_id();
         let (mut broker, _, _broker_dir) = crate::discovery::tests::retirement_runtime_fixture();
         let (mut provider, _, _provider_dir) =
             Box::pin(super::super::tests::registered_content_runtime()).await;
@@ -394,6 +406,7 @@ mod tests {
                 .content_provider_address_known(&provider_peer)
         );
         assert!(!client.service.content_provider_address_known(&contact_peer));
+        let mut expected_client_actions = client.service.explicit_peer_actions_for_test();
         for withdrawn in [false, true] {
             if withdrawn {
                 provider.withdraw_content_registration();
@@ -403,6 +416,13 @@ mod tests {
             } else {
                 vec![provider_peer, contact_peer]
             };
+            let broker_requests_before = broker
+                .service
+                .explicit_peer_actions_for_test()
+                .provider_requests;
+            let mut discovery_requests = 0;
+            let mut discovery_responses = 0;
+            let mut responding_providers = HashSet::new();
             let (reply, mut response) = tokio::sync::oneshot::channel();
             client.dispatch_content_discovery(
                 broker_peer,
@@ -416,17 +436,52 @@ mod tests {
                     tokio::select! {
                         response = &mut response => break response.unwrap(),
                         event = client.service.next_event() => if let DiscoveryEvent::Other(event) = event {
-                            if let super::super::SwarmEvent::ConnectionEstablished { peer_id, .. } = &event {
-                                assert_eq!(*peer_id, broker_peer, "client never dials a provider");
+                            if let SwarmEvent::Behaviour(BehaviourEvent::ContentDiscovery(
+                                request_response::Event::Message { peer, connection_id, message: request_response::Message::Response { .. } },
+                            )) = &event {
+                                assert_eq!(*peer, broker_peer);
+                                assert!(client.service.content_control_connection_is_current(peer, *connection_id));
+                                discovery_responses += 1;
                             }
                             let _ = client.handle_content_swarm_event(event);
                         },
-                        event = broker.service.next_event() => if let DiscoveryEvent::Other(event) = event { let _ = broker.handle_content_swarm_event(event); },
+                        event = broker.service.next_event() => if let DiscoveryEvent::Other(event) = event {
+                            if let SwarmEvent::Behaviour(BehaviourEvent::ContentDiscovery(
+                                request_response::Event::Message { peer, connection_id, message: request_response::Message::Request { .. } },
+                            )) = &event {
+                                assert_eq!(*peer, client_peer);
+                                assert!(broker.service.content_control_connection_is_current(peer, *connection_id));
+                                discovery_requests += 1;
+                            }
+                            if let SwarmEvent::Behaviour(BehaviourEvent::ContentService(
+                                request_response::Event::Message { peer, message: request_response::Message::Response { .. }, .. },
+                            )) = &event {
+                                assert!(targets.contains(peer) && responding_providers.insert(*peer));
+                            }
+                            let _ = broker.handle_content_swarm_event(event);
+                        },
                         event = provider.service.next_event() => if let DiscoveryEvent::Other(event) = event { let _ = provider.handle_content_swarm_event(event); },
                         event = contact.service.next_event() => if let DiscoveryEvent::Other(event) = event { let _ = contact.handle_content_swarm_event(event); },
                     }
                 }
             }).await.expect("bounded real broker lookup");
+            // Kademlia may independently contact an overlay participant. Check exactly
+            // what this application issued, including failed explicit dials or admissions.
+            expected_client_actions.discovery_requests += 1;
+            assert_eq!(
+                client.service.explicit_peer_actions_for_test(),
+                expected_client_actions
+            );
+            assert_eq!((discovery_requests, discovery_responses), (1, 1));
+            assert_eq!(responding_providers.len(), targets.len());
+            assert_eq!(
+                broker
+                    .service
+                    .explicit_peer_actions_for_test()
+                    .provider_requests
+                    - broker_requests_before,
+                targets.len()
+            );
             if withdrawn {
                 assert_eq!(
                     result.unwrap_err(),
