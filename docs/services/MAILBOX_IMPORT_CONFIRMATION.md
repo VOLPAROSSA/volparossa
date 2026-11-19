@@ -60,3 +60,32 @@ Signal sessions and disappearing-message policy: this handoff cannot extend app 
 or acknowledge before its real decrypt/import transaction. Calling/video media is not a
 store-and-forward mailbox feature. No message loss or exactly-once delivery is guaranteed
 across arbitrary peers and stock mail servers.
+
+## Testing an external consumer locally
+
+The `mailbox-provider-pair` test executable runs two independently keyed
+`MailboxService` instances with separate stores in one process. It uses the
+same signed local-stream protocol fixture as the CLI integration tests. Build
+it and the ordinary CLI with the locked workspace dependencies.
+
+```sh
+cargo build --locked -p volparossa --example mailbox-provider-pair --bin volparossa
+```
+
+Mount `target/debug/examples/mailbox-provider-pair` and `target/debug/volparossa`
+as sibling executables inside a disposable nonroot, loopback-only namespace.
+Start `mailbox-provider-pair <private-directory>` with an empty, owned `0700`
+directory at a canonical absolute path. Keep its stdin pipe open. The helper
+creates two test identities and uses the CLI to invite and enroll both mailbox
+owners at both providers. Once `ready` appears, `a/core.json` and `b/core.json`
+contain the CLI path, socket, identity, passphrase file, send and receive
+invitation paths and the recipient's public key. Each `grants.json` contains
+`sendGrant` and `receiveGrant`, the SHA-256 of the respective original signed
+invitations, and `expires`, a Unix time in milliseconds before either expires.
+The paired application authenticates and imports this private configuration.
+
+Closing stdin or sending SIGTERM retires the fixture's private provider state
+and published handles. The fixture lifetime is bounded to 15 minutes. The
+caller retains ownership of application handoffs and the surrounding namespace.
+Protected network routing and durable native application import require their
+own end-to-end trials.
