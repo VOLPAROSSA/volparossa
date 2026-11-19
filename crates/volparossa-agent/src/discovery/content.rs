@@ -573,6 +573,25 @@ impl DiscoveryRuntime {
         Ok(verified)
     }
 
+    fn send_lookup_offers(&mut self, waiter: RelayWaiter, offers: Vec<ContentProviderOffer>) {
+        self.content.event(if offers.is_empty() {
+            "CONTENT_LOOKUP_REPLY_EMPTY"
+        } else {
+            "CONTENT_LOOKUP_REPLY_OFFERS"
+        });
+        if let Ok(response) = ContentDiscoveryResponse::new(&waiter.request, offers) {
+            if self
+                .service
+                .send_content_discovery_response(waiter.channel, response)
+                .is_err()
+            {
+                self.content.event("CONTENT_LOOKUP_REPLY_CHANNEL_FAILED");
+            }
+        } else {
+            self.content.event("CONTENT_LOOKUP_REPLY_ENCODING_REJECTED");
+        }
+    }
+
     fn send_empty_content_response(
         &mut self,
         request: &ContentDiscoveryRequest,
@@ -833,22 +852,7 @@ impl DiscoveryRuntime {
             } else {
                 Vec::new()
             };
-            self.content.event(if offers.is_empty() {
-                "CONTENT_LOOKUP_REPLY_EMPTY"
-            } else {
-                "CONTENT_LOOKUP_REPLY_OFFERS"
-            });
-            if let Ok(response) = ContentDiscoveryResponse::new(&waiter.request, offers) {
-                if self
-                    .service
-                    .send_content_discovery_response(waiter.channel, response)
-                    .is_err()
-                {
-                    self.content.event("CONTENT_LOOKUP_REPLY_CHANNEL_FAILED");
-                }
-            } else {
-                self.content.event("CONTENT_LOOKUP_REPLY_ENCODING_REJECTED");
-            }
+            self.send_lookup_offers(waiter, offers);
         }
     }
 

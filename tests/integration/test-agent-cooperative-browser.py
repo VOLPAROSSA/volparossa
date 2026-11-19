@@ -357,6 +357,17 @@ class CooperativeInventoryReadiness(unittest.TestCase):
         self.lines = [f"{peer}\troles={role}\treachability=0" for peer, role in self.expected.items()]
         self.complete = ("\n".join(self.lines) + "\n").encode()
 
+    def test_panel_observer_pin_only_changes_the_discovered_driver(self):
+        pins = CHECK["pins"]
+        with mock.patch.dict(pins.__globals__, TRIAL=None):
+            original = pins()
+        with mock.patch.dict(pins.__globals__, TRIAL="discovered-360m"):
+            discovered = pins()
+        self.assertNotEqual(original["revision"], discovered["revision"])
+        self.assertEqual(original["runtime"], discovered["runtime"])
+        changed = [name for name, record in original["files"].items() if record != discovered["files"][name]]
+        self.assertEqual(changed, ["scripts/smoke_cooperative_compute.py"])
+
     def test_inventory_requires_all_exact_roles_without_claiming_reachability(self):
         ready = self.check["inventory_ready"]
         self.assertTrue(ready(self.complete, self.expected))
@@ -1018,12 +1029,19 @@ class CooperativeBrowserProof(unittest.TestCase):
                 stdout.write(f"99\tlevel=1\tevent={code}\tsession=\tpath=-\n"
                              f"101\tlevel=1\tevent={code}\tsession=\tpath=-\n"
                              "102\tlevel=1\tevent=PRIVATE_UNKNOWN\tsession=\tpath=-\n".encode())
+                if node == "relay1":
+                    for reason in ("CONTENT_DISCOVERY_RELAY_QUEUE_FULL", "CONTENT_LOOKUP_RESPONSE_AUTHORIZED",
+                                   "CONTENT_LOOKUP_REPLY_EMPTY", "CONTENT_EXACT_COLLECTION_EXPIRED"):
+                        stdout.write(f"103\tlevel=1\tevent={reason}\tsession=\tpath=-\n".encode())
                 stdout.flush()
                 return subprocess.CompletedProcess(argv, 0)
             with mock.patch.object(subprocess, "run", side_effect=query):
                 result = CHECK["peer_event_windows"](work, 100)
             self.assertEqual(observed, ["relay1", "relay4", "relay5"])
-            self.assertEqual(result["windows"]["relay1"]["counts"], {"CONTENT_PROVIDER_SERVICE_EMPTY": 1})
+            self.assertEqual(result["windows"]["relay1"]["counts"], {
+                "CONTENT_PROVIDER_SERVICE_EMPTY": 1, "CONTENT_DISCOVERY_RELAY_QUEUE_FULL": 1,
+                "CONTENT_LOOKUP_RESPONSE_AUTHORIZED": 1, "CONTENT_LOOKUP_REPLY_EMPTY": 1,
+                "CONTENT_EXACT_COLLECTION_EXPIRED": 1})
             self.assertEqual(result["windows"]["relay4"]["counts"], {"CONTENT_PROVIDER_WITHDRAWN": 1})
             self.assertEqual(result["windows"]["relay5"], {"state": "query_failed"})
             self.assertNotIn("PRIVATE_UNKNOWN", repr(result))

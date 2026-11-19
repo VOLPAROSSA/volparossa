@@ -1,9 +1,9 @@
 //! Request-isolated refresh of enrolled provider identities; no publication or mailbox keys.
 
 use super::{
-    BTreeMap, COLLECTION_TIMEOUT, ConnectionId, ContentDiscoveryResponse, ContentProviderOffer,
-    ContentServiceRequest, ContentServiceResponse, DiscoveryRuntime, HashMap, HashSet, Instant,
-    Libp2pPeerId, MAX_PENDING, OutboundId, RelayWaiter, kad, request_response, unix_millis,
+    BTreeMap, COLLECTION_TIMEOUT, ConnectionId, ContentProviderOffer, ContentServiceRequest,
+    ContentServiceResponse, DiscoveryRuntime, HashMap, HashSet, Instant, Libp2pPeerId, MAX_PENDING,
+    OutboundId, RelayWaiter, kad, lookup_authority_event, request_response, unix_millis,
     unix_seconds, verify_provider,
 };
 
@@ -45,8 +45,13 @@ impl DiscoveryRuntime {
         if targets
             .iter()
             .any(|peer| *peer == waiter.peer || peer == self.service.local_peer_id())
-            || self.content.pending() + targets.len() + 1 > MAX_PENDING
         {
+            self.content.event("CONTENT_DISCOVERY_RELAY_SELF_REJECTED");
+            self.send_empty_content_response(&waiter.request, waiter.channel);
+            return;
+        }
+        if self.content.pending() + targets.len() + 1 > MAX_PENDING {
+            self.content.event("CONTENT_DISCOVERY_RELAY_QUEUE_FULL");
             self.send_empty_content_response(&waiter.request, waiter.channel);
             return;
         }
@@ -77,7 +82,13 @@ impl DiscoveryRuntime {
         let Some(job) = self.content.exact.jobs.get_mut(&key) else {
             return;
         };
-        if job.deadline <= Instant::now() || self.content.pending() >= MAX_PENDING {
+        if job.deadline <= Instant::now() {
+            self.content.event("CONTENT_EXACT_COLLECTION_EXPIRED");
+            self.finish_exact_content_peer(key, peer, None);
+            return;
+        }
+        if self.content.pending() >= MAX_PENDING {
+            self.content.event("CONTENT_DISCOVERY_RELAY_QUEUE_FULL");
             self.finish_exact_content_peer(key, peer, None);
             return;
         }
@@ -94,12 +105,16 @@ impl DiscoveryRuntime {
                 self.content.event("CONTENT_EXACT_ADDRESS_QUERY_STARTED");
                 return;
             }
+            self.content
+                .event("CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE");
         } else if let Ok(id) = self
             .service
             .request_content_service(&peer, ContentServiceRequest::new())
         {
             self.content.exact.requests.insert(id, (key, peer));
             return;
+        } else {
+            self.content.event("CONTENT_EXACT_ADDRESS_REQUEST_REJECTED");
         }
         self.finish_exact_content_peer(key, peer, None);
     }
@@ -200,12 +215,19 @@ impl DiscoveryRuntime {
         if !job.remaining.remove(&peer) {
             return;
         }
-        if job.deadline > Instant::now()
-            && let Some(offer) = offer
-        {
-            job.offers.insert(peer, offer);
+        let offer_event = offer.map(|bytes| {
+            if job.deadline > Instant::now() {
+                job.offers.insert(peer, bytes);
+                "CONTENT_PROVIDER_OFFER_VERIFIED"
+            } else {
+                "CONTENT_PROVIDER_OFFER_LATE"
+            }
+        });
+        let complete = job.remaining.is_empty();
+        if let Some(event) = offer_event {
+            self.content.event(event);
         }
-        if job.remaining.is_empty() {
+        if complete {
             self.finish_exact_content_lookup(key, true);
         }
     }
@@ -233,16 +255,21 @@ impl DiscoveryRuntime {
             .service
             .content_control_connection_is_current(&job.waiter.peer, job.waiter.connection)
         {
+            self.content.event("CONTENT_LOOKUP_REPLY_CONNECTION_LOST");
             return;
         }
-        let now = unix_millis();
-        let valid = accept
-            && job.deadline > Instant::now()
-            && self.roles.relay
-            && self
-                .local_relay_snapshot
-                .as_ref()
-                .is_some_and(|cap| cap.expires_at_ms > now);
+        let within_deadline = job.deadline > Instant::now();
+        let relay_current = self
+            .local_relay_snapshot
+            .as_ref()
+            .is_some_and(|cap| cap.expires_at_ms > unix_millis());
+        let valid = accept && within_deadline && self.roles.relay && relay_current;
+        self.content.event(lookup_authority_event(
+            accept,
+            within_deadline,
+            self.roles.relay,
+            relay_current,
+        ));
         let offers = if valid {
             job.offers
                 .into_iter()
@@ -254,11 +281,7 @@ impl DiscoveryRuntime {
         } else {
             Vec::new()
         };
-        if let Ok(response) = ContentDiscoveryResponse::new(&job.waiter.request, offers) {
-            let _ = self
-                .service
-                .send_content_discovery_response(job.waiter.channel, response);
-        }
+        self.send_lookup_offers(job.waiter, offers);
         self.content.event("CONTENT_EXACT_LOOKUP_FINISHED");
     }
 
@@ -271,6 +294,7 @@ impl DiscoveryRuntime {
             .filter_map(|(key, job)| (job.deadline <= now).then_some(*key))
             .collect();
         for key in expired {
+            self.content.event("CONTENT_EXACT_COLLECTION_EXPIRED");
             self.finish_exact_content_lookup(key, false);
         }
     }
@@ -407,6 +431,7 @@ mod tests {
         assert!(!client.service.content_provider_address_known(&contact_peer));
         let mut expected_client_actions = client.service.explicit_peer_actions_for_test();
         for withdrawn in [false, true] {
+            broker.content.events.clear();
             if withdrawn {
                 provider.withdraw_content_registration();
             }
@@ -481,7 +506,19 @@ mod tests {
                     - broker_requests_before,
                 targets.len()
             );
+            assert!(
+                broker
+                    .content
+                    .events
+                    .contains(&"CONTENT_LOOKUP_RESPONSE_AUTHORIZED")
+            );
             if withdrawn {
+                assert!(
+                    broker
+                        .content
+                        .events
+                        .contains(&"CONTENT_LOOKUP_REPLY_EMPTY")
+                );
                 assert!(
                     broker
                         .content
@@ -505,6 +542,18 @@ mod tests {
                         .contains(&"CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED")
                 );
             } else {
+                assert!(
+                    broker
+                        .content
+                        .events
+                        .contains(&"CONTENT_PROVIDER_OFFER_VERIFIED")
+                );
+                assert!(
+                    broker
+                        .content
+                        .events
+                        .contains(&"CONTENT_LOOKUP_REPLY_OFFERS")
+                );
                 let offers = result.expect("fresh signed offers from both exact peers");
                 assert_eq!(
                     offers

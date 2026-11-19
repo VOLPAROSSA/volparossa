@@ -43,6 +43,7 @@ STATUS_PHASES = frozenset(("wrapper-launch", "namespace-validation", "browser-st
     "cancel-task", "cancel-admitted", "cancel-authorized", "cancelled", "panel-cleanup",
     "result-validation", "browser-stop", "complete"))
 STATUS_ERRORS = frozenset(("CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "INTERRUPTED", "SCRIPT_FAILED",
+    "FIRST_TASK_WAIT_EXPIRED", "CANCEL_WAIT_EXPIRED",
     "busy", "invalid_request", "handshake_required", "no_such_task", "execution_failed",
     "cleanup_unconfirmed", "unavailable", "not_configured", "invalid_response", "invalid_question",
     "invalid_context", "public_consent_required", "invalid_license", "deadline_exceeded", "storage_bound"))
@@ -125,6 +126,17 @@ PROVIDER_LIFECYCLE_EVENT_CODES = frozenset(("CONTENT_PROVIDER_REGISTERED",
     "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING", "CONTENT_PROVIDER_REGISTRATION_RECOVERED",
     "CONTENT_PROVIDER_REGISTRATION_FAILED"))
 PEER_DISCOVERY_EVENT_CODES = PROVIDER_LIFECYCLE_EVENT_CODES | {
+    code for code in DISCOVERY_FAILURE_EVENT_CODES if code.startswith("CONTENT_DISCOVERY_RELAY_")
+} | {
+    "CONTENT_EXACT_COLLECTION_EXPIRED", "CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE",
+    "CONTENT_EXACT_ADDRESS_PROVENANCE_REJECTED", "CONTENT_EXACT_ADDRESS_TARGET_MISSING",
+    "CONTENT_EXACT_ADDRESS_HINTS_UNAVAILABLE", "CONTENT_EXACT_ADDRESS_REQUEST_REJECTED",
+    "CONTENT_LOOKUP_COLLECTION_REJECTED", "CONTENT_LOOKUP_RESPONSE_EXPIRED",
+    "CONTENT_LOOKUP_RELAY_ROLE_REJECTED", "CONTENT_LOOKUP_RELAY_AUTHORITY_REJECTED",
+    "CONTENT_LOOKUP_RESPONSE_AUTHORIZED", "CONTENT_LOOKUP_REPLY_CONNECTION_LOST",
+    "CONTENT_LOOKUP_REPLY_EMPTY", "CONTENT_LOOKUP_REPLY_OFFERS",
+    "CONTENT_LOOKUP_REPLY_CHANNEL_FAILED", "CONTENT_LOOKUP_REPLY_ENCODING_REJECTED",
+    "CONTENT_PROVIDER_OFFER_LATE",
     "CONTENT_EXACT_LOOKUP_STARTED", "CONTENT_EXACT_LOOKUP_FINISHED",
     "CONTENT_EXACT_ADDRESS_QUERY_STARTED", "CONTENT_EXACT_RESOLVED_REQUEST_SENT",
     "CONTENT_EXACT_ADDRESS_UNAVAILABLE", "CONTENT_PROVIDER_SERVICE_EMPTY",
@@ -399,6 +411,11 @@ def account_home(work, cleanup=False):
 
 def pins():
     value = read(PINS)
+    discovered = value.pop("discovered_driver")
+    if TRIAL == "discovered-360m":
+        # The six other reviewed files are identical on this descendant of the historical Browser pin.
+        value["revision"] = discovered["revision"]
+        value["files"]["scripts/smoke_cooperative_compute.py"] = discovered["file"]
     require(value["version"] == 1 and value["repository"] == "https://github.com/VOLPAROSSA/volparossa-browser"
             and re.fullmatch(r"[0-9a-f]{40}", value["revision"]) and value["revision"] != "0" * 40
             and set(value["files"]) == set(FILES), "exact reviewed browser source pin required")
