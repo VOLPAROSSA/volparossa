@@ -14,6 +14,9 @@ private_storage_fragments_private() {
             finish) storage_observe_minimum=16 ;;
         esac
     fi
+    case ${private_storage_maintenance:-no}:${storage_consumer_profile_version:-7}:$1 in
+        yes:10:restore|yes:10:finish) set -- "$@" --matrix-route ;;
+    esac
     set -- timeout --signal=TERM --kill-after=5s "${storage_phase_timeout_seconds:-1500}s" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
@@ -25,7 +28,7 @@ private_storage_fragments_private() {
             "$storage_observe_minimum" -- "$@"
     fi
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
-      STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} "$@"
+      STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} STORAGE_PROOF_ROUTE_POLICY=${consumer_route_policy:-} "$@"
 }
 
 private_storage_fragments_cleanup() {
@@ -37,6 +40,11 @@ private_storage_fragments_cleanup() {
 
 private_storage_fragments_phase_start() {
     storage_phase=$1
+    case ${private_storage_maintenance:-no}:${storage_consumer_profile_version:-7}:$storage_phase in
+        yes:10:restore|yes:10:finish)
+            storage_consumer_phase_start "$storage_phase" || fail MAINTENANCE_MATRIX_START_FAILED
+            return ;;
+    esac
     if [ "${private_storage_maintenance:-no}" = yes ]; then
         private_storage_maintenance_phase_layout "$storage_phase" \
             >"$WORK/private-storage-fragments-$storage_phase-layout.json" || fail MAINTENANCE_SCOPE_INVALID
@@ -50,6 +58,11 @@ private_storage_fragments_phase_start() {
 
 private_storage_fragments_phase_finish() {
     storage_expected_flows=$1
+    case ${private_storage_maintenance:-no}:${storage_consumer_profile_version:-7}:$storage_phase in
+        yes:10:restore|yes:10:finish)
+            storage_consumer_phase_finish "$storage_expected_flows" || fail MAINTENANCE_MATRIX_FINISH_FAILED
+            return ;;
+    esac
     if [ "${private_storage_maintenance:-no}" = yes ]; then
         private_storage_maintenance_control_current || fail MAINTENANCE_CONTROL_CHANGED
     fi
@@ -227,6 +240,10 @@ private_storage_fragments_run() {
     fi
     private_storage_fragments_usage uploaded_usage
 
+    if [ "${private_storage_maintenance:-no}:${storage_consumer_profile_version:-7}" = yes:10 ]; then
+        PHASE=private-storage-maintenance-control-matrix
+        storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
+    fi
     PHASE=private-storage-fragments-withdrawal
     # A remains stopped with its original store intact; only B/C serve restores.
     private_storage_fragments_reopen relay5 relay3
@@ -257,6 +274,9 @@ private_storage_fragments_run() {
     private_storage_fragments_usage deleted_usage
     if [ "${private_storage_maintenance:-no}" = yes ]; then
         private_storage_consumer_run
+        if [ "${cloud_upload_maintenance:-no}" = yes ]; then
+            private_cloud_upload_run
+        fi
     fi
     benchmark_disconnect_route private-storage-fragments || fail FRAGMENTS_ROUTE_CLEANUP_FAILED
     private_storage_fragments_cleanup || fail FRAGMENTS_PRIVATE_CLEANUP_FAILED
@@ -264,7 +284,9 @@ private_storage_fragments_run() {
         python3 -B "$source_directory/tests/integration/cloud-private-upload-smoke.py" evidence "$WORK" \
             "$WORK/cloud-private-upload-evidence.json" >/dev/null || fail CLOUD_PRIVATE_UPLOAD_EVIDENCE_INVALID
     elif [ "${private_storage_maintenance:-no}" = yes ]; then
-        python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" evidence "$WORK" \
+        storage_evidence_command=evidence
+        if [ "${storage_consumer_profile_version:-7}" = 10 ]; then storage_evidence_command=evidence-matrix; fi
+        python3 -B "$source_directory/tests/integration/private-storage-maintenance-smoke.py" "$storage_evidence_command" "$WORK" \
             "$WORK/private-storage-maintenance-evidence.json" >/dev/null || fail MAINTENANCE_EVIDENCE_INVALID
     elif [ "${cloud_private_file:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/cloud-private-file-smoke.py" evidence "$WORK" \

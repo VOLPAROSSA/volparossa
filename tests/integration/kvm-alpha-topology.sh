@@ -21,6 +21,7 @@ signal_backup_fragments=no
 signal_mailbox=no
 private_storage_fragments=no
 private_storage_maintenance=no
+cloud_upload_maintenance=no
 storage_fixture_correlation=no
 image_snapshot=no
 cloud_private_file=no
@@ -84,7 +85,7 @@ usage() {
         '         --scenario content-provider accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 HEX' \
         '         --scenario protected-quote checks signed refusal and authority; it does not prove protected execution.' \
         '         or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 HEX (not both)' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|cloud-upload-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -180,6 +181,16 @@ print_plan() {
             '  remove local ciphertext, stop A, restore twice via B/C and decrypt/verify every original hash;' \
             '  retain owner keys privately, delete every remote copy and prove exact cleanup/host state;' \
             '  no running Immich, mobile sync or general serverless availability claim.'
+        return
+    fi
+    if [ "$cloud_upload_maintenance" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA cloud-upload-maintenance protected network smoke plan:' \
+            '  preserve the full finite core and pinned Image/Cloud v1 maintenance proof;' \
+            '  separate pinned Cloud v2: authenticated empty catalog, actual PUT and automatic finite enrollment;' \
+            '  measure early A replacements, withdraw A, require remaining repair and two cold authenticated GETs;' \
+            '  retain all eleven identities, delete every live copy and independently verify zero provider usage;' \
+            '  separate captures, private cleanup and unchanged host state; synthetic input, no full account server.'
         return
     fi
     if [ "$private_storage_maintenance" = yes ]; then
@@ -802,6 +813,7 @@ while [ "$#" -gt 0 ]; do
             signal_mailbox=no
             private_storage_fragments=no
             private_storage_maintenance=no
+            cloud_upload_maintenance=no
             storage_fixture_correlation=no
             image_snapshot=no
             cloud_private_file=no
@@ -848,6 +860,7 @@ while [ "$#" -gt 0 ]; do
                 private-storage-handoff) scenario=content-custody; private_storage_handoff=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-fragments) scenario=content-custody; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
                 private-storage-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; storage_consumer_profile_version=10; storage_fixture_correlation=yes; wifi_link=no; uplink_link=no ;;
+                cloud-upload-maintenance) scenario=content-custody; private_storage_fragments=yes; private_storage_maintenance=yes; cloud_upload_maintenance=yes; storage_consumer_profile_version=10; wifi_link=no; uplink_link=no ;;
                 image-snapshot) scenario=content-custody; private_storage_fragments=yes; image_snapshot=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-file) scenario=content-custody; private_storage_fragments=yes; cloud_private_file=yes; wifi_link=no; uplink_link=no ;;
                 cloud-private-upload) scenario=content-custody; private_storage_fragments=yes; cloud_private_upload=yes; wifi_link=no; uplink_link=no ;;
@@ -1204,13 +1217,22 @@ if [ "$private_storage_maintenance" = yes ]; then
         storage-consumer-maintenance.mjs storage-consumer-maintenance-pins.json storage-consumer-maintenance-pins-v2.json \
         storage-consumer-maintenance-pins-v3.json storage-consumer-maintenance-pins-v4.json storage-consumer-maintenance-pins-v5.json \
         storage-consumer-maintenance-pins-v6.json storage-consumer-maintenance-pins-v7.json \
-        storage-consumer-maintenance-pins-v8.json storage-consumer-maintenance-pins-v9.json storage-consumer-maintenance-pins-v10.json \
+        storage-consumer-maintenance-pins-v8.json storage-consumer-maintenance-pins-v9.json storage-consumer-maintenance-pins-v10.json storage-consumer-maintenance-pins-v10-current.json \
         storage-consumer-control-underlay.sh storage-consumer-control-underlay.py \
         storage-consumer-network.sh storage-consumer-network.py storage-consumer-route-sampler.py \
         storage-consumer-maintenance-evidence.py storage-consumer-maintenance-provision.py \
         image-snapshot-provision.py agent-private-task-code.py agent-private-task-code-pins.json; do
         [ -f "$source_directory/tests/integration/$maintenance_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$maintenance_fixture" ] || exit 69
+    done
+fi
+if [ "$cloud_upload_maintenance" = yes ]; then
+    for upload_fixture in cloud-upload-maintenance-smoke.sh cloud-upload-maintenance-smoke.py \
+        cloud-upload-maintenance.mjs cloud-upload-maintenance-pins.json cloud-upload-maintenance-pins-v2.json \
+        cloud-upload-maintenance-pins-v3.json cloud-upload-maintenance-pins-v4.json cloud-upload-maintenance-pins-v5.json cloud-upload-maintenance-pins-v6.json cloud-upload-maintenance-pins-v6-current.json \
+        cloud-upload-maintenance-evidence.py cloud-upload-maintenance-provision.py; do
+        [ -f "$source_directory/tests/integration/$upload_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$upload_fixture" ] || exit 69
     done
 fi
 if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
@@ -1224,7 +1246,7 @@ if [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     done
 fi
 if [ "$cloud_private_upload" = yes ]; then
-    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins.json cloud-retained-upload.py cloud-retained-upload-pins.json; do
+    for upload_fixture in cloud-private-upload-smoke.sh cloud-private-upload-smoke.py cloud-private-upload-pins-paired.json cloud-retained-upload.py cloud-retained-upload-pins.json; do
         [ -f "$source_directory/tests/integration/$upload_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$upload_fixture" ] || exit 69
     done
@@ -2353,6 +2375,9 @@ cleanup() {
     if [ "$private_storage_maintenance" = yes ] && command -v private_storage_maintenance_join >/dev/null 2>&1; then
         private_storage_maintenance_join || original_status=1
     fi
+    if [ "$cloud_upload_maintenance" = yes ] && command -v private_cloud_upload_cleanup >/dev/null 2>&1; then
+        private_cloud_upload_cleanup || original_status=1
+    fi
     if [ "$private_storage_maintenance" = yes ] && command -v private_storage_consumer_cleanup >/dev/null 2>&1; then
         private_storage_consumer_cleanup || original_status=1
     fi
@@ -2671,6 +2696,9 @@ cleanup() {
         image_snapshot_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_maintenance" = yes ]; then
         private_storage_maintenance_finalize_report "$original_status" || original_status=1
+        if [ "$cloud_upload_maintenance" = yes ]; then
+            private_cloud_upload_finalize_report "$original_status" || original_status=1
+        fi
     elif [ "$private_storage_fragments" = yes ]; then
         private_storage_fragments_finalize_report "$original_status" || original_status=1
     elif [ "$private_storage_handoff" = yes ]; then
@@ -2876,6 +2904,10 @@ if [ "$private_storage_maintenance" = yes ]; then
     . "$source_directory/tests/integration/storage-consumer-control-underlay.sh"
     # shellcheck source=tests/integration/storage-consumer-network.sh
     . "$source_directory/tests/integration/storage-consumer-network.sh"
+fi
+if [ "$cloud_upload_maintenance" = yes ]; then
+    # shellcheck source=tests/integration/cloud-upload-maintenance-smoke.sh
+    . "$source_directory/tests/integration/cloud-upload-maintenance-smoke.sh"
 fi
 if [ "$signal_backup_fragments" = yes ]; then
     # shellcheck source=tests/integration/signal-backup-fragments-smoke.sh
@@ -3159,8 +3191,30 @@ if [ "$private_storage_maintenance" = yes ]; then
         "$WORK/bin/storage-consumer-maintenance-pins-v9.json"
     install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v10.json" \
         "$WORK/bin/storage-consumer-maintenance-pins-v10.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/storage-consumer-maintenance-pins-v10-current.json" \
+        "$WORK/bin/storage-consumer-maintenance-pins-v10-current.json"
     install -o root -g root -m 0444 "$source_directory/tests/integration/agent-private-task-code-pins.json" \
         "$WORK/bin/agent-private-task-code-pins.json"
+fi
+if [ "$cloud_upload_maintenance" = yes ]; then
+    for upload_script in cloud-upload-maintenance-smoke.py cloud-upload-maintenance.mjs \
+        cloud-upload-maintenance-evidence.py cloud-upload-maintenance-provision.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$upload_script" "$WORK/bin/$upload_script"
+    done
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v2.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v2.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v3.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v3.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v4.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v4.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v5.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v5.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v6.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v6.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-upload-maintenance-pins-v6-current.json" \
+        "$WORK/bin/cloud-upload-maintenance-pins-v6-current.json"
 fi
 if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_private_upload" = yes ]; then
     if [ "${IMAGE_HANDOFF_SHA256:-}" ]; then
@@ -3174,7 +3228,7 @@ if [ "$image_snapshot" = yes ] || [ "$cloud_private_file" = yes ] || [ "$cloud_p
 fi
 if [ "$cloud_private_upload" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/cloud-private-upload-smoke.py" "$WORK/bin/cloud-private-upload-smoke.py"
-    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins.json" "$WORK/bin/cloud-private-upload-pins.json"
+    install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-private-upload-pins-paired.json" "$WORK/bin/cloud-private-upload-pins-paired.json"
     if [ "${CLOUD_UPLOAD_PROFILE:-ordinary}" = retained-owner ]; then
         install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-retained-upload.py" "$WORK/bin/cloud-retained-upload.py"
         install -o root -g root -m 0444 "$source_directory/tests/integration/cloud-retained-upload-pins.json" "$WORK/bin/cloud-retained-upload-pins.json"
@@ -6496,6 +6550,8 @@ start_privacy_observers() {
             [ "$private_storage_maintenance" = yes ] || return 1 ;;
         private-storage-fragments-consumer-publish-privacy|private-storage-fragments-consumer-exercise-privacy|private-storage-fragments-consumer-finish-privacy)
             [ "$private_storage_maintenance" = yes ] || return 1 ;;
+        private-storage-fragments-cloud-upload-upload-privacy|private-storage-fragments-cloud-upload-exercise-privacy|private-storage-fragments-cloud-upload-finish-privacy)
+            [ "$cloud_upload_maintenance" = yes ] || return 1 ;;
         private-storage-fragments-upload-privacy|private-storage-fragments-restore-privacy|private-storage-fragments-finish-privacy)
             [ "$private_storage_fragments" = yes ] || return 1 ;;
         private-storage-handoff-upload-privacy|private-storage-handoff-pending-privacy|private-storage-handoff-complete-privacy|private-storage-handoff-restore_b-privacy|private-storage-handoff-restore_c-privacy|private-storage-handoff-finish-privacy)

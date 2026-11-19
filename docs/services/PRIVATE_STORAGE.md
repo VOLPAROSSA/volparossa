@@ -454,6 +454,15 @@ the full uncommitted prefix. Once FINALIZE was sent, only the signed PROGRESS
 check described above can recover a lost response. An explicit control-policy
 refusal ends the attempt.
 
+The shared consumer VM and its Cloud upload continuation stage Image
+`21988efc1ba112a9840e0f052f4e4d0dc56a9d63` and Cloud
+`08be97111c323df95af68b3331eabd260957d0e4` using `--current-apps`.
+Each phase checks its manifest digest, original source files, vendored Image
+helpers and Node runtime. The upload continuation requires the same candidate
+pair in the shared phase. Original v10/v6 receipts still use their recorded
+manifests. The joined VM must complete both provider lifecycles to establish
+acceptance for these candidate revisions.
+
 ### Explicit usage
 
 The examples are templates: replace the uppercase key/hash placeholders with independently
@@ -1073,3 +1082,12 @@ Each trial retains its own protected-path, private-cleanup and host-observation
 scope. They do not establish independent physical failure domains, automatic
 account/contribution recovery or general application availability. Execution uses
 the approved disposable workflow; a scenario preview is not runtime proof.
+
+Automatic enrollment and background repair of new uploads remain a separate,
+unfinished milestone. The `cloud-upload-maintenance` candidate first requires
+the complete Storage maintenance and Image/Cloud consumer proof, then tests a
+new authenticated upload under finite authority, provider withdrawal, repair,
+two cold reads across restart and deletion of all retained copies. Its profile
+uses the preceding proof's verified control underlay with separate per-phase
+captures and unchanged private-data boundaries. Historical upload success does
+not establish this longer maintenance lifecycle.

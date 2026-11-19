@@ -27,7 +27,7 @@ require, read, create = F["require"], F["read"], F["create"]
 private_file, invoke, unlock = F["private_file"], F["invoke"], F["unlock"]
 owner_root = CLOUD["owner_root"]
 RETAINED = os.environ.get("CLOUD_UPLOAD_PROFILE", "ordinary") == "retained-owner"
-PINS_PATH = HERE / ("cloud-retained-upload-pins.json" if RETAINED else "cloud-private-upload-pins.json")
+PINS_PATH = HERE / ("cloud-retained-upload-pins.json" if RETAINED else "cloud-private-upload-pins-paired.json")
 RECOVERY = runpy.run_path(str(HERE / "cloud-retained-upload.py")) if RETAINED else None
 PINS = json.loads(PINS_PATH.read_text())
 REVISION = PINS["revision"]
@@ -205,10 +205,26 @@ def preselection_events(path):
     return value
 
 
+def verify_image_source(vendor):
+    # The guest uses these three exact vendored files when running the Cloud adapter.
+    # The source record itself is already bound by the Cloud pin.
+    originals = ("scripts/immich_snapshot.py", "src/core-storage.mjs", "LICENSE")
+    image_revision = ("78cc1d6cc7012ac64bbd07408990b63ed025d127" if RETAINED
+        else "770a23fef01cb4cc69303a433b31b9df0d26b44e")
+    require(vendor["version"] == 1 and vendor["local_modifications"] is False
+        and vendor["repository"] == "https://github.com/VOLPAROSSA/volparossa-image"
+        and vendor["revision"] == image_revision
+        and set(vendor["files"]) == set(originals), "Cloud Image source differs")
+    for original in originals:
+        local = "vendor/volparossa-image/" + Path(original).name
+        require(vendor["files"][original] == dict(local=local, **PINS["files"][local]),
+            "Cloud Image file identity differs")
+
+
 def tools():
-    require(type(REVISION) is str and re.fullmatch(r"[0-9a-f]{40}", REVISION)
-            and REVISION != "0" * 40, "reviewed Cloud upload source pin required")
-    return CLOUD["tools"]()
+    source, node = CLOUD["tools"]()
+    verify_image_source(json.loads((source / "third_party/volparossa-image-source.json").read_bytes()))
+    return source, node
 
 
 def fixture(root):
@@ -217,10 +233,13 @@ def fixture(root):
 
 def prepare(root, binary, client, provider_a, provider_b, provider_c, key_a, key_b, key_c):
     global STAGE
-    STAGE = "baseline_import"
+    STAGE = "baseline_source_pins"
     tools()
+    STAGE = "baseline_owner_inputs"
     require(not list(root.iterdir()) and len({key_a, key_b, key_c}) == 3, "fresh owner and providers required")
+    STAGE = "baseline_import"
     receipt, source_url = CLOUD["import_source"](root)
+    STAGE = "baseline_import_receipt"
     require(receipt["version"] == 1 and receipt["encryption"] == "OpenPGP-AES256"
             and receipt["source_consistency"] == "strong-etag-conditional-ranges", "baseline import missing")
     cipher = root / "bundle/file.pgp"

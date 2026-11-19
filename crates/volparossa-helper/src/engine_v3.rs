@@ -660,6 +660,8 @@ pub(crate) enum BackendError {
     Kernel,
     /// Definite MPTCP connect poll timeout; retains the ordinary Kernel rejection.
     MptcpConnectPollTimedOut,
+    /// The authenticated client MPTCP worker failed to bind its selected address.
+    MptcpBindAddressInUse,
     /// Credentialed client MPTCP connect socket status: connection refused.
     MptcpConnectSocketRefused,
     /// Credentialed client MPTCP connect socket status: network unreachable.
@@ -671,6 +673,47 @@ pub(crate) enum BackendError {
     /// The worker exhausted its bounded MPTCP operation before descriptor transfer.
     MptcpConnectOperationDeadline,
     CleanupIncomplete,
+    /// Acquire-only origin; identical cleanup authority and public result to `CleanupIncomplete`.
+    AcquireCleanupIncomplete(AcquireCleanupOrigin),
+}
+
+/// Closed acquisition boundaries, never worker error text or resource identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AcquireCleanupOrigin {
+    WorkerBudget,
+    WorkerState,
+    CoordinatorDeadline,
+    CoordinatorAmbiguous,
+    CoordinatorUnavailable,
+    CoordinatorOther,
+    WorkerResponse,
+    DescriptorState,
+    DescriptorDeadline,
+}
+
+impl AcquireCleanupOrigin {
+    const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::WorkerBudget => "ACQUIRE_WORKER_BUDGET",
+            Self::WorkerState => "ACQUIRE_WORKER_STATE",
+            Self::CoordinatorDeadline => "ACQUIRE_COORDINATOR_DEADLINE",
+            Self::CoordinatorAmbiguous => "ACQUIRE_COORDINATOR_AMBIGUOUS",
+            Self::CoordinatorUnavailable => "ACQUIRE_COORDINATOR_UNAVAILABLE",
+            Self::CoordinatorOther => "ACQUIRE_COORDINATOR_OTHER",
+            Self::WorkerResponse => "ACQUIRE_WORKER_RESPONSE",
+            Self::DescriptorState => "ACQUIRE_DESCRIPTOR_STATE",
+            Self::DescriptorDeadline => "ACQUIRE_DESCRIPTOR_DEADLINE",
+        }
+    }
+}
+
+impl BackendError {
+    pub(crate) const fn with_acquire_origin(self, origin: AcquireCleanupOrigin) -> Self {
+        match self {
+            Self::CleanupIncomplete => Self::AcquireCleanupIncomplete(origin),
+            other => other,
+        }
+    }
 }
 
 /// Cancellation-safe affine boundary for privileged worker adapters.
@@ -681,7 +724,7 @@ pub(crate) enum BackendError {
 /// durable journal and systemd custody for the same helper runtime; inherited-custody adoption and
 /// crash recovery remain absent. Definitive `Err` variants guarantee no mutation,
 /// detached work, or owned descriptor survives.
-/// `CleanupIncomplete` instead means exact-lineage resources may remain only under backend-owned
+/// `CleanupIncomplete`, including its Acquire-origin variant, means exact-lineage resources may remain under backend-owned
 /// quarantine/reaper authority, so the engine must issue exact rollback/destroy. Every Acquire
 /// error closes every descriptor it created, and no error may leave *unowned* detached work.
 /// Destroy success is stronger: `ConfirmedAbsent` proves that the exact stable lineage's worker is
@@ -4434,7 +4477,11 @@ impl HelperEngine {
             } => (*owner, descriptor),
             ResolvedCall::Definite {
                 owner,
-                result: Err(BackendError::CleanupIncomplete),
+                result:
+                    Err(
+                        error @ (BackendError::CleanupIncomplete
+                        | BackendError::AcquireCleanupIncomplete(_)),
+                    ),
             } => {
                 let cleanup = self.rollback_context(*owner, request, sender).await;
                 if cleanup.response_sent {
@@ -4444,8 +4491,13 @@ impl HelperEngine {
                     if cleanup.confirmed {
                         backend_response(
                             request,
-                            BackendError::CleanupIncomplete,
-                            "TRANSPORT_SOCKET_UNAVAILABLE",
+                            error,
+                            match error {
+                                BackendError::AcquireCleanupIncomplete(origin) => {
+                                    origin.diagnostic_code()
+                                }
+                                _ => "TRANSPORT_SOCKET_UNAVAILABLE",
+                            },
                         )
                     } else {
                         response(
@@ -4471,6 +4523,7 @@ impl HelperEngine {
                             BackendError::MptcpConnectPollTimedOut => {
                                 "MPTCP_CONNECT_POLL_TIMED_OUT"
                             }
+                            BackendError::MptcpBindAddressInUse => "MPTCP_BIND_ADDRESS_IN_USE",
                             BackendError::MptcpConnectSocketRefused => {
                                 "MPTCP_CONNECT_SOCKET_REFUSED"
                             }
@@ -6308,12 +6361,15 @@ fn backend_response(
         BackendError::Invalid => HelperResult::InvalidRequest,
         BackendError::Kernel
         | BackendError::MptcpConnectPollTimedOut
+        | BackendError::MptcpBindAddressInUse
         | BackendError::MptcpConnectSocketRefused
         | BackendError::MptcpConnectSocketNetworkUnreachable
         | BackendError::MptcpConnectSocketHostUnreachable
         | BackendError::MptcpConnectSocketTimedOut
         | BackendError::MptcpConnectOperationDeadline => HelperResult::Kernel,
-        BackendError::CleanupIncomplete => HelperResult::CleanupIncomplete,
+        BackendError::CleanupIncomplete | BackendError::AcquireCleanupIncomplete(_) => {
+            HelperResult::CleanupIncomplete
+        }
     };
     response(request, result, diagnostic, None)
 }
@@ -6458,8 +6514,9 @@ mod tests {
         fail_prepare_capacity: AtomicBool,
         fail_probe_cleanup: AtomicBool,
         fail_acquire_cleanup: AtomicBool,
+        acquire_cleanup_origin: StdMutex<Option<AcquireCleanupOrigin>>,
         fail_next_acquire_kernel: AtomicBool,
-        next_acquire_diagnostic: StdMutex<Option<BackendError>>,
+        next_acquire_diagnostic: std::sync::Mutex<Option<BackendError>>,
         panic_prepare_factory: AtomicBool,
         panic_prepare_poll: AtomicBool,
         substitute_prepare_generation: AtomicBool,
@@ -6955,6 +7012,10 @@ mod tests {
             Box::pin(async move {
                 let result = if let Err(error) = functional_validation {
                     Err(error)
+                } else if let Some(origin) =
+                    *self.acquire_cleanup_origin.lock().expect("acquire origin")
+                {
+                    Err(BackendError::AcquireCleanupIncomplete(origin))
                 } else if self.fail_acquire_cleanup.load(Ordering::Acquire) {
                     Err(BackendError::CleanupIncomplete)
                 } else if self.fail_next_acquire_kernel.swap(false, Ordering::AcqRel) {
@@ -9141,6 +9202,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mptcp_bind_address_in_use_is_bound_to_request_and_preserves_context() {
+        assert_definite_mptcp_acquire(
+            BackendError::MptcpBindAddressInUse,
+            "MPTCP_BIND_ADDRESS_IN_USE",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn mptcp_connect_socket_errors_preserve_the_same_committed_route() {
         for (error, code) in [
             (
@@ -9219,6 +9289,7 @@ mod tests {
         let original = prepare_request(1);
         for error in [
             BackendError::MptcpConnectPollTimedOut,
+            BackendError::MptcpBindAddressInUse,
             BackendError::MptcpConnectSocketRefused,
             BackendError::MptcpConnectSocketNetworkUnreachable,
             BackendError::MptcpConnectSocketHostUnreachable,
@@ -10628,6 +10699,92 @@ mod tests {
                 .contains(&([7; 16], expected_generation))
         );
         assert!(state.in_flight.is_none());
+    }
+
+    #[tokio::test]
+    async fn acquire_origins_preserve_result_and_exact_rollback_with_uncertainty_dominant() {
+        use AcquireCleanupOrigin as Origin;
+        for (origin, code) in [
+            (Origin::WorkerBudget, "ACQUIRE_WORKER_BUDGET"),
+            (Origin::WorkerState, "ACQUIRE_WORKER_STATE"),
+            (Origin::CoordinatorDeadline, "ACQUIRE_COORDINATOR_DEADLINE"),
+            (
+                Origin::CoordinatorAmbiguous,
+                "ACQUIRE_COORDINATOR_AMBIGUOUS",
+            ),
+            (
+                Origin::CoordinatorUnavailable,
+                "ACQUIRE_COORDINATOR_UNAVAILABLE",
+            ),
+            (Origin::CoordinatorOther, "ACQUIRE_COORDINATOR_OTHER"),
+            (Origin::WorkerResponse, "ACQUIRE_WORKER_RESPONSE"),
+            (Origin::DescriptorState, "ACQUIRE_DESCRIPTOR_STATE"),
+            (Origin::DescriptorDeadline, "ACQUIRE_DESCRIPTOR_DEADLINE"),
+        ] {
+            for cleanup_confirmed in [false, true] {
+                let backend = Arc::new(FakeBackend::default());
+                let engine = fake_engine(
+                    Arc::clone(&backend),
+                    Arc::new(FixedClock(AtomicU64::new(100))),
+                );
+                let prepared = commit_client_context(&engine, &backend).await;
+                let (lineage, generation) = {
+                    let state = engine.inner.state.lock().await;
+                    let context = state.contexts.get(&[7; 16]).expect("committed context");
+                    (
+                        context_backend_lineage([7; 16], context),
+                        context.generation,
+                    )
+                };
+                *backend.acquire_cleanup_origin.lock().unwrap() = Some(origin);
+                backend
+                    .fail_destroy
+                    .store(!cleanup_confirmed, Ordering::Release);
+                let acquire = acquire_request_for(&prepared, 96);
+                let digest = operation_digest(&acquire).unwrap().to_vec();
+                let execution = engine.execute_with_descriptor(acquire).await;
+                assert_eq!(
+                    execution.response.result,
+                    HelperResult::CleanupIncomplete as i32
+                );
+                assert_eq!(execution.response.request_id, vec![96; 16]);
+                assert_eq!(execution.response.operation_digest, digest);
+                assert_eq!(
+                    execution.response.diagnostic_code,
+                    if cleanup_confirmed {
+                        code
+                    } else {
+                        "CLEANUP_INCOMPLETE"
+                    }
+                );
+                assert!(execution.response.outcome.is_none());
+                assert!(execution.descriptor.is_none());
+                {
+                    let calls = backend.destroy_calls.lock().unwrap();
+                    assert_eq!(calls.len(), 1);
+                    let (binding, payload) = calls[0];
+                    assert_eq!(binding.lineage, lineage);
+                    assert_eq!(binding.operation_generation, generation);
+                    assert_eq!(binding.request_id, [96; 16]);
+                    assert_eq!(binding.operation_kind, OperationKind::Acquire);
+                    assert_eq!(binding.phase, BackendPhase::Quarantined);
+                    assert_eq!(binding.action, BackendAction::Destroy);
+                    assert_eq!(payload.backend_generation, lineage.backend_generation);
+                }
+                let state = engine.inner.state.lock().await;
+                assert!(state.in_flight.is_none());
+                if cleanup_confirmed {
+                    assert!(!state.contexts.contains_key(&[7; 16]));
+                    assert!(state.cleanup_pending.is_empty());
+                } else {
+                    assert_eq!(
+                        state.contexts.get(&[7; 16]).unwrap().phase,
+                        ContextPhase::Quarantined
+                    );
+                    assert!(state.cleanup_pending.contains(&([7; 16], generation)));
+                }
+            }
+        }
     }
 
     #[tokio::test]

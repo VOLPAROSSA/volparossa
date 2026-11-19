@@ -11,6 +11,10 @@ import sys
 
 NAME = 'private-storage-maintenance-helper-acquire.json'
 MARKER = 'WORKER_TRANSPORT_ACQUIRE_FAILED'
+COORDINATOR_MARKER = 'WORKER_TRANSPORT_COORDINATOR_UNAVAILABLE'
+COORDINATOR_REASONS = ('record_absent', 'process_absent', 'lease_expired', 'liveness_lost',
+    'lease_expired_and_liveness_lost', 'dead_unspecified', 'quarantined', 'shutting_down',
+    'runtime_unavailable')
 MAX_INPUT = 4 * 1024 * 1024
 MAX_LINE = 16384
 MAX_LINES = 32768
@@ -63,8 +67,17 @@ def empty(state='observed'):
 
 
 def validate(value):
-    require(type(value) is dict and set(value) == set(empty()))
-    require(type(value['version']) is int and value['version'] == 1)
+    require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1, 2))
+    expected_keys = set(empty())
+    if value['version'] == 2:
+        expected_keys.add('coordinator_unavailable_reasons')
+    require(value.keys() == expected_keys)
+    if value['version'] == 2:
+        reasons = value['coordinator_unavailable_reasons']
+        require(value['source_state'] == 'observed' and type(reasons) is list
+            and 0 < len(reasons) <= len(COORDINATOR_REASONS))
+        require(all(type(reason) is str and reason in COORDINATOR_REASONS for reason in reasons))
+        require(reasons == sorted(set(reasons)))
     require(value['kind'] == empty()['kind'] and value['scope'] == empty()['scope'])
     require(value['diagnostic_only'] is True and all(value[key] is False for key in FALSE_FLAGS))
     require(value['source_state'] in ('observed', 'absent', 'invalid', 'unreadable', 'changed'))
@@ -128,6 +141,7 @@ def project(path):
     if offset:
         raw = raw.partition(b'\n')[2]  # Never parse an uncertain first partial line.
     rows = deque(maxlen=MAX_RECORDS)
+    coordinator_reasons = set()
     source = io.BytesIO(raw)
     for _ in range(MAX_LINES):
         line = source.readline(MAX_LINE + 1)
@@ -142,7 +156,15 @@ def project(path):
             item = json.loads(line, object_pairs_hook=unique,
                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite diagnostic')))
             fields = item.get('fields') if type(item) is dict else None
-            if type(fields) is not dict or fields.get('diagnostic_code') != MARKER:
+            if type(fields) is not dict:
+                continue
+            if fields.get('diagnostic_code') == COORDINATOR_MARKER:
+                require(fields.keys() == {'diagnostic_code', 'reason'})
+                reason = fields['reason']
+                require(type(reason) is str and reason in COORDINATOR_REASONS)
+                coordinator_reasons.add(reason)
+                continue
+            if fields.get('diagnostic_code') != MARKER:
                 continue
             require(set(fields) in ({'diagnostic_code', 'operation', 'class'},
                                    {'diagnostic_code', 'operation', 'class', 'errno'}))
@@ -156,6 +178,9 @@ def project(path):
     if source.read(1):
         value['input_truncated'] = True
     value['records'] = list(rows)
+    if coordinator_reasons:
+        # Presence in the sampled log is independent of the retained socket rows.
+        value.update(version=2, coordinator_unavailable_reasons=sorted(coordinator_reasons))
     value['projection_complete'] = not (value['input_truncated']
         or value['records_truncated'] or value['malformed_records'])
     return validate(value)

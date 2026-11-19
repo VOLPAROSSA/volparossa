@@ -8,9 +8,10 @@ private_storage_consumer_private() {
     consumer_profile_version=${storage_consumer_profile_version-7}
     case $consumer_profile_version in 7|8|9|10) ;; *) fail CONSUMER_PROFILE_INVALID; return 1 ;; esac
     set -- "$@" --profile-version "$consumer_profile_version" --network-version 2
+    # Publish observation starts before Image and includes owner cleanup.
+    # These phase-wide diagnostics do not bind an application or failed request.
     case $1:${storage_fixture_correlation:-no}:$consumer_profile_version in
-        publish:yes:10) set -- "$@" --fixture-request-stage ;;
-        publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
+        publish:yes:10|publish:yes:9|exercise:yes:9|finish:yes:9) set -- "$@" --fixture-correlation ;;
     esac
     STORAGE_PROOF_BASELINE_MS=${provider_baseline_ms:-0} \
       STORAGE_PROOF_ROUTE_SCOPE=${storage_route_scope:-} \
@@ -20,6 +21,16 @@ private_storage_consumer_private() {
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/storage-consumer-maintenance-smoke.py" "$@"
+}
+
+private_storage_consumer_release_known() {
+    # Only these closed states enter the cleanup receipt. Core output stays
+    # inside the unprivileged owner process, including on command failure.
+    if release_result=$(private_storage_consumer_private release-known "$consumer_user" "$1" \
+        "$binary_directory/volparossa" "$WORK/runtime-client/control/agent.sock" 2>/dev/null); then
+        case $release_result in no_archive|owner_confirmed|unconfirmed) printf '%s\n' "$release_result"; return ;; esac
+    fi
+    printf '%s\n' unavailable
 }
 
 private_storage_consumer_phase() {
@@ -61,6 +72,12 @@ private_storage_consumer_phase() {
             "$WORK/bin/storage-consumer-failure-boundary.py" capture "$WORK" \
             "$binary_directory/volparossa" "$consumer_phase" "${provider_baseline_ms:-0}") \
             >/dev/null 2>&1 || true
+        if [ "$consumer_phase" = publish ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
+            # The application and observer have joined. Freeze their failure first,
+            # then address each archive with its own retained identity and journal.
+            consumer_image_release=$(private_storage_consumer_release_known image)
+            consumer_cloud_release=$(private_storage_consumer_release_known cloud)
+        fi
     fi
     [ "$consumer_status" -eq 0 ] || fail CONSUMER_APPLICATION_FAILED
     # These are independent actual route, packet/control and completion checks,
@@ -102,10 +119,17 @@ private_storage_consumer_usage_snapshot() {
 private_storage_consumer_cleanup() {
     [ "${consumer_private_cleanup_complete:-no}" != yes ] || return 0
     [ -n "${consumer_user:-}" ] || return 0
-    if [ "${storage_fixture_correlation:-no}" = yes ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
+    set --
+    if [ -n "${consumer_image_release:-}" ] && [ -n "${consumer_cloud_release:-}" ]; then
+        set -- "$consumer_image_release" "$consumer_cloud_release"
+    fi
+    # Owner release results exist only after a failed shared publication.
+    # A healthy upload continuation still needs all three provider services.
+    if [ "${storage_consumer_profile_version:-7}" = 10 ] \
+        && { [ "${storage_fixture_correlation:-no}" = yes ] || [ "$#" -eq 2 ]; }; then
         private_storage_consumer_usage_snapshot || true
     fi
-    private_storage_consumer_private cleanup "$consumer_user" \
+    private_storage_consumer_private cleanup "$consumer_user" "$@" \
         >"$WORK/storage-consumer-private-cleanup.json" || return 1
     # Only an empty fixture-owned parent is removed here. Provider deletion is
     # checked separately; removing private local state never proves it.
@@ -120,10 +144,14 @@ private_storage_consumer_run() {
     jq -e 'length == 3 and all(.[]; . == {reserved_bytes:0,committed_bytes:0,leases:0})' \
         "$WORK/private-storage-fragments-deleted_usage.json" >/dev/null \
         || fail CONSUMER_INITIAL_STORE_NOT_EMPTY
-    storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
+    if [ "${storage_consumer_profile_version:-7}" != 10 ]; then
+        storage_consumer_control_prepare || fail CONSUMER_CONTROL_MATRIX_FAILED
+    fi
     if [ -e "$WORK/u" ] || [ -L "$WORK/u" ]; then fail CONSUMER_OWNER_PARENT_NOT_NEW; fi
     consumer_user=$WORK/u/m
-    consumer_longest_socket=$consumer_user/image/restored-bundle/g-xxxxxxxx/S.gpg-agent
+    # Without a per-user runtime directory, the pinned GPG agent binds inside
+    # its temporary home. Cloud catalog restoration creates the deepest home.
+    consumer_longest_socket=$consumer_user/cloud/w/catalog-read-XXXXXX/g-xxxxxxxx/S.gpg-agent
     [ "${#consumer_longest_socket}" -lt 104 ] || fail CONSUMER_SOCKET_PATH_TOO_LONG
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/u" "$consumer_user"
     # Recheck the actual new owner root in the current client mount namespace;

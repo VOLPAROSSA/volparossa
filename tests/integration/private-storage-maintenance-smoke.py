@@ -3,6 +3,7 @@
 """Real owner CLI/core maintenance over the existing disposable protected topology."""
 import base64
 import copy
+from functools import cache
 import hashlib
 import json
 import os
@@ -19,6 +20,9 @@ import time
 F = runpy.run_path(str(Path(__file__).with_name('private-storage-fragments-smoke.py')))
 SAMPLER = runpy.run_path(str(Path(__file__).with_name('private-storage-log-sampler.py')))
 CONSUMERS = runpy.run_path(str(Path(__file__).with_name('storage-consumer-maintenance-evidence.py')))
+MATRIX_PHASES = ('restore', 'finish')
+CORE_READBACKS = tuple(f'private-storage-core-{phase}-control-{moment}.json'
+    for phase in MATRIX_PHASES for moment in ('before', 'after'))
 read, require = F['read'], F['require']
 private_root, private_file, create, invoke, unlock = (F[key] for key in
     ('private_root', 'private_file', 'create', 'invoke', 'unlock'))
@@ -55,7 +59,7 @@ EXPORT_NAMES = tuple(name for name in F['EXPORT_NAMES'] if name not in
     *(f'private-storage-fragments-{name}-layout.json' for name in ('upload', 'lifecycle', 'restore', 'finish')),
     'content-provider-adaptive-private-storage-fragments-lifecycle-control.json',
     *(f'private-storage-fragments-lifecycle-privacy-{role}.json' for role in F['ROLES']))
-EXPORT_NAMES = tuple(dict.fromkeys((*EXPORT_NAMES, *CONSUMERS['EXPORT_NAMES'])))
+EXPORT_NAMES = tuple(dict.fromkeys((*EXPORT_NAMES, *CONSUMERS['EXPORT_NAMES'], *CORE_READBACKS)))
 SCOPE_FALSE = ('independent_failure_domains_proven', 'network_contribution_credit',
     'archive_encryption_proven', 'automatic_archive_discovery', 'automatic_grant_refresh',
     'contribution_resize_proven', 'full_alpha_acceptance_claimed')
@@ -753,6 +757,12 @@ def retirement_turn(value, turn, *, target=None, maximum=4):
             copy_outcomes=renewal_outcomes(refresh.get('copy_outcomes')))))
 
 
+@cache
+def matrix_network():
+    # Diagnostic-only collectors stage the original minimal module set.
+    return runpy.run_path(str(Path(__file__).with_name('storage-consumer-network.py')))
+
+
 def failure_receipt(error):
     if LIFECYCLE_DIAGNOSTIC is not None:
         return dict(version=4 if 'reconciliation' in LIFECYCLE_DIAGNOSTIC else 3,
@@ -760,9 +770,15 @@ def failure_receipt(error):
             code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
             **LIFECYCLE_DIAGNOSTIC, sampler=SAMPLER_DIAGNOSTIC or None)
     upload = UPLOAD_DIAGNOSTIC if STAGE == 'upload' else None
-    return dict(version=3 if upload is not None else 2, success=False,
+    version = 3 if upload is not None else 2
+    if STAGE == 'foreground' and TURN_DIAGNOSTIC and 'foreground_progress' in TURN_DIAGNOSTIC:
+        version = 4
+    sampler_failure = isinstance(error, SAMPLER['SamplerFailure']) or (
+        SAMPLER_DIAGNOSTIC.get('kind') == 'consumer-route-sampler-failure'
+        and isinstance(error, matrix_network()['S']['OLD']['SamplerFailure']))
+    return dict(version=version, success=False,
         kind='private-storage-maintenance-failure', stage=STAGE,
-        code='sampler_failure' if isinstance(error, SAMPLER['SamplerFailure']) else failure_code(error),
+        code='sampler_failure' if sampler_failure else failure_code(error),
         turn=TURN_DIAGNOSTIC, retirement=RETIREMENT_DIAGNOSTIC,
         retirement_turns=RETIREMENT_TURNS, repair=REPAIR_DIAGNOSTIC, repair_turns=REPAIR_TURNS,
         sampler=SAMPLER_DIAGNOSTIC or None, **(dict(upload=upload) if upload is not None else {}))
@@ -988,6 +1004,28 @@ def peer_args(root, key):
     return ['--state', root / 'foreground', '--provider-key', key, *unlock(root)]
 
 
+def foreground_progress_failure(exit_status, stdout, _stderr):
+    """Keep only the exit status and the closed diagnostic from this failed Progress call."""
+    if type(exit_status) is not int or not -128 <= exit_status <= 255 or exit_status == 0:
+        return
+    record = dict(exit_status=exit_status, diagnostic_state='missing', diagnostic=None)
+    TURN_DIAGNOSTIC['foreground_progress'] = record
+    if not stdout:
+        return
+    if len(stdout) > 1024:
+        record['diagnostic_state'] = 'oversize'
+        return
+    record['diagnostic_state'] = 'invalid'
+    try:
+        value = json.loads(stdout.decode('utf-8'), object_pairs_hook=CONSUMERS['unique'])
+        require(type(value) is dict and set(value) == {'version', 'operation', 'stage', 'category', 'agent_code'}
+            and type(value['version']) is int and value['version'] == 1 and value['operation'] == 'progress'
+            and CONSUMERS['APP']['valid_peer_failure'](value), 'foreground diagnostic')
+    except (ValueError, RecursionError):
+        return
+    record.update(diagnostic_state='observed', diagnostic=value)
+
+
 def run_turn(root, binary, client, key_b, interrupt=None, *, budget=None):
     """One real daemon-issued turn; no owner-side scheduler or direct provider socket."""
     global TURN_DIAGNOSTIC
@@ -1017,7 +1055,8 @@ def run_turn(root, binary, client, key_b, interrupt=None, *, budget=None):
             else:
                 require(interrupt == 'foreground', 'unknown interruption')
                 TURN_DIAGNOSTIC['substage'] = 'foreground_operation'
-                foreground = invoke(binary, client, ['storage', 'peer', 'progress', *peer_args(root, key_b)])
+                foreground = invoke(binary, client, ['storage', 'peer', 'progress', '--failure-diagnostic',
+                    *peer_args(root, key_b)], failure_observer=foreground_progress_failure)
                 require(foreground['committed'] is True and foreground['stored_bytes'] == len(FG),
                     'independent foreground operation not acknowledged')
         TURN_DIAGNOSTIC['substage'] = 'join_owner'
@@ -2336,6 +2375,13 @@ def validate_evidence(value, *, historical=False, previous=False):
             'all_provider_keys_match_independent_fixture_peers', 'three_provider_namespaces_distinct')),
         'private owner/provider isolation missing')
     require(set(value['network']) == {*F['PHASES'], 'lifecycle'}, 'network phase missing')
+    matrix = 'control_underlay' in value
+    if matrix:
+        require(not (historical or previous), 'historical Core matrix')
+        network = matrix_network()
+        underlay = value['control_underlay']
+        network['U']['validate'](underlay, value['expected_peers'], value['layout'], value['control_transition'])
+        snapshot_sha = hashlib.sha256(network['canonical'](underlay['after'])).hexdigest()
     current_layout, transition_sha = value['layout'], None
     if not (historical or previous):
         current_layout = CONSUMERS['validate_control_transition'](value['control_transition'],
@@ -2344,6 +2390,18 @@ def validate_evidence(value, *, historical=False, previous=False):
     else:
         require('control_transition' not in value, 'historical transition not admitted')
     for name, phase in value['network'].items():
+        if matrix and name in MATRIX_PHASES:
+            network['keys'](phase, ('layout', 'selected_route', 'privacy', 'control_privacy', 'gates',
+                'control_before_sha256', 'control_after_sha256'))
+            require(phase['control_before_sha256'] == phase['control_after_sha256'] == snapshot_sha,
+                'Core phase physical control matrix changed')
+            # Both original kernel snapshots are exported. Avoid embedding four byte-identical
+            # copies in the bounded report; replay hashes each original before this validation.
+            observed = {key: phase[key] for key in ('layout', 'selected_route', 'privacy', 'control_privacy', 'gates')}
+            observed.update(control_before=underlay['after'], control_after=underlay['after'])
+            network['validate_network'](observed, value['expected_peers'], value['layout'], name, BYTES,
+                F['SURVIVOR_READ_BYTES'], underlay, minimum=F['PHASES'][name], core=True)
+            continue
         layout = dict(value['layout'] if name == 'upload' else current_layout)
         if transition_sha is not None:
             CONSUMERS['keys'](phase['layout'], ('route_scope',) if name == 'upload'
@@ -2359,7 +2417,7 @@ def validate_evidence(value, *, historical=False, previous=False):
             maintenance_contexts=True, minimum=1 if name == 'lifecycle' else None)
 
 
-def evidence(work):
+def evidence(work, *, matrix=False):
     usage_names = ('uploaded_usage', 'restored_usage', 'deleted_usage')
     value = {name: read(work / f'private-storage-fragments-{name}.json')
         for name in F['SUMMARY_NAMES'] if name not in ('smoke', 'evidence', *usage_names)}
@@ -2373,6 +2431,17 @@ def evidence(work):
         privacy={role: read(work / f'private-storage-fragments-{name}-privacy-{role}.json') for role in F['ROLES']},
         control_privacy=read(work / f'content-provider-adaptive-private-storage-fragments-{name}-control.json'),
         gates=read(work / f'private-storage-fragments-{name}-gates.json')) for name in (*F['PHASES'], 'lifecycle')}
+    if matrix:
+        network = matrix_network()
+        underlay = network['U']['read_check'](work, work / network['U']['NAME'], 'complete')
+        value['control_underlay'] = underlay
+        for name in MATRIX_PHASES:
+            for moment in ('before', 'after'):
+                path = work / f'private-storage-core-{name}-control-{moment}.json'
+                snapshot, raw = CONSUMERS['read'](path, maximum=network['U']['MAX_BYTES'])
+                require(raw == network['canonical'](snapshot), 'Core snapshot encoding changed')
+                network['validate_readback'](snapshot, underlay)
+                value['network'][name][f'control_{moment}_sha256'] = hashlib.sha256(raw).hexdigest()
     validate_evidence(value)
     return value
 
@@ -2381,6 +2450,8 @@ def validate_report(report, revision, *, historical=False, previous=False, strea
         challenge_profile=False, append_profile=False, flow_profile=False, close_profile=False):
     # Historical v2 reports describe only the original opaque fixture. They
     # remain inspectable, but never satisfy the current combined CLI gate.
+    matrix = report.get('schema_version') == 10
+    require(not matrix or close_profile, 'Core matrix source profile')
     require(type(close_profile) is bool
         and not (close_profile and (historical or previous or stream_profile or challenge_profile or append_profile or flow_profile))
         and type(flow_profile) is bool
@@ -2391,13 +2462,17 @@ def validate_report(report, revision, *, historical=False, previous=False, strea
         and type(stream_profile) is bool and not (stream_profile and (historical or previous))
         and not (historical and previous) and re.fullmatch('[0-9a-f]{40}', revision) and report['source_revision'] == revision
         and type(report['schema_version']) is int
-        and report['schema_version'] == (9 if close_profile else 8 if flow_profile else 7 if append_profile else 2 if historical else 3 if previous else 6 if challenge_profile else 5 if stream_profile else 4)
+        and report['schema_version'] == (10 if matrix else 9 if close_profile else 8 if flow_profile else 7 if append_profile else 2 if historical else 3 if previous else 6 if challenge_profile else 5 if stream_profile else 4)
         and report['report_kind'] == 'volparossa-private-storage-maintenance'
         and report['success'] is True and report['runner_exit_status'] == 0
         and report['phase'] == 'private-storage-maintenance-complete' and report['observed_blocker'] is None
         and report['cleanup'] == dict(complete=True, remaining_owned_objects=0)
         and report['host_state']['unchanged'] is True, 'source-bound cleanup missing')
     validate_evidence(report['maintenance'], historical=historical, previous=previous)
+    require(('control_underlay' in report['maintenance']) == matrix, 'Core matrix source profile')
+    if matrix:
+        require(report['maintenance']['control_underlay'] == report['consumers']['control_underlay'],
+            'Core and consumers used different control matrices')
     if not historical:
         CONSUMERS['validate_evidence'](report['consumers'], previous=previous)
         require((report['consumers']['schema_version'] == 6) == stream_profile
@@ -2498,6 +2573,13 @@ def main(args):
             work / 'private-storage-maintenance-selection-start.private',
             work / 'private-storage-maintenance-selection-end.private'), sort_keys=True))
         return
+    if len(args) == 3 and args[0] == 'report-core-matrix':
+        report = read(Path(args[1]))
+        require(report.get('schema_version') == 10, 'Core matrix source profile')
+        validate_report(report, args[2], close_profile=True)
+        require(evidence(Path(args[1]).parent, matrix=True) == report['maintenance'],
+            'Core matrix report differs from original raw evidence')
+        return
     if len(args) == 3 and args[0] in ('report', 'report-consumer-v4', 'report-consumer-v5', 'report-consumer-v6', 'report-consumer-v7', 'report-consumer-v8', 'report-consumer-v9', 'report-consumer-v10'):
         report = read(Path(args[1]))
         validate_report(report, args[2], stream_profile=args[0] == 'report-consumer-v6',
@@ -2512,28 +2594,37 @@ def main(args):
                 and type(consumer['provision']['version']) is int and consumer['provision']['version'] == version,
                 'consumer_current_source_profile')
         return
-    if len(args) == 3 and args[0] == 'evidence':
-        result = evidence(Path(args[1]))
+    if len(args) == 3 and args[0] in ('evidence', 'evidence-matrix'):
+        result = evidence(Path(args[1]), matrix=args[0] == 'evidence-matrix')
         Path(args[2]).write_text(json.dumps(result, sort_keys=True) + '\n')
         return
     if len(args) == 10 and args[0] == 'prepare':
         result = prepare(private_root(args[1]), *args[2:])
     elif len(args) == 7 and args[0] == 'lifecycle':
         result = lifecycle(private_root(args[1]), args[2], args[3], args[4:])
-    elif len(args) == 7 and args[0] in ('upload', 'restore', 'finish'):
+    elif (len(args) == 7 and args[0] in ('upload', 'restore', 'finish')
+            or len(args) == 8 and args[0] in MATRIX_PHASES and args[-1] == '--matrix-route'):
         root = private_root(args[1])
         socket = Path(args[3])
         require(socket.parts[-3:] == ('runtime-client', 'control', 'agent.sock'), 'fixture client socket differs')
         exit_socket = socket.parents[2] / 'runtime-exit/control/agent.sock'
         baseline = int(os.environ['STORAGE_PROOF_BASELINE_MS'])
-        scope = json.loads(os.environ['STORAGE_PROOF_ROUTE_SCOPE'])
-        SAMPLER['validate_route_scope'](scope)
-        with SAMPLER['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]],
-                client=socket, scope=scope, diagnostic=SAMPLER_DIAGNOSTIC) as coverage:
+        matrix = len(args) == 8
+        sampler = matrix_network()['S'] if matrix else SAMPLER
+        if matrix:
+            policy = json.loads(os.environ['STORAGE_PROOF_ROUTE_POLICY'])
+            sampler['validate_policy'](policy)
+            constraint = dict(policy=policy)
+        else:
+            scope = json.loads(os.environ['STORAGE_PROOF_ROUTE_SCOPE'])
+            sampler['validate_route_scope'](scope)
+            constraint = dict(scope=scope)
+        with sampler['capture'](args[2], exit_socket, baseline, F['PHASES'][args[0]],
+                client=socket, diagnostic=SAMPLER_DIAGNOSTIC, **constraint) as coverage:
             result = {'upload': upload, 'restore': restore, 'finish': finish}[args[0]](
-                root, args[2], args[3], args[4:])
+                root, args[2], args[3], args[4:7])
         summary = coverage.report(joined=coverage.joined)
-        SAMPLER['validate_summary'](summary, baseline, F['PHASES'][args[0]])
+        sampler['validate_summary'](summary, baseline, F['PHASES'][args[0]])
         create(root / f'flow-{args[0]}.json', json.dumps(summary, sort_keys=True).encode())
     elif len(args) == 2 and args[0] == 'cleanup':
         result = cleanup(args[1])

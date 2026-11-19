@@ -39,12 +39,15 @@ PROVIDER_PHASES = ('tls_handshake', 'registry_snapshot', 'selector_read', 'stora
     'storage_challenge_write_flush', 'storage_request_read_verify', 'storage_operation', 'other_protocol', 'closing')
 TERMINALS = ('active', 'complete', 'tls_timeout', 'tls_error', 'operation_error', 'cancelled')
 MATCHES = ('matched', 'matched_incomplete', 'missing', 'ambiguous', 'incomplete', 'unmatchable')
-KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out',
+ACQUIRE_ORIGINS = ('acquire_worker_budget', 'acquire_worker_state', 'acquire_coordinator_deadline',
+    'acquire_coordinator_ambiguous', 'acquire_coordinator_unavailable', 'acquire_coordinator_other',
+    'acquire_worker_response', 'acquire_descriptor_state', 'acquire_descriptor_deadline')
+KERNEL_DIAGNOSTICS = ('mptcp_connect_poll_timed_out', 'mptcp_bind_address_in_use',
     'mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
     'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out', 'mptcp_connect_operation_deadline')
 HELPER_DIAGNOSTICS = ('unknown', 'backend_result_ambiguous', 'stale_backend_result',
     'flow_identity_unavailable', 'transport_unavailable', 'cleanup_incomplete', 'replay_commit_inconsistent',
-    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS
+    'expired_context_cleanup_incomplete', 'expired_extension_cleanup_incomplete') + KERNEL_DIAGNOSTICS + ACQUIRE_ORIGINS
 HELPER_REASONS = ('helper_kernel', 'helper_capacity', 'helper_unavailable', 'helper_not_found',
     'helper_cleanup_incomplete', 'helper_other_rejection', 'helper_timeout', 'helper_io',
     'helper_validation', 'helper_authority', 'helper_correlation', 'helper_runtime_changed')
@@ -123,6 +126,7 @@ def acquire_summary(value, phase, terminal):
         require(code is None or (type(code) is str and code in HELPER_DIAGNOSTICS
             and failure['stage'] == 'helper_acquire' and failure['reason'] in HELPER_REASONS[:6]))
         require(code not in KERNEL_DIAGNOSTICS or failure['reason'] == 'helper_kernel')
+        require(code not in ACQUIRE_ORIGINS or failure['reason'] == 'helper_cleanup_incomplete')
 
 
 def reply(value, action, fingerprints, version=1):
@@ -320,7 +324,7 @@ class Samples:
             self.rows.pop(key, None)
             self.incomplete = True
 
-    def round(self, binary, controls, epoch, stopped):
+    def round(self, binary, controls, epoch, stopped, *, terminal_first=False):
         if self.rounds >= MAX_ROUNDS:
             self.incomplete = True
             return
@@ -328,9 +332,14 @@ class Samples:
         clients = self.checked(binary, controls[0], 'clients', epoch, [], stopped)
         if clients is None: return
         records = clients['records']
+        if terminal_first:
+            # A failed connection may become terminal only after the owner
+            # returns. Do not spend the final bounded batch on older successes.
+            records = sorted(records, key=lambda row: 2 if row['terminal'] == 'complete'
+                else 1 if row['terminal'] == 'active' else 0)
         fingerprints = list(dict.fromkeys(row['fingerprint'] for row in records if row['fingerprint'] is not None))
         # Rotate bounded batches; never query more than eight fingerprints per provider.
-        batch = (fingerprints[self.cursor:] + fingerprints[:self.cursor])[:8]
+        batch = (fingerprints if terminal_first else fingerprints[self.cursor:] + fingerprints[:self.cursor])[:8]
         self.cursor = (self.cursor + len(batch)) % max(1, len(fingerprints))
         if len(batch) < len(fingerprints): self.incomplete = True
         providers = []
@@ -435,7 +444,7 @@ def capture(binary, work, root, phase):
             # before disarming. It has the same bounded private query budget.
             finishing = threading.Event()
             if samples.armed and time.monotonic() < deadline:
-                samples.round(binary, controls, epoch, finishing)
+                samples.round(binary, controls, epoch, finishing, terminal_first=True)
         except Exception:
             samples.failed = samples.incomplete = True
             samples.joined = False

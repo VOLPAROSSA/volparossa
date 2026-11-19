@@ -16,6 +16,7 @@ OLD = U['OLD']
 require, keys, canonical = (OLD[k] for k in ('require', 'keys', 'canonical'))
 BROKERS, PROVIDERS = U['BROKERS'], U['PROVIDERS']
 PHASES = OLD['PHASES']
+CLOUD_PHASES = ('upload', 'exercise', 'finish')
 EXPORT_NAMES = (U['NAME'], *(f'storage-consumer-{phase}-control-{suffix}.json'
     for phase in PHASES for suffix in ('before', 'after', *BROKERS)))
 
@@ -41,7 +42,9 @@ def worker_flow(work, path):
     """Only the fixed worker output, not a general alternate-owner JSON reader."""
     work, path = Path(work), Path(path)
     parent = work / 'client-fixtures/private-storage-user'
-    require(path.parent == parent and path.name in {f'flow-consumer-{n}.json' for n in PHASES}
+    allowed = {f'flow-consumer-{n}.json' for n in PHASES} | {
+        f'flow-cloud-upload-{n}.json' for n in CLOUD_PHASES} | {'flow-restore.json', 'flow-finish.json'}
+    require(path.parent == parent and path.name in allowed
         and parent.resolve(strict=True) == parent, 'consumer_worker_flow_path')
     isolation = OLD['read'](work / 'private-storage-fragments-isolation.json', maximum=8192)[0]
     owner = isolation.get('user_uid')
@@ -72,13 +75,23 @@ def worker_flow(work, path):
         parse_constant=lambda _: require(False, 'consumer_nonfinite_flow'))
 
 
-def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay):
+def validate_network(phase, peers, original_layout, name, total, repair_reads, underlay, *, minimum=None, core=False):
+    # Cloud's separate continuation has different flow and cold-read bounds.
+    # Its caller validates those exact application bounds; original consumers
+    # retain their fixed minima and never infer a profile from evidence fields.
+    if core:
+        require(name in ('restore', 'finish') and minimum == 16, 'core_matrix_phase')
+    elif minimum is None:
+        require(name in PHASES, 'consumer_network_phase')
+        minimum = PHASES[name]
+    else:
+        require(name in CLOUD_PHASES and OLD['count'](minimum, 1, 100000), 'cloud_network_phase')
     keys(phase, ('layout', 'selected_route', 'privacy', 'control_privacy', 'gates', 'control_before', 'control_after'))
     require(canonical(phase['layout']) == canonical(layout(underlay, peers)), 'consumer_matrix_binding')
     validate_readback(phase['control_before'], underlay)
     validate_readback(phase['control_after'], underlay)
     selected, privacy, gates = phase['selected_route'], phase['privacy'], phase['gates']
-    S['validate_summary'](gates, gates['event_baseline_unix_ms'], PHASES[name])
+    S['validate_summary'](gates, gates['event_baseline_unix_ms'], minimum)
     S['validate_phase_route'](policy(peers), selected, gates)
     require(original_layout['provider_nodes'] == list(OLD['NODES']), 'consumer_provider_roles')
     slots = selected['benchmark_slots']
@@ -110,14 +123,19 @@ def validate_network(phase, peers, original_layout, name, total, repair_reads, u
         require(privacy[node]['client_leg_wireguard_data_datagrams'] > 16
             and privacy[node]['exit_leg_wireguard_data_datagrams'] > 16, 'consumer_two_leg_traffic')
     application = privacy['exit']['provider_application']
-    for node in OLD['NODES'][1:] if name == 'exercise' else OLD['NODES']:
+    withdrawn = name in ('exercise', 'restore')
+    for node in OLD['NODES'][1:] if withdrawn else OLD['NODES']:
         require(application[node]['request_packets'] > 0 and application[node]['response_packets'] > 0,
             'consumer_active_provider_traffic')
-    if name == 'exercise':
+    if withdrawn:
         require(application[OLD['NODES'][0]]['response_payload_bytes'] == 0, 'consumer_withdrawn_provider_responded')
         amounts = [application[node]['response_payload_bytes'] for node in OLD['NODES'][1:]]
-        require(all(n >= repair_reads for n in amounts) and sum(amounts) >= 2 * repair_reads + total,
-            'consumer_survivor_payload')
+        if core:
+            # Two full reconstructions have the original asymmetric B/C fragment bounds.
+            require(all(n >= lower for n, lower in zip(amounts, repair_reads, strict=True)), 'core_survivor_payload')
+        else:
+            require(all(n >= repair_reads for n in amounts) and sum(amounts) >= 2 * repair_reads + total,
+                'consumer_survivor_payload')
     keys(phase['control_privacy'], BROKERS)
     for broker, control in phase['control_privacy'].items():
         b = BROKERS.index(broker)

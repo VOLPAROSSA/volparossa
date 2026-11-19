@@ -841,6 +841,16 @@ class ConsumerReceipts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M['validate_node_report'](current, 'finish', PROVISION, prepared())
 
+    def test_image_exercise_failure_codes_are_bound_to_the_exercise_stage(self):
+        value = dict(version=1, kind='storage-consumer-maintenance', phase='exercise', passed=False,
+            provision_sha256=PROVISION, stage='image_owner_start', code='maintenance_cleanup_unconfirmed',
+            cleanup_confirmed=False)
+        self.assertEqual(M['validate_node_report'](value, 'exercise', PROVISION), value)
+        for delta in (dict(phase='publish'), dict(stage='cloud_repair'), dict(code='private path')):
+            invalid = dict(value, **delta)
+            with self.assertRaises(ValueError):
+                M['validate_node_report'](invalid, invalid['phase'], PROVISION)
+
     def test_original_closed_node_failure_survives_without_private_stderr(self):
         value = dict(version=1, kind='storage-consumer-maintenance', phase='exercise', passed=False,
             provision_sha256=PROVISION, stage='image_decrypt', code='image_decrypt', cleanup_confirmed=False)
@@ -1022,6 +1032,45 @@ class ConsumerBoundaries(unittest.TestCase):
 
 
 class ConsumerOrchestration(unittest.TestCase):
+    def test_failed_deposit_cleanup_uses_only_existing_owner_and_known_leases(self):
+        command_log = []
+        response = dict(operation='private_storage_fragments_delete', owner_signature_verified=True,
+            physical_payload_charge_upper_bound=0, operation_complete=True)
+
+        def command(argv, deadline):
+            self.assertEqual(argv[:3], ['core', '--control-socket', 'socket'])
+            self.assertLessEqual(deadline, time.monotonic() + 90)
+            command_log.append(argv[3:])
+            return (0 if response['operation_complete'] else 1), json.dumps(response).encode(), b''
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(G, PROFILE_VERSION=10, run_child=command,
+                validate_locations=lambda root, binary, client: (binary, client), no_fixture_processes=lambda root: None):
+            root = Path(tmp)
+            image = root / 'image'
+            image.mkdir(mode=0o700)
+            report = root / 'storage-consumer-publish.json'
+            failed = dict(phase='publish', kind='storage-consumer-maintenance', passed=False)
+            M['write_json'](report, failed)
+            args = (root, 'image', 'core', 'socket')
+            release = M['release_failed_deposit']
+            self.assertEqual(release(*args), 'no_archive')
+            self.assertEqual(command_log, [])
+            archive = image / 'archive'
+            archive.mkdir(mode=0o700)
+            self.assertEqual(release(*args), 'owner_confirmed')
+            response.update(operation_complete=False, physical_payload_charge_upper_bound=199787)
+            self.assertEqual(release(*args), 'unconfirmed')
+            response.update(operation_complete=True, physical_payload_charge_upper_bound=False)
+            with self.assertRaisesRegex(ValueError, 'release_report'):
+                release(*args)
+            self.assertEqual(command_log, [['storage', 'fragments', 'delete', '--state', archive,
+                '--identity', image / 'identity.key', '--passphrase-file', image / 'passphrase']] * 3)
+            report.unlink()
+            M['write_json'](report, dict(failed, passed=True))
+            with self.assertRaisesRegex(ValueError, 'release_scope'):
+                release(*args)
+            self.assertEqual(len(command_log), 3)
+
     def test_actual_staged_import_and_pin_closure_without_download_or_execution(self):
         # The guest stages individual files, not this whole checkout. Exercise
         # the actual runpy/load_pins closure in that same sparse arrangement.
@@ -1030,7 +1079,8 @@ class ConsumerOrchestration(unittest.TestCase):
             'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
             'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
             'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
-            'storage-consumer-maintenance-pins-v9.json', 'image-snapshot-provision.py',
+            'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
+            'storage-consumer-maintenance-pins-v10-current.json', 'image-snapshot-provision.py',
             'agent-private-task-code.py', 'agent-private-task-code-pins.json',
             'private-storage-fragments-smoke.py', 'private-storage-replicas-smoke.py',
             'private-storage-peer-smoke.py', 'content-provider-https-smoke.py',
@@ -1043,15 +1093,10 @@ class ConsumerOrchestration(unittest.TestCase):
             with patch.object(subprocess, 'Popen') as spawn, patch.object(os, 'execve') as execute, \
                     patch.object(urllib.request, 'urlopen') as download:
                 loaded = runpy.run_path(str(root / names[0]))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](), M['PROVISIONER']['load_pins']())
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](2), M['PROVISIONER']['load_pins'](2))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](3), M['PROVISIONER']['load_pins'](3))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](4), M['PROVISIONER']['load_pins'](4))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](5), M['PROVISIONER']['load_pins'](5))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](6), M['PROVISIONER']['load_pins'](6))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](7), M['PROVISIONER']['load_pins'](7))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](8), M['PROVISIONER']['load_pins'](8))
-                self.assertEqual(loaded['PROVISIONER']['load_pins'](9), M['PROVISIONER']['load_pins'](9))
+                for version in range(1, 11):
+                    self.assertEqual(loaded['PROVISIONER']['load_pins'](version), M['PROVISIONER']['load_pins'](version))
+                self.assertEqual(loaded['PROVISIONER']['load_pins'](10, current=True),
+                    M['PROVISIONER']['load_pins'](10, current=True))
                 self.assertEqual(loaded['FLOW_MINIMUM'], M['FLOW_MINIMUM'])
                 for absent in ('image-snapshot-provision.py', 'agent-private-task-code.py', 'agent-private-task-code-pins.json'):
                     (root / absent).unlink()

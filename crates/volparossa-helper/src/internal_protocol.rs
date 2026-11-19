@@ -352,6 +352,13 @@ pub(crate) struct AcquireTransportSocket {
     pub(crate) expected_remote: Option<InternalSocketAddress>,
 }
 
+impl AcquireTransportSocket {
+    pub(crate) const fn is_client_mptcp_connect(&self) -> bool {
+        self.role == InternalEndpointRole::Client as i32
+            && self.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+    }
+}
+
 #[derive(Clone, PartialEq, Message)]
 pub(crate) struct DestroyContext {
     #[prost(bytes = "vec", tag = "1")]
@@ -952,8 +959,7 @@ pub(crate) fn validate_response_for_request(
         && !matches!(
             request.operation,
             Some(internal_worker_request::Operation::AcquireTransportSocket(ref acquire))
-                if acquire.role == InternalEndpointRole::Client as i32
-                    && acquire.descriptor_kind == InternalTransportSocketKind::MptcpConnected as i32
+                if acquire.is_client_mptcp_connect()
         )
     {
         return Err(InternalProtocolError::Invalid);

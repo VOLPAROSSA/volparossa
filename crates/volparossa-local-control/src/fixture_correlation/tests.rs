@@ -74,7 +74,7 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
             value
         );
     }
-    for code in [-1, 10, i32::MAX] {
+    for code in [-1, 20, i32::MAX] {
         let mut value = valid;
         value.first.as_mut().unwrap().helper_diagnostic = Some(code);
         assert!(value.validate().is_err());
@@ -97,6 +97,71 @@ fn fixture_v2_summary_is_closed_bounded_and_unknown_differs_from_absent() {
 }
 
 #[test]
+fn fixture_acquire_origins_preserve_allocations_and_require_cleanup_rejection() {
+    use crate::PrivateStorageFlowAcquireReason as Reason;
+    use StorageFixtureHelperDiagnostic as Code;
+
+    for (code, number) in [
+        (Code::Unknown, 0),
+        (Code::BackendResultAmbiguous, 1),
+        (Code::StaleBackendResult, 2),
+        (Code::FlowIdentityUnavailable, 3),
+        (Code::TransportUnavailable, 4),
+        (Code::CleanupIncomplete, 5),
+        (Code::ReplayCommitInconsistent, 6),
+        (Code::ExpiredContextCleanupIncomplete, 7),
+        (Code::ExpiredExtensionCleanupIncomplete, 8),
+        (Code::MptcpConnectPollTimedOut, 9),
+        (Code::AcquireWorkerBudget, 10),
+        (Code::AcquireWorkerState, 11),
+        (Code::AcquireCoordinatorDeadline, 12),
+        (Code::AcquireCoordinatorAmbiguous, 13),
+        (Code::AcquireCoordinatorUnavailable, 14),
+        (Code::AcquireCoordinatorOther, 15),
+        (Code::AcquireWorkerResponse, 16),
+        (Code::AcquireDescriptorState, 17),
+        (Code::AcquireDescriptorDeadline, 18),
+        (Code::MptcpBindAddressInUse, 19),
+        (Code::MptcpConnectSocketRefused, 20),
+        (Code::MptcpConnectSocketNetworkUnreachable, 21),
+        (Code::MptcpConnectSocketHostUnreachable, 22),
+        (Code::MptcpConnectSocketTimedOut, 23),
+        (Code::MptcpConnectOperationDeadline, 24),
+    ] {
+        assert_eq!(code as i32, number);
+        if !(10..=18).contains(&number) {
+            continue;
+        }
+        let mut value = acquire_summary();
+        value.rounds = 2;
+        value.last.as_mut().unwrap().helper_diagnostic = Some(number);
+        value.validate().unwrap();
+        assert_eq!(
+            StorageFixtureAcquireSummary::decode(value.encode_to_vec().as_slice()).unwrap(),
+            value
+        );
+        for reason in [
+            Reason::HelperKernel,
+            Reason::HelperCapacity,
+            Reason::HelperUnavailable,
+            Reason::HelperNotFound,
+            Reason::HelperOtherRejection,
+        ] {
+            let mut wrong = value;
+            wrong
+                .last
+                .as_mut()
+                .unwrap()
+                .failure
+                .as_mut()
+                .unwrap()
+                .reason = reason as i32;
+            assert!(wrong.validate().is_err());
+        }
+    }
+}
+
+#[test]
 fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
     use crate::{
         PrivateStorageFlowAcquireReason as Reason, PrivateStorageFlowAcquireStage as Stage,
@@ -104,39 +169,33 @@ fn fixture_mptcp_socket_details_require_kernel_acquire_failure() {
 
     use StorageFixtureHelperDiagnostic as Code;
 
-    for (code, number, label) in [
+    for (code, label) in [
         (
             Code::MptcpConnectPollTimedOut,
-            9,
             "mptcp_connect_poll_timed_out",
         ),
+        (Code::MptcpBindAddressInUse, "mptcp_bind_address_in_use"),
         (
             Code::MptcpConnectSocketRefused,
-            20,
             "mptcp_connect_socket_refused",
         ),
         (
             Code::MptcpConnectSocketNetworkUnreachable,
-            21,
             "mptcp_connect_socket_network_unreachable",
         ),
         (
             Code::MptcpConnectSocketHostUnreachable,
-            22,
             "mptcp_connect_socket_host_unreachable",
         ),
         (
-            Code::MptcpConnectSocketTimedOut,
-            23,
-            "mptcp_connect_socket_timed_out",
-        ),
-        (
             Code::MptcpConnectOperationDeadline,
-            24,
             "mptcp_connect_operation_deadline",
         ),
+        (
+            Code::MptcpConnectSocketTimedOut,
+            "mptcp_connect_socket_timed_out",
+        ),
     ] {
-        assert_eq!(code as i32, number);
         let mut value = acquire_summary();
         value.rounds = 2;
         let first = value.first.as_mut().unwrap();

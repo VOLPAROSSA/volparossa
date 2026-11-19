@@ -53,6 +53,10 @@ FAILURE_CODES = {'phase_deadline', 'authority_expired', 'authority_changed', 're
     'cipher_identity', 'cipher_receipt', 'snapshot_crypto', 'publish_operation', 'enrollment_policy', 'enrollment',
     'fragment_geometry', 'catalog_creation', 'configuration', 'input_changed', 'private_file', 'private_directory',
     'application_failed'}
+IMAGE_EXERCISE_STAGES = {'image_owner_start', 'image_repair', 'image_foreground_restore', 'image_decrypt', 'image_joined'}
+IMAGE_EXERCISE_CODES = {'ENOENT', 'EACCES', 'ELOOP', 'core_spawn_failed', 'enrollment_changed',
+    'foreground_cleanup_unconfirmed', 'maintenance_cleanup_unconfirmed', 'local_input_changed',
+    'local_input_unavailable', 'local_verification_failed', 'invalid_maintenance_report', 'operation_in_progress'}
 CATALOG_FAILURE_CODES = {'catalog_materialization_failed', 'catalog_restore_validation',
     'catalog_metadata_validation', 'catalog_selection_validation', 'catalog_plaintext_validation',
     'catalog_file_version_changed', 'catalog_receipt_validation', 'catalog_crypto_timeout',
@@ -167,13 +171,12 @@ def digest_public(path, record):
 
 
 def tools():
-    pins = PROVISIONER['load_pins'](PROFILE_VERSION)
     raw = file_bytes(PROVISION, 65536, public=True)
     value = json.loads(raw)
+    pins = PROVISIONER['receipt_pins'](PROFILE_VERSION, value['pins_sha256'])
     require(type(value['version']) is int and value['version'] == PROFILE_VERSION
         and value['kind'] == 'storage-consumer-maintenance-runtime-provision'
         and value['success'] is True and value['pins'] == pins
-        and value['pins_sha256'] == hashlib.sha256(PROVISIONER['pins_path'](PROFILE_VERSION).read_bytes()).hexdigest()
         and all(value[key] is True for key in ('guest_only', 'source_files_verified', 'runtime_files_verified',
             'shared_adapter_verified', 'original_licenses_retained'))
         and all(value[key] is False for key in ('storage_enrollment_created', 'peer_storage_proven',
@@ -298,6 +301,14 @@ def validate_challenge_read(value, phase):
             and value['returned_outcome'] in allowed[value['step']])), 'deposit_diagnostics')
 
 
+def valid_peer_failure(failure):
+    return (failure['stage'] in ('journal_open', 'authorization', 'agent_ready', 'challenge', 'signed_request',
+            'wire_receipt', 'agent_terminal', 'accounting', 'local_input', 'receipt_validation', 'journal_save', 'deadline', 'unknown')
+        and failure['category'] in ('io', 'timeout', 'protocol', 'agent_rejected', 'invalid', 'busy', 'store', 'unknown')
+        and (failure['agent_code'] in ('CONTENT_INVALID', 'CONTENT_UNAVAILABLE', 'CONTENT_BUSY', 'CONTENT_POLICY', 'unknown')
+            if failure['category'] == 'agent_rejected' else failure['agent_code'] is None))
+
+
 def validate_deposit_diagnostics(value, version=1):
     require(type(version) is int and version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 'deposit_diagnostics')
     keys(value, ('version', 'failures', 'omitted_failures'))
@@ -310,11 +321,7 @@ def validate_deposit_diagnostics(value, version=1):
             *(('agent_detail',) if version >= 2 else ()), *(('agent_outcome',) if version >= 4 else ())))
         require(count(failure['fragment_index'], 0, 3) and count(failure['copy_index'], 0, 1)
             and failure['operation'] in ('prepare', 'reserve', 'progress', 'append', 'finalize', 'renew', 'read_range', 'delete')
-            and failure['stage'] in ('journal_open', 'authorization', 'agent_ready', 'challenge', 'signed_request',
-                'wire_receipt', 'agent_terminal', 'accounting', 'local_input', 'receipt_validation', 'journal_save', 'deadline', 'unknown')
-            and failure['category'] in ('io', 'timeout', 'protocol', 'agent_rejected', 'invalid', 'busy', 'store', 'unknown')
-            and (failure['agent_code'] in ('CONTENT_INVALID', 'CONTENT_UNAVAILABLE', 'CONTENT_BUSY', 'CONTENT_POLICY', 'unknown')
-                if failure['category'] == 'agent_rejected' else failure['agent_code'] is None), 'deposit_diagnostics')
+            and valid_peer_failure(failure), 'deposit_diagnostics')
         if version >= 2 and failure['agent_detail'] is not None:
             detail = failure['agent_detail']
             keys(detail, ('stage', 'deadline_scope', *(('tls_failure',) if version >= 3 else ()),
@@ -495,7 +502,9 @@ def validate_node_report(value, phase, provision, prepared=None, *, profile_vers
                     and value['code'] in ('core_close_failed', 'phase_deadline'), 'publish_lifecycle')
             expected_version = 13 if catalog_restore else lifecycle_profile + 2
         keys(value, fields)
-        require((lifecycle or (value['stage'] in STAGES and value['code'] in FAILURE_CODES))
+        image_exercise = phase == 'exercise' and value['stage'] in IMAGE_EXERCISE_STAGES
+        require((lifecycle or (value['stage'] in STAGES and value['code'] in FAILURE_CODES)
+            or (image_exercise and value['code'] in FAILURE_CODES | IMAGE_EXERCISE_CODES))
             and value['cleanup_confirmed'] is False, 'failure_report')
     else:
         keys(value, ('version', 'kind', 'phase', 'passed', 'provision_sha256', 'image', 'cloud', 'scope'))
@@ -882,6 +891,39 @@ def cleanup_tree(root):
     return len(files), len(directories) + 1
 
 
+def release_failed_deposit(root, name, binary, client):
+    require(name in ('image', 'cloud') and PROFILE_VERSION == 10, 'release_scope')
+    failure = private_json(root / 'storage-consumer-publish.json')
+    require(type(failure) is dict and failure.get('phase') == 'publish' and failure.get('passed') is False
+        and failure.get('kind') == 'storage-consumer-maintenance', 'release_scope')
+    no_fixture_processes(root)
+    app = root / name
+    private_directory(app)
+    archive = app / 'archive'
+    try:
+        private_directory(archive)
+    except FileNotFoundError:
+        return 'no_archive'
+    binary, client = validate_locations(root, binary, client)
+    # The owner CLI verifies the signed plan and skips unattempted copies. A
+    # missing lease ID stays unconfirmed. Teardown never issues a fresh Reserve.
+    status, output, _ = run_child([binary, '--control-socket', client, 'storage', 'fragments', 'delete',
+        '--state', archive, *BASE['unlock'](app)], time.monotonic() + 90)
+    value = json.loads(output)
+    require(type(value) is dict and value.get('operation') == 'private_storage_fragments_delete'
+        and value.get('owner_signature_verified') is True and type(value.get('operation_complete')) is bool
+        and status == (0 if value['operation_complete'] else 1), 'release_report')
+    charge = value.get('physical_payload_charge_upper_bound')
+    require(type(charge) is int and charge >= 0, 'release_report')
+    if value['operation_complete']:
+        require(charge == 0, 'release_report')
+        return 'owner_confirmed'
+    return 'unconfirmed'
+
+
+RELEASE_RESULTS = ('no_archive', 'owner_confirmed', 'unconfirmed', 'unavailable')
+
+
 def cleanup(root):
     no_fixture_processes(root)
     files, directories = cleanup_tree(root) if root.exists() else (0, 0)
@@ -923,8 +965,16 @@ def main(arguments):
     if selected == 'quiesced' and len(arguments) == 2:
         no_fixture_processes(root)
         result = dict(version=1, consumer_processes_observed_quiesced=True, remote_cleanup_proven=False)
-    elif selected == 'cleanup' and len(arguments) == 2:
+    elif selected == 'release-known' and len(arguments) == 5:
+        print(release_failed_deposit(root, *arguments[2:]))
+        return
+    elif selected == 'cleanup' and len(arguments) in (2, 4):
+        release = arguments[2:]
+        require(not release or (PROFILE_VERSION == 10 and all(state in RELEASE_RESULTS for state in release)),
+            'release_report')
         result = cleanup(root)
+        if release:
+            result['failed_publish_owner_delete'] = dict(zip(('image', 'cloud'), release))
     else:
         deadline = time.monotonic() + WORK_SECONDS
         provision = tools()
