@@ -71,6 +71,69 @@ fn reserve(id: u8, units: u64) -> Vec<u8> {
 }
 
 #[test]
+fn external_signer_returns_only_a_public_key_and_signature() {
+    use std::cell::Cell;
+
+    struct External {
+        reported: AccountId,
+        key: Option<SigningKey>,
+        calls: Cell<usize>,
+    }
+    impl CommandSigner for External {
+        fn public_key(&self) -> AccountId {
+            self.reported
+        }
+        fn sign_ed25519(&self, preimage: &[u8]) -> Result<[u8; 64], Error> {
+            self.calls.set(self.calls.get() + 1);
+            self.key
+                .as_ref()
+                .ok_or(Error::Unauthorized)?
+                .sign_ed25519(preimage)
+        }
+    }
+
+    let command = Command {
+        operation_id: [6; 32],
+        payer: owner(1),
+        action: Action::Reserve {
+            recipient: owner(2),
+            units: 7,
+        },
+    };
+    let local = |signer: &dyn CommandSigner| {
+        SignedCommand::sign_with([9; 32], signer, command, 100, 200, [3; 32])
+    };
+    let ordered = |signer: &dyn CommandSigner| {
+        SignedCommand::sign_ordered_with([9; 32], signer, command, 100, 200, [3; 32])
+    };
+    let mut external = External {
+        reported: owner(1),
+        key: Some(key(1)),
+        calls: Cell::new(0),
+    };
+    assert_eq!(
+        local(&external).unwrap().encode(),
+        local(&key(1)).unwrap().encode()
+    );
+    assert_eq!(
+        ordered(&external).unwrap().encode(),
+        ordered(&key(1)).unwrap().encode()
+    );
+    assert_ne!(
+        local(&external).unwrap().encode(),
+        ordered(&external).unwrap().encode()
+    );
+    external.key = Some(key(2));
+    assert!(matches!(local(&external), Err(Error::Unauthorized)));
+    external.key = None;
+    assert!(matches!(ordered(&external), Err(Error::Unauthorized)));
+    external.reported = owner(2);
+    let calls = external.calls.get();
+    assert!(matches!(local(&external), Err(Error::Unauthorized)));
+    assert_eq!(external.calls.get(), calls);
+}
+
+#[test]
 fn inspection_verifies_terms_without_admission_or_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let mut ledger = store(&temp.path().join("ledger"));
