@@ -3,6 +3,7 @@
 """New Image/Cloud maintenance profile, solely in the disposable protected VM."""
 import base64
 from contextlib import nullcontext
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -194,11 +195,18 @@ def tools():
     return hashlib.sha256(raw).hexdigest()
 
 
-def fixture_hash(name):
-    output = bytearray()
+@lru_cache(maxsize=3)
+def fixture_digest(label):
+    """Hash the fixed public fixture in blocks and retain only its digest."""
+    digest = hashlib.sha256()
     for offset in range(0, PLAIN_BYTES, 32):
-        output.extend(hashlib.sha256(f'VOLPAROSSA storage consumer {name} {offset}'.encode()).digest())
-    return hashlib.sha256(output[:PLAIN_BYTES]).hexdigest()
+        block = hashlib.sha256(f'VOLPAROSSA {label} {offset}'.encode()).digest()
+        digest.update(block[:PLAIN_BYTES - offset])
+    return digest.hexdigest()
+
+
+def fixture_hash(name):
+    return fixture_digest(f'storage consumer {name}')
 
 
 def geometry(size):

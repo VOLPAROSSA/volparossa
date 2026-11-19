@@ -46,10 +46,7 @@ def sha(value):
 
 
 def fixture_hash():
-    output = bytearray()
-    for offset in range(0, PLAIN_BYTES, 32):
-        output.extend(hashlib.sha256(f'VOLPAROSSA cloud upload {offset}'.encode()).digest())
-    return hashlib.sha256(output[:PLAIN_BYTES]).hexdigest()
+    return OLD['fixture_digest']('cloud upload')
 
 
 def geometry(size):
