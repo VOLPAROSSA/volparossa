@@ -24,14 +24,25 @@ started. `dns_cache.enabled: false` disables cooperative caching, not private re
 The optional OS resolver requires explicit `fallback.mode: system`; see
 [private Unbound readiness](../docs/network/UNBOUND_FALLBACK.md).
 
-A successful full alpha run publishes the tested Core and private DNS worker packages
-together. In the extracted artifact directory, verify both checksums and install both
-packages on a Debian 13 amd64 test machine with the distribution dependencies available.
+## Install the tested package pair
+
+Download and extract the package artifact for a successful full alpha run into an empty directory on a Debian 13 amd64 test machine. The artifact name contains the tested source commit and run attempt. Compare both SHA-256 values with the independently recorded values for that run, then inspect the two packages from the extracted directory. [Candidate downloads and recorded checksums](../docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof)
 
 ```sh
 sha256sum --check --strict ./*.deb.sha256
+for package in ./*.deb; do
+    dpkg-deb --info "$package"
+    dpkg-deb --contents "$package"
+done
+```
+
+Install both local packages together. APT resolves their Debian dependencies, including `libunbound8` and `dns-root-data`. The package installation leaves the network roles disabled. [First initialization](../docs/development/OPERATIONS.md#first-initialization)
+
+```sh
 sudo apt install ./volparossa_*_amd64.deb ./volparossa-private-dns-worker_*_amd64.deb
 ```
+
+## Building the packages
 
 The disposable DNS guest also supports `build-deb.sh --stage-built BIN_DIR NATIVE_FILE`,
 with an explicit `VOLPAROSSA_PACKAGE_SOURCE_REVISION`. This development-only staging mode

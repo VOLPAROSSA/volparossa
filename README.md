@@ -76,10 +76,10 @@ especially for private data and applications that depend on several layers at on
 | Area | Demonstrated in scoped trials | Important remaining boundary |
 | --- | --- | --- |
 | Network and cache | Protected WireGuard routes carrying genuine MPTCP, UDP/MASQUE and Multipath QUIC traffic, including three-path trials; verified peer retrieval, selected HTTPS/DNS sharing and publication while the original publisher is offline. | This is not automatic caching of arbitrary HTTPS traffic or proof on every device and network. |
-| Weather applications | Real weather, precipitation and particulate forecasts displayed and refreshed in Drizz.li and Overmorrow web clients; on-demand retrieval, refresh and background/resume in installed Overmorrow Android in an emulator. | Web trials obtain the first products before opening the UI. Expiry with real products, physical phones and iOS remain open. |
+| Weather applications | Installed Overmorrow clients on an Android 16 emulator and an iPhone simulator displayed real forecasts, hid expired data and recovered after a failed refresh. [Android](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44514675704) · [iPhone](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44542699817) | Physical phone trials remain open. |
 | Private storage | Fragment storage and provider-loss recovery; separate application trials include native Signal backup export/import, encrypted Image snapshots and OpenCloud file recovery. | The joined Image/Cloud publication, maintenance, repeated restore and deletion lifecycle is not yet accepted. Automatic reciprocal accounting and safe capacity reduction remain unfinished. |
 | Compute and Code | Actual adapter training and reuse, public tasks on peer workers, selected model-review flows and an OpenCode model-driven read/edit/test task. | A successful bounded task is not general coding reliability. Confidential execution of private tasks on other people's devices remains unfinished. |
-| Transactions | Signed TEST-unit transfers across four validators, conflicting-spend rejection, partitions, rejoining and replay without a second debit. | Fixed membership and fictitious assets; not live payments, external settlement or a Bank-to-distributed-ledger integration. |
+| Transactions | Four independent CometBFT validators executed Bank’s signed transfer, conserved all 100 TEST units across a partition and returned the same receipts after restart and replay. [Four-validator trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44534425134) | The trial uses a fixed validator roster and fictitious assets. Live funding and external settlement remain open. |
 
 [Citizen](https://github.com/VOLPAROSSA/volparossa-citizen) separately provides an executable
 referendum-procedure simulation with fictional identities, not verified real-person voting
@@ -111,10 +111,7 @@ automatic software updates also remain in development. The
 tracks the current blockers and next usable milestones without treating feature branches
 as released functionality.
 
-The November Debian 13 amd64 candidate at `9072cce8` passed all 15 transport
-acceptance cases. A Debian 13 virtual machine installed Core with its private
-DNS worker and verified Core startup, upgrade and removal.
-[Candidate results and package download](docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof)
+Two independent Debian 13 amd64 runners built identical Core and private DNS worker packages from `428e2899`. Each passed all 15 transport acceptance cases and exercised package installation, service startup, upgrade and removal. [Candidate results and downloads](docs/IMPLEMENTATION_STATUS.md#network-baseline-and-remaining-proof) · [Install the tested package pair](packaging/README.md#install-the-tested-package-pair)
 
 <a id="four-layers-one-network"></a>
 
