@@ -17,7 +17,8 @@ NATIVE = dict(version=1, standalone_desktops=2, mailbox_providers=2, stock_messa
               delivered_after_sender_restart=True, paired_stock_submissions=0, both_provider_inboxes_empty=True)
 NAMES = {"signal-mailbox-smoke.json", "signal-mailbox-native.json", "content-mailbox-smoke.json",
          "content-mailbox-desktop-live-selection.json", "content-mailbox-desktop-gates.json",
-         "content-provider-mailbox-desktop-control.json"} | {f"content-mailbox-desktop-privacy-{r}.json" for r in ROLES}
+         "content-provider-mailbox-desktop-control.json",
+         "signal-mailbox-send-route-diagnostic.json", "signal-mailbox-receive-route-diagnostic.json"} | {f"content-mailbox-desktop-privacy-{r}.json" for r in ROLES}
 
 
 def verified(report, revision):

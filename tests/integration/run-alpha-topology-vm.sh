@@ -1398,7 +1398,8 @@ HANDOFF_NAMES = {"a01-expected-peers.json"} | {
 SIGNAL_MAILBOX_NAMES = {"signal-backup-provision.json", "host-state-before.json", "host-state-after.json",
                         "guest-exit-status", "current-phase", "signal-mailbox-smoke.json", "signal-mailbox-native.json",
                         "content-mailbox-smoke.json", "content-mailbox-desktop-live-selection.json",
-                        "content-mailbox-desktop-gates.json", "content-provider-mailbox-desktop-control.json"} | {
+                        "content-mailbox-desktop-gates.json", "content-provider-mailbox-desktop-control.json",
+         "signal-mailbox-send-route-diagnostic.json", "signal-mailbox-receive-route-diagnostic.json"} | {
     f"content-mailbox-desktop-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
 SIGNAL_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
                 "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"} | {

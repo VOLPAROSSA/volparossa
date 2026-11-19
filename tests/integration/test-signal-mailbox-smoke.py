@@ -65,6 +65,33 @@ class RoutedNativeMailbox(unittest.TestCase):
             out=subprocess.check_output(["sh",HERE/script,"--preview","--scenario","signal-mailbox"],text=True)
             self.assertIn("two standalone desktops",out.lower().replace("signal desktops","desktops"))
 
+    def test_failure_preserves_only_a_closed_selection_reason_per_mailbox_phase(self):
+        script = HERE / "benchmark-selection.sh"
+        with tempfile.TemporaryDirectory() as folder:
+            command = """
+                set -eu
+                . "$1"
+                WORK=$2
+                signal_mailbox=yes
+                benchmark_connect_count=1; benchmark_connect_exit=1; benchmark_connect_reason=PRESELECTION_UNAVAILABLE
+                benchmark_draw=0; benchmark_poll=0; benchmark_snapshot_status=null
+                for phase in send receive; do
+                    benchmark_label=content-mailbox-$phase
+                    benchmark_image_route_diagnostic connect CONNECT_TRANSIENT
+                done
+                benchmark_label=unknown
+                if benchmark_route_diagnostic_prefix; then exit 1; fi
+            """
+            subprocess.run(["sh","-c",command,"sh",script,folder],check=True)
+            files=list(Path(folder).iterdir())
+            self.assertEqual({f.name for f in files},
+                             {f"signal-mailbox-{phase}-route-diagnostic.json" for phase in ("send","receive")})
+            for f in files:
+                data=json.loads(f.read_bytes())
+                self.assertEqual(data["last_connect_reason"],"PRESELECTION_UNAVAILABLE")
+                self.assertEqual(set(data),{"schema_version","stage","reason","last_connect_reason","connect_exit_status",
+                                          "attempts","retries","redraws","path_polls","path_status"})
+
     def test_both_grants_use_private_canonical_paths_and_the_lower_expiry(self):
         worker = runpy.run_path(str(HERE / "signal-mailbox-native.py"))
         from unittest.mock import patch
