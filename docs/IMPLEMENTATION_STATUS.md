@@ -773,6 +773,22 @@ Actions ZIP has SHA-256
 `38468903864d1f287f161674cfcc4fd1901a92bacef266cc940bd6e39eca8b14`.
 [Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44440163724) · [Original application, sample and cleanup receipts](development/evidence/storage-maintenance-44440163724)
 
+In the following twelve-node run at `e5d06b21e87409139d78317dc7deeae6b372b51b`,
+Image stopped during publication. FINALIZE on fragment 2, copy 0 reached the
+initial READY boundary with a TLS handshake deadline. RESERVE on fragment 2,
+copy 1 and fragment 3, copy 0 each reported eight helper-kernel acquisition
+rounds. Fragment 3, copy 1 reported three rounds, from helper-kernel to another
+helper rejection. All four foreground failures carried `CONTENT_UNAVAILABLE`.
+The separate incomplete sampler observed a two-sided TLS timeout at provider C.
+Its samples carry no fragment or copy identity. Image confirmed owner deletion.
+Cloud had no archive. All three independent provider measurements showed zero
+leases, reserved bytes and committed bytes. Local cleanup completed and the
+guest's outside-namespace network snapshots matched. Joint maintenance and
+cold restoration remained pending. The preceding run reached Cloud before it
+stopped. The 82,262-byte archive (artifact `14496173050`) has SHA-256
+`95205102709774ce80e5a7df56fc85121e399b3aa4a2d00744ae8fc5c72a50dd`.
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44447515035) · [Original application, samples and cleanup receipts](development/evidence/storage-maintenance-44447515035)
+
 #### Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
