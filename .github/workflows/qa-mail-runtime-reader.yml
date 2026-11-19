@@ -1,0 +1,30 @@
+name: Verify public Mail Actions artifact access from Core
+on:
+  push:
+    branches: [qa/verify-mail-runtime-reader-20261119]
+permissions:
+  actions: read
+jobs:
+  original:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Download and open the exact original public QA ZIP
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import hashlib, io, json, subprocess, zipfile
+          path = 'repos/VOLPAROSSA/volparossa-mail/actions/artifacts/14538128185'
+          def fetch(location):
+              process = subprocess.run(['gh', 'api', location], capture_output=True, timeout=30)
+              if process.returncode:
+                  raise SystemExit('GitHub rejected the read-only artifact request at ' + location.rsplit('/', 1)[-1])
+              return process.stdout
+          metadata = json.loads(fetch(path))
+          data = fetch(path + '/zip')
+          assert metadata['workflow_run']['id'] == 44540005296 and metadata['size_in_bytes'] == len(data) == 572
+          assert metadata['digest'] == 'sha256:' + hashlib.sha256(data).hexdigest() == 'sha256:c1ad21a54db7e902beb27a7ce66e3228d06decb393928e22dca7d90dc37f79a3'
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              assert archive.namelist() == ['paired-mail-send.json'] and archive.testzip() is None
+          print('Opened authentic original public Mail QA archive from a read-only Core job')
