@@ -212,6 +212,16 @@ pub(crate) enum ContentError {
     NameRollback,
 }
 
+impl From<crate::route_setup::ContentProviderRouteError> for ContentError {
+    fn from(error: crate::route_setup::ContentProviderRouteError) -> Self {
+        use crate::route_setup::ContentProviderRouteError;
+        match error {
+            ContentProviderRouteError::Unavailable => Self::Unavailable,
+            ContentProviderRouteError::RoleOverlap => Self::Policy,
+        }
+    }
+}
+
 /// In-memory lifecycle, sharing the existing node identity without exporting its private key.
 #[derive(Clone)]
 pub(crate) struct ContentRuntime {
