@@ -35,7 +35,8 @@ consume)
         jq -e '.native_export as $native | .signed_site_recovery.bindings as $signed
           | $native.operation == "native_file_hosting_export" and $native.native_reopened == true
           and $native.asset_count == 5 and $native.original_assets_equal == true
-          and $native.signing_input == "native_file_hosting" and ($native.reviewed_bundle_sha256 | test("^[0-9a-f]{64}$"))
+          and $native.signing_input == "native_file_hosting" and $native.owner_review_bound_before_signing == true
+          and ($native.reviewed_bundle_sha256 | test("^[0-9a-f]{64}$"))
           and $native.reviewed_bundle_sha256 == $signed.bundle_sha256' "$receipt" >/dev/null
     fi
     projection="$RUNNER_TEMP/studio-topology-public-input.json"
