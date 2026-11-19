@@ -284,7 +284,7 @@ class FixtureV2(unittest.TestCase):
 
     def test_current_connect_socket_errors_require_the_exact_kernel_acquire_pair(self):
         for code in ('mptcp_connect_socket_refused', 'mptcp_connect_socket_network_unreachable',
-                     'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out'):
+                     'mptcp_connect_socket_host_unreachable', 'mptcp_connect_socket_timed_out', 'mptcp_connect_operation_deadline'):
             client = self.client()
             client['flow_acquire'] = dict(rounds=2,
                 first=dict(stage='helper_acquire', reason='helper_kernel', helper_diagnostic=code),
