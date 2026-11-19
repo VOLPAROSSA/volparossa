@@ -548,7 +548,7 @@ for choice in ("image-immich", "browser-native-capacity"):
 timeout_line = next(line.strip() for line in topology_job.splitlines() if line.strip().startswith('timeout-minutes:'))
 # Native Codex is built from pinned source before the guest trial; only that
 # scenario gets a 240-minute window. Keep all existing scenario bounds intact.
-# Both Signal scenarios retain their 150-minute window alongside maintenance.
+# The native Signal scenarios retain their 150-minute window alongside maintenance.
 # Compare the whole closed expression: the former single-clause regex did not
 # understand main's parenthesized Signal alternatives and dropped their bound.
 assert timeout_line == (
@@ -556,7 +556,7 @@ assert timeout_line == (
     "inputs.scenario == 'agent-native-coding' && 240 || "
     "inputs.scenario == 'agent-autonomous-aggregation' && 180 || "
     "(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
-    "|| inputs.scenario == 'private-storage-maintenance') "
+    "|| inputs.scenario == 'signal-mailbox' || inputs.scenario == 'private-storage-maintenance') "
     "&& 150 || 120 }}")
 host = (root / "run-alpha-topology-vm.sh").read_text()
 assert 'if scenario == "agent-autonomous-aggregation":\n        file_count_limit = 192' in host
