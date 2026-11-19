@@ -25,9 +25,10 @@ protected_quote_public_key() {
 protected_quote_attach() {
     quote_attach_case=$1
     quote_attach_key=$2
+    shift 2
     protected_quote_cli "$provider_node_a" compute quote attach \
         --bind "$quote_provider_address:18080" --advertised-hostname "$quote_provider_hostname" \
-        --requester-key "$quote_attach_key" --max-seconds 600 --max-attempts 1 \
+        --requester-key "$quote_attach_key" --max-seconds 600 --max-attempts 1 "$@" \
         >"$WORK/protected-quote-attach-$quote_attach_case.json" \
         2>"$WORK/protected-quote-attach-$quote_attach_case.err" || return 1
     jq -e '.operation == "native_content" and .serving == true and .publications == 0' \
@@ -36,7 +37,12 @@ protected_quote_attach() {
 
 protected_quote_case() {
     quote_case=$1
-    case $quote_case in wrong|device-unavailable|repeat) ;; *) return 1 ;; esac
+    shift
+    case "$quote_case:$#:${1-}" in
+        wrong:0:|device-unavailable:0:|repeat:0:) quote_profile=legacy ;;
+        confirmation-unavailable:1:--key-confirmation-v1) quote_profile=key-confirmation-v1 ;;
+        *) return 1 ;;
+    esac
     # Fresh ring window, not an assumed cumulative counter. A denial counts
     # only if the actual requester reached the signed exchange boundary.
     capture_product_logs
@@ -45,7 +51,7 @@ protected_quote_case() {
     protected_quote_cli client compute quote verify --provider-key "$quote_provider_key" \
         --public-policy "$WORK/protected-quote-inputs/policy.json" \
         --vcek "$WORK/protected-quote-inputs/vcek.der" \
-        --vendor-crl "$WORK/protected-quote-inputs/vendor.crl" \
+        --vendor-crl "$WORK/protected-quote-inputs/vendor.crl" "$@" \
         >"$WORK/protected-quote-$quote_case.json" \
         2>"$WORK/protected-quote-$quote_case.err" || quote_status=$?
     printf '%s\n' "$quote_status" >"$WORK/protected-quote-$quote_case.status"
@@ -53,7 +59,7 @@ protected_quote_case() {
     quote_exchange_failures=$(client_event_count_after "$quote_baseline" \
         QUOTE_SIGNED_EXCHANGE_FAILED "$WORK/protected-quote-$quote_case-private-events.txt") || return 1
     [ "$quote_status" -eq 1 ] || return 1
-    if [ "$quote_case" = device-unavailable ]; then
+    if [ "$quote_case" = device-unavailable ] || [ "$quote_case" = confirmation-unavailable ]; then
         [ -s "$WORK/protected-quote-$quote_case.json" ] && [ "$quote_exchange_failures" -eq 0 ] || return 1
         quote_stdout_empty=false
     else
@@ -61,8 +67,8 @@ protected_quote_case() {
         quote_stdout_empty=true
     fi
     jq -n --argjson status "$quote_status" --argjson empty "$quote_stdout_empty" \
-        --argjson after "$quote_exchange_failures" \
-        '{exit_status:$status,stdout_empty:$empty,signed_exchange_failures_before:0,signed_exchange_failures_after:$after}' \
+        --argjson after "$quote_exchange_failures" --arg profile "$quote_profile" \
+        '{profile:$profile,exit_status:$status,stdout_empty:$empty,signed_exchange_failures_before:0,signed_exchange_failures_after:$after}' \
         >"$WORK/protected-quote-$quote_case-gate.json"
 }
 
@@ -140,6 +146,11 @@ protected_quote_route_run() {
     protected_quote_case device-unavailable || fail QUOTE_DEVICE_REFUSAL_MISSING
     PHASE=protected-quote-exhausted
     protected_quote_case repeat || fail QUOTE_BUDGET_NOT_REJECTED
+    protected_quote_cli "$provider_node_a" compute quote detach \
+        >"$WORK/protected-quote-detach-valid.json" 2>"$WORK/protected-quote-detach-valid.err" || fail QUOTE_DETACH_FAILED
+    PHASE=protected-quote-confirmation-unavailable
+    protected_quote_attach confirmation "$quote_requester_key" --key-confirmation-v1 || fail QUOTE_ATTACH_FAILED
+    protected_quote_case confirmation-unavailable --key-confirmation-v1 || fail QUOTE_CONFIRMATION_REFUSAL_MISSING
     benchmark_capture_paths protected-quote-live mptcp || fail QUOTE_LIVE_ROUTE_MISSING
     jq -e --arg context "$quote_context" '.route_context_id == $context' \
         "$WORK/protected-quote-live-selection.json" >/dev/null || fail QUOTE_ROUTE_CHANGED
@@ -151,7 +162,7 @@ protected_quote_route_run() {
     content_provider_stop_control_observer || fail QUOTE_CONTROL_CAPTURE_INCOMPLETE
     PHASE=protected-quote-finish
     protected_quote_cli "$provider_node_a" compute quote detach \
-        >"$WORK/protected-quote-detach-valid.json" 2>"$WORK/protected-quote-detach-valid.err" || fail QUOTE_DETACH_FAILED
+        >"$WORK/protected-quote-detach-confirmation.json" 2>"$WORK/protected-quote-detach-confirmation.err" || fail QUOTE_DETACH_FAILED
     protected_quote_cli "$provider_node_a" content stop >"$WORK/protected-quote-stop.json" \
         2>"$WORK/protected-quote-stop.err" || fail QUOTE_STOP_FAILED
     jq -e '.serving == false' "$WORK/protected-quote-stop.json" >/dev/null || fail QUOTE_STOP_FAILED
@@ -159,10 +170,11 @@ protected_quote_route_run() {
     jq -n --slurpfile wrong "$WORK/protected-quote-wrong-gate.json" \
         --slurpfile device "$WORK/protected-quote-device-unavailable-gate.json" \
         --slurpfile repeat "$WORK/protected-quote-repeat-gate.json" \
-        '{wrong:$wrong[0],device_unavailable:$device[0],repeat:$repeat[0],
+        --slurpfile confirmation "$WORK/protected-quote-confirmation-unavailable-gate.json" \
+        '{wrong:$wrong[0],device_unavailable:$device[0],repeat:$repeat[0],confirmation_unavailable:$confirmation[0],
           grant:{max_seconds:600,max_attempts:1,wrong_key_distinct:true,requester_key_bound:true},
           device:{provider_mount_checked:true,fixed_device_absent:true},
-          detach_wrong:true,detach_valid:true,provider_stopped:true,client_disconnected:true}' \
+          detach_wrong:true,detach_valid:true,detach_confirmation:true,provider_stopped:true,client_disconnected:true}' \
         >"$WORK/protected-quote-gates.json"
     python3 -B "$source_directory/tests/integration/protected-quote-route.py" \
         evidence "$WORK" "$expected_commit" || fail QUOTE_EVIDENCE_INVALID

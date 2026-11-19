@@ -31,12 +31,15 @@ class Wiring(unittest.TestCase):
             self.assertNotIn("Protected-quote:", later.stdout)
             self.assertNotIn("protected-quote route refusal plan:", later.stdout)
 
-    def test_real_three_case_calls_and_authority_are_fixed(self):
+    def test_real_legacy_and_confirmation_case_calls_and_authority_are_fixed(self):
         source = SHELL.read_text()
         self.assertEqual(source.count("protected_quote_case wrong ||"), 1)
         self.assertEqual(source.count("protected_quote_case device-unavailable ||"), 1)
         self.assertEqual(source.count("protected_quote_case repeat ||"), 1)
-        self.assertIn('--max-seconds 600 --max-attempts 1', source)
+        self.assertEqual(source.count('protected_quote_attach confirmation "$quote_requester_key" --key-confirmation-v1 ||'), 1)
+        self.assertEqual(source.count('protected_quote_case confirmation-unavailable --key-confirmation-v1 ||'), 1)
+        self.assertIn('--max-seconds 600 --max-attempts 1 "$@"', source)
+        self.assertIn('--vendor-crl "$WORK/protected-quote-inputs/vendor.crl" "$@"', source)
         self.assertIn('protected_quote_attach wrong "$quote_wrong_key"', source)
         self.assertIn('protected_quote_attach valid "$quote_requester_key"', source)
         self.assertIn('nsenter --target "$quote_provider_pid" --mount -- test ! -e /dev/sev-guest', source)
@@ -172,11 +175,17 @@ chown() { printf '%s\\n' "$@" >"$TRACE"; return "$OWNER_STATUS"; }
 capture_product_logs() { :; }
 client_log_baseline_ms() { printf '100\\n'; }
 client_event_count_after() { test "$1" = 100; test "$2" = QUOTE_SIGNED_EXCHANGE_FAILED; printf '%s\\n' "$CASE_FAILURES"; }
-protected_quote_cli() { printf '%s' "$CASE_OUTPUT"; return "$CASE_STATUS"; }
-protected_quote_case "$CASE"
+protected_quote_cli() { printf '%s\\n' "$@" > "$WORK/argv"; printf '%s' "$CASE_OUTPUT"; return "$CASE_STATUS"; }
+if [ "$CASE" = confirmation-unavailable ]; then
+    protected_quote_case "$CASE" --key-confirmation-v1
+else
+    protected_quote_case "$CASE"
+fi
 '''
             result = subprocess.run(["sh", "-c", script, "inert-case", str(SHELL)], env=env,
                 capture_output=True, timeout=5)
+            args = (Path(directory) / "argv").read_text().splitlines()
+            self.assertEqual(args.count("--key-confirmation-v1"), int(name == "confirmation-unavailable"))
             gate = Path(directory) / f"protected-quote-{name}-gate.json"
             receipt = json.loads(gate.read_bytes()) if gate.exists() else None
             recorded_status = (Path(directory) / f"protected-quote-{name}.status").read_text().strip()
@@ -188,7 +197,7 @@ protected_quote_case "$CASE"
                 code, gate, status = self.case(name, 1, 1, "")
                 self.assertEqual(code, 0)
                 self.assertEqual(status, "1")
-                self.assertEqual(gate, dict(exit_status=1, stdout_empty=True,
+                self.assertEqual(gate, dict(profile="legacy", exit_status=1, stdout_empty=True,
                     signed_exchange_failures_before=0, signed_exchange_failures_after=1))
                 for exit_status, count, output in ((1, 0, ""), (1, 2, ""), (1, 1, "{}"),
                                                  (0, 1, ""), (124, 1, ""), (137, 1, "")):
@@ -196,6 +205,12 @@ protected_quote_case "$CASE"
                     self.assertNotEqual(code, 0)
                     self.assertIsNone(gate)
                     self.assertEqual(recorded, str(exit_status))
+
+    def test_opt_in_uses_the_confirmation_argv_and_records_an_authenticated_refusal(self):
+        code, gate, _ = self.case("confirmation-unavailable", 1, 0, "{}")
+        self.assertEqual(code, 0)
+        self.assertEqual(gate, dict(profile="key-confirmation-v1", exit_status=1, stdout_empty=False,
+            signed_exchange_failures_before=0, signed_exchange_failures_after=0))
 
     def test_refusal_requires_nonempty_stdout_exit_one_and_no_exchange_failure(self):
         code, gate, _ = self.case("device-unavailable", 1, 0, '{"not_yet_validated":"fixture"}')
