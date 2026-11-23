@@ -1,16 +1,19 @@
 # Shared development workflow
 
-This workflow applies to Codex, OpenCode and other coding agents. The historical
-filename is retained for existing links. Use repository state and the user's latest
-instructions rather than session transcripts or tool-specific rituals.
+Codex, OpenCode and other coding agents use this workflow across VOLPAROSSA.
+Each repository's root `AGENTS.md` links here and gives its own contracts,
+verification guidance and authority boundaries. Changes to shared development
+practice belong here. Use the user's latest scoped instructions and current
+repository state when resuming work across clients.
 
 ## Start or resume
 
-1. Read the task, applicable AGENTS instructions and the compact
-   [implementation status](../IMPLEMENTATION_STATUS.md). For a full-project resume,
-   read the complete [goal](GOAL.md), including its integrated [DPS](GOAL.md#dps)
-   and [Studio/hosting](GOAL.md#studio) sections. For a bounded task, load the
-   relevant requirements and contracts.
+1. Read the task, the owning repository's `AGENTS.md`, any instructions for the
+   affected paths and the relevant local README or status. Consult the Core
+   [implementation status](../IMPLEMENTATION_STATUS.md) for shared dependencies.
+   For a full-project resume, read the complete [goal](GOAL.md), including its
+   integrated [DPS](GOAL.md#dps) and [Studio/hosting](GOAL.md#studio) sections.
+   For a bounded task, load the relevant requirements and contracts.
 2. Inspect status and ownership before writing. Use `git status --short --branch`
    and, when working across checkouts, `git worktree list`. Refresh remote heads,
    relevant PRs and CI when integration decisions depend on them; old pending or
