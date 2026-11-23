@@ -64,9 +64,10 @@ runs. Source checks, public fixtures, protected execution and product acceptance
 different evidence. Cache pinned build inputs, never test success, private fixtures,
 credentials or authorization. Keep untrusted PR cache reads separate from trusted writes.
 
-Update the compact implementation status with the source, bounded result, evidence
-link and remaining dependency. Put detailed dated evidence in the linked history or
-topic record, without repeating it in goal text, workflow and verification instructions.
+Update the affected row in the [Core status](../IMPLEMENTATION_STATUS.md) when
+its result or next dependency changes. Cite the tested revision and evidence.
+Put detailed Core trial narratives in the linked [topic records](../IMPLEMENTATION_STATUS.md#detailed-trial-records)
+and keep application-specific results in the owning repository.
 Archive superseded narrative; keep unique failures and exact evidence bindings.
 
 <a id="worktree-and-generated-artifact-lifecycle"></a>
