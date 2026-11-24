@@ -40,6 +40,14 @@ failure chronology are in the
 [implementation ledger](IMPLEMENTATION_STATUS.md#explicit-public-code-proposals-bounded-peer-repair-passes).
 Replay against the integration branch is not a new live combined-source trial.
 
+## Public peer coding in the native VSCodium workbench
+
+On 19 November 2026, Core `06b12d06` handled a public coding request from the installed VSCodium 1.135.06055 extension in the twelve-node Debian KVM. The ordinary editor user had loopback and a same-owner 0600 Unix socket to Core. After the owner selected GPL-3.0-only, the workbench showed the entire public question and source and requested explicit enrollment.
+
+Core discovered one eligible provider. The independent observer saw the original Qwen3-0.6B worker on `relay4`. Its 12 tokens reached EOS and produced a 31-byte replacement. The peer job ID and report digest shown by the workbench matched the original retained job and report. After separate edit and test approvals, the applied file digest matched the original output. The three unchanged tests failed before the edit and passed afterward in both the owner-selected and independent checks.
+
+The discovery and task captures recorded two and seven completed MPTCP/TLS exit flows respectively. Task traffic reached the selected compute provider. Eight original control exchanges included exactly one submission. VSCodium exited normally and the observer confirmed the worker had ended. Cleanup reproduced the initial network-state digest and left zero owned topology objects. The immutable Code driver was `ab7dd3de` and the workflow was `5ad6f4c6`. [Original KVM](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/44561152211) · [Original receipts](https://github.com/VOLPAROSSA/volparossa-code/blob/15c6a6fdb6c16e242ce19cd95a1c663f0a1c84f5/docs/evidence/vscodium-public-peer-44561152211.zip)
+
 ## Original native OpenCode / two-peer document trial
 
 This disposable integration connects the source-built OpenCode runtime in
