@@ -332,6 +332,23 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   observed lifetime countdown. Its raw snapshots differed.
   [Four-validator run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Original build, consensus and cleanup receipts](../development/evidence/bank-validators-44426288636)
 
+### Bank owner cancellation
+
+Core `3fb7e249` installed the Bank TEST authorizer from `a65eb8a3` for its
+four-validator Debian 13 trial. The owner committed 70 of 100 TEST units and
+reserved another 10. The signed cancellation released those 10 to the payer.
+After the signing seed was removed and one validator restarted, the reopened
+reservation, payment and cancellation ran again in block 25. All four stores
+agreed at height 26. The balances remained 30 and 70 and the cancellation
+kept receipt sequence 4.
+[Validator receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-inner.json) · [Passing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/2)
+
+The first attempt failed the outer host check when finite IPv6 lifetimes
+increased. The second attempt used the same source and guard. It observed
+normal lifetime countdown, removed the private keys and owned namespaces,
+and passed. Independent light-client finality remains open.
+[First host receipt](../development/evidence/bank-validators-44564082860/attempt-1/transaction-abci-acceptance.json) · [First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/1) · [Passing host receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-acceptance.json)
+
 ## Native Firefox ordinary tabs
 
 Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
