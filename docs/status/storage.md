@@ -377,3 +377,19 @@ contracts. Both upload export paths validate the two diagnostic sidecars.
 The joined trial must demonstrate authenticated upload, automatic enrollment
 under finite authority, provider withdrawal, repair, two cold restorations
 across restart, deletion and cleanup. That trial remains pending.
+
+### Joint publication and the authenticated Cloud read
+
+Core `648e204a` repeated the Image and Cloud maintenance trial after the foreground
+reservation-receipt change. This run pinned Image `21988efc` and Cloud `08be9711`. Both apps published four fragments with two copies
+per fragment. Each reported 799,146 logical ciphertext bytes, 1,598,292 committed
+payload bytes, eight copy records and zero uncertain payload bytes. The publication
+observer passed its 56-completion lower bound and joined. Earlier combined trials
+also reached publication. [Earlier run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367739602) · [Original publication report](../development/evidence/storage-maintenance-45408914106/storage-consumer-publish.json)
+
+The exercise reached `cloud_authenticated_read` and rejected the `repair_charge`
+check. The receipt does not identify the failing field. The guest network digests
+matched, the topology reported zero remaining owned objects and the local fixture
+was removed. The separate Core fragment lifecycle reported zero usage at its three
+providers. Remote cleanup and provider usage for the two application deposits
+remain unconfirmed. [Original exercise and cleanup reports](../development/evidence/storage-maintenance-45408914106) · [110,808-byte original archive, SHA-256 `90f4619e…80c022e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45408914106/artifacts/14933057121)
