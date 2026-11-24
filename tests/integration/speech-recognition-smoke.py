@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import select
 import signal
 import subprocess
@@ -73,6 +74,7 @@ def execute(root, output, revision):
                "--runtime-root", root / "runtime/venv", "--model-root", root / "runtime/model",
                "--work-parent", root / "work", "--language", "en", "--execute", "--input"]
     fixture = [sys.executable, "-B", str(HERE / "speech-recognition-fixture.py")]
+    lifecycle = runpy.run_path(str(HERE / "agent-private-conversation.py"))["service_diagnostic"]
     scratch, recordings = root / "work", root / "recordings"
     scratch.mkdir(mode=0o700)
     subprocess.run([*fixture, "prepare", recordings], timeout=40, check=True)
@@ -80,12 +82,23 @@ def execute(root, output, revision):
                "scope": "synthetic_english_speech", "passed": False, "phase": "recognition"}
     try:
         for name in ("bicycle", "station"):
-            result = subprocess.run([*command, recordings / (name + ".wav")],
-                                    stdout=subprocess.PIPE, check=True, timeout=150)
-            response = json.loads(result.stdout)
+            # The ordinary CLI debug subscriber uses stdout. Keep the full stream private in
+            # this synthetic guest and export only the shared closed lifecycle projection.
+            trace = recordings / (name + ".log")
+            with trace.open("xb") as log:
+                result = subprocess.run([*command, recordings / (name + ".wav")], stdout=log,
+                                        env=dict(os.environ, NO_COLOR="1",
+                                                 RUST_LOG="off,volparossa::compute::private_diagnostic=debug"),
+                                        timeout=150)
+            receipt["lifecycle"] = lifecycle(trace)
+            if result.returncode:
+                raise ValueError("speech worker did not complete")
+            lines = trace.read_bytes().splitlines()
+            require(len(lines) <= 32 and bool(lines) and len(lines[-1]) <= 16384)
+            response = json.loads(lines[-1])
             require(response["max_observed_rss_bytes"] > 0 and response["elapsed_ms"] > 0 and not any(scratch.iterdir()))
-            (recordings / (name + ".result.json")).write_bytes(result.stdout)
-            (output / ("speech-" + name + ".json")).write_bytes(result.stdout)
+            (recordings / (name + ".result.json")).write_bytes(lines[-1] + b"\n")
+            (output / ("speech-" + name + ".json")).write_bytes(lines[-1] + b"\n")
         receipt["phase"] = "score"
         score = subprocess.run([*fixture, "score", recordings], stdout=subprocess.PIPE, timeout=15)
         receipt["score"] = json.loads(score.stdout)

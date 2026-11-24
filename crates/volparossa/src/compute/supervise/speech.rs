@@ -40,6 +40,9 @@ pub(in crate::compute) async fn run(
                 () = &mut deadline => return Err(ExecutionDeadline.into()),
                 result = &mut completion => {
                     let (value, status) = result?;
+                    if value["status"] == "error" {
+                        return Err(super::worker_failure(&value, id, status));
+                    }
                     ensure!(status.success() && value["status"] == "ok", "compute_speech_failed");
                     return Ok(value);
                 },
