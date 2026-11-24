@@ -12,6 +12,7 @@ use zeroize::Zeroizing;
 
 pub(super) struct Input {
     source: Source,
+    expires_at: Option<u64>,
 }
 
 enum Source {
@@ -27,6 +28,7 @@ impl Input {
         let Some(expected) = expected else {
             return Ok(Self {
                 source: Source::Streaming(file),
+                expires_at: None,
             });
         };
         Self::with_review(file, length, Some(expected), |_, _| Ok(())).map(|(input, ())| input)
@@ -67,14 +69,31 @@ impl Input {
         Ok((
             Self {
                 source: Source::Reviewed { bytes, offset: 0 },
+                expires_at: None,
             },
             decision,
         ))
     }
-}
 
-impl Read for Input {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+    pub(super) fn valid_until(mut self, expires: u64) -> Self {
+        self.expires_at = Some(expires);
+        self
+    }
+
+    fn read_with_clock(
+        &mut self,
+        output: &mut [u8],
+        now: impl FnOnce() -> Result<u64>,
+    ) -> io::Result<usize> {
+        // The publish codec reads EOF after storing the last chunk and before signing.
+        if let Some(expires) = self.expires_at
+            && now().map_err(io::Error::other)? >= expires
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "site signing authorization expired while staging",
+            ));
+        }
         match &mut self.source {
             Source::Streaming(file) => file.read(output),
             Source::Reviewed { bytes, offset } => {
@@ -86,9 +105,35 @@ impl Read for Input {
     }
 }
 
+impl Read for Input {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.read_with_clock(output, super::now_seconds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_authorization_must_still_be_live_at_the_final_pre_signature_read() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bundle");
+        std::fs::write(&path, b"x").unwrap();
+        let (input, ()) =
+            Input::with_review(File::open(path).unwrap(), 1, None, |_, _| Ok(())).unwrap();
+        let mut input = input.valid_until(101);
+        let mut buffer = [0; 1];
+        assert_eq!(input.read_with_clock(&mut buffer, || Ok(100)).unwrap(), 1);
+        assert_eq!(buffer, *b"x");
+        assert_eq!(
+            input
+                .read_with_clock(&mut buffer, || Ok(101))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
 
     #[test]
     fn reviewed_snapshot_survives_original_file_mutation_and_signs_only_checked_bytes() {

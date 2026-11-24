@@ -37,6 +37,7 @@ def session(args, digest, accept):
             if not decision_sent and b"or press Enter to cancel: " in output:
                 assert all(value.encode() in output for value in (
                     "site-review-fixture", "/index.html", "/style.css", digest,
+                    "100000 bytes, 7 chunks, 0 bytes minimum free",
                     args[args.index("--expected-publisher-key") + 1],
                     hashlib.sha256(Path("first/index.html").read_bytes()).hexdigest(),
                 ))
@@ -67,7 +68,8 @@ binary, key, digest = sys.argv[1:]
 args = [binary, "--control-socket", "absent.sock", "content", "publish", "--review-site",
         "--input", "tested.vps", "--identity", "identity.key", "--expected-publisher-key", key,
         "--name", "site-review-fixture", "--revision", "5", "--lifetime-seconds", "300",
-        "--cache", "reviewed-cache", "--manifest", "reviewed.manifest", "--min-free-bytes", "0"]
+        "--cache", "reviewed-cache", "--manifest", "reviewed.manifest", "--quota-bytes", "100000", "--max-entries", "7",
+        "--min-free-bytes", "0"]
 for extra in ([], ["--contribute"], ["--passphrase-file", "fixture-password"]):
     result = subprocess.run(args + extra, input=("SIGN " + digest[:12] + "\n").encode(),
                             capture_output=True, start_new_session=True, timeout=10, check=False)

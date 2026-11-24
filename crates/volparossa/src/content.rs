@@ -855,10 +855,16 @@ fn publish(args: &Publish) -> Result<Published> {
         &signer,
         &mut cache,
     )?;
-    let verified = manifest.verify(&signer.verifying_key(), now)?;
+    let publisher = signer.verifying_key();
     drop(signer);
     manifest_output.write_all(&manifest.encode())?;
     manifest_output.as_file().sync_all()?;
+    let verification_time = if args.review_site {
+        now_seconds()?
+    } else {
+        now
+    };
+    let verified = manifest.verify(&publisher, verification_time)?;
     manifest_output
         .persist_noclobber(&args.manifest)
         .map_err(|error| error.error)

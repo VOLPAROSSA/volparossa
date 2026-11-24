@@ -31,7 +31,7 @@ pub(in crate::content) fn prepare(
     if expires <= now {
         bail!("site signing authorization expired during review");
     }
-    Ok((input, now, expires))
+    Ok((input.valid_until(expires), now, expires))
 }
 
 fn confirm(args: &Publish, bytes: &[u8], digest: [u8; 32], expires: u64) -> Result<()> {
@@ -59,6 +59,12 @@ fn confirm(args: &Publish, bytes: &[u8], digest: [u8; 32], expires: u64) -> Resu
         tty,
         "Cache          {}",
         args.cache.as_os_str().as_encoded_bytes().escape_ascii()
+    )?;
+    let limits = args.limits.cache_limits()?;
+    writeln!(
+        tty,
+        "Cache limits   {} bytes, {} chunks, {} bytes minimum free",
+        limits.max_bytes, limits.max_entries, limits.min_free_bytes
     )?;
     if args.reuse_cache {
         writeln!(
