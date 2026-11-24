@@ -535,6 +535,12 @@ Signal Desktop exported a 198,352-byte encrypted backup. When two of three Stora
 
 With Thunderbird closed, the owner’s Stalwart server accepted a second message over local SMTP. It rejected an unknown local recipient and external forwarding. After Stalwart restarted on the same SQLite database, the owner recovered both the original import and the delivered message, including its stored transport headers. This exercised an isolated loopback mail server. [Source-bound Thunderbird and Stalwart receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/5bb90ec3be8c168fd58a19e2d03f626f6560d96b/third_party/thunderbird-stalwart-owner-smtp)
 
+## Paired Mail delivery
+
+On Core `b9c01e97` and Mail `30cc423a`, the paired sender and receiver used separate application processes behind one Core client. Two providers confirmed custody of the encrypted message. After the sender profile was removed and one provider reopened its store, the owner retrieved the message over a fresh protected route. Stalwart returned all 90,139 original MIME bytes before either provider acknowledged import. The next fetch was empty. The sender and receiver phases recorded six and seven Exit MPTCP flows respectively. The guest host snapshots matched and cleanup left zero owned objects. [Protected route and application receipt](../development/evidence/paired-mail-44553382181/paired-mail-smoke.json) · [Hosted topology trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44553382181)
+
+In the earlier local-provider trial on Mail `30cc423a`, Stalwart restarted after losing its import reply. The retry recovered the same 429-byte message, and a fresh Thunderbird profile opened it over implicit TLS. On Mail `94f3162d`, the sending Thunderbird profile submitted both a saved draft and a newly composed message. The recipient opened them in its Inbox. Automatic pickup later delivered a third message after reconnection. [Original import and recovery receipt](../development/evidence/mail-owner-44547309790/peer-mail.json) · [Sender and receiver trial](https://github.com/VOLPAROSSA/volparossa-mail/actions/runs/44562762968)
+
 ## Latest completed integration evidence
 
 - **Code:** actual 38824828727 on Code `fd4ff9688c58` / Core `7d0f9f0b492c`
