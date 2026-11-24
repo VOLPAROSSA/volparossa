@@ -26,6 +26,17 @@ def check(condition):
     if not condition:
         raise ValueError("Studio handoff identity, bytes, geometry or ownership differed")
 
+def check_workflow(env):
+    core, studio = env["STUDIO_CORE_REVISION"], env["STUDIO_REVISION"]
+    check(re.fullmatch(r"[0-9a-f]{40}", core) and re.fullmatch(r"[0-9a-f]{40}", studio))
+    if env["GITHUB_REPOSITORY"] == "VOLPAROSSA/volparossa":
+        check(env["GITHUB_WORKFLOW"] == "Quality" and env["GITHUB_SHA"] == core)
+    else:
+        check(env["GITHUB_REPOSITORY"] == "VOLPAROSSA/volparossa-studio"
+              and env["GITHUB_WORKFLOW_REF"] == "VOLPAROSSA/volparossa-studio/.github/workflows/silex-publication-bounds.yml@refs/heads/main"
+              and env["GITHUB_REF"] == "refs/heads/main" and env["GITHUB_REF_PROTECTED"] == "true"
+              and env["GITHUB_WORKFLOW_SHA"] == env["GITHUB_SHA"] == studio)
+
 def digest(value):
     return hashlib.sha256(value).hexdigest()
 
@@ -126,6 +137,9 @@ def admit(directory, expected_sha, revision, context=()):
                 studio_evidence_sha256=expected_sha)
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["check-workflow"]:
+        check_workflow(os.environ)
+        raise SystemExit(0)
     if len(sys.argv) not in (4, 7):
         raise SystemExit("usage: DIRECTORY EVIDENCE_SHA256 CORE_REVISION [RUN_ID ATTEMPT STUDIO_REVISION]")
     print(json.dumps(admit(*sys.argv[1:4], sys.argv[4:]), sort_keys=True))
