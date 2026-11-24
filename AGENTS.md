@@ -11,8 +11,8 @@ agents. The user's latest scoped instructions take precedence over older records
   resumption, read GOAL; for bounded work, read the affected requirements and topic
   sections. Use `docs/README.md` as the index and the application's own guidance.
   Do not load historical ledgers, source snapshots or unrelated specifications by default.
-- `docs/development/CODEX_WORKFLOW.md` defines the shared development workflow;
-  despite its filename it is client-independent. GOAL is the single goal reference
+- Follow the [shared development workflow](docs/development/CODEX_WORKFLOW.md)
+  across repositories and coding clients. GOAL is the single goal reference
   when switching clients or sessions. `docs/development/TESTING.md#requirement-preservation`
   covers preservation checks when requirements or source records change; no ritual
   rereading or verification is needed per task.

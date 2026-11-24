@@ -1,16 +1,19 @@
 # Shared development workflow
 
-This workflow applies to Codex, OpenCode and other coding agents. The historical
-filename is retained for existing links. Use repository state and the user's latest
-instructions rather than session transcripts or tool-specific rituals.
+Codex, OpenCode and other coding agents use this workflow across VOLPAROSSA.
+Each repository's root `AGENTS.md` links here and gives its own contracts,
+verification guidance and authority boundaries. Changes to shared development
+practice belong here. Use the user's latest scoped instructions and current
+repository state when resuming work across clients.
 
 ## Start or resume
 
-1. Read the task, applicable AGENTS instructions and the compact
-   [implementation status](../IMPLEMENTATION_STATUS.md). For a full-project resume,
-   read the complete [goal](GOAL.md), including its integrated [DPS](GOAL.md#dps)
-   and [Studio/hosting](GOAL.md#studio) sections. For a bounded task, load the
-   relevant requirements and contracts.
+1. Read the task, the owning repository's `AGENTS.md`, any instructions for the
+   affected paths and the relevant local README or status. Consult the Core
+   [implementation status](../IMPLEMENTATION_STATUS.md) for shared dependencies.
+   For a full-project resume, read the complete [goal](GOAL.md), including its
+   integrated [DPS](GOAL.md#dps) and [Studio/hosting](GOAL.md#studio) sections.
+   For a bounded task, load the relevant requirements and contracts.
 2. Inspect status and ownership before writing. Use `git status --short --branch`
    and, when working across checkouts, `git worktree list`. Refresh remote heads,
    relevant PRs and CI when integration decisions depend on them; old pending or
@@ -46,6 +49,22 @@ Before shared wire/interface allocation, inspect current and retained integratio
 heads; preserve field ownership and compatibility. Make ordinary scoped development,
 commit and push decisions autonomously; branch protections and release authority apply.
 
+### Commit attribution for Erik's Codex work
+
+For work that Erik Le Blansch authors with Codex, use his GitHub account
+`erikleblansch` as the sole author. Configure each new working clone for his
+tasks with his account-linked Git identity before creating source commits.
+
+```sh
+git config --local user.name erikleblansch
+git config --local user.email 58982453+erikleblansch@users.noreply.github.com
+```
+
+Use that identity for delegated commits too. Omit tool co-author trailers from
+Erik's commits and the final squash message. Check the source authors before
+merging, since GitHub can credit them when it creates the squash commit.
+Preserve the authorship of other contributors when integrating their work.
+
 ## Verify and record
 
 Choose checks for the changed behavior and actual risk. Use narrow formatter/compile
@@ -61,9 +80,10 @@ runs. Source checks, public fixtures, protected execution and product acceptance
 different evidence. Cache pinned build inputs, never test success, private fixtures,
 credentials or authorization. Keep untrusted PR cache reads separate from trusted writes.
 
-Update the compact implementation status with the source, bounded result, evidence
-link and remaining dependency. Put detailed dated evidence in the linked history or
-topic record, without repeating it in goal text, workflow and verification instructions.
+Update the affected row in the [Core status](../IMPLEMENTATION_STATUS.md) when
+its result or next dependency changes. Cite the tested revision and evidence.
+Put detailed Core trial narratives in the linked [topic records](../IMPLEMENTATION_STATUS.md#detailed-trial-records)
+and keep application-specific results in the owning repository.
 Archive superseded narrative; keep unique failures and exact evidence bindings.
 
 <a id="worktree-and-generated-artifact-lifecycle"></a>

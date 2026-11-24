@@ -221,6 +221,15 @@ pub(super) fn verify_preparation(value: &Value, bytes: &[u8], assets: &[Value]) 
     Ok(())
 }
 
+pub(super) fn reviewed_digest(sha: &[u8; 32], selected: Option<OsString>) -> Result<OsString> {
+    let packed = hex::encode(sha);
+    match selected {
+        Some(reviewed) if reviewed == packed.as_str() => Ok(reviewed),
+        Some(_) => Err("native_owner_review_digest"),
+        None => Ok(packed.into()),
+    }
+}
+
 pub(super) async fn publish(
     f: &Fixture,
     p: &Progress,
@@ -233,12 +242,18 @@ pub(super) async fn publish(
     } else {
         600
     };
+    let native_review = std::env::var_os("VOLPAROSSA_STUDIO_NATIVE_REVIEW_SHA256");
+    let has_native_review = native_review.is_some();
+    let reviewed = reviewed_digest(&packed.sha, native_review)?;
+    if has_native_review {
+        println!("\nSTUDIO_NATIVE_OWNER_REVIEW {}", hex::encode(packed.sha));
+    }
     let mut args = vec![
         "publish".into(),
         "--input".into(),
         f.path("site.bundle").into_os_string(),
         "--expected-input-sha256".into(),
-        hex::encode(packed.sha).into(),
+        reviewed,
         "--expected-publisher-key".into(),
         hex::encode(f.publisher.as_bytes()).into(),
         "--cache".into(),

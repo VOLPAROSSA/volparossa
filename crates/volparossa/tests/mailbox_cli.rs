@@ -358,10 +358,41 @@ async fn rejects_final() {
     let _ = server.await;
 }
 
+async fn verify_sender_invitation(fixture: &Fixture) {
+    let before = fixture.requests.load(Ordering::SeqCst);
+    let mut args = [
+        "verify-invitation",
+        "--invitation",
+        "invitation",
+        "--owner-key",
+        &fixture.owner_key,
+        "--identity",
+        "sender",
+        "--passphrase-file",
+        "passphrase",
+    ];
+    let report = fixture.success(&args).await;
+    assert_eq!(report["owner_key"], fixture.owner_key);
+    assert_eq!(report["sender_key"], fixture.sender_key);
+    assert_eq!(report["network_used"], false);
+    let original = fs::read(fixture.directory.path().join("invitation")).unwrap();
+    assert_eq!(
+        report["invitation_sha256"],
+        hex::encode(Sha256::digest(&original))
+    );
+    args[4] = &fixture.sender_key;
+    assert!(!fixture.invoke(&args).await.status.success());
+    args[4] = &fixture.owner_key;
+    args[6] = "recipient";
+    assert!(!fixture.invoke(&args).await.status.success());
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), before);
+}
+
 async fn split_import() {
     let fixture = Fixture::new();
     let server = fixture.server(false);
     fixture.invite_and_enroll().await;
+    verify_sender_invitation(&fixture).await;
     let root = fixture.directory.path();
     let payload = b"Message-ID: <fixture@example.invalid>\r\nSubject: private fixture\r\n\r\nretained until explicit import";
     fs::write(root.join("input"), payload).unwrap();

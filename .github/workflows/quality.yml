@@ -645,12 +645,13 @@ jobs:
 
       - name: Check native CPU cache hints and unchanged admission without loading models
         run: |
-          cargo test --locked -p volparossa compute::native_cpu
-          cargo test --locked -p volparossa compute::supervise::native_session
-          cargo test --locked -p volparossa compute::private_serve::tests::native_session
-          cargo test --locked -p volparossa compute::sandbox::tests::native_session
-          cargo test --locked -p volparossa compute::resources::tests
-          cargo test --locked -p volparossa compute::spare_capacity::memory::tests
+          cargo test --locked -p volparossa --bin volparossa -- \
+            compute::native_cpu \
+            compute::supervise::native_session \
+            compute::private_serve::tests::native_session \
+            compute::sandbox::tests::native_session \
+            compute::resources::tests \
+            compute::spare_capacity::memory::tests
           python3 -B tests/integration/test-agent-private-conversation.py
           python3 -B tests/integration/test-native-source-weight-cache-contract.py
 

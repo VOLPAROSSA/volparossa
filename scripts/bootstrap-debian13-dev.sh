@@ -47,78 +47,80 @@ if ! command -v apt-cache >/dev/null 2>&1 || ! command -v apt-get >/dev/null 2>&
     exit 1
 fi
 
-packages=''
-missing=''
-
-candidate_version() {
-    apt-cache policy "$1" 2>/dev/null | awk '/^[[:space:]]*Candidate:/ { print $2; exit }'
-}
-
-add_package() {
-    purpose=$1
-    shift
-    selected=''
-    for package_name in "$@"; do
-        version=$(candidate_version "$package_name")
-        if [ -n "$version" ] && [ "$version" != '(none)' ]; then
-            selected=$package_name
-            break
-        fi
-    done
-    if [ -z "$selected" ]; then
-        missing="${missing}${purpose}: $*\n"
-        return
-    fi
-    case " $packages " in
-        *" $selected "*) ;;
-        *) packages="${packages}${packages:+ }${selected}" ;;
-    esac
-}
-
-add_package 'C/C++ build toolchain' build-essential
-add_package 'Clang compiler' clang
-add_package 'CMake' cmake
-add_package 'Ninja' ninja-build
-add_package 'pkg-config' pkg-config
-add_package 'Rust compiler' rustc
-add_package 'Cargo' cargo
-add_package 'Git' git
-add_package 'Rust formatter' rustfmt
-add_package 'Rust Clippy linter' rust-clippy
-add_package 'Debian package builder' dpkg-dev
-add_package 'debhelper' debhelper
-add_package 'just task runner' just
-add_package 'shell script static analysis' shellcheck
-add_package 'IP routing diagnostics' iproute2
-add_package 'nftables diagnostics' nftables
-add_package 'WireGuard diagnostics' wireguard-tools
-add_package 'Protocol Buffers compiler' protobuf-compiler
-add_package 'SQLite development headers' libsqlite3-dev
-add_package 'OpenSSL development headers' libssl-dev
-add_package 'libmnl development headers' libmnl-dev
-add_package 'libnl core development headers' libnl-3-dev
-add_package 'libnl generic-netlink development headers' libnl-genl-3-dev
-add_package 'libevent development headers' libevent-dev
-add_package 'Linux capability inspection' libcap2-bin
-add_package 'native memory checker' valgrind
-add_package 'JSON acceptance-report tooling' jq
-add_package 'namespace capture tooling' tcpdump
-add_package 'traffic shaping and throughput test tooling' iperf3
-
+# Each capability lists acceptable packages in preference order.
+requirements='C/C++ build toolchain|build-essential
+Clang compiler|clang
+CMake|cmake
+Ninja|ninja-build
+pkg-config|pkg-config
+Rust compiler|rustc
+Cargo|cargo
+Git|git
+Rust formatter|rustfmt
+Rust Clippy linter|rust-clippy
+Debian package builder|dpkg-dev
+debhelper|debhelper
+just task runner|just
+shell script static analysis|shellcheck
+IP routing diagnostics|iproute2
+nftables diagnostics|nftables
+WireGuard diagnostics|wireguard-tools
+Protocol Buffers compiler|protobuf-compiler
+SQLite development headers|libsqlite3-dev
+OpenSSL development headers|libssl-dev
+libmnl development headers|libmnl-dev
+libnl core development headers|libnl-3-dev
+libnl generic-netlink development headers|libnl-genl-3-dev
+libevent development headers|libevent-dev
+Linux capability inspection|libcap2-bin
+native memory checker|valgrind
+JSON acceptance-report tooling|jq
+namespace capture tooling|tcpdump
+traffic shaping and throughput test tooling|iperf3'
 if [ "$with_mptcpd" -eq 1 ]; then
-    add_package 'optional mptcpd daemon' mptcpd
-    add_package 'optional mptcpd plugins' mptcpd-plugins
-    add_package 'optional libmptcpd development headers' libmptcpd3-dev libmptcpd-dev
+    requirements="${requirements}
+optional mptcpd daemon|mptcpd
+optional mptcpd plugins|mptcpd-plugins
+optional libmptcpd development headers|libmptcpd3-dev libmptcpd-dev"
 fi
 
-if [ -n "$missing" ]; then
-    printf '%s\n' 'Required package capabilities were not found in the current apt metadata:' >&2
-    # The text is assembled only from fixed package names above.
-    printf '%b' "$missing" >&2
-    printf '%s\n' \
-        'No changes were made. Review Debian 13 sources and update apt metadata yourself, then retry.' >&2
+names=$(printf '%s\n' "$requirements" | awk -F '|' '{print $2}')
+# The names are fixed above and intentionally split into individual arguments.
+# shellcheck disable=SC2086
+if ! policy=$(apt-cache policy $names 2>/dev/null); then
+    printf '%s\n' 'Could not read the current apt package policy. No changes were made.' >&2
     exit 1
 fi
+resolved=$(printf '%s\n' "$policy" | awk -v requirements="$requirements" '
+    /^[^[:space:]]+:$/ {
+        name = $1
+        sub(/:.*/, "", name)
+    }
+    $1 == "Candidate:" && !(name in versions) { versions[name] = $2 }
+    END {
+        count = split(requirements, rows, "\n")
+        for (i = 1; i <= count; i++) {
+            split(rows[i], fields, /[|]/)
+            n = split(fields[2], options, " ")
+            for (j = 1; j <= n; j++) {
+                name = options[j]
+                if (versions[name] != "" && versions[name] != "(none)") break
+            }
+            if (j > n) {
+                missing = missing fields[1] ": " fields[2] "\n"
+            } else if (!(name in selected)) {
+                print name, versions[name]
+                selected[name] = 1
+            }
+        }
+        if (missing != "") {
+            print "Required package capabilities were not found in the current apt metadata:" > "/dev/stderr"
+            printf "%s", missing > "/dev/stderr"
+            print "No changes were made. Review Debian 13 sources and update apt metadata yourself, then retry." > "/dev/stderr"
+            exit 1
+        }
+    }
+')
 
 printf '%s\n' \
     'VOLPAROSSA Debian 13 development package preview' \
@@ -126,14 +128,16 @@ printf '%s\n' \
     '' \
     'Resolved apt packages:'
 
-for package_name in $packages; do
-    printf '  %-28s candidate %s\n' "$package_name" "$(candidate_version "$package_name")"
-done
+set --
+while read -r package_name version; do
+    printf '  %-28s candidate %s\n' "$package_name" "$version"
+    set -- "$@" "$package_name"
+done <<EOF
+$resolved
+EOF
 
 printf '\nExact install command:\n  apt-get install --no-install-recommends'
-for package_name in $packages; do
-    printf ' %s' "$package_name"
-done
+printf ' %s' "$@"
 printf '\n'
 
 if [ "$print_only" -eq 1 ]; then
@@ -151,10 +155,6 @@ case "$answer" in
     *) printf '%s\n' 'Declined; no changes made.'; exit 0 ;;
 esac
 
-set --
-for package_name in $packages; do
-    set -- "$@" "$package_name"
-done
 if [ "$(id -u)" -eq 0 ]; then
     apt-get install --no-install-recommends "$@"
 else

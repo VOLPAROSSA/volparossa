@@ -78,14 +78,36 @@ class Owner:
         return value
 
 
+def valid_cancellation(observed, replay):
+    if not isinstance(observed, dict) or set(observed) != {"released_units", "receipts", "reopened_sha256", "retry_height"}:
+        return False
+    receipts = observed["receipts"]
+    if not isinstance(receipts, list) or len(receipts) != 2:
+        return False
+    fields = {"operation_id", "reservation_id", "command_sha256", "sequence", "state", "consensus_certificate"}
+    if any(not isinstance(r, dict) or set(r) != fields for r in receipts):
+        return False
+    reserve, cancel = receipts
+    return (all(isinstance(r[f], str) and re.fullmatch("[a-f0-9]{64}", r[f]) for r in receipts
+                for f in ("operation_id", "reservation_id", "command_sha256"))
+            and observed["released_units"] == 10 and [r["sequence"] for r in receipts] == [3, 4]
+            and reserve["state"] == "Reserved" and cancel["state"] == "Cancelled"
+            and reserve["operation_id"] == reserve["reservation_id"] == cancel["reservation_id"] != cancel["operation_id"]
+            and reserve["command_sha256"] != cancel["command_sha256"] == observed["reopened_sha256"]
+            and all(r["consensus_certificate"] is False for r in receipts)
+            and type(observed["retry_height"]) is int
+            and replay["retry_start_height"] < observed["retry_height"] < replay["height"])
+
+
 def validate_receipt(receipt, expected_sha, checks):
     if not isinstance(receipt, dict) or set(receipt) != {"source_revision", "authorizer_sha256",
-            "genesis_ledger", "seed_removed", "reserve_sha256", "commit_sha256", "reopened_without_seed"}:
+            "genesis_ledger", "seed_removed", "reserve_sha256", "commit_sha256", "reopened_without_seed", "cancellation"}:
         return False
     keys = ["genesis_ledger", "reserve_sha256", "commit_sha256"]
     return (bool(re.fullmatch("[a-f0-9]{64}", expected_sha))
             and receipt["source_revision"] == source_revision() and receipt["authorizer_sha256"] == expected_sha
             and receipt["seed_removed"] is True and receipt["reopened_without_seed"] is True
+            and valid_cancellation(receipt["cancellation"], checks["crash_replay"])
             and all(isinstance(receipt[k], str) and re.fullmatch("[0-9a-f]{64}", receipt[k]) for k in keys)
             and checks["startup"].get("bank_genesis_ledger") == receipt["genesis_ledger"]
             and receipt["reserve_sha256"] != receipt["commit_sha256"]

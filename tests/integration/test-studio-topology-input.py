@@ -43,6 +43,24 @@ class StudioInput(unittest.TestCase):
         write(self.root / "evidence.json", raw)
         return MODULE["admit"](self.root, SHA(raw), CORE, context)
 
+    def test_hosted_workflow_binds_the_revision_of_its_own_repository(self):
+        check = MODULE["check_workflow"]
+        env = dict(STUDIO_CORE_REVISION=CORE, STUDIO_REVISION=STUDIO, GITHUB_REPOSITORY="VOLPAROSSA/volparossa",
+                   GITHUB_WORKFLOW="Quality", GITHUB_SHA=CORE)
+        check(env)
+        for update in (dict(GITHUB_WORKFLOW="other"), dict(GITHUB_SHA=STUDIO), dict(STUDIO_REVISION="main")):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                check(dict(env, **update))
+        env.update(GITHUB_REPOSITORY="VOLPAROSSA/volparossa-studio", GITHUB_SHA=STUDIO,
+                   GITHUB_WORKFLOW_SHA=STUDIO, GITHUB_REF="refs/heads/main", GITHUB_REF_PROTECTED="true",
+                   GITHUB_WORKFLOW_REF="VOLPAROSSA/volparossa-studio/.github/workflows/silex-publication-bounds.yml@refs/heads/main")
+        check(env)
+        for update in (dict(GITHUB_SHA=CORE), dict(GITHUB_WORKFLOW_SHA=CORE), dict(GITHUB_REF="refs/heads/trial"),
+                       dict(GITHUB_REF_PROTECTED="false"), dict(GITHUB_WORKFLOW_REF="other"),
+                       dict(GITHUB_REPOSITORY="other/studio"), dict(STUDIO_CORE_REVISION="main")):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                check(dict(env, **update))
+
     def test_exact_projection_and_independent_range(self):
         result = self.admit()
         self.assertEqual(result["chunks"], 2)
@@ -103,11 +121,14 @@ class StudioInput(unittest.TestCase):
         def verify(candidate):
             repair["CHECK"]["validate_offline_site"](candidate, fixture["expected_peers"], fixture["holder_offline"])
 
+        verify(site)  # The original single-reader receipt remains readable.
+        viewer["recipient_browser_reopen"] = dict(viewer["recipient_browser"])
         verify(site)
         for location, leaf, value in ((("publish",), "original_signature_reused", False),
                                      (("publish",), "manifest_id", "6"*64),
                                      (("acquire",), "peer_bytes", size - 1),
                                      (("viewer", "recipient_browser"), "chart_decoded", False),
+                                     (("viewer", "recipient_browser_reopen"), "browser_closed", False),
                                      (("viewer", "ready"), "peer_bytes", 0),
                                      (("viewer", "assets", MODULE["CHART"]), "sha256", "7"*64),
                                      (("view", "captures", "exit"), "provider_response_payload_bytes", size-1),
