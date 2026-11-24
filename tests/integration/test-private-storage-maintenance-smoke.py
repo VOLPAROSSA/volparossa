@@ -1493,6 +1493,42 @@ class MaintenanceEvidence(unittest.TestCase):
             phase.chmod(0o644)
             self.assertEqual(CHECK['route_diagnostic'](work)['selection_phase'], 'unknown')
 
+    def test_terminal_connect_excludes_prior_retry_and_reports_closed_snapshot_details(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            def write(name, content):
+                path = work / name
+                path.write_text(content)
+                path.chmod(0o600)
+            write('private-storage-maintenance-selection-start.private', '100\n')
+            write('private-storage-maintenance-selection-end.private', '150\n')
+            write('private-storage-maintenance-selection-route-diagnostic.json', json.dumps(dict(
+                self.selection_route(), stage='connect', reason='CONNECT_REJECTED', last_connect_reason='NO_ELIGIBLE_PATHS')))
+            write('logs-client.txt', self.event(105, 'PRESELECTION_SAMPLE_INVALID_SNAPSHOT')
+                + self.event(105, 'PRESELECTION_SNAPSHOT_RELAY_COUNT')
+                + self.event(140, 'PRESELECTION_SAMPLE_NO_EXIT')
+                + self.event(146, 'PRESELECTION_SNAPSHOT_NO_FORWARDED_EXIT'))
+            inventory = runpy.run_path(str(HERE / 'content-provider-readiness.py'))['new_record']()
+            write('maintenance-inventory.private', json.dumps(inventory))
+            marker = 'private-storage-maintenance-connect-window.private'
+            write(marker, '12 103 145\n')
+            both = CHECK['route_diagnostic'](work)
+            CHECK['validate_route_diagnostic'](both)
+            self.assertEqual(both['last_connect']['snapshot_reasons']['observed_reason'], 'PRESELECTION_SNAPSHOT_RELAY_COUNT')
+            self.assertEqual(both['reconnect_inventory'], inventory)
+            write(marker, '12 130 145\n')
+            last = CHECK['route_diagnostic'](work)['last_connect']
+            self.assertEqual(last['attempt'], 12)
+            self.assertEqual(last['samples']['observed_reason'], 'PRESELECTION_SAMPLE_NO_EXIT')
+            self.assertEqual(last['snapshot_reasons']['uncertainty'], 'no_fresh_signal')
+            for wrong in ('11 130 145\n', '12 99 145\n', '12 130 151\n', '12 140 130\n'):
+                write(marker, wrong)
+                self.assertIsNone(CHECK['route_diagnostic'](work)['last_connect'])
+            write('maintenance-inventory.private', json.dumps(dict(inventory, private='sentinel')))
+            self.assertIsNone(CHECK['route_diagnostic'](work)['reconnect_inventory'])
+            legacy = {key: value for key, value in both.items() if key not in ('last_connect', 'reconnect_inventory')}
+            CHECK['validate_route_diagnostic'](dict(legacy, version=1))
+
     def test_route_projection_missing_or_invalid_is_unknown_not_raw_export(self):
         for kind in ('missing', 'empty', 'duplicate', 'private', 'oversize', 'mode', 'symlink', 'hardlink', 'fifo'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:

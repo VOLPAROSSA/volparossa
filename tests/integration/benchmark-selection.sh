@@ -137,6 +137,7 @@ benchmark_image_route_diagnostic() {
     if [ "$benchmark_diagnostic_prefix" = private-storage-maintenance-selection ]; then
         if [ "$1" = initialize ]; then
             (umask 077
+             : >"$WORK/private-storage-maintenance-connect-window.private"
              : >"$WORK/private-storage-maintenance-selection-end.private"
              : >"$WORK/private-storage-maintenance-selection-route-diagnostic.json"
              case "${benchmark_label:-}" in
@@ -216,6 +217,9 @@ benchmark_select_route() {
         benchmark_connect_count=$((benchmark_connect_count + 1))
         benchmark_snapshot_status=null
         benchmark_poll=0
+        if [ "${private_storage_maintenance:-no}" = yes ]; then
+            benchmark_connect_start=$(date +%s%3N) || benchmark_connect_start=
+        fi
         if timeout --signal=TERM --kill-after=5s "${benchmark_remaining}s" \
             "$binary_directory/volparossa" \
             --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" connect \
@@ -260,6 +264,12 @@ benchmark_select_route() {
             benchmark_draw=$((benchmark_draw + 1))
         else
             benchmark_connect_exit=$?
+            if [ "${private_storage_maintenance:-no}" = yes ]; then
+                benchmark_connect_end=$(date +%s%3N) || benchmark_connect_end=
+                (umask 077
+                 printf '%s %s %s\n' "$benchmark_connect_count" "$benchmark_connect_start" "$benchmark_connect_end" \
+                    >"$WORK/private-storage-maintenance-connect-window.private") || true
+            fi
             if benchmark_route_diagnostic_prefix; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi

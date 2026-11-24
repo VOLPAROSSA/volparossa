@@ -141,6 +141,10 @@ PRESELECTION_REASON_CODES = (
     'PRESELECTION_SAMPLE_INVALID_POLICY', 'PRESELECTION_SAMPLE_INVALID_SNAPSHOT',
     'PRESELECTION_SAMPLE_ENTROPY',
 )
+# Closed reason codes emitted by the discovery sampler on invalid snapshots.
+SNAPSHOT_REASON_CODES = tuple('PRESELECTION_SNAPSHOT_' + suffix for suffix in (
+    'TIME', 'POLICY', 'RELAY_COUNT', 'NO_FORWARDED_EXIT', 'CANDIDATE_BOUND',
+    'SUBJECT_SET', 'DIRECT_BINDING', 'FORWARDED_BINDING', 'INVALID_LIMIT', 'UNAVAILABLE'))
 ROUTE_CONNECT_CODES = ('NOT_STARTED', 'CONNECTED', 'UNRECOGNIZED',
     'CLIENT_ROLE_DISABLED', 'POLICY_UNAVAILABLE', 'CLIENT_ROUTE_PROFILE_INVALID',
     'CONNECT_ALREADY_IN_PROGRESS', 'PRESELECTION_UNAVAILABLE', 'NO_ELIGIBLE_PATHS',
@@ -431,20 +435,20 @@ def validate_selection_route(value):
             'route diagnostic process status')
 
 
-def validate_preselection_diagnostic(value):
+def validate_preselection_diagnostic(value, codes=PRESELECTION_REASON_CODES, scope='selection_window_not_last_attempt_proof'):
     counters = ('records', 'fresh_records', 'stale_records', 'later_records', 'unrecognized_reason_records')
     require(type(value) is dict and set(value) == {'version', 'state', 'observed_reason',
         'uncertainty', 'scope', 'limit', 'counts', 'window_covers_baseline', *counters}
         and type(value['version']) is int and value['version'] == 1
         and type(value['limit']) is int and value['limit'] == 400
-        and value['scope'] == 'selection_window_not_last_attempt_proof', 'preselection diagnostic shape')
+        and value['scope'] == scope, 'preselection diagnostic shape')
     if value['records'] is None:
         require(all(value[name] is None for name in counters)
             and value['counts'] is None and value['window_covers_baseline'] is None,
             'preselection missing observation')
     else:
         require(all(type(value[name]) is int and 0 <= value[name] <= 400 for name in counters)
-            and type(value['counts']) is dict and set(value['counts']) == set(PRESELECTION_REASON_CODES)
+            and type(value['counts']) is dict and set(value['counts']) == set(codes)
             and all(type(count) is int and 0 <= count <= 400 for count in value['counts'].values())
             and type(value['window_covers_baseline']) is bool
             and value['records'] == sum(value[name] for name in ('fresh_records', 'stale_records', 'later_records'))
@@ -463,9 +467,12 @@ def validate_preselection_diagnostic(value):
 
 
 def validate_route_diagnostic(value):
-    require(type(value) is dict and set(value) == {'version', 'kind', 'scope', 'route_state',
-        'route', 'preselection', 'acceptance_evidence', 'selection_phase'} and type(value['version']) is int
-        and value['version'] == 1 and value['kind'] == 'private-storage-maintenance-route-diagnostic'
+    require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1, 2),
+        'maintenance route diagnostic version')
+    fields = {'version', 'kind', 'scope', 'route_state', 'route', 'preselection', 'acceptance_evidence', 'selection_phase'}
+    if value['version'] == 2:
+        fields.update(('last_connect', 'reconnect_inventory'))
+    require(set(value) == fields and value['kind'] == 'private-storage-maintenance-route-diagnostic'
         and value['scope'] == 'last_selection_window_not_failure_cause'
         and value['acceptance_evidence'] is False
         and value['selection_phase'] in ('initial', 'reconnect', 'unknown'), 'maintenance route diagnostic shape')
@@ -475,6 +482,18 @@ def validate_route_diagnostic(value):
         require(value['route_state'] in ('absent', 'invalid') and value['route'] is None,
             'maintenance route observation')
     validate_preselection_diagnostic(value['preselection'])
+    if value['version'] == 2:
+        if value['reconnect_inventory'] is not None:
+            helper = runpy.run_path(str(Path(__file__).with_name('content-provider-readiness.py')))
+            helper['closed_record'](value['reconnect_inventory'])
+        last = value['last_connect']
+        if last is not None:
+            require(value['route_state'] == 'observed' and value['route']['stage'] == 'connect'
+                and type(last) is dict and set(last) == {'attempt', 'samples', 'snapshot_reasons'}
+                and type(last['attempt']) is int and 0 < last['attempt'] == value['route']['attempts'],
+                'invalid terminal Connect window')
+            validate_preselection_diagnostic(last['samples'], PRESELECTION_REASON_CODES, 'connect_time_window')
+            validate_preselection_diagnostic(last['snapshot_reasons'], SNAPSHOT_REASON_CODES, 'connect_time_window')
 
 
 def route_diagnostic(work):
@@ -506,6 +525,30 @@ def route_diagnostic(work):
         pass
     except (OSError, ValueError, UnicodeError, TypeError):
         value['route_state'] = 'invalid'
+    value.update(version=2, last_connect=None, reconnect_inventory=None)
+    try:
+        helper = runpy.run_path(str(Path(__file__).with_name('content-provider-readiness.py')))
+        raw = closed_diagnostic_text(work / 'maintenance-inventory.private', 8192)
+        value['reconnect_inventory'] = helper['closed_record'](json.loads(raw, object_pairs_hook=helper['unique_pairs']))
+    except (OSError, ValueError, TypeError, UnicodeError):
+        pass
+    if value['route_state'] == 'observed' and value['route']['stage'] == 'connect':
+        try:
+            marker = closed_diagnostic_text(work / 'private-storage-maintenance-connect-window.private', 64)
+            require(re.fullmatch(r'[1-9][0-9]{0,2} [0-9]{1,20} [0-9]{1,20}\n', marker), 'invalid Connect window')
+            attempt, start, end = map(int, marker.split())
+            # Also bracket this marker by the current selection so a stale retry
+            # number cannot be attached to a later selection that reused it.
+            outer_start = int(closed_diagnostic_text(work / 'private-storage-maintenance-selection-start.private', 32))
+            outer_end = int(closed_diagnostic_text(work / 'private-storage-maintenance-selection-end.private', 32))
+            require(attempt == value['route']['attempts'] and 0 < outer_start <= start <= end <= outer_end
+                <= time.time_ns() // 1_000_000, 'unbound Connect window')
+            logs = work / 'logs-client.txt'
+            value['last_connect'] = dict(attempt=attempt,
+                samples=preselection_window(logs, start, end, PRESELECTION_REASON_CODES, 'PRESELECTION_SAMPLE_'),
+                snapshot_reasons=preselection_window(logs, start, end, SNAPSHOT_REASON_CODES, 'PRESELECTION_SNAPSHOT_'))
+        except (OSError, ValueError, TypeError, UnicodeError):
+            pass
     validate_route_diagnostic(value)
     return value
 
@@ -597,11 +640,19 @@ def closed_preselection_events(path, baseline_path, end_path):
     except (OSError, ValueError, UnicodeError):
         value['uncertainty'] = 'invalid_window_end'
         return value
-    value['uncertainty'] = 'absent'
+    return preselection_window(path, baseline, selection_end, PRESELECTION_REASON_CODES, 'PRESELECTION_SAMPLE_',
+        scope='selection_window_not_last_attempt_proof')
+
+
+def preselection_window(path, baseline, selection_end, codes, prefix, scope='connect_time_window'):
+    value = dict(version=1, state='unknown', observed_reason='unknown', uncertainty='absent', scope=scope,
+        limit=400, records=None, fresh_records=None, stale_records=None, later_records=None, counts=None,
+        unrecognized_reason_records=None, window_covers_baseline=None)
+    captured_at_ms = time.time_ns() // 1_000_000
     try:
         lines = closed_diagnostic_text(path, 131072).splitlines()
         require(len(lines) <= 400, 'preselection event ring exceeded')
-        counts = dict.fromkeys(PRESELECTION_REASON_CODES, 0)
+        counts = dict.fromkeys(codes, 0)
         fresh, stale, later, unrecognized, previous = 0, 0, 0, 0, 0
         first = None
         for line in lines:
@@ -625,7 +676,7 @@ def closed_preselection_events(path, baseline_path, end_path):
             fresh += 1
             if match[3] in counts:
                 counts[match[3]] += 1
-            elif match[3].startswith('PRESELECTION_SAMPLE_'):
+            elif match[3].startswith(prefix):
                 unrecognized += 1
         value.update(records=len(lines), fresh_records=fresh, stale_records=stale, later_records=later, counts=counts,
             unrecognized_reason_records=unrecognized,

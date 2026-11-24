@@ -305,8 +305,9 @@ private_storage_maintenance_lifecycle() {
     [ "$(stat -Lc '%d:%i' "/proc/$maintenance_new_pid/ns/net")" = "$maintenance_namespace" ] || return 1
     [ "$(readlink -f "/proc/$maintenance_new_pid/exe")" = "$binary_directory/volparossa-agent" ] || return 1
     # Reuse current read-only inventory and ordinary protected selection barriers.
-    python3 -I -B "$WORK/bin/content-provider-readiness.py" "$WORK" \
-        >"$WORK/maintenance-inventory.private" || return 1
+    (umask 077
+     python3 -I -B "$WORK/bin/content-provider-readiness.py" "$WORK" \
+        >"$WORK/maintenance-inventory.private") || return 1
     benchmark_select_route private-storage-maintenance-reconnect mptcp || return 1
     private_storage_maintenance_post_reconnect
 }
