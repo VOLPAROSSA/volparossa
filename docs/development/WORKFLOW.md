@@ -26,7 +26,9 @@ current repository state when resuming work.
 
 Do not read provenance snapshots or the entire evidence history at startup.
 Requirements are authoritative for scope; status is evidence and priorities, not a
-replacement specification. The [documentation index](../README.md) locates topics.
+replacement specification. The [documentation index](../README.md) locates topics. Use the
+[Git source locator and CI attempt summary](TESTING.md#source-lookup-and-ci-results)
+for revision-bound handovers or test triage.
 
 ## Plan and execute
 
