@@ -98,6 +98,7 @@ enum Files<'a> {
     Task { dataset: &'a Path, output: &'a Path },
     Session(&'a Path),
     Speech(&'a Path),
+    Synthesis(&'a Path),
 }
 
 pub(super) fn speech_command(
@@ -116,8 +117,7 @@ pub(super) fn speech_command(
     );
     isolated_command(
         Command::new("/usr/bin/bwrap"),
-        runtime,
-        model,
+        Some((runtime, model)),
         Files::Speech(audio),
         Limits {
             threads,
@@ -125,6 +125,20 @@ pub(super) fn speech_command(
             address_space: super::resources::SMALL_CPU.address_space,
         },
         &source,
+    )
+}
+
+pub(super) fn synthesis_command(output: &Path, seconds: u16) -> Command {
+    isolated_command(
+        Command::new("/usr/bin/bwrap"),
+        None,
+        Files::Synthesis(output),
+        Limits {
+            threads: 1,
+            wall_seconds: u64::from(seconds),
+            address_space: 256 * 1024 * 1024,
+        },
+        include_str!("../../../../workers/volparossa-ml/synthesis.py"),
     )
 }
 
@@ -145,8 +159,7 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
     );
     isolated_command(
         command,
-        &options.runtime_root,
-        &options.model_root,
+        Some((&options.runtime_root, &options.model_root)),
         files,
         Limits {
             threads: options.threads,
@@ -161,52 +174,50 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
 #[allow(clippy::too_many_lines)]
 fn isolated_command(
     mut command: Command,
-    runtime: &Path,
-    model: &Path,
+    model_runtime: Option<(&Path, &Path)>,
     files: Files<'_>,
     limits: Limits,
     source: &str,
 ) -> Command {
-    command
-        .env_clear()
-        .args([
-            "--unshare-user",
-            "--unshare-net",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--die-with-parent",
-            "--new-session",
-            "--cap-drop",
-            "ALL",
-            "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--size",
-            &TMPFS_BYTES.to_string(),
-            "--tmpfs",
-            "/tmp",
-            "--ro-bind",
-        ])
-        .arg(runtime)
-        .arg("/runtime")
-        .arg("--ro-bind")
-        .arg(model)
-        .arg("/model");
+    command.env_clear().args([
+        "--unshare-user",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--size",
+        &TMPFS_BYTES.to_string(),
+        "--tmpfs",
+        "/tmp",
+    ]);
+    let python = if let Some((runtime, model)) = model_runtime {
+        command.arg("--ro-bind").arg(runtime).arg("/runtime");
+        command.arg("--ro-bind").arg(model).arg("/model");
+        "/runtime/bin/python3"
+    } else {
+        "/usr/bin/python3"
+    };
     let working_directory = match files {
         Files::Session(root) => {
             command.arg("--bind").arg(root).arg("/session");
@@ -216,6 +227,10 @@ fn isolated_command(
             command.arg("--ro-bind").arg(dataset).arg("/dataset.json");
             command.arg("--bind").arg(output).arg("/output");
             "/output"
+        }
+        Files::Synthesis(output) => {
+            command.arg("--bind").arg(output).arg("/output");
+            "/tmp"
         }
         Files::Speech(audio) => {
             command.arg("--ro-bind").arg(audio).arg("/audio.wav");
@@ -271,7 +286,7 @@ fn isolated_command(
             "/usr/bin/ionice",
             "-c",
             "3",
-            "/runtime/bin/python3",
+            python,
             "-I",
             "-c",
         ])

@@ -44,7 +44,7 @@ pub(crate) struct Options {
 }
 
 /// Admit bounded RIFF chunks, including ordinary ancillary metadata, and one PCM payload.
-fn samples(bytes: &[u8]) -> Result<usize> {
+pub(super) fn samples(bytes: &[u8]) -> Result<usize> {
     fn word(bytes: &[u8]) -> Result<usize> {
         Ok(u32::from_le_bytes(bytes.try_into()?) as usize)
     }
