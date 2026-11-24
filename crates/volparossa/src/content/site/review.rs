@@ -10,13 +10,17 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use volparossa_content::site::{SITE_CONTENT_TYPE, SiteBundle};
 
-use crate::content::{Publish, now_seconds, reviewed_input::Input};
+use crate::content::{Publish, now_seconds, parse_content_name, reviewed_input::Input};
 
 pub(in crate::content) fn prepare(
     args: &Publish,
     file: File,
     length: u64,
 ) -> Result<(Input, u64, u64)> {
+    if args.content_type != SITE_CONTENT_TYPE {
+        bail!("--review-site requires the native site content type");
+    }
+    parse_content_name(&args.name).map_err(anyhow::Error::msg)?;
     let (input, expires) =
         Input::with_review(file, length, args.expected_input_sha256, |bytes, digest| {
             let expires = args.expiry(now_seconds()?)?;
@@ -31,9 +35,6 @@ pub(in crate::content) fn prepare(
 }
 
 fn confirm(args: &Publish, bytes: &[u8], digest: [u8; 32], expires: u64) -> Result<()> {
-    if args.content_type != SITE_CONTENT_TYPE {
-        bail!("--review-site requires the native site content type");
-    }
     let publisher = args
         .expected_publisher_key
         .context("select a publisher key for site review")?;

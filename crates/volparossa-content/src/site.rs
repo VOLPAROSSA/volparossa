@@ -238,6 +238,9 @@ impl SiteBundle {
 
     /// Inspect every asset in canonical order without copying the caller's encoded payload.
     /// The complete index and all ranges are validated before yielding the first asset.
+    ///
+    /// # Errors
+    /// Returns the same framing, metadata and resource errors as [`Self::decode`].
     pub fn inspect(
         encoded: &[u8],
     ) -> Result<impl ExactSizeIterator<Item = SiteAssetSource<&[u8]>>, SiteError> {
