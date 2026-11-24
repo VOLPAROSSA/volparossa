@@ -67,6 +67,8 @@ def verify(directory, revision):
     proof = FIXTURE["load"](directory / "speech-synthesis-smoke.json")
     require(re.fullmatch("[a-f0-9]{40}", revision) and proof["version"] == 1 and proof["source_revision"] == revision
             and proof["passed"] is True and set(proof["clips"]) == {"dutch", *FIXTURE["PHRASES"]})
+    recognition = FIXTURE["load"](directory / "speech-recognition-smoke.json")
+    require(recognition["source_revision"] == revision and set(recognition["recognizer_inputs"]) == set(FIXTURE["PHRASES"]))
     for name, row in proof["clips"].items():
         response = row["cli"]
         require(re.fullmatch("[a-f0-9]{64}", row["original_pcm_sha256"])
@@ -79,7 +81,10 @@ def verify(directory, revision):
                 and response["engine"] == "espeak-ng" and response["voice"] == ("nl" if name == "dutch" else "en-us")
                 and response["audio_samples"] == row["samples"] and response["cleanup"]["complete"] is True)
         if name in FIXTURE["PHRASES"]:
-            original = FIXTURE["load"](directory / ("speech-" + name + ".json"))
+            result_file = directory / ("speech-" + name + ".json")
+            original = FIXTURE["load"](result_file)
+            require(recognition["recognizer_inputs"][name] == {
+                "marked_wav_sha256": row["marked_wav_sha256"], "result_file_sha256": digest(result_file.read_bytes())})
             require(original["operation"] == "compute_transcribe" and original["audio_samples"] == row["samples"])
 
 
