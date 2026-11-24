@@ -18,7 +18,7 @@ another copy of requirements, current failures or the integration queue.
 | How must a component behave? | Its architecture, network, service or application contract below. |
 | What exists and what has actually passed? | [Implementation status](IMPLEMENTATION_STATUS.md), with exact source and evidence links; application-specific evidence stays in its repository. |
 | Which repository or retained PR should we work on next? | [Organization maintenance index](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md); confirm live PR heads and checks before integration. |
-| How do we change and verify it? | [AGENTS](../AGENTS.md), [shared workflow](development/CODEX_WORKFLOW.md) and [testing](development/TESTING.md). |
+| How do we change and verify it? | [AGENTS](../AGENTS.md), [shared workflow](development/WORKFLOW.md) and [testing](development/TESTING.md). |
 | Where is the earlier evidence? | [Archive](archive/README.md); historical instructions and pending states are not current authority. |
 
 The README and websites introduce the project; they are not additional execution
@@ -73,7 +73,7 @@ or go directly to a topic when you already know what you need.
 3. Follow the status links for retained work, exact revisions, acceptance evidence
    and dependencies. Read historical records only when the task needs them.
 4. Follow the [architecture](architecture/ARCHITECTURE.md) and relevant topic guide below.
-   Use [Contributing](../CONTRIBUTING.md) and the [shared development workflow](development/CODEX_WORKFLOW.md)
+   Use [Contributing](../CONTRIBUTING.md) and the [shared development workflow](development/WORKFLOW.md)
    when preparing scoped work or transferring it between clients or sessions.
 5. Use the [read-only prerequisite checks](development/OPERATIONS.md#read-only-prerequisites), then
    the [build instructions](development/OPERATIONS.md#build-and-package).
@@ -129,7 +129,7 @@ or go directly to a topic when you already know what you need.
 - [Documentation archive](archive/README.md): original requirements, dated audits and detailed historical evidence; not startup reading.
 - [Requirement preservation](development/TESTING.md#requirement-preservation): checks when requirements change.
 - [Goal preservation verifier](../scripts/verify-goal-preservation.py): standard-library-only integrity check.
-- [Shared development workflow](development/CODEX_WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
+- [Shared development workflow](development/WORKFLOW.md): task-driven execution, delegation, verification and handover for any client.
 - [Operations](development/OPERATIONS.md): configuration, commands, packaging and removal.
 - [Testing](development/TESTING.md): focused checks, disposable topologies and acceptance requirements.
 - [Implementation status](IMPLEMENTATION_STATUS.md): compact current work, evidence and dependencies.

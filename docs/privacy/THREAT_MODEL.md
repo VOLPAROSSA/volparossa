@@ -151,6 +151,25 @@ firewall state, observe all destinations, and impersonate the node. Encrypted-at
 0600 permissions, privilege separation, systemd hardening, ephemeral keys, and redacted persistence
 help against accidents and lesser local users, not a hostile root.
 
+### Sabotage of development and recovery
+
+The planned decentralized development cycle must withstand attempts by insiders, external
+contributors, compromised agents and coordinated reviewers to publish harmful changes or
+dismantle shared safeguards without authority. Code, dependencies, rule lists and changes to
+build or review procedures can affect multiple applications at once. A series of small edits
+can eliminate a supported capability, concentrate publication in one operator or make the
+last trusted version impossible to recover.
+
+Independent review must examine the cumulative change against previously authorized goals,
+checks and authority. Review, publication and recovery require distinct capabilities. After
+a compromise, recovery depends on an independent holder of the trusted state, verifiable
+metadata and enough uncompromised authority to authorize restoration. When these conditions
+cannot be met, affected clients must report that recovery is unavailable. The immune system's
+authority covers shared artifacts and delegated capabilities. Owners retain the ability to
+stop the software, manage their own data and leave the network.
+[Review criteria and recovery exercises](../services/DECENTRALIZED_AGENTS.md#review-of-proposed-changes)
+define the expected behavior.
+
 ### Malicious content, naming and storage peers (planned extension)
 
 The [content-network proposal](../services/CONTENT_NETWORK_PROPOSAL.md) adds untrusted chunk holders,

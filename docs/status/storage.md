@@ -350,6 +350,18 @@ objects and its before/after network digests matched. Shared repair, cold
 restore and the separate finite upload lifecycle remain open.
 [Original 81,883-byte archive, SHA-256 `c90eb64a…c01ae792`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44537092652/artifacts/14539650755) · [Original reports](../development/evidence/storage-maintenance-44537092652)
 
+The twelve-node trial on `3dedd5f0` stopped at Image publication. The owner
+sent RESERVE for fragment 2, copy 1. Its one reported failure was an I/O error
+while waiting for the receipt. The agent recorded an operation timeout reading
+the remote receipt. Image deletion was unconfirmed and Cloud had no archive.
+Provider A retained one lease with 199,787 reserved bytes. Providers B and C
+reported zero leases and bytes. The usage receipt identifies the provider but
+does not identify the fragment. The separate Core lifecycle deleted all eleven
+copies and its three providers reported zero usage. Local cleanup completed
+and the guest network snapshots matched. Shared repair and cold restore still
+require a completed trial.
+[Original 95,189-byte archive, SHA-256 `bec95299…e3b7ac0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44568672976/artifacts/14557796765) · [Original reports](../development/evidence/storage-maintenance-44568672976)
+
 ## Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -365,3 +377,36 @@ contracts. Both upload export paths validate the two diagnostic sidecars.
 The joined trial must demonstrate authenticated upload, automatic enrollment
 under finite authority, provider withdrawal, repair, two cold restorations
 across restart, deletion and cleanup. That trial remains pending.
+
+### Joint publication and the authenticated Cloud read
+
+Core `648e204a` repeated the Image and Cloud maintenance trial after the foreground
+reservation-receipt change. This run pinned Image `21988efc` and Cloud `08be9711`. Both apps published four fragments with two copies
+per fragment. Each reported 799,146 logical ciphertext bytes, 1,598,292 committed
+payload bytes, eight copy records and zero uncertain payload bytes. The publication
+observer passed its 56-completion lower bound and joined. Earlier combined trials
+also reached publication. [Earlier run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367739602) · [Original publication report](../development/evidence/storage-maintenance-45408914106/storage-consumer-publish.json)
+
+The exercise reached `cloud_authenticated_read` and rejected the `repair_charge`
+check. The receipt does not identify the failing field. The guest network digests
+matched, the topology reported zero remaining owned objects and the local fixture
+was removed. The separate Core fragment lifecycle reported zero usage at its three
+providers. Remote cleanup and provider usage for the two application deposits
+remain unconfirmed. [Original exercise and cleanup reports](../development/evidence/storage-maintenance-45408914106) · [110,808-byte original archive, SHA-256 `90f4619e…80c022e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45408914106/artifacts/14933057121)
+
+On Core `29b82140` the client restarted with its original Storage enrollment.
+Route selection ended after twelve Connect calls with `NO_ELIGIBLE_PATHS`
+before the first path poll. The selection window included eleven invalid
+snapshot events and one no-exit event. The owner observed Core loss and advanced
+its cursor from 3 to 4. A second termination interrupted owner cleanup. The
+original receipt records neither a joined owner nor a process exit status.
+Guest cleanup removed its objects and its network snapshots matched. The
+applications had not started. [KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177) · [35,674-byte archive, SHA-256 `eb2279cb…01a5f045`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177/artifacts/14934864537)
+
+The next trial runs on `f176b1b7`, which binds bounded discovery observations
+to the terminal Connect interval and retains the restarted client's peer
+inventory. The later change at `81872882` allows the owner supervisor to finish
+its bounded cleanup on repeated termination. Its process regression delivered
+two termination signals and verified that the child and its output readers
+were joined. Shared restoration, deletion, provider usage and the finite
+upload continuation still require their joined trial. [Source-bound trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506380399) · [Owner cleanup change](https://github.com/VOLPAROSSA/volparossa/commit/81872882fb7ea8e52f75455a5060c9fd5c1b6932)
