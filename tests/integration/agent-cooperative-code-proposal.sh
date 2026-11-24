@@ -81,16 +81,25 @@ agent_cooperative_code_proposal_run() {
         jobs_units="$jobs_units $code_planner_unit"
         code_planner=$jobs_root/local-planner
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$code_planner" "$code_planner/work"
+        # Core takes this advisory lease before spawning any model worker. Keep
+        # the runtime read-only except for the original shared lock inode.
+        code_runtime=$jobs_root/provision/venv
+        code_planner_lease=$code_runtime/.volparossa-compute.lock
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- /usr/bin/python3 -I -c 'import os, sys
+os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))' "$code_planner_lease" \
+            || fail CODE_PLANNER_RUNTIME_LEASE_FAILED
         systemd-run --no-block --unit="$code_planner_unit" --slice=system.slice --service-type=exec \
             --property=CollectMode=inactive --property=User=volparossa --property=Group=volparossa \
             --property=PrivateNetwork=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=ProtectHome=yes \
-            --property=ProtectSystem=strict --property="ReadWritePaths=$code_planner" \
+            --property=ProtectSystem=strict --property="ReadWritePaths=$code_planner $code_planner_lease" \
             --property="InaccessiblePaths=$code_root $jobs_source $WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5" \
             --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=NoNewPrivileges=yes --property=UMask=0077 \
             --property=MemoryMax=7G --property=MemorySwapMax=0 --property=TasksMax=128 --property=KillMode=control-group \
             --property=RuntimeMaxSec=2700s --property=TimeoutStopSec=20s \
             -- "$binary_directory/volparossa" compute private-serve --socket "$code_planner/private.sock" \
-            --work-parent "$code_planner/work" --runtime-root "$jobs_root/provision/venv" --model-root "$jobs_root/provision/model" \
+            --work-parent "$code_planner/work" --runtime-root "$code_runtime" --model-root "$jobs_root/provision/model" \
             --model-profile qwen3-0.6b-v1 --threads 2 --max-seconds 600 --execute || fail CODE_PLANNER_SERVICE_FAILED
         code_attempt=0
         while [ ! -S "$code_planner/private.sock" ]; do

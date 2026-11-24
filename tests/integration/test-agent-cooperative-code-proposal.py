@@ -332,6 +332,15 @@ jq() { return 83; }
             with self.assertRaises(ValueError):
                 C["validate_planner"]({**value, **change})
 
+    def test_private_planner_can_acquire_only_the_real_runtime_lease(self):
+        shell = (HERE / "agent-cooperative-code-proposal.sh").read_text()
+        block = shell[shell.index("        code_runtime="):shell.index("        code_attempt=0", shell.index("        code_runtime="))]
+        self.assertIn("code_planner_lease=$code_runtime/.volparossa-compute.lock", block)
+        self.assertIn("os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600", block)
+        self.assertIn('--runtime-root "$code_runtime"', block)
+        self.assertIn('--property=ProtectSystem=strict --property="ReadWritePaths=$code_planner $code_planner_lease"', block)
+        self.assertNotIn('ReadWritePaths=$code_runtime', block)
+
     def test_root_owned_workbench_parents_are_traversable_under_the_topology_private_umask(self):
         helper = runpy.run_path(str(HERE / "agent-cooperative-workbench.py"))
         with tempfile.TemporaryDirectory() as tmp:
