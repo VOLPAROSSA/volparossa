@@ -3,7 +3,7 @@
 This is the current execution index for the complete [DICN goal](development/GOAL.md),
 including [DPS](development/GOAL.md#dps) and
 [Studio/hosting](development/GOAL.md#studio). Use [AGENTS.md](../AGENTS.md)
-for engineering boundaries and the [development workflow](development/CODEX_WORKFLOW.md)
+for engineering boundaries and the [development workflow](development/WORKFLOW.md)
 for scoped execution. A milestone does not reduce the agreed goal.
 
 [Current work](#current-integration-and-active-work) ·

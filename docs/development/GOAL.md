@@ -2,7 +2,7 @@
 
 Bouw de volledige DICN-ontwikkel-alpha hieronder. Een mijlpaal of huidige
 implementatiebeperking verkleint deze scope niet. [AGENTS.md](../../AGENTS.md) en de
-[ontwikkelwerkwijze](CODEX_WORKFLOW.md) bepalen de uitvoering;
+[ontwikkelwerkwijze](WORKFLOW.md) bepalen de uitvoering;
 [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md) bevat het actuele plan en
 bewijs. Lees taakgericht volgens die werkwijze.
 
