@@ -5,6 +5,48 @@ multipath. Real dataplane claims require a disposable Debian 13 network-namespac
 independent kernel/native counters, packet captures, fault injection, cleanup, and a machine-readable
 acceptance report.
 
+## Source lookup and CI results
+
+Use `git grep -nF` for a narrow lookup, or `git grep -cIF` for file counts.
+For a handover spanning many files or repositories, use the
+[commit-bound source index](../../scripts/source-context.py) from a reviewed Core checkout:
+
+```sh
+python3 -B "$CORE/scripts/source-context.py" --repo "$REPO" --rev HEAD RouteContext -- crates
+```
+
+Set `CORE` and `REPO` to the Core and target checkout directories. The result
+lists matching committed text, ranked by matching lines, with blob IDs, applicable
+instruction paths, total files and a continuation offset. Read selected files with
+`git show COMMIT:path`. Use the returned commit with the same query for the next
+page. Check local instructions, untracked files and the working diff separately.
+Reuse an earlier source finding when its inputs still match, including applicable
+instructions, callers and cross-repository pins. Share those references between
+contributors so only one person or agent has to resolve the same question.
+
+During iteration, select tests from the changed module and its consumers. For Rust,
+`cargo tree --locked --offline --workspace --invert PACKAGE` helps locate dependents
+in a prepared checkout. Changes to shared interfaces, locks, feature sets, build
+scripts, workflows or unclear dependencies need broader verification. Required
+checks and explicit acceptance runs follow the owning repository's full contract.
+
+Inspect a previous hosted attempt before dispatching another. From any checkout:
+
+```sh
+bash "$CORE/scripts/ci-run-summary.sh" VOLPAROSSA/volparossa RUN_ID ATTEMPT
+```
+
+The read-only helper uses GitHub CLI and jq. It returns the run link, head SHA,
+job IDs, conclusions, step counts by outcome, unsuccessful or pending steps,
+and elapsed seconds. For skipped step names or detailed diagnosis open the original
+attempt and the relevant job. A zero exit status means the query succeeded.
+For evidence reuse, verify the tested checkout (including a PR's merge tree),
+workflow, pins, tools, platform, inputs and scope against the original receipt.
+A matching PR head alone cannot establish that binding. Preserve failures and
+explicit acceptance runs. Source checks, public fixtures, protected execution and
+product acceptance provide different evidence. Cache pinned build inputs only.
+Exclude private fixtures and credentials. Separate untrusted PR reads from trusted writes.
+
 ## Requirement preservation
 
 [GOAL.md](GOAL.md) is the complete effective specification, including DPS and
@@ -30,6 +72,20 @@ preservation and inclusion markers, not semantic equivalence or runtime acceptan
 Review requirement rewrites against the sources for full functional coverage,
 privacy and authority. Ordinary code tasks that leave these documents untouched
 do not require this check at startup.
+
+## Development cycle and Browser acceptance
+
+The following scenarios define future functional acceptance. Record the
+tested versions, independent participants, observed decisions and outcomes.
+Use test projects, synthetic private markers and disposable clients so the
+evidence can be inspected without collecting real personal data.
+
+| Capability | Required end-to-end evidence |
+| --- | --- |
+| [Decentralized development and updates](../services/REPOSITORY_MAINTENANCE.md#functional-verification) | Complete a change through client activation with the central development services unreachable. Restore or replace the public mirror from the accepted peer history. |
+| [Sabotage review and recovery](../services/DECENTRALIZED_AGENTS.md#review-of-proposed-changes) | Detect cumulative damage under independent review, admit a legitimate change and recover a client from uncompromised peers. |
+| [DeGoog search](../applications/APPLICATIONS.md#browser) | Exercise the selected engine, peer reuse, freshness, result quality and fallback in Firefox. Inspect where private query markers travel. |
+| [Supplementary Consent-O-Matic rules](../applications/APPLICATIONS.md#browser) | Observe the site's recorded consent, continued site functionality, background receipt of an approved rule and recovery after withdrawal. |
 
 ## Unprivileged quality gate
 

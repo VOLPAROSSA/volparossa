@@ -399,6 +399,24 @@ remain byte-identical. Preservation/reference checks and independent scope revie
 cover this change, not new runtime acceptance. Only the literal-document Rust test
 is removed; behavioral tests and production paths are unchanged.
 
+## Owner-local speech recognition
+
+On Core `003fea1d01611aaac097745fe30de1f850ad879d`, the Debian 13 runner executed
+the offline transcription command using the pinned multilingual Whisper small model.
+The bicycle and station recordings each contained eight reference words. Both had
+zero word errors. The calls took 11,666 and 11,417 ms and reported peak RSS of
+2,328,981,504 and 2,324,226,048 bytes, respectively. Both calls confirmed cleanup.
+The same trial refused digital silence and joined a live worker after each of SIGINT
+and SIGTERM. The reference and both original CLI results reproduce the scores.
+[Original exported JSON](../development/evidence/speech-recognition-45427534478) ·
+[Hosted run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45427534478) ·
+[2,199-byte speech archive, SHA-256 `0650f0a9…850f806`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45427534478/artifacts/14937757204)
+
+The earlier tiny-model run used the same synthetic samples and 25% per-clip threshold.
+It scored four errors on the bicycle recording and one on the station recording.
+Natural speech, additional languages and confidential remote execution need their
+own observations. [Tiny-model run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45425123392)
+
 ## Protected Compute evidence
 
 The public resident model completed two turns on `6ac9f2a8`, and PR332 merged

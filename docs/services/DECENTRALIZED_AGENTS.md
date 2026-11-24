@@ -82,31 +82,29 @@ The intended service has three responsibilities:
 - **Learn cooperatively:** train and exchange reusable artifacts, while evaluating whether
   each proposed successor actually improves the accepted model or workflow.
 - **Maintain shared rules:** assess permitted/prohibited content and check, repair or exclude
-  defective agents through the mutual governance system.
+  defective agents through the mutual governance system. Apply independent review to
+  [proposed changes](#review-of-proposed-changes) throughout the development cycle.
 
 Participation remains capability-based. An idle device can contribute without training a
 large model or retaining every model. No permanent central compute, training, task-dispatch
 or decision authority is part of the target. Network-policy decisions are intended to be
 fully automatic, without substituting a mandatory human approval step.
 
-The user extended this scope on 2026-10-01 to autonomous maintenance of the core
-and all current/future VOLPAROSSA organization repositories. Agents should share
-implementation and independent review work under immune-system oversight, then
-publish through narrowly authorized repository capabilities. This is not yet
-implemented and does not distribute GitHub credentials to compute peers. The
-user additionally approved automatic installation of authenticated releases on
-VOLPAROSSA clients; this requires a separate verified update/activation facility,
-not execution of arbitrary peer programs. See the separate
-[repository-maintenance scope and publication boundaries](REPOSITORY_MAINTENANCE.md).
+The development goal covers autonomous maintenance of Core and all current and future
+VOLPAROSSA repositories. Agents share implementation, isolated testing and independent
+review over DICN. The target development, publication and client-update cycle operates
+without GitHub or GitHub Actions. GitHub receives an automatic, replaceable public mirror.
+Approved source publication, release authorization and client activation have separate
+permissions and checks. [Repository maintenance and updates](REPOSITORY_MAINTENANCE.md)
+defines those boundaries.
 
 ### Shared values
 
 The requested positive principles are **Humilitas, Humanitas, Mansuetudo, Diligentia,
 Liberalitas, Temperantia and Castitas**. The negative principles are **Superbia, Invidia,
-Ira, Acedia, Avaritia, Gula and Luxuria**. These are the primary basis for agents' reasoning in
-both applications: **concrete allowed/prohibited content decisions** for the whitelist/blacklist,
-and **behavior and training** of agents themselves. The examples supplied on 2026-09-14 illustrate
-intended applications; they are not an independent rulebook or the source of that reasoning.
+Ira, Acedia, Avaritia, Gula and Luxuria**. These guide agents' reasoning about content policy,
+their own behavior and training, and the effects of changes to VOLPAROSSA. The examples
+supplied on 2026-09-14 illustrate intended applications.
 Jurisdiction, assessment boundaries and conflict rules still need specification;
 no numerical virtue score or automatic "good person/bad person" classification is implied.
 Describing or critically discussing a vice is distinct from facilitating harmful conduct;
@@ -120,7 +118,8 @@ thousands of rules can leave gaps; literal compliance can also undermine the rea
 exists. The intended agent reasoning must consider purpose, context and consequences in new
 situations, rather than treating an unlisted case or a verbal loophole as sufficient permission.
 
-This applies both to agent behavior/training and to automatic whitelist/blacklist maintenance.
+This applies to agent behavior and training, automatic whitelist/blacklist maintenance and
+independent review of proposed changes.
 The required direction is **principles -> contextual reasoning -> decisions**. Concrete content
 decisions are applications and recorded outcomes of the principles, not their complete definition.
 Examples may illustrate and test the intended reasoning; matching a listed example is not the
@@ -136,6 +135,38 @@ an abstract vocabulary itself prevent deception, bias or conflicting judgments. 
 interpretation, evidence-bound decisions and correction remain implementation requirements;
 this clarification changes the design description, not the active destination whitelist or the
 completion status of the automatic governance system.
+
+### Review of proposed changes
+
+The planned immune system assesses human and AI proposals under the same rules. Compare the
+candidate with the last trusted state, the agreed project goals and the history of related
+changes across repositories. Trace direct effects, downstream effects on other components and
+the cumulative effects of individually acceptable changes. Check what users can still do, who
+can see their data, who controls development and release decisions, and who could keep the
+service running or recover it after a failure. Relate findings to functionality, security,
+privacy, decentralization, continuity and the founding principles.
+
+Reviewers use the policy, authority assignments, independent checks and recovery references
+in force before the proposal. Bind the decision and reasons to the exact change, applicable
+authority and supporting evidence, including uncertainty or dissent. Limit access to private
+evidence. A change to the review system itself requires approval under the preceding authority
+and can take effect only for subsequent decisions. A disputed finding can be reconsidered
+independently. Scope a hold or withdrawal to the affected candidate or capability so other
+authorized work can continue.
+
+#### Functional verification
+
+Use disposable repositories and participants to demonstrate the following outcomes.
+
+| Scenario | Required observation |
+| --- | --- |
+| A dependency update removes an independent check, or a compromised author nominates its own reviewers. | The independent assessment identifies the lost safeguard or invalid authority. Coordinated approvals under one operator cannot authorize publication. |
+| Successive changes keep individual checks passing while moving all recovery copies to one operator. | Review identifies the revisions whose combined effect removes independent recovery and withholds the change that would break the requirement. The decision can be reconstructed from the recorded evidence. |
+| A reviewed security fix replaces an unsafe component, or a lawful governance decision changes the architecture. | Both can proceed under the existing mandate when independent evidence confirms the intended transition. A mistaken hold can be corrected. A device owner can pause participation, withdraw or uninstall and retain control over local data. |
+| Sabotage is discovered after publication and the affected publisher is unavailable. | Independent participants can withdraw the affected authority or release within their mandate. A client obtains a compatible known-good revision from another peer, verifies its current recovery authorization under existing trust and resumes service with user data and downgrade protections intact. |
+
+The [threat model](../privacy/THREAT_MODEL.md#sabotage-of-development-and-recovery)
+describes the trust assumptions for these exercises.
 
 ## Audio, images and natural conversation
 
