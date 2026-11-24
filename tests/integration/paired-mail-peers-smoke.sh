@@ -123,7 +123,10 @@ paired_peer_finish() {
     peer_wait=0
     while [ "$peer_wait" -lt 60 ]; do
         for peer_log in exit "$provider_control_node"; do
-            content_mailbox_cli "$peer_log" logs --limit 400 >"$WORK/logs-$peer_log.txt" || fail PAIRED_MAIL_PEER_LOG_FAILED
+            # The guest observer reads these service-private rings. Neither Mail
+            # participant has permission to traverse the Exit or relay runtime.
+            CONTENT_REPLICATION_COMMAND_TIMEOUT=5s content_replication_cli "$peer_log" logs --limit 400 \
+                >"$WORK/logs-$peer_log.txt" || fail PAIRED_MAIL_PEER_LOG_FAILED
         done
         peer_flows=$(content_provider_event_count exit MPTCP_EXIT_FLOW_COMPLETED)
         peer_lookups=$(content_provider_event_count "$provider_control_node" CONTENT_EXACT_LOOKUP_FINISHED)
