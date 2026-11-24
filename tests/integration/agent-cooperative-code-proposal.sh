@@ -90,12 +90,17 @@ agent_cooperative_code_proposal_run() {
             -- /usr/bin/python3 -I -c 'import os, sys
 os.close(os.open(sys.argv[1], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))' "$code_planner_lease" \
             || fail CODE_PLANNER_RUNTIME_LEASE_FAILED
+        code_planner_log=$WORK/private-planner-diagnostics/service.log
+        mkdir -m 0700 "$WORK/private-planner-diagnostics" || fail CODE_PLANNER_DIAGNOSTIC_COLLISION
+        install -m 0600 /dev/null "$code_planner_log"
         systemd-run --no-block --unit="$code_planner_unit" --slice=system.slice --service-type=exec \
             --property=CollectMode=inactive --property=User=volparossa --property=Group=volparossa \
             --property=PrivateNetwork=yes --property=PrivateTmp=yes --property=PrivateDevices=yes --property=ProtectHome=yes \
             --property=ProtectSystem=strict --property="ReadWritePaths=$code_planner $code_planner_lease" \
             --property="InaccessiblePaths=$code_root $jobs_source $WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5" \
             --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=NoNewPrivileges=yes --property=UMask=0077 \
+            --setenv=RUST_LOG=off,volparossa::compute::private_diagnostic=debug --setenv=NO_COLOR=1 \
+            --property="StandardOutput=append:$code_planner_log" --property=StandardError=null \
             --property=MemoryMax=7G --property=MemorySwapMax=0 --property=TasksMax=128 --property=KillMode=control-group \
             --property=RuntimeMaxSec=2700s --property=TimeoutStopSec=20s \
             -- "$binary_directory/volparossa" compute private-serve --socket "$code_planner/private.sock" \

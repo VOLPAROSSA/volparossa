@@ -1,5 +1,5 @@
 {
-  "code_revision": "b350bdd8d33e09b32221564b0de70a232036761a",
+  "code_revision": "72d8de73d14362a7b368e950129f05400153e9dd",
   "files": {
     "code/scripts/opencode_session.cjs": {
       "bytes": 13260,
@@ -22,12 +22,12 @@
       "sha256": "e1f8beefd86e3df466fa2f30f4f78fb76210674904e940d5f70199e1a04c5373"
     },
     "code/src/extension.cjs": {
-      "bytes": 26429,
-      "sha256": "b4c435a7283937fb7af69669b1809f043805e360935bdcff0e773a70f3105d40"
+      "bytes": 27001,
+      "sha256": "ae277d160dae97ac4fe9714b36a60b4b78c55dcf96a1c4636371375fdfb8f17e"
     },
     "code/src/opencode-bridge.cjs": {
-      "bytes": 8201,
-      "sha256": "376066e77bc477c5673c1ac74cdbfa03623abb348b6342ebe3bd81682a196584"
+      "bytes": 8807,
+      "sha256": "2c31604b46d5f8e3da7b3c1ffbbba014351a3f3860d1154c1e3f414a1b96a545"
     },
     "code/src/opencode-runtime.cjs": {
       "bytes": 14437,

@@ -398,7 +398,8 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
 PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "editor_failed", "runtime_inputs",
     "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server",
     "owner_verifier", "runtime_preparation", "model_task", "model_request_bound", "model_conversation",
-    "model_transport", "model_execution", "runtime_cleanup"}
+    "model_transport", "model_execution", "model_output", "model_tool_choice", "model_budget", "model_busy",
+    "model_cancelled", "model_cleanup", "model_incomplete", "native_session", "runtime_cleanup"}
 
 
 def workbench_driver(value, successful=False, *, planner=False):
@@ -661,9 +662,15 @@ def capture(work, application_status, observer_status):
         observer = value
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    write(work / f"{NAME}-diagnostic.json", dict(version=1, driver_exit_status=application_status,
-        observer_exit_status=observer_status, driver_report=state, observer=observer,
-        peer_execution=closed_peer_status(paths(work)[1])))
+    report = dict(version=1, driver_exit_status=application_status, observer_exit_status=observer_status,
+                  driver_report=state, observer=observer, peer_execution=closed_peer_status(paths(work)[1]))
+    private_log = work / "private-planner-diagnostics" / "service.log"
+    if private_log.exists():
+        # Parse only fixed local lifecycle fields. The source log stays in the
+        # disposable root-only directory and is excluded from all exports.
+        project = runpy.run_path(str(HERE / "agent-private-conversation.py"))["service_diagnostic"]
+        report["local_planner_lifecycle"] = project(private_log)
+    write(work / f"{NAME}-diagnostic.json", report)
 
 
 def validate_planner(value):
