@@ -407,8 +407,8 @@ jobs:
           retention-days: 14
 
   storage-evidence:
-    name: Verify original Storage trial receipts
-    if: github.event_name == 'pull_request' && github.event.pull_request.commits == 1 && (github.event.pull_request.changed_files == 9 || github.event.pull_request.changed_files == 10)
+    name: Classify status documentation or verify original Storage trial receipts
+    if: github.event_name == 'pull_request' && github.event.pull_request.commits == 1 && ((github.event.pull_request.changed_files <= 4 && startsWith(github.head_ref, 'docs/')) || github.event.pull_request.changed_files == 9 || github.event.pull_request.changed_files == 10)
     permissions:
       contents: read
       actions: read
@@ -422,24 +422,33 @@ jobs:
           fetch-depth: 3
           persist-credentials: false
       - id: classify
-        name: Compare both source trees and the authenticated artifact
+        name: Verify the change against the protected base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           route=full
-          checker="$RUNNER_TEMP/check-storage-evidence-pr.py"
-          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && git show "$BASE_SHA:scripts/check-storage-evidence-pr.py" > "$checker"; then
-            route=$(python3 -I -B "$checker") || route=full
+          checker="$RUNNER_TEMP/quality-classifier.py"
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if (( CHANGED <= 4 )); then
+              if git show "$BASE_SHA:scripts/check-status-docs-pr.py" > "$checker"; then
+                route=$(python3 -I -B "$checker" "$BASE_SHA" "$HEAD_SHA" "$GITHUB_SHA") || route=full
+                case "$route" in status) ;; invalid) route=status-invalid ;; *) route=full ;; esac
+              fi
+            elif git show "$BASE_SHA:scripts/check-storage-evidence-pr.py" > "$checker"; then
+              route=$(python3 -I -B "$checker") || route=full
+              case "$route" in verified|invalid) ;; *) route=full ;; esac
+            fi
           fi
-          case "$route" in full|verified|invalid) ;; *) route=full ;; esac
           printf 'route=%s\n' "$route" >> "$GITHUB_OUTPUT"
 
   quality-build:
     name: Full unprivileged workspace suite
     needs: storage-evidence
-    if: ${{ always() && !cancelled() && (needs.storage-evidence.result != 'success' || needs.storage-evidence.outputs.route != 'verified') && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
+    if: ${{ always() && !cancelled() && (needs.storage-evidence.result != 'success' || (needs.storage-evidence.outputs.route != 'verified' && needs.storage-evidence.outputs.route != 'status' && needs.storage-evidence.outputs.route != 'status-invalid')) && !(github.event_name == 'workflow_dispatch' && (inputs.studio_export_pack || inputs.ctutils_compatibility || inputs.maintained_zbus)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -449,8 +458,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test Storage evidence routing and archive verification
-        run: python3 -B scripts/test-check-storage-evidence-pr.py
+      - name: Test status documentation and Storage evidence routing
+        run: |
+          python3 -B scripts/test-check-storage-evidence-pr.py
+          python3 -B scripts/test-check-status-docs-pr.py
 
       - name: Verify complete committed goal preservation and fresh-export controls
         run: |
@@ -869,7 +880,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Require a complete workspace suite or verified original evidence
+      - name: Require a complete workspace suite or a verified PR-only check
         env:
           EVENT: ${{ github.event_name }}
           CLASSIFIER: ${{ needs.storage-evidence.result }}
@@ -877,8 +888,8 @@ jobs:
           BUILD: ${{ needs.quality-build.result }}
         run: |
           set -euo pipefail
-          test "$ROUTE" != invalid
-          if [[ "$ROUTE/$CLASSIFIER" == verified/success ]]; then
+          [[ "$ROUTE" != invalid && "$ROUTE" != status-invalid ]]
+          if [[ "$ROUTE/$CLASSIFIER" == verified/success || "$ROUTE/$CLASSIFIER" == status/success ]]; then
             test "$EVENT/$BUILD" = 'pull_request/skipped'
           else
             test "$BUILD" = success
