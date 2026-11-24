@@ -86,12 +86,14 @@ pub(super) fn native_session_command(options: &Options, root: &Path) -> Command 
     command_inner(options, Some(root))
 }
 
+#[derive(Clone, Copy)]
 struct Limits {
     threads: u16,
     wall_seconds: u64,
     address_space: u64,
 }
 
+#[derive(Clone, Copy)]
 enum Files<'a> {
     Task { dataset: &'a Path, output: &'a Path },
     Session(&'a Path),

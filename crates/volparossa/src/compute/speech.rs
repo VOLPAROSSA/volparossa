@@ -4,7 +4,7 @@ use std::{
     fs,
     io::Write as _,
     os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -126,37 +126,9 @@ pub(super) async fn run(args: &Options) -> Result<()> {
         .prefix("private-speech-")
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&args.work_parent)?;
-    let audio = staging.path().join("input.wav");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&audio)?;
-    file.write_all(&bytes)?;
-    drop(file);
-    drop(bytes);
-    let mut id = [0; 16];
-    getrandom::fill(&mut id).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
-    let request =
-        json!({"version":1,"id":hex::encode(id),"threads":args.threads,"language":args.language});
-    let interrupt = signal(SignalKind::interrupt())?;
     let started = Instant::now();
-    let child = super::sandbox::speech_command(
-        &args.runtime_root,
-        &args.model_root,
-        &audio,
-        args.threads,
-        args.max_seconds,
-    )
-    .spawn()
-    .context("compute_speech_spawn")?;
-    let result =
-        super::supervise::speech::run(child, &request, staging.path(), args.max_seconds, interrupt)
-            .await;
-    staging
-        .close()
-        .map_err(|_| super::private_task::CleanupUnconfirmed)?;
-    let (reply, peak_rss) = result?;
+    let result = recognize(args, staging.path(), bytes).await;
+    let (reply, peak_rss) = super::private_task::finish_owned(staging, result)?;
     let text = reply["transcript"]
         .as_str()
         .context("compute_speech_reply")?;
@@ -174,6 +146,33 @@ pub(super) async fn run(args: &Options) -> Result<()> {
         "max_observed_rss_bytes":peak_rss,"cleanup":{"complete":true}});
     println!("{summary}");
     Ok(())
+}
+
+async fn recognize(args: &Options, stage: &Path, bytes: Vec<u8>) -> Result<(Value, u64)> {
+    let audio = stage.join("input.wav");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&audio)?;
+    file.write_all(&bytes)?;
+    drop(file);
+    drop(bytes);
+    let mut id = [0; 16];
+    getrandom::fill(&mut id).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
+    let request =
+        json!({"version":1,"id":hex::encode(id),"threads":args.threads,"language":args.language});
+    let interrupt = signal(SignalKind::interrupt())?;
+    let child = super::sandbox::speech_command(
+        &args.runtime_root,
+        &args.model_root,
+        &audio,
+        args.threads,
+        args.max_seconds,
+    )
+    .spawn()
+    .context("compute_speech_spawn")?;
+    super::supervise::speech::run(child, &request, stage, args.max_seconds, interrupt).await
 }
 
 #[cfg(test)]

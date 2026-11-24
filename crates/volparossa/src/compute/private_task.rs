@@ -232,20 +232,24 @@ impl Staged {
     }
 
     fn finish(self, result: Result<Value>) -> Result<Value> {
-        if result
-            .as_ref()
-            .is_err_and(|error| error.downcast_ref::<CleanupUnconfirmed>().is_some())
-        {
-            // Keep only this exact owned tree. Never remove inputs still possibly
-            // mounted by a live worker and never emit an answer or a false cleanup flag.
-            let _ = self.directory.keep();
-            return Err(CleanupUnconfirmed.into());
-        }
-        self.directory
-            .close()
-            .map_err(|_| anyhow::anyhow!("compute_private_storage_cleanup_failed"))?;
-        result
+        finish_owned(self.directory, result)
     }
+}
+
+/// Dispose of the snapshot only after the exact worker lifetime was joined.
+pub(super) fn finish_owned<T>(directory: tempfile::TempDir, result: Result<T>) -> Result<T> {
+    if result
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<CleanupUnconfirmed>().is_some())
+    {
+        // Keep only this exact owned tree for recovery if the worker may still hold a mount.
+        let _ = directory.keep();
+        return Err(CleanupUnconfirmed.into());
+    }
+    directory
+        .close()
+        .map_err(|_| anyhow::anyhow!("compute_private_storage_cleanup_failed"))?;
+    result
 }
 
 fn preview(args: &Options) -> Value {
