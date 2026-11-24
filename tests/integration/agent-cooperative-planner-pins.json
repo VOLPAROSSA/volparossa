@@ -17,6 +17,10 @@
       "bytes": 4875,
       "sha256": "b1af15486f23c99db478de42701d55494666000283c04eba5a9bd343242a8ec7"
     },
+    "code/scripts/smoke_opencode_cooperation.cjs": {
+      "bytes": 20828,
+      "sha256": "a064a8786f94698c9d315338b0a2e3a0d78b793319d965308dccb120af1a9bc1"
+    },
     "code/src/cooperative-tool-server.cjs": {
       "bytes": 4499,
       "sha256": "e1f8beefd86e3df466fa2f30f4f78fb76210674904e940d5f70199e1a04c5373"
