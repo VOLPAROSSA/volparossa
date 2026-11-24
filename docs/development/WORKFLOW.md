@@ -1,16 +1,17 @@
 # Shared development workflow
 
-Codex, OpenCode and other coding agents use this workflow across VOLPAROSSA.
-Each repository's root `AGENTS.md` links here and gives its own contracts,
-verification guidance and authority boundaries. Changes to shared development
-practice belong here. Use the user's latest scoped instructions and current
-repository state when resuming work across clients.
+This workflow applies to all VOLPAROSSA contributors and any AI coding agents
+working on their behalf. Start at the owning repository's root `AGENTS.md` for
+its contracts, verification guidance and authority boundaries. Keep shared
+development practice here. Use the user's latest scoped instructions and
+current repository state when resuming work.
 
 ## Start or resume
 
 1. Read the task, the owning repository's `AGENTS.md`, any instructions for the
    affected paths and the relevant local README or status. Consult the Core
-   [implementation status](../IMPLEMENTATION_STATUS.md) for shared dependencies.
+   [implementation status](../IMPLEMENTATION_STATUS.md) for Core work and shared
+   dependencies.
    For a full-project resume, read the complete [goal](GOAL.md), including its
    integrated [DPS](GOAL.md#dps) and [Studio/hosting](GOAL.md#studio) sections.
    For a bounded task, load the relevant requirements and contracts.
@@ -29,48 +30,57 @@ replacement specification. The [documentation index](../README.md) locates topic
 
 ## Plan and execute
 
-Select models, reasoning effort, tools, skills and any agents dynamically using
-available client capabilities, task complexity, uncertainty, risk, latency and cost.
-Reassess when requirements or evidence change. There is no fixed vendor, model,
-role-to-model mapping, skill roster or repository concurrency limit. Delegate only
-when useful, with minimal sufficient context, explicit ownership, exact source and
-expected evidence. Avoid competing writers and repeated exploration. The coordinating
-agent integrates results and arranges independent review where the change warrants it.
+Choose models, reasoning effort, tools, skills, agents, context and parallelism
+dynamically using available capabilities, task complexity, uncertainty, risk,
+latency and cost. Reassess when requirements or evidence change. No vendor, model,
+role-to-model mapping, skill roster or repository concurrency quota is prescribed.
+When useful, delegate independent, bounded work with the goal, minimal sufficient
+context, exact source revision, owned paths or checkout, relevant contracts and
+expected evidence. Avoid competing writers and repeated exploration. The
+coordinator integrates results and arranges independent review when correctness,
+privacy or consequential integration warrants it. Agents may not approve their
+own work or gain publication or release authority through delegation.
 
 A repository instruction cannot enable a model, switch a running session or override
-client policy. Use supported controls and report limitations accurately; do not edit
-host configuration, install tooling or run routing probes merely to satisfy a workflow.
-Both [Codex](https://learn.chatgpt.com/docs/agent-configuration/subagents) and
-[OpenCode](https://opencode.ai/docs/rules/) support project instructions, but their
-configuration and delegation capabilities differ.
+tool policy. Keep project requirements, implementation evidence and tool choices
+distinct. Use supported controls and report their actual capabilities and limits.
+Do not edit host configuration, install tooling or run routing probes merely to
+satisfy the workflow.
 
 Implement complete usable slices within the agreed privacy and authority boundaries.
 Before shared wire/interface allocation, inspect current and retained integration
-heads; preserve field ownership and compatibility. Make ordinary scoped development,
-commit and push decisions autonomously; branch protections and release authority apply.
+heads; preserve field ownership and compatibility. Choose implementation details,
+priorities, checks and scoped commit or push timing autonomously. Keep changes
+reviewable and preserve unrelated changes, unfinished work and branch protections.
+Seek authorization for consequential actions outside the agreed scope, including
+private disclosure, real funds, host changes, permission expansion or bypassing
+release controls.
 
-### Commit attribution for Erik's Codex work
+### Commit attribution
 
-For work that Erik Le Blansch authors with Codex, use his GitHub account
-`erikleblansch` as the sole author. Configure each new working clone for his
-tasks with his account-linked Git identity before creating source commits.
+Use the contributor's verified, account-linked Git identity for new commits.
+Attribute work performed by AI coding agents or subagents to the contributor
+on whose behalf they work. Confirm the name and account-linked email. Set the
+identity locally in the task's checkout when needed and check it with
+`git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`. Resolve missing or
+conflicting identity information before committing on the contributor's behalf.
 
-```sh
-git config --local user.name erikleblansch
-git config --local user.email 58982453+erikleblansch@users.noreply.github.com
-```
-
-Use that identity for delegated commits too. Omit tool co-author trailers from
-Erik's commits and the final squash message. Check the source authors before
-merging, since GitHub can credit them when it creates the squash commit.
-Preserve the authorship of other contributors when integrating their work.
+Omit AI-specific `Co-authored-by` trailers from source commits and final integration
+messages where tooling and applicable terms permit. Report any unavoidable
+AI-specific attribution before publishing. Before merging or squashing, check the
+source authors and resulting attribution, including automatically generated
+co-author trailers. Always preserve the original authorship of other contributors
+when integrating their existing work. Use an integration method that retains
+their credit if a squash would lose it.
 
 ## Verify and record
 
 Choose checks for the changed behavior and actual risk. Use narrow formatter/compile
 checks and targeted functional smoke during development; run broader integration and
 release checks when their scope is affected. Documentation-only work needs relevant
-link, scope and preservation checks, not runtime builds or model-routing demonstrations.
+link, technical-claim, scope and preservation checks without runtime builds or
+model-routing demonstrations. Run builds and runtime trials on approved disposable
+hosted runners. Local read-only inspection and inert validation preserve host safety.
 Run [requirement preservation](TESTING.md#requirement-preservation) when effective
 requirements or preserved sources change, not on every task or conversation.
 
@@ -99,5 +109,4 @@ provenance; delete only understood generated outputs with verified recovery path
 
 A handover needs the current branch/source, owned checkout, remaining work and exact
 relevant evidence. Do not repeat machine inventories, UI character counts or historic
-model tests. Approved hosted runners remain the place for builds and runtime trials;
-local read-only inspection and inert documentation validation preserve host safety.
+model tests.
