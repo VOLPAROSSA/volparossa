@@ -395,6 +395,10 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
     "trust_page", "trust_grant", "trust_close", "workbench_failed"}
 
 
+PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "editor_failed", "runtime_inputs",
+    "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server"}
+
+
 def workbench_driver(value, successful=False, *, planner=False):
     fields = WORKBENCH_FLAGS | {"version", "kind", "phase", "failure", "owner_check_status", "original_source_sha256",
         "original_tests_sha256", "question_sha256", "license", "actual_applied_sha256", "replacement_sha256",
@@ -417,7 +421,7 @@ def workbench_driver(value, successful=False, *, planner=False):
         and value["kind"] == kind
         and all(type(value[key]) is bool for key in WORKBENCH_FLAGS)
         and value["phase"] in {"prepare", "workbench", "independent_check", "complete"}
-        and value["failure"] in (WORKBENCH_FAILURES | ({"planner_start", "planner_action", "planner_result"} if planner else set())) and value["owner_check_status"] in {None, "passed"}
+        and value["failure"] in (WORKBENCH_FAILURES | (PLANNER_FAILURES if planner else set())) and value["owner_check_status"] in {None, "passed"}
         and value["original_source_sha256"] == sha(ORIGINAL) and value["original_tests_sha256"] == TEST_SHA
         and value["question_sha256"] == QUESTION_SHA and value["license"] == "GPL-3.0-only"
         and all(value[key] is None or hex64(value[key]) for key in ("actual_applied_sha256", "replacement_sha256", "report_sha256"))
