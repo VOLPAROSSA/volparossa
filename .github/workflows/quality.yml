@@ -763,6 +763,15 @@ jobs:
           VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
         run: cargo test --locked --offline --workspace --all-features
 
+      - name: Exercise the native geodetic claim ABI from a C caller
+        run: |
+          cargo build --locked --offline -p volparossa-dps-ffi
+          fixture=crates/volparossa-dps-ffi
+          clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I "$fixture/include" "$fixture/tests/geodetic_smoke.c" target/debug/libvolparossa_dps_ffi.a \
+            -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc -o "$RUNNER_TEMP/dps-geodetic-smoke"
+          "$RUNNER_TEMP/dps-geodetic-smoke"
+
       - name: Check storage outcome tests without unrelated workspace feature unification
         run: >-
           cargo test --locked --offline -p volparossa-agent --lib

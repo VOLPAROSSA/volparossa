@@ -28,9 +28,7 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use volparossa_local_control::dps::{
-    AssessmentLimitation, AssessmentStatus, DPS_SERVICE_VERSION, DpsAssessRequest, FrameKind,
-    MAX_DPS_RADIUS_METRES, NavigationAuthentication, PositionFrame, PositionObservation,
-    SourceKind,
+    AssessmentLimitation, AssessmentStatus, DpsAssessRequest, MAX_DPS_RADIUS_METRES, SourceKind,
     geodetic::{HeightReference, Wgs84GeodeticPosition},
 };
 
@@ -483,37 +481,17 @@ fn unix_millis(time: SystemTime) -> Result<u64> {
 }
 
 fn request_for(claim: &Claim, radius: f64) -> Result<DpsAssessRequest> {
-    let [x, y, z] = claim
-        .position
-        .to_ecef()
-        .map_err(|_| Failure::Geometry)?
-        .components_metres();
+    let ecef = claim.position.to_ecef().map_err(|_| Failure::Geometry)?;
     let mut identifiers = [[0; 16]; 3];
     for id in &mut identifiers {
         getrandom::fill(id).map_err(|_| Failure::Randomness)?;
     }
-    let frame = PositionFrame {
-        kind: FrameKind::Wgs84Ecef as i32,
-        local_frame_id: vec![],
-    };
-    Ok(DpsAssessRequest {
-        dps_version: DPS_SERVICE_VERSION,
-        desired_frame: Some(frame.clone()),
-        maximum_age_ms: 5000,
-        observations: vec![PositionObservation {
-            observation_id: identifiers[0].to_vec(),
-            source_id: identifiers[1].to_vec(),
-            declared_independence_group: identifiers[2].to_vec(),
-            source_kind: SourceKind::Gnss as i32,
-            frame: Some(frame),
-            x_metres: x,
-            y_metres: y,
-            z_metres: z,
-            supplied_radius_metres: radius,
-            observed_at_unix_ms: unix_millis(claim.epoch)?,
-            navigation_authentication: NavigationAuthentication::Unknown as i32,
-        }],
-    })
+    Ok(ecef.single_claim_request(
+        SourceKind::Gnss,
+        identifiers,
+        radius,
+        unix_millis(claim.epoch)?,
+    ))
 }
 
 fn limitation(value: i32) -> Result<&'static str> {

@@ -1,8 +1,8 @@
 # Native DPS quality ABI 1
 
 This library calls the existing `DpsAssessRequest::assess(now)` implementation
-and validates its result. It receives a **bare canonical Protobuf request**,
-not a `ControlRequest` or authority to access the administrative socket. It does
+and validates its result. Its two entry points receive either a bare canonical
+Protobuf request or a single geodetic observation. It does
 not acquire clocks, sensors, radio observations, sockets or files, persist inputs,
 log requests, share data or replace OS location. The C smoke test alone reads
 four public synthetic fixture files.
@@ -14,7 +14,16 @@ and the seven mandatory limitations. It contains no candidate coordinates,
 source/observation/correlation IDs, group counts or timestamps. ECEF is an asserted
 reference, not proof of a geographic anchor. Consistency is not physical truth.
 
-Input is limited to 16,384 bytes **before** Protobuf decoding. Existing structural
+The separate `volparossa_dps_assess_geodetic_v1` entry accepts one caller-held
+WGS84 position with explicit ellipsoidal height and a finite, positive 3D
+comparison radius. It uses the same ECEF conversion and five-second assessment
+window as the GPSD adapter. It identifies the modality as Other and returns the
+same coordinate-free summary. Missing, future and stale measurement times yield
+unavailable quality. The caller owns permission, foreground lifetime, measurement
+provenance and the meaning of the supplied radius. A horizontal accuracy estimate
+on its own cannot supply that radius.
+
+Canonical wire input is limited to 16,384 bytes **before** Protobuf decoding. Existing structural
 validation still limits claims to 32, IDs to 16 bytes, frame shapes and enum values.
 Exact re-encoding rejects unknown/duplicate fields, explicit defaults, reordered
 fields and overlong varints; this bridge is intentionally stricter about encoding
