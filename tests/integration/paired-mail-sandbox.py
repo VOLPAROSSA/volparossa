@@ -14,9 +14,9 @@ HERE = Path(__file__).resolve().parent
 BUNDLE = Path("/var/tmp/volparossa-paired-mail-runtime")
 
 
-def command(bundle, private, phase, cli, control):
+def mounts(bundle, private, cli, control):
     product, runtime = bundle / "source", bundle / "runtime"
-    args = ["bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--clearenv",
+    return ["bwrap", "--die-with-parent", "--new-session", "--unshare-all", "--clearenv",
             "--setenv", "PATH", "/trial/bin:/usr/bin:/bin", "--setenv", "LANG", "C.UTF-8",
             "--setenv", "HOME", "/tmp", "--dir", "/run", "--cap-drop", "ALL",
             "--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs", "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf", "--ro-bind", "/usr", "/usr", "--tmpfs", "/usr/local",
@@ -29,6 +29,10 @@ def command(bundle, private, phase, cli, control):
             "--ro-bind", cli, "/trial/core/volparossa", "--ro-bind", control, "/trial/core/agent.sock",
             "--bind", private / "app", "/trial/state", "--bind", private / "store", "/var/lib/volparossa-mail",
             "--ro-bind", HERE / "paired-mail-guest.py", "/trial/driver.py"]
+
+
+def command(bundle, private, phase, cli, control):
+    args = mounts(bundle, private, cli, control)
     for name in (("a", "b") if phase == "send" else ("b",)):
         args.extend(["--ro-bind", private / "providers" / name, "/tmp/r/providers/" + name])
     return [*args, "--", "/usr/bin/python3", "-I", "-B", "/trial/driver.py", phase]
