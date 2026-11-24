@@ -204,6 +204,10 @@ impl Fixture {
     }
 
     async fn send(&self) -> Value {
+        self.send_to("sender-cache", "sender-manifest").await
+    }
+
+    async fn send_to(&self, cache: &str, manifest: &str) -> Value {
         self.success(&[
             "send",
             "--invitation",
@@ -213,9 +217,9 @@ impl Fixture {
             "--input",
             "input",
             "--cache",
-            "sender-cache",
+            cache,
             "--manifest",
-            "sender-manifest",
+            manifest,
             "--identity",
             "sender",
             "--passphrase-file",
@@ -354,10 +358,41 @@ async fn rejects_final() {
     let _ = server.await;
 }
 
+async fn verify_sender_invitation(fixture: &Fixture) {
+    let before = fixture.requests.load(Ordering::SeqCst);
+    let mut args = [
+        "verify-invitation",
+        "--invitation",
+        "invitation",
+        "--owner-key",
+        &fixture.owner_key,
+        "--identity",
+        "sender",
+        "--passphrase-file",
+        "passphrase",
+    ];
+    let report = fixture.success(&args).await;
+    assert_eq!(report["owner_key"], fixture.owner_key);
+    assert_eq!(report["sender_key"], fixture.sender_key);
+    assert_eq!(report["network_used"], false);
+    let original = fs::read(fixture.directory.path().join("invitation")).unwrap();
+    assert_eq!(
+        report["invitation_sha256"],
+        hex::encode(Sha256::digest(&original))
+    );
+    args[4] = &fixture.sender_key;
+    assert!(!fixture.invoke(&args).await.status.success());
+    args[4] = &fixture.owner_key;
+    args[6] = "recipient";
+    assert!(!fixture.invoke(&args).await.status.success());
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), before);
+}
+
 async fn split_import() {
     let fixture = Fixture::new();
     let server = fixture.server(false);
     fixture.invite_and_enroll().await;
+    verify_sender_invitation(&fixture).await;
     let root = fixture.directory.path();
     let payload = b"Message-ID: <fixture@example.invalid>\r\nSubject: private fixture\r\n\r\nretained until explicit import";
     fs::write(root.join("input"), payload).unwrap();
@@ -471,6 +506,74 @@ async fn confirm_import_after_restart(fixture: &Fixture, args: &[&str], id: &str
     fetch_args[0] = "fetch";
     assert_eq!(fixture.success(&fetch_args).await["messages_fetched"], 0);
     assert_eq!(fs::read(root.join("consumer-imported")).unwrap(), payload);
+    let another = fixture.send_to("another-cache", "another-manifest").await;
+    let another_id = another["message_id"].as_str().unwrap();
+    assert_ne!(another_id, id);
+    fetch_args[4] = "another-handoff";
+    fixture.success(&fetch_args).await;
+    let another_pending = format!("another-handoff/{another_id}/pending.pb");
+    let another_token = format!("another-handoff/{another_id}/import-token");
+    let mut another_args = args.to_vec();
+    another_args[2] = &another_pending;
+    another_args[4] = &another_token;
+    let another_confirmed = fixture.success(&another_args).await;
     restarted.abort();
     let _ = restarted.await;
+    verify_without_providers(fixture, args, &directory, &another_confirmed).await;
+}
+
+async fn verify_without_providers(
+    fixture: &Fixture,
+    args: &[&str],
+    directory: &std::path::Path,
+    other: &Value,
+) {
+    let mut verify = args.to_vec();
+    verify[0] = "verify-import-acks";
+    verify.extend(["--invitation", "invitation"]);
+    let before = fixture.requests.load(Ordering::SeqCst);
+    let complete = fixture.success(&verify).await;
+    assert_eq!(complete["operation"], "mailbox_verify_import_acks");
+    assert_eq!(complete["network_used"], false);
+    assert_eq!(complete["acknowledged_providers"], 2);
+    fs::remove_file(directory.join("confirmed.json")).unwrap();
+    assert_eq!(fixture.success(&verify).await, complete);
+    let observation = &complete["acknowledgement_receipts"][0];
+    let key = observation["provider_key"].as_str().unwrap();
+    let path = directory.join(format!("ack-{key}.json"));
+    let original = fs::read(&path).unwrap();
+    let other_ack = other["acknowledgement_receipts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ack| ack["provider_key"] == key)
+        .unwrap();
+    let mut candidate = observation.clone();
+    // Even an authentic signature by the expected provider cannot stand in for
+    // this message, and a copied wrapper cannot hide a modified signature.
+    for replacement in [
+        other_ack["receipt"].clone(),
+        complete["acknowledgement_receipts"][1]["receipt"].clone(),
+        {
+            let mut bytes = hex::decode(observation["receipt"].as_str().unwrap()).unwrap();
+            *bytes.last_mut().unwrap() ^= 1;
+            Value::String(hex::encode(bytes))
+        },
+    ] {
+        candidate["receipt"] = replacement;
+        fs::write(&path, serde_json::to_vec(&candidate).unwrap()).unwrap();
+        assert!(!fixture.invoke(&verify).await.status.success());
+    }
+    fs::remove_file(&path).unwrap();
+    assert!(!fixture.invoke(&verify).await.status.success());
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.write_all(&original).unwrap();
+    assert_eq!(fixture.success(&verify).await, complete);
+    assert!(!directory.join("confirmed.json").exists());
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), before);
 }

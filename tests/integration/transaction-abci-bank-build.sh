@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Build one reviewed Bank example in the opted-in disposable runner. Export only its digest.
+# Install the reviewed public Bank TEST owner tool in the opted-in disposable runner. Export only its digest.
 set -euo pipefail
 umask 077
 [[ $GITHUB_ACTIONS == true && $RUNNER_ENVIRONMENT == github-hosted && $(id -u) != 0 ]]
@@ -15,7 +15,7 @@ git init -q "$work/bank"
 git -C "$work/bank" -c transfer.fsckObjects=true fetch --quiet --depth 1 https://github.com/VOLPAROSSA/volparossa-bank.git "$revision"
 git -C "$work/bank" checkout -q --detach FETCH_HEAD
 [[ $(git -C "$work/bank" rev-parse HEAD) == "$revision" ]]
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends musl-tools \
+sudo env DEBIAN_FRONTEND=noninteractive apt-get -c "$UBUNTU_ARCHIVE_CONFIG" install --yes --no-install-recommends musl-tools \
     protobuf-compiler=3.21.12-8.2ubuntu0.4 libprotoc32t64=3.21.12-8.2ubuntu0.4 libprotobuf32t64=3.21.12-8.2ubuntu0.4
 test "$(protoc --version)" = 'libprotoc 3.21.12'
 target=x86_64-unknown-linux-musl
@@ -25,9 +25,10 @@ export CC_x86_64_unknown_linux_musl=musl-gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_M
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 manifest="$work/bank/paper-payments/Cargo.toml"
 cargo +1.98.1 fetch --locked --manifest-path "$manifest" --target "$target"
-cargo +1.98.1 build --locked --offline --manifest-path "$manifest" --example ordered_authorizer --target "$target"
+cargo +1.98.1 install --locked --offline --debug --path "$work/bank/paper-payments" --target "$target" \
+    --features owner-cli --bin bank-test-authorizer --root "$work/install"
 git -C "$work/bank" diff --exit-code HEAD --
-strip --strip-all -o "$work/authorizer" "$CARGO_TARGET_DIR/$target/debug/examples/ordered_authorizer"
+strip --strip-all -o "$work/authorizer" "$work/install/bin/bank-test-authorizer"
 [[ $(stat -c %s "$work/authorizer") -le 33554432 ]]
 readelf -hW "$work/authorizer" | grep -F 'Advanced Micro Devices X86-64' >/dev/null
 if readelf -lW "$work/authorizer" | grep -w INTERP >/dev/null || readelf -dW "$work/authorizer" | grep -w NEEDED >/dev/null; then

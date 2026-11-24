@@ -55,6 +55,28 @@ pub struct VerifiedImportReceipt {
 }
 
 impl SignedImportReceipt {
+    /// Authenticate a past handoff at its signed creation time for offline evidence.
+    /// Live mailbox operations must verify the grant at the current time.
+    ///
+    /// # Errors
+    /// Rejects a future handoff and all signature, authority and binding errors of `verify`.
+    pub fn verify_at_issuance(
+        &self,
+        owner: &VerifyingKey,
+        now: u64,
+    ) -> Result<VerifiedImportReceipt, MailboxError> {
+        let created = self
+            .envelope
+            .body
+            .as_ref()
+            .ok_or(MailboxError::Invalid)?
+            .created;
+        if created > now {
+            return Err(MailboxError::Expired);
+        }
+        self.verify(owner, created)
+    }
+
     /// Sign a completed, private local download for later explicit consumer confirmation.
     ///
     /// The caller must already have authenticated and decrypted the original message. This
