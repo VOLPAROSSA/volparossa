@@ -58,17 +58,21 @@ signal_mailbox_run() {
     # Run the provisioning of the two app identities and the complete native case inside this phase.
     install -o root -g root -m 0444 /home/vpci/signal-backup-runtime/provision.json "$WORK/bin/signal-mailbox-runtime.json"
     signal_mailbox_stage_cli || fail SIGNAL_MAILBOX_CLI_STAGING_FAILED
-    content_mailbox_phase_start desktop
     install -o root -g root -m 0555 "$source_directory/tests/integration/signal-mailbox-native.py" \
         "$WORK/bin/signal-mailbox-native.py"
     install -o root -g root -m 0444 "$source_directory/tests/integration/signal-mailbox-pins.json" \
         "$WORK/bin/signal-mailbox-pins.json"
-    timeout --signal=TERM --kill-after=10s 650s ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
-        --groups="$mailbox_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -I -B "$WORK/bin/signal-mailbox-native.py" "$signal_private" "$signal_cli" \
-        "$WORK/runtime-client/control/agent.sock" "$mailbox_key_a" "$mailbox_key_b" \
-        >"$WORK/signal-mailbox-native.json" || fail SIGNAL_MAILBOX_NATIVE_NOT_PROVEN
-    content_mailbox_phase_finish 12
+    for native_mode in desktop worker; do
+        content_mailbox_phase_start "$native_mode"
+        if [ "$native_mode" = desktop ]; then signal_report=signal-mailbox-native.json
+        else signal_report=signal-mailbox-worker.json; fi
+        timeout --signal=TERM --kill-after=10s 650s ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+            --groups="$mailbox_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- python3 -I -B "$WORK/bin/signal-mailbox-native.py" "$signal_private" "$signal_cli" \
+            "$WORK/runtime-client/control/agent.sock" "$native_mode" "$mailbox_key_a" "$mailbox_key_b" \
+            >"$WORK/$signal_report" || fail SIGNAL_MAILBOX_NATIVE_NOT_PROVEN
+        content_mailbox_phase_finish 12
+    done
     signal_mailbox_cleanup || fail SIGNAL_MAILBOX_PRIVATE_CLEANUP_FAILED
 }
 

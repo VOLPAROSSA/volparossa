@@ -1442,10 +1442,12 @@ PAIRED_MAIL_NAMES = {"paired-mail-smoke.json", "paired-mail-supply.json", "conte
         *(f"content-mailbox-paired-{phase}-privacy-{r}.json" for r in ("client","relay0","relay1","relay2","exit")))}
 SIGNAL_MAILBOX_NAMES = {"signal-backup-provision.json", "host-state-before.json", "host-state-after.json",
                         "guest-exit-status", "current-phase", "signal-mailbox-smoke.json", "signal-mailbox-native.json",
-                        "content-mailbox-smoke.json", "content-mailbox-desktop-live-selection.json",
-                        "content-mailbox-desktop-gates.json", "content-provider-mailbox-desktop-control.json",
-         "signal-mailbox-send-route-diagnostic.json", "signal-mailbox-receive-route-diagnostic.json"} | {
-    f"content-mailbox-desktop-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
+                        "signal-mailbox-worker.json", "content-mailbox-smoke.json",
+                        "signal-mailbox-send-route-diagnostic.json", "signal-mailbox-receive-route-diagnostic.json"}
+for mode in ("desktop", "worker"):
+    SIGNAL_MAILBOX_NAMES.update({f"content-mailbox-{mode}-live-selection.json", f"content-mailbox-{mode}-gates.json",
+                                 f"content-provider-mailbox-{mode}-control.json"})
+    SIGNAL_MAILBOX_NAMES.update(f"content-mailbox-{mode}-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit"))
 SIGNAL_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
                 "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"} | {
     f"signal-backup-{name}.json" for name in (

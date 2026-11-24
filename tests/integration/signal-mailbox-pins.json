@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "chat_revision": "7fa73f619c540ba86e8bdc4bdea4bc92be24b322",
+  "chat_revision": "3014b2fd07f5f9202ec9918646f67de4eacea8e7",
   "signal_revision": "ef3872cb0249ec939d8aff857568a0e87a6b5075",
   "files": {
     "LICENSE": {
@@ -35,13 +35,17 @@
       "bytes": 3626,
       "sha256": "bdb986ce44a0f29bca309e5ad3856e4f0754be90069d2d9825a08c485df56dbe"
     },
+    "overlay/ts/services/mailbox/ledger.node.ts": {
+      "bytes": 4010,
+      "sha256": "fa381e5307035ef7475aab46b61719e5c4e677a4d4ea0c2aec4e2b331e44bfbf"
+    },
     "overlay/ts/services/mailbox/packet.node.ts": {
-      "bytes": 2932,
-      "sha256": "053e9d88bda6398b6a870d6d0c516145b03099ac0c142efd2e9cdf24317e60b5"
+      "bytes": 2901,
+      "sha256": "8c11430d3d7e5658593f851fb459956626b0a030b1b4d16b2ae695f102e55ddd"
     },
     "overlay/ts/services/mailbox/session.preload.ts": {
-      "bytes": 9808,
-      "sha256": "6b436df539edb923f6f7d76ad5459dda55d968d1e0de1b78151e6413b318b422"
+      "bytes": 11071,
+      "sha256": "3f0059fea8d00dd73c1197628e8dc37a9068d78924966027e9ab188c58a9c91a"
     },
     "overlay/ts/test-mock/backups/volparossa-withdrawal.node.ts": {
       "bytes": 2955,
@@ -52,8 +56,8 @@
       "sha256": "327d63ecedc40223ec58e71257dab5fa9c9ccf396dea3237f5b797b9433404e7"
     },
     "patches/signal-mailbox.patch": {
-      "bytes": 16533,
-      "sha256": "9f762eaccaa246b3453dc199f42b5b79217f7adb938e407e9b919ed234323c18"
+      "bytes": 19782,
+      "sha256": "e2c50025dd72b5057b80601b650a75594e7a8326a4edd4b77e365bce025f1bce"
     },
     "scripts/apply_signal_overlay.py": {
       "bytes": 6893,
@@ -68,16 +72,16 @@
       "sha256": "44a3396a1e486e5d6c2510fde84a85d549239c8c46a151fc8225ffebe65e8d1f"
     },
     "scripts/run_native_mailbox.py": {
-      "bytes": 10918,
-      "sha256": "d4110617f2d784ba137cb0d0afb14a2ac6ffbd27de27758c6d77282ffa8baac3"
+      "bytes": 13267,
+      "sha256": "26ba7e742843ac682e2a03c945219840bb4571409392a755b004213db80862e2"
     },
     "scripts/run_native_receipts.py": {
       "bytes": 6854,
       "sha256": "d6d68303d3c1d2daea557b0d217f30016e3cd822691d88ac9301e8ef360dbc9e"
     },
     "scripts/signal_mailbox.py": {
-      "bytes": 11572,
-      "sha256": "2ba3eaa34c4e763b0ce05db1b76c8ae3116ca5bd6df52fe4fe42a90e1c4e1307"
+      "bytes": 22045,
+      "sha256": "2ba08816434929946a55beca41b69a1b03c7d35a50cbad9e1e61308065b5129a"
     },
     "scripts/stage_node.py": {
       "bytes": 8939,
@@ -100,8 +104,8 @@
       "sha256": "7013b41dc57c9274fdbe5ddb4af69fac2141d949a5ce6757e4af95fae7f4cc05"
     },
     "tests/native/paired-mailbox_test.node.ts": {
-      "bytes": 17240,
-      "sha256": "a8bf351d49a26e541cfdc84330010e54390796ea3c105ed241951b2531da9bf1"
+      "bytes": 34101,
+      "sha256": "b435580d334ecc2c921735b6b39a1125952f46e69942d9c015fe8ae165e799b3"
     },
     "upstream-lock.json": {
       "bytes": 2100,
