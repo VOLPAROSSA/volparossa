@@ -463,6 +463,11 @@ jobs:
           python3 -B scripts/test-check-storage-evidence-pr.py
           python3 -B scripts/test-check-status-docs-pr.py
 
+      - name: Test contributor context selection and CI result summaries offline
+        run: |
+          python3 -B scripts/test-source-context.py
+          bash scripts/test-ci-run-summary.sh
+
       - name: Verify complete committed goal preservation and fresh-export controls
         run: |
           python3 -B scripts/verify-goal-preservation.py --git-revision "$(git rev-parse HEAD)"
@@ -581,17 +586,7 @@ jobs:
 
       - name: Check Storage consumer diagnostic profiles without network access
         run: |
-          python3 -B tests/integration/test-storage-consumer-maintenance-provision.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-smoke.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-evidence.py
-          python3 -B tests/integration/test-storage-consumer-maintenance-shell.py
-          node --test tests/integration/test-storage-consumer-maintenance.mjs
-          python3 -B tests/integration/test-private-storage-maintenance-smoke.py
-          python3 -B tests/integration/test-private-storage-maintenance-wiring.py
-          python3 -B tests/integration/test-storage-fixture-correlation-sampler.py
-          python3 -B tests/integration/test-storage-request-stage-consumers.py
-          python3 -B tests/integration/test-storage-consumer-failure-boundary.py
-          python3 -B tests/integration/test-storage-provider-usage-snapshot.py
+          make --jobs=2 --keep-going --output-sync=target --file=scripts/storage-contracts.mk
 
       - name: Check formatting and shell sources
         run: |
@@ -677,6 +672,10 @@ jobs:
           retention-days: 14
 
       - name: Lint standalone fuzz package
+        env:
+          # Cargo fingerprints reusable units within this job. The fuzz workspace
+          # still resolves and checks its own locked graph and feature set.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
           cargo clippy --keep-going \

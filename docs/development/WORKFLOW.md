@@ -28,6 +28,23 @@ Do not read provenance snapshots or the entire evidence history at startup.
 Requirements are authoritative for scope; status is evidence and priorities, not a
 replacement specification. The [documentation index](../README.md) locates topics.
 
+Use `git grep -nF` for a narrow lookup, or `git grep -cIF` for file counts.
+For a handover spanning many files or repositories, use the
+[commit-bound source index](../../scripts/source-context.py) from a reviewed Core checkout:
+
+```sh
+python3 -B "$CORE/scripts/source-context.py" --repo "$REPO" --rev HEAD RouteContext -- crates
+```
+
+Set `CORE` and `REPO` to the Core and target checkout directories. The result
+lists matching committed text, ranked by matching lines, with blob IDs, applicable
+instruction paths, total files and a continuation offset. Read selected files with
+`git show COMMIT:path`. Use the returned commit with the same query for the next
+page. Check local instructions, untracked files and the working diff separately.
+Reuse an earlier source finding when its inputs still match, including applicable
+instructions, callers and cross-repository pins. Share those references between
+contributors so only one person or agent has to resolve the same question.
+
 ## Plan and execute
 
 Choose models, reasoning effort, tools, skills, agents, context and parallelism
@@ -84,11 +101,28 @@ hosted runners. Local read-only inspection and inert validation preserve host sa
 Run [requirement preservation](TESTING.md#requirement-preservation) when effective
 requirements or preserved sources change, not on every task or conversation.
 
-Reuse completed exact-source results when still applicable. Inspect an existing hosted
-run before dispatching another; preserve original failures and explicit acceptance
-runs. Source checks, public fixtures, protected execution and product acceptance are
-different evidence. Cache pinned build inputs, never test success, private fixtures,
-credentials or authorization. Keep untrusted PR cache reads separate from trusted writes.
+During iteration, select tests from the changed module and its consumers. For Rust,
+`cargo tree --locked --offline --workspace --invert PACKAGE` helps locate dependents
+in a prepared checkout. Changes to shared interfaces, locks, feature sets, build
+scripts, workflows or unclear dependencies need broader verification. Required
+checks and explicit acceptance runs follow the owning repository's full contract.
+
+Inspect a previous hosted attempt before dispatching another. From any checkout:
+
+```sh
+bash "$CORE/scripts/ci-run-summary.sh" VOLPAROSSA/volparossa RUN_ID ATTEMPT
+```
+
+The read-only helper uses GitHub CLI and jq. It returns the run link, head SHA,
+job IDs, conclusions, step counts by outcome, unsuccessful or pending steps,
+and elapsed seconds. For skipped step names or detailed diagnosis open the original
+attempt and the relevant job. A zero exit status means the query succeeded.
+For evidence reuse, verify the tested checkout (including a PR's merge tree),
+workflow, pins, tools, platform, inputs and scope against the original receipt.
+A matching PR head alone cannot establish that binding. Preserve failures and
+explicit acceptance runs. Source checks, public fixtures, protected execution and
+product acceptance provide different evidence. Cache pinned build inputs only.
+Exclude private fixtures and credentials. Separate untrusted PR reads from trusted writes.
 
 Update the affected row in the [Core status](../IMPLEMENTATION_STATUS.md) when
 its result or next dependency changes. Cite the tested revision and evidence.
