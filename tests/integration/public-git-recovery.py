@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import secrets
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 
 REPOSITORY = '851dc721-4b71-4cea-a819-883a7eaf576e'
@@ -116,6 +118,7 @@ def trial(cli, control, parent, cache, holder_key, holder_peer):
                     'publication differs from local enrollment')
             deposit = json.loads(command('content', 'custody', 'deposit', '--manifest', manifest, '--cache', store,
                                           '--provider-key', holder_key, *unlock))
+            observed_at = int(time.time())
             require(deposit['manifest_id'] == mid and deposit['complete'] is True and
                     deposit['confirmed_complete_providers'] == 1 and deposit['observations'][0]['provider_key_hex'] == holder_key
                     and deposit['observations'][0]['state'] == 'complete', 'independent holder did not confirm custody')
@@ -127,14 +130,72 @@ def trial(cli, control, parent, cache, holder_key, holder_peer):
                 and fetched['name'] == NAME and fetched['sha256'] == sha and fetched['provider_peer_ids'] == [holder_peer]
                 and fetched['providers_used'] == 1 and 0 < fetched['bytes'] == fetched['peer_bytes'], 'fresh download did not match the enrolled holder and publication')
         restore(root, downloaded, sha, COMMITS)
+        raw_bundle = downloaded.read_bytes().hex()
     require(not root.exists(), 'owner fixture cleanup incomplete')
     return dict(repository_id=REPOSITORY, ref=REF, revisions=COMMITS, bundle_sha256=sha, manifest_id=mid,
                 publisher_key=key, holder_key=holder_key, holder_peer=holder_peer,
-                signed_manifest=manifest_bytes, custody_receipt=deposit['observations'][0]['signed_receipt_hex'],
+                signed_manifest=manifest_bytes, verified_at=observed_at, received_bundle=raw_bundle,
+                fetch={k: fetched[k] for k in ('operation', 'publisher_key', 'name', 'revision', 'manifest_id',
+                    'sha256', 'bytes', 'peer_bytes', 'provider_peer_ids', 'providers_used', 'publication_expires_unix_seconds')},
+                custody_receipt=deposit['observations'][0]['signed_receipt_hex'],
                 downloaded_bytes=fetched['bytes'], publisher_removed=True, empty_receiver=True,
                 strict_fsck=True, mirror_inaccessible=True, fixture_removed=True)
 
 
+def verify_host(receipt, topology, source):
+    # Use the canonical field decoder and Ed25519 verifier from the existing custody checker.
+    checks = runpy.run_path(str(Path(__file__).with_name('content-retain-smoke.py')))
+    fields = checks['fields']
+    require(topology['source_revision'] == source and topology['success'] is True, 'host topology/source mismatch')
+    require(receipt['repository_id'] == REPOSITORY and receipt['ref'] == REF and receipt['revisions'] == COMMITS,
+            'repository enrollment differs')
+    require(all(receipt[field] is True for field in ('empty_receiver', 'mirror_inaccessible', 'strict_fsck',
+            'publisher_removed', 'fixture_removed')), 'guest did not complete isolated recovery')
+    custody = topology['custody']
+    holder = custody['replacement']['state']['confirmed_holders'][0]
+    nodes = [n for n,k in custody['layout']['provider_keys'].items() if k == holder]
+    require(len(nodes) == 1, 'missing independently enrolled holder')
+    peer = custody['expected_peers'][nodes[0]]
+    require(holder == receipt['holder_key'] == checks['C']['peer_key'](peer) and peer == receipt['holder_peer'],
+            'unexpected custody source')
+    contents = bytes.fromhex(receipt['received_bundle'])
+    require(0 < len(contents) <= 65536, 'Git fixture exceeds its enrolled size bound')
+    sha = hashlib.sha256(contents).digest()
+    signed = bytes.fromhex(receipt['signed_manifest'])
+    manifest_id = hashlib.sha256(signed).digest()
+    envelope = fields(signed, 4096)
+    body = fields(envelope[1], 4096)
+    key, at = bytes.fromhex(receipt['publisher_key']), receipt['verified_at']
+    require(set(envelope) == {1, 2} and set(body) == set(range(1, 9)) and body[1] == body[6] == 1
+            and body[2] == key and len(body[5]) == 32 and body[3] <= at < body[4] and body[4] - body[3] == 7200
+            and hashlib.sha256(body[8]).digest() == body[7], 'publication identity or validity differs')
+    checks['verify_signature'](envelope[1], envelope[2], key, b'VOLPAROSSA/native-content-manifest/v1\0')
+    metadata = fields(body[8], 4096)
+    require(metadata == {1: NAME.encode(), 2: 1, 3: b'application/octet-stream', 4: len(contents),
+                         5: metadata[5], 6: sha} and fields(metadata[5], 256) == {1: sha, 2: len(contents)},
+            'signed publication differs from the downloaded Git bundle')
+    _, claim = checks['envelope'](bytes.fromhex(receipt['custody_receipt']), holder, 3, at)
+    require(set(claim) == {1, 2, 3, 4, 6, 7, 8, 9, 10, 11} and len(claim[1]) == len(claim[2]) == 32
+            and claim[3] == bytes.fromhex(holder) and claim[4] == key and claim[6] == 2 and claim[7] == manifest_id
+            and claim[8] == sha and claim[9] == len(contents) and claim[10] == 1 and claim[11] == body[4],
+            'signed deposit receipt differs from the holder, publisher or bundle')
+    require(receipt['fetch'] == dict(operation='named_content_download', publisher_key=key.hex(), name=NAME,
+            revision=1, manifest_id=manifest_id.hex(), sha256=sha.hex(), bytes=len(contents), peer_bytes=len(contents),
+            provider_peer_ids=[peer], providers_used=1, publication_expires_unix_seconds=body[4])
+            and receipt['manifest_id'] == manifest_id.hex() and receipt['bundle_sha256'] == sha.hex()
+            and receipt['downloaded_bytes'] == len(contents), 'original fetch and signed custody evidence differ')
+    with tempfile.TemporaryDirectory(prefix='git-recovery-host-') as work:
+        root = Path(work)
+        bundle = root / 'received.bundle'
+        bundle.write_bytes(contents)
+        restore(root, bundle, sha.hex(), COMMITS)
+
+
 if __name__ == '__main__':
-    cli, control, parent, cache, key, peer = sys.argv[1:]
-    print(json.dumps(trial(cli, control, Path(parent), Path(cache), key, peer)))
+    if sys.argv[1] == 'verify-host':
+        receipt, topology, source = sys.argv[2:]
+        require(Path(receipt).stat().st_size <= 131072, 'oversized Git recovery receipt')
+        verify_host(json.loads(Path(receipt).read_bytes()), json.loads(Path(topology).read_bytes()), source)
+    else:
+        cli, control, parent, cache, key, peer = sys.argv[1:]
+        print(json.dumps(trial(cli, control, Path(parent), Path(cache), key, peer)))

@@ -1491,11 +1491,8 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-custody-smoke.json"
           python3 -B tests/integration/content-custody-smoke.py report "$report" "$GITHUB_SHA"
-          jq -e '.repository_id == "851dc721-4b71-4cea-a819-883a7eaf576e" and .ref == "refs/heads/main"
-            and .revisions == ["0c14d282024543994a2ee8c625048932e419da04", "655f50114b90ca929db4097da36d577bd4215243"]
-            and .publisher_removed and .empty_receiver and .strict_fsck and .mirror_inaccessible and .fixture_removed
-            and .downloaded_bytes > 0 and (.bundle_sha256 | test("^[0-9a-f]{64}$"))' \
-            "$VOLPAROSSA_ALPHA_OUTPUT/content-custody-git-recovery.json"
+          python3 -B tests/integration/public-git-recovery.py verify-host \
+            "$VOLPAROSSA_ALPHA_OUTPUT/content-custody-git-recovery.json" "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
