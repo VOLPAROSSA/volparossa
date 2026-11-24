@@ -340,47 +340,6 @@ impl PeerStore {
         Ok(())
     }
 
-    /// Checks whether a freshly authenticated advertisement exactly matches the live stored row.
-    /// This read does not refresh the row or grant a peer capability.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid input, an unrepresentable time or a database error.
-    pub fn contains_exact_advertisement(
-        &self,
-        advertisement: &NodeAdvertisement,
-        signed_envelope: &[u8],
-        now: UnixTime,
-    ) -> Result<bool, PeerStoreError> {
-        validate_signed_advertisement_envelope(signed_envelope)?;
-        advertisement.validate_at(now)?;
-        let serialized = serde_json::to_vec(advertisement)?;
-        if serialized.len() > MAX_SERIALIZED_ADVERTISEMENT_BYTES {
-            return Err(PeerStoreError::AdvertisementTooLarge);
-        }
-        let exact = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM advertisements
-             WHERE node_id = ?1 AND sequence_number = ?2 AND peer_id = ?3
-               AND protocol_version = ?4 AND policy_hash = ?5 AND advertisement_json = ?6
-               AND signed_advertisement_envelope = ?7 AND measured_at = ?8 AND expires_at = ?9
-               AND expires_at > ?10)",
-            params![
-                advertisement.node_id.as_str(),
-                to_sql_integer(advertisement.sequence_number)?,
-                advertisement.peer_id.as_str(),
-                i64::from(advertisement.protocol_version),
-                advertisement.policy_hash.as_bytes().as_slice(),
-                serialized,
-                signed_envelope,
-                to_sql_time(advertisement.measured_at)?,
-                to_sql_time(advertisement.expires_at)?,
-                to_sql_time(now)?,
-            ],
-            |row| row.get(0),
-        )?;
-        Ok(exact)
-    }
-
     /// Records a bounded endpoint observation and retains at most sixteen per peer.
     ///
     /// # Errors
