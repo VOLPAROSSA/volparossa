@@ -167,3 +167,11 @@ other’s public or link address. Both ends of the physical link stay under
 capture. This scenario tests delivery with both clients isolated from the
 Exit. Discovery behavior between directly reachable peers requires a separate
 measurement.
+
+On `ab17c375` the sender deposited 91,992 encrypted bytes at both custodians
+while the recipient was offline. It reopened the original send after removing
+the input. The restarted recipient received `NO_ELIGIBLE_PATHS` during route
+selection. The guest exited before Stalwart import, cleaned up its objects and
+matched the host digests. Each phase now waits for the three fixture relay
+advertisements before calling the route selector. A timeout identifies
+incomplete discovery. [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45409332468)

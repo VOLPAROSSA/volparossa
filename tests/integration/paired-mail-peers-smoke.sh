@@ -87,6 +87,17 @@ paired_peer_online() {
 paired_peer_route() {
     paired_peer_actor "$1"; peer_phase=$2; peer_prefix=paired-mail-peers-$peer_phase
     PHASE=$peer_prefix-route
+    # A restarted agent's role bit is available before peer discovery is ready.
+    # The ordinary selector still chooses the control and two data relays.
+    peer_discovery_deadline=$(($(date +%s) + 60))
+    while ! { CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli "$peer_node" peers \
+            >"$WORK/$peer_prefix-peers.private" &&
+        awk -v a="$R0_PEER" -v b="$R1_PEER" -v c="$R2_PEER" '
+            ($1 == a || $1 == b || $1 == c) && $2 == "roles=0b010" { seen[$1] = 1 }
+            END { exit !(seen[a] && seen[b] && seen[c]) }' "$WORK/$peer_prefix-peers.private"; }; do
+        [ "$(date +%s)" -lt "$peer_discovery_deadline" ] || fail PAIRED_MAIL_PEER_RELAY_DISCOVERY_UNAVAILABLE
+        sleep 1
+    done
     content_replication_select "$peer_node" "$peer_prefix" || fail PAIRED_MAIL_PEER_ROUTE_UNAVAILABLE
     peer_context=$(jq -er '.route_context_id' "$WORK/$peer_prefix-selection.json")
     content_mailbox_cli "$peer_node" content status >"$WORK/$peer_prefix-status.json" || fail PAIRED_MAIL_PEER_ROUTE_STATUS_FAILED
