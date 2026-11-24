@@ -34,7 +34,6 @@ enum ExtensionResult {
     AwaitBudget,
 }
 
-#[derive(Clone)]
 pub(super) struct PreselectionRestriction {
     pub(super) exit_node: [u8; 32],
     pub(super) exit_peer: Libp2pPeerId,

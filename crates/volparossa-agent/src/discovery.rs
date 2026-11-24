@@ -206,7 +206,6 @@ pub(crate) struct DiscoveryRuntimeResources {
 /// The discovery actor derives every network target from its own freshly revalidated snapshot.
 /// An established-route restriction may discard candidates, but cannot add peers, endpoints,
 /// dispatch identity or authority absent from that actor-owned snapshot.
-#[derive(Clone)]
 pub(crate) struct ClientPreselectionParameters {
     transport: Transport,
     address_family: ObservationAddressFamily,
@@ -394,15 +393,22 @@ impl DiscoveryControlHandle {
     ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
         // Only this pre-dispatch result can retry. A live route, reservation or
         // probe has never started, and the caller retains its original deadline.
+        if parameters.restriction.is_some() {
+            return self.try_client_preselection(parameters).await;
+        }
+        let fresh_policy = || ClientPreselectionParameters {
+            restriction: None,
+            ..parameters
+        };
         let deadline = Instant::now() + CLIENT_PRESELECTION_TIMEOUT;
-        let mut result = self.try_client_preselection(parameters.clone()).await;
+        let mut result = self.try_client_preselection(fresh_policy()).await;
         while matches!(result, Err(ClientPreselectionError::AwaitingPublication)) {
             result = tokio::time::timeout_at(deadline, async {
                 tokio::time::sleep(RESERVATION_MAINTENANCE_INTERVAL).await;
                 if Instant::now() >= deadline {
                     return Err(ClientPreselectionError::Timeout);
                 }
-                self.try_client_preselection(parameters.clone()).await
+                self.try_client_preselection(fresh_policy()).await
             })
             .await
             .map_err(|_| ClientPreselectionError::Timeout)?;
@@ -25661,11 +25667,7 @@ mod tests {
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("product/test boundary")
             .0;
-        let parameters = braced_item(
-            product,
-            "#[derive(Clone)]
-pub(crate) struct ClientPreselectionParameters {",
-        );
+        let parameters = braced_item(product, "pub(crate) struct ClientPreselectionParameters {");
         for field in [
             "transport: Transport,",
             "address_family: ObservationAddressFamily,",
