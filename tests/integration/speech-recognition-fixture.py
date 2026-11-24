@@ -126,47 +126,87 @@ def load(path):
     return json.loads(path.read_bytes(), object_pairs_hook=unique)
 
 
-def score(directory):
-    reference = load(directory / "reference.json")
-    require(reference["version"] == 1 and reference["source"] == "espeak-ng"
+def validate_reference(reference):
+    require(type(reference["version"]) is int and reference["version"] == 1
+            and reference["source"] == "espeak-ng"
             and reference["packages"] == {pkg: ENGINE for pkg in PACKAGES}
             and reference["voice"] == "en-us" and reference["words_per_minute"] == 145
             and set(reference["recordings"]) == set(PHRASES))
-    clips = {}
-    for name, phrase in PHRASES.items():
-        path = directory / (name + ".wav")
-        require(not path.is_symlink())
-        samples = len(original_wave(path, RATE)) // 2
-        digest = sha256(path.read_bytes())
-        require(reference["recordings"][name] == {"samples": samples, "sha256": digest})
-        result = load(directory / (name + ".result.json"))
-        transcript = result["transcript"]
-        require(result["version"] == 1 and result["operation"] == "compute_transcribe"
-                and result["model_profile"] == "whisper-tiny-v1" and result["language"] == "en"
-                and type(result["audio_samples"]) is int and result["audio_samples"] == samples
-                and result["cleanup"]["complete"] is True and isinstance(transcript, str)
-                and len(transcript.encode()) <= 4096)
-        expected, actual = words(phrase), words(transcript)
-        errors = word_errors(expected, actual)
-        clips[name] = {"wav_sha256": digest, "audio_samples": samples,
+    for recording in reference["recordings"].values():
+        require(set(recording) == {"samples", "sha256"} and type(recording["samples"]) is int
+                and 0 < recording["samples"] <= MAX_SECONDS * RATE
+                and re.fullmatch("[0-9a-f]{64}", recording["sha256"]))
+
+
+def score_clip(phrase, recording, result):
+    transcript = result["transcript"]
+    require(set(result) == {"version", "operation", "model_profile", "language", "audio_samples",
+                            "cleanup", "transcript", "elapsed_ms", "max_observed_rss_bytes"}
+            and type(result["version"]) is int and result["version"] == 1
+            and result["operation"] == "compute_transcribe"
+            and result["model_profile"] == "whisper-tiny-v1" and result["language"] == "en"
+            and type(result["audio_samples"]) is int and result["audio_samples"] == recording["samples"]
+            and set(result["cleanup"]) == {"complete"} and result["cleanup"]["complete"] is True
+            and isinstance(transcript, str) and bool(transcript.strip()) and len(transcript.encode()) <= 4096)
+    for key in ("elapsed_ms", "max_observed_rss_bytes"):
+        require(type(result[key]) is int and 0 < result[key] < (1 << 64))
+    expected, actual = words(phrase), words(transcript)
+    errors = word_errors(expected, actual)
+    return {"wav_sha256": recording["sha256"], "audio_samples": recording["samples"],
             "transcript_sha256": sha256(transcript.encode()), "reference_words": len(expected),
             "hypothesis_words": len(actual), "word_errors": errors, "word_error_rate": errors / len(expected),
+            "elapsed_ms": result["elapsed_ms"], "max_observed_rss_bytes": result["max_observed_rss_bytes"],
             "cleanup_complete": True, "passed": 4 * errors <= len(expected)}
+
+
+def score(directory, exported=False):
+    reference = load(directory / ("speech-reference.json" if exported else "reference.json"))
+    validate_reference(reference)
+    clips = {}
+    for name, phrase in PHRASES.items():
+        recording = reference["recordings"][name]
+        if exported:
+            result_path = directory / ("speech-" + name + ".json")
+        else:
+            path = directory / (name + ".wav")
+            require(not path.is_symlink())
+            samples = len(original_wave(path, RATE)) // 2
+            require(recording == {"samples": samples, "sha256": sha256(path.read_bytes())})
+            result_path = directory / (name + ".result.json")
+        clips[name] = score_clip(phrase, recording, load(result_path))
     require(len({row["wav_sha256"] for row in clips.values()}) == len(clips))
     passed = all(row["passed"] for row in clips.values())
     return {"version": 1, "scope": "synthetic_english_speech", "model_profile": "whisper-tiny-v1",
             "maximum_word_error_rate_per_clip": 0.25, "clips": clips, "passed": passed}
 
 
+def verify_export(directory, revision):
+    require(re.fullmatch("[a-f0-9]{40}", revision))
+    receipt = load(directory / "speech-recognition-smoke.json")
+    require(type(receipt["version"]) is int and receipt["version"] == 1
+            and receipt["source_revision"] == revision and receipt["scope"] == "synthetic_english_speech"
+            and receipt["model_sha256"] == "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
+            and receipt["passed"] is True and receipt["phase"] == "complete"
+            and receipt["live_worker_cancelled_and_joined"] is True
+            and receipt["signals"] == ["SIGINT", "SIGTERM"] and receipt["digital_silence_refused"] is True)
+    actual = score(directory, exported=True)
+    # JSON comparison also distinguishes Booleans from 0 and 1.
+    require(actual["passed"] and json.dumps(actual, sort_keys=True) == json.dumps(receipt["score"], sort_keys=True))
+    return actual
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "score"))
+    parser.add_argument("operation", choices=("prepare", "score", "verify-export"))
     parser.add_argument("directory", type=Path)
+    parser.add_argument("revision", nargs="?")
     args = parser.parse_args()
+    if (args.revision is not None) != (args.operation == "verify-export"):
+        parser.error("verify-export requires a source revision")
     if args.operation == "prepare":
         prepare(args.directory.absolute())
         return 0
-    result = score(args.directory)
+    result = verify_export(args.directory, args.revision) if args.operation == "verify-export" else score(args.directory)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["passed"] else 1
 
