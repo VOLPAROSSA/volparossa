@@ -47,7 +47,8 @@ STAGES = {'phase_start', *(f'{app}_{step}' for app in ('image', 'cloud')
     for step in ('encrypt', 'publish', 'enroll', 'authority', 'repair', 'joined', 'delete')),
     'cloud_catalog', 'image_foreground_restore', 'image_decrypt', 'cloud_start', 'cloud_authenticated_read'}
 FAILURE_CODES = {'phase_deadline', 'authority_expired', 'authority_changed', 'retained_binding',
-    'foreground_observation_missing', 'storage_result', 'repair_charge', 'delete_charge', 'publish_charge',
+    'foreground_observation_missing', 'storage_result', 'repair_charge', 'repair_placement', 'repair_pending', 'repair_redundancy',
+    'cloud_restore_receipt', 'delete_charge', 'publish_charge',
     'retention_identity', 'retention_geometry', 'checkpoint', 'child_cleanup', 'owner_join', 'image_restore',
     'image_decrypt', 'plaintext_mismatch', 'cloud_size', 'cloud_body', 'cloud_plaintext_cleanup', 'authorization',
     'cipher_identity', 'cipher_receipt', 'snapshot_crypto', 'publish_operation', 'enrollment_policy', 'enrollment',

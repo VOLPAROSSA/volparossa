@@ -47,7 +47,8 @@ const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'wo
 const SQL = Buffer.from('-- VOLPAROSSA synthetic quiesced snapshot\nCREATE TABLE fixture (id integer);\nINSERT INTO fixture VALUES (1);\n');
 const HASH = /^[a-f0-9]{64}$/u;
 const FAILURE_CODES = new Set(['phase_deadline', 'authority_expired', 'authority_changed', 'retained_binding',
-  'foreground_observation_missing', 'storage_result', 'repair_charge', 'delete_charge', 'publish_charge',
+  'foreground_observation_missing', 'storage_result', 'repair_charge', 'repair_placement', 'repair_pending', 'repair_redundancy',
+  'cloud_restore_receipt', 'delete_charge', 'publish_charge',
   'retention_identity', 'retention_geometry', 'checkpoint', 'child_cleanup', 'owner_join', 'image_restore',
   'image_decrypt', 'plaintext_mismatch', 'cloud_size', 'cloud_body', 'cloud_plaintext_cleanup', 'authorization',
   'cipher_identity', 'cipher_receipt', 'snapshot_crypto', 'publish_operation', 'enrollment_policy', 'enrollment',
@@ -669,11 +670,12 @@ export function validateStorage(result, bytes, kind, aBytes = 0) {
     'delete_charge');
   } else if (kind === 'repaired') {
     check(s.report_version === 2 && s.placement_authorizations === 3 && s.retained_copy_records === 11
-      && s.pending_retirements === 3 && s.replacement_overhead_included === true
-      && s.desired_copies_per_fragment === 2 && s.committed_payload_bytes === 2 * bytes
-      && s.uncertain_payload_bytes === aBytes && s.physical_payload_charge_upper_bound === 2 * bytes + aBytes
-      && s.fragments_with_confirmed_unexpired_copy === 4 && s.fully_redundant_from_retained_receipts === true,
-    'repair_charge');
+      && s.replacement_overhead_included === true && s.desired_copies_per_fragment === 2, 'repair_placement');
+    check(s.pending_retirements === 3, 'repair_pending');
+    check(s.committed_payload_bytes === 2 * bytes && s.uncertain_payload_bytes === aBytes
+      && s.physical_payload_charge_upper_bound === 2 * bytes + aBytes, 'repair_charge');
+    check(s.fragments_with_confirmed_unexpired_copy === 4 && s.fully_redundant_from_retained_receipts === true,
+      'repair_redundancy');
   } else {
     check(kind === 'published', 'storage_kind');
     check(s.physical_payload_charge_upper_bound === 2 * bytes && s.committed_payload_bytes === 2 * bytes
@@ -1070,6 +1072,38 @@ async function negativeAuthorization(origin, signal) {
 async function waitRepaired(ctx, app, c) {
   await until(ctx, () => repairedOnDisk(app, c));
 }
+// The foreground RESTORE finishes before the owner resumes renewal. Keep the result
+// of the authenticated DAV read, which can differ from a status sampled after shutdown.
+export function observeDavRestore(openCatalog, expectedConfig, expectedDigest) {
+  let calls = 0, receipt, reading = false;
+  return {
+    async download(operation) {
+      check(!reading, 'cloud_restore_receipt');
+      reading = true;
+      try { return await operation(); } finally { reading = false; }
+    },
+    openCatalog(input, options) {
+      const factory = options.storageFactory;
+      check(typeof factory === 'function', 'configuration');
+      return openCatalog(input, { ...options, storageFactory: async config => {
+        check(config === expectedConfig, 'configuration');
+        const core = await factory(config);
+        return { async restore(request, control) {
+          const matched = reading && request.sha256 === expectedDigest;
+          calls++;
+          const value = await core.restore(request, control);
+          if (calls === 1 && matched) receipt = value;
+          return value;
+        } };
+      } });
+    },
+    accounting(bytes, unavailableBytes) {
+      check(calls === 1 && receipt?.operation === 'restore' && receipt.restore_verified === true,
+        'cloud_restore_receipt');
+      return validateStorage(receipt, bytes, 'repaired', unavailableBytes);
+    },
+  };
+}
 async function exercise(ctx, m) {
   const retained = await json(join(ctx.root, 'consumer-binding.json'));
   check(retained.version === 1 && retained.provision_sha256 === ctx.provision, 'retained_binding');
@@ -1124,10 +1158,12 @@ async function exercise(ctx, m) {
         ctx.stage = 'cloud_start';
         const token = randomBytes(32).toString('base64url');
         const workDirectory = catalogWorkDirectory(app);
+        const read = observeDavRestore(m.openPrivateCatalog, join(app, 'storage.json'), r.cipher_sha256);
         const service = await m.startCloudService({ version: 1, catalog: join(app, 'catalog'), workDirectory,
           bearerToken: token, port: 0, allowedOrigins: [], maxOpenBytes: 4 * MAX_CIPHER, maxConcurrent: 1,
           requestTimeoutMs: 900000, maxRangeBytes: 4 * MAX_CIPHER,
-          storageMaintenance: [{ config: join(app, 'storage.json'), enrollment: join(app, 'maintenance') }] }, { signal: ctx.signal });
+          storageMaintenance: [{ config: join(app, 'storage.json'), enrollment: join(app, 'maintenance') }] },
+        { signal: ctx.signal, openCatalog: read.openCatalog });
         try {
           ctx.stage = 'cloud_repair';
           await waitRepaired(ctx, app, c);
@@ -1138,21 +1174,18 @@ async function exercise(ctx, m) {
             timeoutMs: 120000, totalTimeoutMs: 900000 });
           const selected = await dav.stat({ spaceId: 'synthetic-space', pathSegments: ['synthetic.bin'] });
           check(selected.size === PLAIN_BYTES, 'cloud_size');
-          const observed = await observeForeground(ctx, app, c, async () => {
+          const observed = await observeForeground(ctx, app, c, () => read.download(async () => {
             const hash = createHash('sha256'); let bytes = 0;
             for await (const chunk of dav.streamFile(selected)) {
               bytes += chunk.length; check(bytes <= PLAIN_BYTES && !ctx.signal.aborted, 'cloud_body'); hash.update(chunk);
             }
             check(bytes === PLAIN_BYTES && hash.digest('hex') === sha(fixtureBytes(name)), 'plaintext_mismatch');
-          });
+          }));
           await service.close();
-          const core = await m.CoreStorage.open(join(app, 'storage.json'));
-          try {
-            const accounting = validateStorage(await core.status({ signal: ctx.signal }), r.cipher_bytes, 'repaired', retained[name].a_bytes);
-            result.cloud = { ...accounting, ...observed.lifecycle, cipher_cache_removed_before_read: true,
-              authenticated_get_body_verified: true, wrong_token_status: 401, plaintext_sha256: sha(fixtureBytes(name)),
-              plaintext_bytes: PLAIN_BYTES, original_enrollment_and_journals_retained: true, owner_joined: true };
-          } finally { await core.close(); }
+          const accounting = read.accounting(r.cipher_bytes, retained[name].a_bytes);
+          result.cloud = { ...accounting, ...observed.lifecycle, cipher_cache_removed_before_read: true,
+            authenticated_get_body_verified: true, wrong_token_status: 401, plaintext_sha256: sha(fixtureBytes(name)),
+            plaintext_bytes: PLAIN_BYTES, original_enrollment_and_journals_retained: true, owner_joined: true };
           check((await readdir(workDirectory)).length === 0, 'cloud_plaintext_cleanup');
         } finally { await service.close(); }
       }

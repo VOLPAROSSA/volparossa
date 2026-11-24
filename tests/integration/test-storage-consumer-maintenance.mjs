@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { boundedFile, fixtureBytes, ForegroundObservation, MAX_CIPHER, PHASES, PLAIN_BYTES,
   consumerFailureReport, depositDiagnostic, parseProcStat, replacementReady, requirePublishComplete, retainedSnapshot,
   retentionAdvanced, validateAppendProfile, validateCheckpoint, validateStorage,
-  catalogWorkDirectory, createPublishCatalog, observeCatalogRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+  catalogWorkDirectory, createPublishCatalog, observeCatalogRestore, observeDavRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
 
 test('Cloud catalog publication and reads fit the guest GnuPG socket limit', () => {
   const app = join('/opt', `va.${'a'.repeat(32)}.ABCDEF`, 'u/m/cloud');
@@ -1236,6 +1236,43 @@ test('repair readiness requires both surviving providers and preserved unavailab
   }
 });
 
+test('DAV accounting uses exactly one matching foreground restore and survives later renewal uncertainty', async () => {
+  const digest = 'ab'.repeat(32), request = { sha256: digest }, control = { signal: AbortSignal.timeout(1000) };
+  const foreground = { ...storage(), operation: 'restore', restore_verified: true };
+  // Stopping a resumed owner after it marks a survivor uncertain gives a different status.
+  const later = storage();
+  later.storage.committed_payload_bytes = 175;
+  later.storage.uncertain_payload_bytes = 100;
+  const core = { async restore(r, c) { assert.equal(r, request); assert.equal(c, control); return foreground; },
+    async status() { return later; } };
+  const read = observeDavRestore((_input, options) => options.storageFactory('/private/config'), '/private/config', digest);
+  const bridge = await read.openCatalog({}, { storageFactory: async () => core });
+  assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
+  assert.equal(await read.download(() => bridge.restore(request, control)), foreground);
+  assert.throws(() => validateStorage(later, 100, 'repaired', 75), /repair_charge/u);
+  assert.deepEqual(read.accounting(100, 75), validateStorage(foreground, 100, 'repaired', 75));
+  await bridge.restore(request, control);
+  assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
+});
+
+test('DAV restore propagates the real result or failure and binds its digest and confirmation', async () => {
+  const selected = 'cd'.repeat(32);
+  for (const [requestDigest, verified, throws, inGet] of [
+    [selected, false, false, true], ['ab'.repeat(32), true, false, true], [selected, true, true, true],
+    [selected, true, false, false],
+  ]) {
+    const failure = Error('original failure'), value = { ...storage(), operation: 'restore', restore_verified: verified };
+    const core = { async restore() { if (throws) throw failure; return value; } };
+    const read = observeDavRestore((_input, options) => options.storageFactory('/config'), '/config', selected);
+    const bridge = await read.openCatalog({}, { storageFactory: async () => core });
+    const restore = () => bridge.restore({ sha256: requestDigest }, {});
+    const result = inGet ? read.download(restore) : restore();
+    if (throws) await assert.rejects(result, error => error === failure);
+    else assert.equal(await result, value);
+    assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
+  }
+});
+
 test('public repair summary retains all eleven copies and the unavailable provider charge', () => {
   const selected = validateStorage(storage(), 100, 'repaired', 75);
   assert.equal(selected.physical_payload_charge_upper_bound, 275);
@@ -1324,6 +1361,10 @@ test('entrypoint preserves actual app APIs, no runtime injection or reenrollment
   assert.match(exercise, /storageMaintenance: \[\{ config: join\(app, 'storage.json'\)/u);
   assert.match(exercise, /for await \(const chunk of dav\.streamFile\(selected\)\)/u);
   assert.match(exercise, /negativeAuthorization/u);
+  assert.match(exercise, /openCatalog: read\.openCatalog/u);
+  assert.match(exercise, /observeForeground\(ctx, app, c, \(\) => read\.download\(/u);
+  assert.match(exercise, /read\.accounting\(r\.cipher_bytes, retained\[name\]\.a_bytes\)/u);
+  assert.doesNotMatch(exercise, /await core\.status\(/u);
   assert.doesNotMatch(exercise, /enrollMaintenance|storePrivateFile|\.deposit\(|\.create\(|spawnProcess|openMaintenance:/u);
   assert.doesNotMatch(source, /npm|sudo|execSync|shell: true/u);
 });
