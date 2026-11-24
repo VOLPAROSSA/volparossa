@@ -349,6 +349,25 @@ normal lifetime countdown, removed the private keys and owned namespaces,
 and passed. Independent light-client finality remains open.
 [First host receipt](../development/evidence/bank-validators-44564082860/attempt-1/transaction-abci-acceptance.json) · [First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/1) · [Passing host receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-acceptance.json)
 
+### Local planning and cooperative public document trials
+
+The installed VSCodium editor showed the exact public source and obtained owner
+approval to start the local OpenCode planner. On Core `33c56f6a` and Code
+driver `b350bdd8`, an independent observer saw one worker with the pinned
+Qwen weights in the planner's isolated network and confirmed that it ended.
+The editor reported a model-task failure before it handed any task to a public
+peer. The preceding run had observed zero model workers. The successful direct
+editor-to-peer path has its own trial. [Local planner run and original reports](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45422052884) · [Preceding run](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45419279512) · [Direct editor path](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/44561152211)
+
+On Core `98da34a4`, the coordinator assembled a complete hierarchical answer
+for the enrolled public document. The observer counted 23 workers, and 21 of
+23 job handles had original terminal receipts. Two receipts remained
+unconfirmed at expiry. The route sampler also failed its binding check.
+Firefox reported unconfirmed cleanup, so the full scenario remains open.
+The original archive SHA-256 is
+`ea24f5856ff10dc2d130f6edecd97941e106d85174ce54d07bb0be9523e4f738`.
+[Original topology run and reports](https://github.com/VOLPAROSSA/volparossa/actions/runs/45412759752)
+
 ## Native Firefox ordinary tabs
 
 Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
