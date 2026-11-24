@@ -5,20 +5,31 @@ if [[ $# != 3 || ! $1 =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ || ! $2 =~ ^[1-9][0-9
   echo 'Usage: ci-run-summary.sh OWNER/REPO RUN_ID ATTEMPT' >&2
   exit 2
 fi
-# Keep gh's paginated job lookup, the attempt link and each job ID. Never fetch logs.
-gh run view "$2" --repo "$1" --attempt "$3" \
-  --json url,attempt,workflowName,workflowDatabaseId,event,headSha,status,conclusion,startedAt,updatedAt,jobs |
-  jq -ce --arg attempt "$3" '
+# The REST attempt endpoint works with older gh releases and binds reruns explicitly.
+repo="repos/$1/actions"
+endpoint="$repo/runs/$2/attempts/$3"
+run=$(gh api "$endpoint" | jq -ce --arg id "$2" --arg attempt "$3" '
+  if (.id | tostring) != $id or (.run_attempt | tostring) != $attempt
+  then error("unexpected run or attempt") else . end
+  | {url: (.html_url + "/attempts/" + $attempt), attempt: .run_attempt,
+     workflow_id, event, headSha: .head_sha, status, conclusion: (.conclusion // ""),
+     run_started_at, updated_at}')
+workflow=$(gh api "$repo/workflows/$(jq -r '.workflow_id' <<<"$run")" --jq .name)
+# Keep the raw paginated job JSON on stdin. Large runs can exceed shell argument limits.
+summary=$(gh api --paginate "$endpoint/jobs?per_page=100" |
+  jq -ces --argjson run "$run" --arg workflow "$workflow" '
     def seconds($start; $end):
       try ((($end | fromdateiso8601) - ($start | fromdateiso8601) | select(. >= 0)) // null)
       catch null;
-    if (.attempt | tostring) != $attempt then error("unexpected run attempt") else . end
-    | {url, attempt, workflow: .workflowName, workflow_id: .workflowDatabaseId, event, headSha, status, conclusion,
-       elapsed_s: (if .status == "completed" then seconds(.startedAt; .updatedAt) else null end),
-       jobs: [.jobs[] | {id: .databaseId, name, status, conclusion,
-         elapsed_s: (if .status == "completed" and .conclusion != "skipped"
-                     then seconds(.startedAt; .completedAt) else null end),
-         steps: ([.steps[] | (.conclusion | select(. != "")) // .status]
-                 | group_by(.) | map({key: .[0], value: length}) | from_entries),
-         inspect: [.steps[] | select(.conclusion != "success" and .conclusion != "skipped")
-                   | {number, name, status, conclusion}]}]}'
+    if length == 0 then error("missing jobs response") else . end
+    | [.[] | .jobs[] | {id, name, status, conclusion: (.conclusion // ""),
+        elapsed_s: (if .status == "completed" and .conclusion != "skipped"
+                    then seconds(.started_at; .completed_at) else null end),
+        steps: ([.steps[]? | (.conclusion // .status)]
+                | group_by(.) | map({key: .[0], value: length}) | from_entries),
+        inspect: [.steps[]? | select(.conclusion != "success" and .conclusion != "skipped")
+                  | {number, name, status, conclusion: (.conclusion // "")}]}] as $jobs
+    | $run | {url, attempt, workflow: $workflow, workflow_id, event, headSha, status, conclusion,
+       elapsed_s: (if .status == "completed" then seconds(.run_started_at; .updated_at) else null end),
+       jobs: $jobs}')
+printf '%s\n' "$summary"
