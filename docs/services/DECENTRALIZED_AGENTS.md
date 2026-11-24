@@ -150,7 +150,7 @@ audio, generate spoken responses and eventually support fluid, interruptible
 voice conversations. Video understanding is a further extension with greater
 processing and bandwidth demands; it is not supplied by image storage.
 
-Provision `whisper-tiny-v1` through the explicit pinned ML provisioner. To
+Provision `whisper-small-v1` through the explicit pinned ML provisioner. To
 transcribe a supplied English recording, invoke the following from its owner
 account using absolute paths to the private file and provisioned directories.
 

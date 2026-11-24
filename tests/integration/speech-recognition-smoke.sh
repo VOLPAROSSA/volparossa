@@ -32,7 +32,7 @@ phase cli
 CARGO_TARGET_DIR=/home/vpci/target cargo build --locked -p volparossa --bin volparossa
 phase provision
 python3 -B workers/volparossa-ml/provision.py --execute --yes --disposable-guest --root "$root/runtime" \
-    --model-profile whisper-tiny-v1 --budget-bytes 3221225472
+    --model-profile whisper-small-v1 --budget-bytes 3221225472
 phase recognition
 python3 -B tests/integration/speech-recognition-smoke.py "$root" "$output" "$1"
 phase complete

@@ -13,7 +13,7 @@ import time
 import wave
 
 HERE = Path(__file__).resolve().parent
-MODEL_SHA = "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
+MODEL_SHA = "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b"
 
 
 def require(ok):
@@ -103,7 +103,7 @@ def execute(root, output, revision):
         receipt["phase"] = "score"
         score = subprocess.run([*fixture, "score", recordings], stdout=subprocess.PIPE, timeout=15)
         receipt["score"] = json.loads(score.stdout)
-        require(score.returncode == 0 and receipt["score"]["passed"])
+        require(score.returncode in (0, 1) and "clips" in receipt["score"])
         receipt["phase"] = "cancellation"
         for owner_signal in (signal.SIGINT, signal.SIGTERM):
             cancelled([*command, recordings / "bicycle.wav"], scratch, owner_signal)
@@ -116,7 +116,10 @@ def execute(root, output, revision):
         denied = subprocess.run([*command, quiet], capture_output=True, timeout=15)
         require(denied.returncode != 0 and not denied.stdout and b"compute_speech_no_signal" in denied.stderr
                 and not any(scratch.iterdir()))
-        receipt.update(passed=True, phase="complete", digital_silence_refused=True)
+        receipt.update(digital_silence_refused=True)
+        receipt["phase"] = "acceptance"
+        require(score.returncode == 0 and receipt["score"]["passed"])
+        receipt.update(passed=True, phase="complete")
     finally:
         (output / "speech-recognition-smoke.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
 

@@ -21,7 +21,7 @@ def receipt_inputs(directory):
             wav.setparams((1, 2, 16000, samples, "NONE", "not compressed"))
             wav.writeframes(struct.pack("<h", index) * samples)
         recordings[name] = {"samples": samples, "sha256": F["sha256"](path.read_bytes())}
-        result = {"version": 1, "operation": "compute_transcribe", "model_profile": "whisper-tiny-v1",
+        result = {"version": 1, "operation": "compute_transcribe", "model_profile": "whisper-small-v1",
             "elapsed_ms": 50, "max_observed_rss_bytes": 20480,
             "language": "en", "transcript": phrase, "audio_samples": samples, "cleanup": {"complete": True}}
         (directory / (name + ".result.json")).write_text(json.dumps(result))
@@ -66,7 +66,7 @@ class SpeechFixture(unittest.TestCase):
             receipt_inputs(directory)
             revision = "a" * 40
             receipt = {"version": 1, "source_revision": revision, "scope": "synthetic_english_speech",
-                "model_sha256": "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395",
+                "model_sha256": "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b",
                 "phase": "complete", "passed": True, "live_worker_cancelled_and_joined": True,
                 "signals": ["SIGINT", "SIGTERM"], "digital_silence_refused": True, "score": F["score"](directory)}
             (directory / "speech-recognition-smoke.json").write_text(json.dumps(receipt))
