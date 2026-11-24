@@ -165,6 +165,15 @@ original ZIP has SHA-256
 `adcc978cceb01bd0a358f12dc35755cf7adabc8659f056b3ac4f2f31b088faf9`.
 [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424897092) · [Original reports](development/evidence/browser-cooperative-45424897092)
 
+On the integrated Core `442cd948`, the first task again completed its 21 jobs
+and two synthesis levels. The second cancelled two live workers. Both tasks
+confirmed cleanup. The sampler identified a timeout querying `content status`
+after 112 valid samples and 283 completed flows. It had counted zero failed
+flows at that point. The complete route claim remains open. The guest restored
+its host state and retained zero owned objects. The original 36,798-byte ZIP
+has SHA-256 `5db37edd7389e541c2a0da6fa7b7536deb8e3db6b7fd217a0860f637f33b6b03`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506355803) · [Original reports](development/evidence/browser-cooperative-45506355803)
+
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker
 PID and start time before deliberate broker shutdown. Every observed transient

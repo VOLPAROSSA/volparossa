@@ -1,0 +1,553 @@
+{
+  "version": 4,
+  "browser_exit_status": 0,
+  "observer_exit_status": 1,
+  "browser": {
+    "state": "valid",
+    "status": {
+      "version": 1,
+      "phase": "complete",
+      "failure": null
+    }
+  },
+  "observer": {
+    "state": "valid",
+    "status": {
+      "version": 1,
+      "phase": "complete",
+      "failure": null,
+      "invariant_reason": null,
+      "task_count": 2,
+      "observed_workers": 21,
+      "cancel_workers": 2,
+      "counts_saturated": false,
+      "driver_alive": false
+    }
+  },
+  "coordinator": {
+    "state": "valid",
+    "tasks": [
+      {
+        "ordinal": 1,
+        "answer_diagnostic": {
+          "state": "valid",
+          "status": {
+            "version": 1,
+            "complete": true,
+            "execution_complete": true,
+            "answer_complete": true,
+            "interrupted": false,
+            "joining": "hierarchical_peer_synthesis",
+            "leaf_answers": {
+              "state": "valid",
+              "observed": 2,
+              "counts": {
+                "eos": 0,
+                "json_boundary": 0,
+                "token_limit": 2,
+                "wire_truncated": 0,
+                "empty": 0,
+                "legacy_unknown": 0,
+                "invalid_or_unknown": 0
+              }
+            },
+            "refinement": {
+              "state": "valid",
+              "status": {
+                "version": 2,
+                "enabled": true,
+                "complete": true,
+                "reason": "complete",
+                "split_levels": 4,
+                "stop_reasons": [],
+                "nodes": [
+                  {
+                    "ordinal": 1,
+                    "level": 1,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 2,
+                    "level": 1,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 3,
+                    "level": 2,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 4,
+                    "level": 2,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 5,
+                    "level": 3,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 6,
+                    "level": 3,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 7,
+                    "level": 4,
+                    "complete": true,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 8,
+                    "level": 4,
+                    "complete": true,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "children_observed": 16,
+                "child_answer_complete": {
+                  "complete": 10,
+                  "incomplete": 6,
+                  "unknown": 0
+                },
+                "child_generation_counts": {
+                  "eos": 10,
+                  "json_boundary": 0,
+                  "token_limit": 6,
+                  "absent": 0,
+                  "invalid_or_unknown": 0
+                },
+                "effective_answers": {
+                  "state": "valid",
+                  "observed": 10,
+                  "counts": {
+                    "eos": 10,
+                    "json_boundary": 0,
+                    "token_limit": 0,
+                    "wire_truncated": 0,
+                    "empty": 0,
+                    "legacy_unknown": 0,
+                    "invalid_or_unknown": 0
+                  }
+                }
+              }
+            },
+            "synthesis": {
+              "state": "valid",
+              "reason": null,
+              "levels": [
+                {
+                  "level": 1,
+                  "answers": {
+                    "state": "valid",
+                    "observed": 2,
+                    "counts": {
+                      "eos": 2,
+                      "json_boundary": 0,
+                      "token_limit": 0,
+                      "wire_truncated": 0,
+                      "empty": 0,
+                      "legacy_unknown": 0,
+                      "invalid_or_unknown": 0
+                    }
+                  }
+                },
+                {
+                  "level": 2,
+                  "answers": {
+                    "state": "valid",
+                    "observed": 1,
+                    "counts": {
+                      "eos": 1,
+                      "json_boundary": 0,
+                      "token_limit": 0,
+                      "wire_truncated": 0,
+                      "empty": 0,
+                      "legacy_unknown": 0,
+                      "invalid_or_unknown": 0
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "state": "valid",
+        "status": {
+          "answer_complete": true,
+          "cleanup_confirmed": true,
+          "error_class": "none",
+          "execution_complete": true,
+          "execution_ok": true,
+          "local_cleanup_confirmed": true,
+          "phase": "complete",
+          "receipts": {
+            "confirmed": true,
+            "error": "none",
+            "handles": 21,
+            "phase": "complete",
+            "receipts": 21,
+            "terminal": 21
+          },
+          "reconciliation": {
+            "attempted": 0,
+            "deadline_reached": false,
+            "error": "none",
+            "rpc": null,
+            "terminal_persisted": 0
+          },
+          "rpc": null,
+          "version": 2
+        }
+      },
+      {
+        "ordinal": 2,
+        "answer_diagnostic": {
+          "state": "valid",
+          "status": {
+            "version": 1,
+            "complete": false,
+            "execution_complete": false,
+            "answer_complete": false,
+            "interrupted": true,
+            "joining": "awaiting_fragments_before_peer_synthesis",
+            "leaf_answers": {
+              "state": "valid",
+              "observed": 0,
+              "counts": {
+                "eos": 0,
+                "json_boundary": 0,
+                "token_limit": 0,
+                "wire_truncated": 0,
+                "empty": 0,
+                "legacy_unknown": 0,
+                "invalid_or_unknown": 0
+              }
+            },
+            "refinement": {
+              "state": "absent"
+            },
+            "synthesis": {
+              "state": "absent"
+            }
+          }
+        },
+        "state": "valid",
+        "status": {
+          "answer_complete": false,
+          "cleanup_confirmed": true,
+          "error_class": "none",
+          "execution_complete": false,
+          "execution_ok": true,
+          "local_cleanup_confirmed": true,
+          "phase": "complete",
+          "receipts": {
+            "confirmed": true,
+            "error": "none",
+            "handles": 2,
+            "phase": "complete",
+            "receipts": 2,
+            "terminal": 2
+          },
+          "reconciliation": {
+            "attempted": 0,
+            "deadline_reached": false,
+            "error": "none",
+            "rpc": null,
+            "terminal_persisted": 0
+          },
+          "rpc": null,
+          "version": 2
+        }
+      }
+    ]
+  },
+  "rpc_events": {
+    "state": "valid",
+    "baseline_unix_ms": 1795562295522,
+    "limit": 1000,
+    "records": 1000,
+    "window_covers_baseline": false,
+    "matching_failures": 6,
+    "counts": {
+      "COMPUTE_RPC_CHALLENGE_FAILED": 0,
+      "COMPUTE_RPC_DISCOVERY_FAILED": 6,
+      "COMPUTE_RPC_FINAL_POLICY_FAILED": 0,
+      "COMPUTE_RPC_LOCAL_REPLY_FAILED": 0,
+      "COMPUTE_RPC_LOCAL_REQUEST_FAILED": 0,
+      "COMPUTE_RPC_OFFER_BINDING_FAILED": 0,
+      "COMPUTE_RPC_PREEXPORT_CHECK_FAILED": 0,
+      "COMPUTE_RPC_PROVIDER_CLOSE_FAILED": 0,
+      "COMPUTE_RPC_PROVIDER_TLS_FAILED": 0,
+      "COMPUTE_RPC_REPLY_BINDING_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_BINDING_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_CLOSE_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_FLOW_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_SETUP_FAILED": 0,
+      "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED": 0
+    },
+    "discovery_failure_events": 12,
+    "discovery_counts": {
+      "CONTENT_DISCOVERY_CALLER_CLOSED": 0,
+      "CONTENT_DISCOVERY_CLIENT_QUEUE_FULL": 0,
+      "CONTENT_DISCOVERY_CLIENT_ROLE_REJECTED": 0,
+      "CONTENT_DISCOVERY_CONNECTION_ABSENT": 0,
+      "CONTENT_DISCOVERY_CONNECTION_CLOSED": 0,
+      "CONTENT_DISCOVERY_CONNECTION_NO_DIRECT": 0,
+      "CONTENT_DISCOVERY_CONNECTION_REGISTRY_POISONED": 0,
+      "CONTENT_DISCOVERY_CONTROL_CONNECTION_LOST": 0,
+      "CONTENT_DISCOVERY_CONTROL_EXPIRED": 0,
+      "CONTENT_DISCOVERY_CONTROL_LIFETIME_SHORT": 0,
+      "CONTENT_DISCOVERY_CONTROL_MISSING": 0,
+      "CONTENT_DISCOVERY_CONTROL_SELF_REJECTED": 0,
+      "CONTENT_DISCOVERY_DIAL_FAILED": 0,
+      "CONTENT_DISCOVERY_LIMIT_INVALID": 0,
+      "CONTENT_DISCOVERY_LOCAL_DEADLINE": 0,
+      "CONTENT_DISCOVERY_PROTOCOL_UNSUPPORTED": 0,
+      "CONTENT_DISCOVERY_RELAY_AUTHORITY_UNAVAILABLE": 0,
+      "CONTENT_DISCOVERY_RELAY_CONNECTION_INVALID": 0,
+      "CONTENT_DISCOVERY_RELAY_NONCE_INVALID": 0,
+      "CONTENT_DISCOVERY_RELAY_QUERY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_QUEUE_FULL": 0,
+      "CONTENT_DISCOVERY_RELAY_REPLAY_FULL": 0,
+      "CONTENT_DISCOVERY_RELAY_REPLAY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_SELF_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_SERVICE_UNAVAILABLE": 0,
+      "CONTENT_DISCOVERY_REQUEST_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_REJECTED": 6,
+      "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE": 6,
+      "CONTENT_DISCOVERY_RPC_IO_FAILED": 0,
+      "CONTENT_DISCOVERY_RPC_TIMED_OUT": 0,
+      "CONTENT_EXACT_ADDRESS_UNAVAILABLE": 0
+    },
+    "provider_lifecycle_counts": {
+      "CONTENT_PROVIDER_REGISTERED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_EXPIRED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_FAILED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_RECOVERED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING": 0,
+      "CONTENT_PROVIDER_WITHDRAWN": 0
+    }
+  },
+  "discovery_peers": {
+    "scope": "separate_node_rings_without_per_request_correlation",
+    "control_relay": "relay0",
+    "providers": [
+      "relay4",
+      "relay5"
+    ],
+    "windows": {
+      "relay0": {
+        "state": "valid",
+        "baseline_unix_ms": 1795562295522,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_EXACT_LOOKUP_FINISHED": 84,
+          "CONTENT_EXACT_LOOKUP_STARTED": 84,
+          "CONTENT_LOOKUP_REPLY_OFFERS": 85,
+          "CONTENT_LOOKUP_RESPONSE_AUTHORIZED": 85,
+          "CONTENT_PROVIDER_OFFER_VERIFIED": 86,
+          "CONTENT_PROVIDER_REQUEST_DIAL_FAILED": 1
+        }
+      },
+      "relay4": {
+        "state": "valid",
+        "baseline_unix_ms": 1795562295522,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_PROVIDER_REGISTERED": 19
+        }
+      },
+      "relay5": {
+        "state": "valid",
+        "baseline_unix_ms": 1795562295522,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_PROVIDER_REGISTERED": 18
+        }
+      }
+    }
+  }
+}

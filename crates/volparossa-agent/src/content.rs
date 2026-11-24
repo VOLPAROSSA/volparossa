@@ -710,7 +710,7 @@ impl ContentRuntime {
             publications,
             control_relay_peer_id: context
                 .routes
-                .content_discovery_control()
+                .status_content_control()
                 .await
                 .map(|peer| peer.to_string())
                 .unwrap_or_default(),
