@@ -86,8 +86,46 @@ pub(super) fn native_session_command(options: &Options, root: &Path) -> Command 
     command_inner(options, Some(root))
 }
 
-// Keep the complete fixed sandbox argument vector reviewable in one place.
-#[allow(clippy::too_many_lines)]
+struct Limits {
+    threads: u16,
+    wall_seconds: u64,
+    address_space: u64,
+}
+
+enum Files<'a> {
+    Task { dataset: &'a Path, output: &'a Path },
+    Session(&'a Path),
+    Speech(&'a Path),
+}
+
+pub(super) fn speech_command(
+    runtime: &Path,
+    model: &Path,
+    audio: &Path,
+    threads: u16,
+    max_seconds: u16,
+) -> Command {
+    let pins = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/model-pins-whisper-tiny.json"
+    ));
+    let source = format!(
+        "PINS_JSON = {pins}\n{}",
+        include_str!("../../../../workers/volparossa-ml/speech.py")
+    );
+    isolated_command(
+        Command::new("/usr/bin/bwrap"),
+        runtime,
+        model,
+        Files::Speech(audio),
+        Limits {
+            threads,
+            wall_seconds: u64::from(max_seconds),
+            address_space: super::resources::SMALL_CPU.address_space,
+        },
+        &source,
+    )
+}
+
 fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
     let mut command = Command::new("/usr/bin/bwrap");
     if let Some(root) = &options.native_backend.native_backend_root {
@@ -96,6 +134,37 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
     if let Some(adapter) = &options.adapter_root {
         command.arg("--ro-bind").arg(adapter).arg("/adapter");
     }
+    let files = session_root.map_or(
+        Files::Task {
+            dataset: &options.dataset,
+            output: &options.output,
+        },
+        Files::Session,
+    );
+    isolated_command(
+        command,
+        &options.runtime_root,
+        &options.model_root,
+        files,
+        Limits {
+            threads: options.threads,
+            wall_seconds: session_root.map_or(u64::from(options.max_seconds), |_| 2400),
+            address_space: super::resources::limits(options.model_profile).address_space,
+        },
+        &worker_source(),
+    )
+}
+
+// Keep the complete fixed sandbox argument vector reviewable in one place.
+#[allow(clippy::too_many_lines)]
+fn isolated_command(
+    mut command: Command,
+    runtime: &Path,
+    model: &Path,
+    files: Files<'_>,
+    limits: Limits,
+    source: &str,
+) -> Command {
     command
         .env_clear()
         .args([
@@ -131,30 +200,30 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
             "/tmp",
             "--ro-bind",
         ])
-        .arg(&options.runtime_root)
+        .arg(runtime)
         .arg("/runtime")
         .arg("--ro-bind")
-        .arg(&options.model_root)
+        .arg(model)
         .arg("/model");
-    if let Some(root) = session_root {
-        command.arg("--bind").arg(root).arg("/session");
-    } else {
-        command
-            .arg("--ro-bind")
-            .arg(&options.dataset)
-            .arg("/dataset.json")
-            .arg("--bind")
-            .arg(&options.output)
-            .arg("/output");
-    }
+    let working_directory = match files {
+        Files::Session(root) => {
+            command.arg("--bind").arg(root).arg("/session");
+            "/session"
+        }
+        Files::Task { dataset, output } => {
+            command.arg("--ro-bind").arg(dataset).arg("/dataset.json");
+            command.arg("--bind").arg(output).arg("/output");
+            "/output"
+        }
+        Files::Speech(audio) => {
+            command.arg("--ro-bind").arg(audio).arg("/audio.wav");
+            "/tmp"
+        }
+    };
     command
         .args([
             "--chdir",
-            if session_root.is_some() {
-                "/session"
-            } else {
-                "/output"
-            },
+            working_directory,
             "--setenv",
             "LANG",
             "C.UTF-8",
@@ -166,13 +235,13 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
             "",
             "--setenv",
             "OMP_NUM_THREADS",
-            &options.threads.to_string(),
+            &limits.threads.to_string(),
             "--setenv",
             "MKL_NUM_THREADS",
-            &options.threads.to_string(),
+            &limits.threads.to_string(),
             "--setenv",
             "OPENBLAS_NUM_THREADS",
-            &options.threads.to_string(),
+            &limits.threads.to_string(),
             "--setenv",
             "TOKENIZERS_PARALLELISM",
             "false",
@@ -187,20 +256,13 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
             "--core=0",
             "--nofile=128",
             "--nproc=128",
-            &format!(
-                "--as={}",
-                super::resources::limits(options.model_profile).address_space
-            ),
+            &format!("--as={}", limits.address_space),
             &format!("--fsize={MAX_FILE_BYTES}"),
             // RLIMIT_CPU counts aggregate process CPU time across threads, not
             // elapsed time. The supervisor still enforces max_seconds wall time;
             // this finite kernel backstop must allow the approved worker threads
             // to use that same window rather than killing a two-thread job early.
-            &format!(
-                "--cpu={}",
-                session_root.map_or(u64::from(options.max_seconds), |_| 2400)
-                    * u64::from(options.threads)
-            ),
+            &format!("--cpu={}", limits.wall_seconds * u64::from(limits.threads)),
             "/usr/bin/nice",
             "-n",
             "19",
@@ -211,7 +273,7 @@ fn command_inner(options: &Options, session_root: Option<&Path>) -> Command {
             "-I",
             "-c",
         ])
-        .args(source_arguments(&worker_source()))
+        .args(source_arguments(source))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

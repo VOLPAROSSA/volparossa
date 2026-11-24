@@ -55,6 +55,7 @@ on:
           - agent-training
           - agent-owner-priority
           - agent-owner-cancel
+          - speech-recognition
           - agent-private-task
           - agent-private-code
           - agent-private-conversation
@@ -161,7 +162,7 @@ jobs:
           "private-storage-maintenance", "image-snapshot", "cloud-private-file",
           "cloud-private-upload", "content-repair", "content-replication", "content-mailbox", "paired-mail",
           "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel",
-          "agent-private-task", "agent-private-code", "agent-private-conversation",
+          "speech-recognition", "agent-private-task", "agent-private-code", "agent-private-conversation",
           "agent-native-coding", "agent-private-browser", "browser-network", "agent-reasoning",
           "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine",
           "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery",
@@ -292,6 +293,8 @@ jobs:
           python3 -B tests/integration/test-content-replication-capture.py
           python3 -B tests/integration/test-agent-peer-learning-capture.py
           sh -n tests/integration/agent-training-smoke.sh
+          sh -n tests/integration/speech-recognition-smoke.sh
+          python3 -B tests/integration/test-speech-recognition-fixture.py
           sh -n tests/integration/agent-private-task-smoke.sh
           python3 -B tests/integration/agent-private-task-smoke.py self-test
           python3 -B tests/integration/agent-private-task-browser.py self-test
@@ -446,7 +449,7 @@ jobs:
           printf 'VOLPAROSSA_NATIVE_RUNTIME=%s\n' /opt/volparossa-native-coding-build/native-runtime.tar.gz >>"$GITHUB_ENV"
 
       - name: Build exact pinned mqvpn/xquic runtime
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-native-coding' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'transaction-abci' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-priority' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-owner-cancel' && env.VOLPAROSSA_ALPHA_SCENARIO != 'speech-recognition' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-task' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-code' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-conversation' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-native-coding' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-private-browser' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-reasoning'
         run: |
           set -euo pipefail
           native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
@@ -580,7 +583,7 @@ jobs:
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-native-coding; then
             coding_args=(--native-runtime "$VOLPAROSSA_NATIVE_RUNTIME")
           fi
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh && test "$VOLPAROSSA_ALPHA_SCENARIO" != transaction-abci && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-training && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-priority && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-cancel && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-task && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-code && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-native-coding && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-browser && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-reasoning; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh && test "$VOLPAROSSA_ALPHA_SCENARIO" != transaction-abci && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-training && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-priority && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-owner-cancel && test "$VOLPAROSSA_ALPHA_SCENARIO" != speech-recognition && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-task && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-code && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-conversation && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-native-coding && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-private-browser && test "$VOLPAROSSA_ALPHA_SCENARIO" != agent-reasoning; then
             native_args=(--mpquic "$VOLPAROSSA_ALPHA_MPQUIC")
           fi
           browser_args=()
@@ -1886,6 +1889,34 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/agent-private-code-smoke.json"
           python3 -B tests/integration/agent-private-task-smoke.py report-code "$report" "$GITHUB_SHA"
+
+      - name: Verify offline speech recognition and cancellation
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'speech-recognition'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg rev "$GITHUB_SHA" '.source_revision == $rev and .passed and .score.passed and
+            .live_worker_cancelled_and_joined and ([.score.clips[].passed] == [true,true])' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/speech-recognition-smoke.json"
+
+      - name: Retain the two synthetic speech results and original trial outcome
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'speech-recognition' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: speech-recognition-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-recognition-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-bicycle.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-station.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/current-phase
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/guest-exit-status
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-recognition-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-bicycle.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-station.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-incomplete.json
 
       - name: Require real owner-local private inference and exact cleanup
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-task'

@@ -3,6 +3,7 @@
 pub(super) mod diagnostic;
 mod lifetime;
 pub(super) mod native_session;
+pub(super) mod speech;
 
 use std::{
     collections::BTreeSet, fmt, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
@@ -242,7 +243,13 @@ pub(super) async fn run(
     if options.mode.is_private() && result.is_err() {
         diagnostic::terminal_state(&progress, &budget, controls.as_ref(), peak_rss);
     }
-    let mut result = confirm_cleanup(&mut child, options.mode, result, private_lifetimes).await?;
+    let mut result = confirm_cleanup(
+        &mut child,
+        options.mode.is_private(),
+        result,
+        private_lifetimes,
+    )
+    .await?;
     result["supervisor"] = supervisor_report(options, peak_rss, controls.as_ref(), &budget);
     if options.mode == Mode::PlanTasks {
         check_task_plan_result(&result, options)?;
@@ -286,11 +293,11 @@ fn supervisor_report(
 
 async fn confirm_cleanup(
     child: &mut Child,
-    mode: Mode,
+    private: bool,
     result: Result<Value>,
     mut private_lifetimes: Option<Result<lifetime::OwnedLifetimes>>,
 ) -> Result<Value> {
-    if mode.is_private() {
+    if private {
         match &result {
             Ok(_) => diagnostic::event("execution", "result_observed"),
             Err(error) => diagnostic::failure("execution", error),
@@ -303,7 +310,7 @@ async fn confirm_cleanup(
         let _ = lifetimes.refresh(); // A failed capture poisons confirmation, never cleanup.
     }
     if result.is_err() {
-        reap_failed_child(child, mode, cleanup_deadline).await?;
+        reap_failed_child(child, private, cleanup_deadline).await?;
     }
     if let Some(lifetimes) = private_lifetimes {
         let confirmed = match lifetimes {
@@ -329,7 +336,7 @@ async fn confirm_cleanup(
 
 async fn reap_failed_child(
     child: &mut Child,
-    mode: Mode,
+    private: bool,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
     // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
@@ -340,9 +347,7 @@ async fn reap_failed_child(
         .await
         .context("compute_reap_deadline")
         .and_then(|result| result.context("compute_reap"));
-    if mode.is_private()
-        && let Err(error) = &reaped
-    {
+    if private && let Err(error) = &reaped {
         diagnostic::failure("reap", error);
         return Err(super::private_task::CleanupUnconfirmed.into());
     }

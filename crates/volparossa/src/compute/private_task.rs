@@ -137,6 +137,13 @@ pub(super) fn validate_profile_input(mode: Mode, raw: &[u8], profile: ModelProfi
 }
 
 fn read_input(path: &Path) -> Result<Vec<u8>> {
+    let raw = read_owned_file(path, MAX_INPUT_BYTES)?;
+    validate_input(&raw)?;
+    Ok(raw)
+}
+
+/// Snapshot one explicitly selected, private, bounded ordinary file.
+pub(super) fn read_owned_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     ensure!(
         path.is_absolute() && fs::canonicalize(path)? == path,
         "compute_private_input_path"
@@ -151,14 +158,14 @@ fn read_input(path: &Path) -> Result<Vec<u8>> {
             && info.uid() == nix::unistd::geteuid().as_raw()
             && info.nlink() == 1
             && info.mode() & 0o777 == 0o600
-            && info.len() <= MAX_INPUT_BYTES,
+            && info.len() <= limit,
         "compute_private_input_file"
     );
     let mut raw = Vec::new();
     Read::by_ref(&mut file)
-        .take(MAX_INPUT_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut raw)?;
-    validate_input(&raw)?;
+    ensure!(raw.len() as u64 <= limit, "compute_private_input_bound");
     Ok(raw)
 }
 
