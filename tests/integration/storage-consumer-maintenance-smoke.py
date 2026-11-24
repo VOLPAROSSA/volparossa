@@ -892,12 +892,20 @@ def cleanup_tree(root):
     return len(files), len(directories) + 1
 
 
-def release_failed_deposit(root, name, binary, client):
-    require(name in ('image', 'cloud') and PROFILE_VERSION == 10, 'release_scope')
-    failure = private_json(root / 'storage-consumer-publish.json')
-    require(type(failure) is dict and failure.get('phase') == 'publish' and failure.get('passed') is False
+RELEASE_PHASES = ('publish', 'exercise', 'finish')
+
+
+def require_failed_phase(root, phase):
+    require(phase in RELEASE_PHASES and PROFILE_VERSION == 10, 'release_scope')
+    failure = private_json(root / f'storage-consumer-{phase}.json')
+    require(type(failure) is dict and failure.get('phase') == phase and failure.get('passed') is False
         and failure.get('kind') == 'storage-consumer-maintenance', 'release_scope')
     no_fixture_processes(root)
+
+
+def release_failed_deposit(root, name, binary, client, phase='publish'):
+    require(name in ('image', 'cloud'), 'release_scope')
+    require_failed_phase(root, phase)
     app = root / name
     private_directory(app)
     archive = app / 'archive'
@@ -966,16 +974,21 @@ def main(arguments):
     if selected == 'quiesced' and len(arguments) == 2:
         no_fixture_processes(root)
         result = dict(version=1, consumer_processes_observed_quiesced=True, remote_cleanup_proven=False)
-    elif selected == 'release-known' and len(arguments) == 5:
+    elif selected == 'release-ready' and len(arguments) == 3:
+        require_failed_phase(root, arguments[2])
+        return
+    elif selected == 'release-known' and len(arguments) in (5, 6):
         print(release_failed_deposit(root, *arguments[2:]))
         return
-    elif selected == 'cleanup' and len(arguments) in (2, 4):
-        release = arguments[2:]
+    elif selected == 'cleanup' and len(arguments) in (2, 4, 5):
+        phase = arguments[2] if len(arguments) == 5 else 'publish'
+        require(phase in RELEASE_PHASES, 'release_scope')
+        release = arguments[3:] if len(arguments) == 5 else arguments[2:]
         require(not release or (PROFILE_VERSION == 10 and all(state in RELEASE_RESULTS for state in release)),
             'release_report')
         result = cleanup(root)
         if release:
-            result['failed_publish_owner_delete'] = dict(zip(('image', 'cloud'), release))
+            result['failed_' + phase + '_owner_delete'] = dict(zip(('image', 'cloud'), release))
     else:
         deadline = time.monotonic() + WORK_SECONDS
         provision = tools()

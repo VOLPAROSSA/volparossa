@@ -1058,18 +1058,32 @@ class ConsumerOrchestration(unittest.TestCase):
             archive = image / 'archive'
             archive.mkdir(mode=0o700)
             self.assertEqual(release(*args), 'owner_confirmed')
+            for phase in ('exercise', 'finish'):
+                receipt = root / f'storage-consumer-{phase}.json'
+                M['write_json'](receipt, dict(failed, phase='publish'))
+                with self.assertRaises(ValueError):
+                    release(*args, phase)
+                receipt.unlink()
+                M['write_json'](receipt, dict(failed, phase=phase, passed=True))
+                with self.assertRaises(ValueError):
+                    release(*args, phase)
+                receipt.unlink()
+                M['write_json'](receipt, dict(failed, phase=phase))
+                self.assertEqual(release(*args, phase), 'owner_confirmed')
+            with self.assertRaises(ValueError):
+                release(*args, 'prepare')
             response.update(operation_complete=False, physical_payload_charge_upper_bound=199787)
             self.assertEqual(release(*args), 'unconfirmed')
             response.update(operation_complete=True, physical_payload_charge_upper_bound=False)
             with self.assertRaisesRegex(ValueError, 'release_report'):
                 release(*args)
             self.assertEqual(command_log, [['storage', 'fragments', 'delete', '--state', archive,
-                '--identity', image / 'identity.key', '--passphrase-file', image / 'passphrase']] * 3)
+                '--identity', image / 'identity.key', '--passphrase-file', image / 'passphrase']] * 5)
             report.unlink()
             M['write_json'](report, dict(failed, passed=True))
             with self.assertRaisesRegex(ValueError, 'release_scope'):
                 release(*args)
-            self.assertEqual(len(command_log), 3)
+            self.assertEqual(len(command_log), 5)
 
     def test_actual_staged_import_and_pin_closure_without_download_or_execution(self):
         # The guest stages individual files, not this whole checkout. Exercise

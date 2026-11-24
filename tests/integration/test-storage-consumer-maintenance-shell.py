@@ -30,6 +30,46 @@ private_storage_consumer_release_known image
         self.assertLess(phase.index('storage-consumer-failure-boundary.py'), phase.index('private_storage_consumer_release_known image'))
         self.assertLess(phase.index('private_storage_consumer_release_known cloud'), phase.index('fail CONSUMER_APPLICATION_FAILED'))
 
+    def test_failed_application_phase_releases_owners_and_reopens_only_the_withdrawn_original(self):
+        # Replace every network and process command. The real source determines
+        # which stages to call and whether the original error survives.
+        script = """
+. "$1"
+WORK=$2
+storage_consumer_profile_version=10
+consumer_user=$WORK/u/m
+WORKER_UID=1
+binary_directory=/unused
+storage_user=/unused
+storage_store_a=$3
+python3() { [ "$3" = flow-minimum ] && { echo 1; return 0; }; return 1; }
+timeout() { return 0; }
+storage_consumer_phase_start() { :; }
+private_storage_consumer_private() {
+    case $1 in
+        release-ready) return "$test_ready" ;;
+        release-known) echo "$3-$6" >>"$WORK/operations"; echo owner_confirmed ;;
+        *) return 1 ;;
+    esac
+}
+private_storage_replicas_serve() { echo "$1-$2" >>"$WORK/operations"; return 1; }
+fail() { echo "$1"; exit 7; }
+private_storage_consumer_phase "$4"
+"""
+        for phase, ready, original, reopen in (('exercise', 0, True, True), ('exercise', 0, False, False),
+                ('exercise', 1, True, False), ('finish', 0, True, False)):
+            with self.subTest(phase=phase, ready=ready, original=original), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                store = root / 'state-relay4/private-store'
+                store.mkdir(parents=True)
+                inode = f'{store.stat().st_dev}:{store.stat().st_ino}' if original else 'replaced'
+                result = subprocess.run(['sh', '-eu', '-c', script, 'inert', str(SCRIPT), tmp, inode, phase],
+                    env={'PATH': '/usr/bin:/bin', 'test_ready': str(ready)}, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(result.stdout.strip(), 'CONSUMER_APPLICATION_FAILED')
+                self.assertEqual((root / 'operations').read_text().splitlines(),
+                    (['relay4-yes'] if reopen else []) + ['image-' + phase, 'cloud-' + phase])
+
     def test_provider_snapshot_after_failed_publish_preserves_the_healthy_upload_continuation(self):
         script = """
 . "$1"

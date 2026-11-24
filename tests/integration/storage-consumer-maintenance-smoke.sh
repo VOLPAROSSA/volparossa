@@ -27,7 +27,7 @@ private_storage_consumer_release_known() {
     # Only these closed states enter the cleanup receipt. Core output stays
     # inside the unprivileged owner process, including on command failure.
     if release_result=$(private_storage_consumer_private release-known "$consumer_user" "$1" \
-        "$binary_directory/volparossa" "$WORK/runtime-client/control/agent.sock" 2>/dev/null); then
+        "$binary_directory/volparossa" "$WORK/runtime-client/control/agent.sock" "${2:-publish}" 2>/dev/null); then
         case $release_result in no_archive|owner_confirmed|unconfirmed) printf '%s\n' "$release_result"; return ;; esac
     fi
     printf '%s\n' unavailable
@@ -72,11 +72,19 @@ private_storage_consumer_phase() {
             "$WORK/bin/storage-consumer-failure-boundary.py" capture "$WORK" \
             "$binary_directory/volparossa" "$consumer_phase" "${provider_baseline_ms:-0}") \
             >/dev/null 2>&1 || true
-        if [ "$consumer_phase" = publish ] && [ "${storage_consumer_profile_version:-7}" = 10 ]; then
-            # The application and observer have joined. Freeze their failure first,
-            # then address each archive with its own retained identity and journal.
-            consumer_image_release=$(private_storage_consumer_release_known image)
-            consumer_cloud_release=$(private_storage_consumer_release_known cloud)
+        if [ "${storage_consumer_profile_version:-7}" = 10 ]; then
+            # The primary failure has been frozen. A failed exercise still has
+            # provider A withdrawn. Reopen only its identified original store
+            # after the application and worker processes have joined.
+            if [ "$consumer_phase" = exercise ] \
+                && private_storage_consumer_private release-ready "$consumer_user" exercise >/dev/null 2>&1 \
+                && [ -n "${storage_store_a:-}" ] && [ ! -L "$WORK/state-relay4/private-store" ] \
+                && [ "$storage_store_a" = "$(stat -c '%d:%i' "$WORK/state-relay4/private-store" 2>/dev/null)" ]; then
+                private_storage_replicas_serve relay4 yes >/dev/null 2>&1 || true
+            fi
+            consumer_release_phase=$consumer_phase
+            consumer_image_release=$(private_storage_consumer_release_known image "$consumer_phase")
+            consumer_cloud_release=$(private_storage_consumer_release_known cloud "$consumer_phase")
         fi
     fi
     [ "$consumer_status" -eq 0 ] || fail CONSUMER_APPLICATION_FAILED
@@ -123,11 +131,14 @@ private_storage_consumer_cleanup() {
     if [ -n "${consumer_image_release:-}" ] && [ -n "${consumer_cloud_release:-}" ]; then
         set -- "$consumer_image_release" "$consumer_cloud_release"
     fi
-    # Owner release results exist only after a failed shared publication.
+    # Owner release results exist only after a failed application phase.
     # A healthy upload continuation still needs all three provider services.
     if [ "${storage_consumer_profile_version:-7}" = 10 ] \
         && { [ "${storage_fixture_correlation:-no}" = yes ] || [ "$#" -eq 2 ]; }; then
         private_storage_consumer_usage_snapshot || true
+    fi
+    if [ "$#" -eq 2 ] && [ "${consumer_release_phase:-publish}" != publish ]; then
+        set -- "$consumer_release_phase" "$@"
     fi
     private_storage_consumer_private cleanup "$consumer_user" "$@" \
         >"$WORK/storage-consumer-private-cleanup.json" || return 1
