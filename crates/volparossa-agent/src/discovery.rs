@@ -394,12 +394,14 @@ impl DiscoveryControlHandle {
     ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
         // Only this pre-dispatch result can retry. A live route, reservation or
         // probe has never started, and the caller retains its original deadline.
-        let started = Instant::now();
+        let deadline = Instant::now() + CLIENT_PRESELECTION_TIMEOUT;
         let mut result = self.try_client_preselection(parameters.clone()).await;
         while matches!(result, Err(ClientPreselectionError::AwaitingPublication)) {
-            let remaining = CLIENT_PRESELECTION_TIMEOUT.saturating_sub(started.elapsed());
-            result = timeout(remaining, async {
+            result = tokio::time::timeout_at(deadline, async {
                 tokio::time::sleep(RESERVATION_MAINTENANCE_INTERVAL).await;
+                if Instant::now() >= deadline {
+                    return Err(ClientPreselectionError::Timeout);
+                }
                 self.try_client_preselection(parameters.clone()).await
             })
             .await
@@ -23294,7 +23296,51 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn startup_publication_wait_enforces_the_original_connect_deadline() {
+        for send_retry in [false, true] {
+            let (sender, mut receiver) = mpsc::channel(1);
+            let handle = DiscoveryControlHandle::from_sender(sender);
+            let start = Instant::now();
+            let request = tokio::spawn(async move {
+                handle
+                    .prepare_client_preselection(valid_client_preselection_parameters())
+                    .await
+            });
+            let Some(DiscoveryCommand::BeginClientPreselection { reply, .. }) =
+                receiver.recv().await
+            else {
+                panic!("expected first selection")
+            };
+            assert!(
+                reply
+                    .send(Err(ClientPreselectionError::AwaitingPublication))
+                    .is_ok()
+            );
+            tokio::task::yield_now().await;
+            let pending = if send_retry {
+                tokio::time::advance(RESERVATION_MAINTENANCE_INTERVAL).await;
+                let Some(DiscoveryCommand::BeginClientPreselection { reply, .. }) =
+                    receiver.recv().await
+                else {
+                    panic!("expected pre-deadline retry")
+                };
+                Some(reply)
+            } else {
+                None
+            };
+            tokio::time::advance(CLIENT_PRESELECTION_TIMEOUT - start.elapsed()).await;
+            assert!(matches!(
+                request.await.expect("completed"),
+                Err(ClientPreselectionError::Timeout)
+            ));
+            assert_eq!(start.elapsed(), CLIENT_PRESELECTION_TIMEOUT);
+            assert!(pending.is_none_or(|reply| reply.is_closed()));
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn selection_retries_only_the_pre_dispatch_publication_wait() {
         let (sender, mut receiver) = mpsc::channel(1);
         let handle = DiscoveryControlHandle::from_sender(sender);
