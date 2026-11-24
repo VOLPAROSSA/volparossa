@@ -36,6 +36,14 @@ and commit and run Git object validation after retrieval. A fetched repository
 supplies source bytes. Approval of a new canonical ref and installation of a
 release each require their own decision. [Git bundle format and verification](https://git-scm.com/docs/git-bundle)
 
+Core `ad7748b7` recovered a 506-byte public Git bundle through a surviving custody
+holder after removal of the publisher's repository, cache and key. The receiver
+had only loopback and called the existing Core agent through its local socket.
+Git verified the original two commits and `refs/heads/main` in a fresh bare
+repository. Host-state comparison and guest cleanup passed. The original archive
+SHA-256 is `bb5932b0a6a6a50f2dbf126b1507bf5a21307275adea5311379ed27874f80894`.
+[Original trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45509864506) · [Git recovery receipt](../development/evidence/public-git-45509864506/content-custody-git-recovery.json)
+
 Radicle Heartwood addresses a different part of the cycle. Its repository ID
 derives from the initial identity document and remains stable across renames.
 Delegates and a threshold govern changes. Signed refs bind advertised Git refs
