@@ -93,6 +93,16 @@ class StatusDocs(unittest.TestCase):
         with self.assertRaises(check.FullSuite):
             check.classify(*self.merge(head))
 
+    def test_commenting_out_a_heading_falls_back_to_the_full_suite(self):
+        self.path.write_text('# Network trial records\n\n<!--\n## Network baseline\n-->\n')
+        with self.assertRaises(check.FullSuite):
+            check.classify(*self.merge())
+
+    def test_link_in_a_heading_uses_the_full_suite(self):
+        self.path.write_text(self.source + '## [Index](../IMPLEMENTATION_STATUS.md)\n')
+        with self.assertRaises(check.FullSuite):
+            check.classify(*self.merge())
+
     def test_unknown_markup_falls_back_to_ordinary_suite(self):
         self.path.write_text(self.source + '[trial][source]\n[source]: missing.md\n')
         with self.assertRaises(check.FullSuite):

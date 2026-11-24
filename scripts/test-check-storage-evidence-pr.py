@@ -124,6 +124,8 @@ class EvidenceChanges(unittest.TestCase):
             ('pull_request', 'success', 'status', 'skipped', True),
             ('pull_request', 'failure', 'status', 'skipped', False),
             ('push', 'success', 'status', 'skipped', False),
+            ('pull_request', 'success', 'status-invalid', 'skipped', False),
+            ('pull_request', 'success', 'status-invalid', 'success', False),
             ('push', 'skipped', '', 'success', True),
             ('pull_request', 'failure', '', 'success', True),
             ('pull_request', 'success', 'full', 'skipped', False),
