@@ -119,7 +119,7 @@ async fn render(
     stage: &Path,
     voice: &str,
     text: String,
-    cancelled: impl std::future::Future<Output = ()>,
+    cancelled: impl Future<Output = ()>,
 ) -> Result<(Vec<u8>, usize, u64)> {
     let mut id = [0; 16];
     getrandom::fill(&mut id).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
