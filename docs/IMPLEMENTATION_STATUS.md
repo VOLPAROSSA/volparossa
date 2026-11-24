@@ -52,6 +52,14 @@ system value; these priorities impose no fixed application/model/agent order.
    keep runtime performance evidence separate from CI savings and respect the
    existing outreach, financial/legal, publication and host authority boundaries.
 
+The central build chat will schedule four additions within the full goal as
+their dependencies permit. Decentralized Git and update delivery depend on
+replicated source, isolated builds and release authority. Sabotage review needs
+independent decision history and recoverable trusted versions. DeGoog search
+and the supplementary Consent-O-Matic list depend on verified public content,
+scoped Compute and Browser integration. These are planned capabilities. Their
+functional trials are specified in the [acceptance guide](development/TESTING.md#development-cycle-and-browser-acceptance).
+
 ### Retained branches and resumption dependencies
 
 The owner-designated central build chat maintains the current work across repositories. The organization queue links to the open work and the protected project goal records its mandate. For local checkout paths, use `git worktree list` in the selected repository. [Organization maintenance](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md) · [Project goal](development/GOAL.md)

@@ -31,6 +31,20 @@ Review requirement rewrites against the sources for full functional coverage,
 privacy and authority. Ordinary code tasks that leave these documents untouched
 do not require this check at startup.
 
+## Development cycle and Browser acceptance
+
+The following scenarios define future functional acceptance. Record the
+tested versions, independent participants, observed decisions and outcomes.
+Use test projects, synthetic private markers and disposable clients so the
+evidence can be inspected without collecting real personal data.
+
+| Capability | Required end-to-end evidence |
+| --- | --- |
+| [Decentralized development and updates](../services/REPOSITORY_MAINTENANCE.md#functional-verification) | Complete a change through client activation with the central development services unreachable. Restore or replace the public mirror from the accepted peer history. |
+| [Sabotage review and recovery](../services/DECENTRALIZED_AGENTS.md#review-of-proposed-changes) | Detect cumulative damage under independent review, admit a legitimate change and recover a client from uncompromised peers. |
+| [DeGoog search](../applications/APPLICATIONS.md#browser) | Exercise the selected engine, peer reuse, freshness, result quality and fallback in Firefox. Inspect where private query markers travel. |
+| [Supplementary Consent-O-Matic rules](../applications/APPLICATIONS.md#browser) | Observe the site's recorded consent, continued site functionality, background receipt of an approved rule and recovery after withdrawal. |
+
 ## Unprivileged quality gate
 
 During functional development, run the narrowest formatter/compile check and relevant executable

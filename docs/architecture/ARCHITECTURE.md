@@ -96,6 +96,14 @@ defines sensor, integrity and application requirements; the service contract spe
 measurement provenance, uncertainty and private processing. Receiving help, contributing,
 retaining history and training remain separately authorized.
 
+The Browser's planned DeGoog integration shares eligible public source material
+and index updates through Core. A search request belongs to the user's chosen
+provider and privacy context. Consent-O-Matic uses the same peer delivery and
+verification facilities for an independently approved supplementary list.
+Firefox applies consent preferences locally. The two integrations need
+neither a dedicated central server nor a second peer network.
+[Browser application contract](../applications/APPLICATIONS.md#browser)
+
 ## Studio and shared hosting
 
 The integrated [Studio/hosting scope](../development/GOAL.md#studio)
@@ -118,6 +126,17 @@ direction. Actual training and public peer-task milestones exist; confidential r
 execution, dependable reasoning and complete governance remain unfinished. None of these
 milestones grants new networking authority to `volparossa-agent`. Model caches do not grant
 execution privileges, and destination-policy trust remains separate.
+
+In the planned development cycle, independent peers retain the Git history,
+approved refs, review records and inputs needed for builds and recovery. The
+shared brain may propose an update to itself. Independent reviewers judge the
+exact change under the previously authorized policy, including its effects
+across earlier revisions. Advancing the accepted ref, authorizing a release
+and activating it on a client each require their own authority. GitHub mirrors
+approved public material asynchronously. Its availability and credentials are
+outside the trust path from proposal to client update.
+[Repository maintenance](../services/REPOSITORY_MAINTENANCE.md) ·
+[Immune review](../services/DECENTRALIZED_AGENTS.md#review-of-proposed-changes)
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
 attempt uses a fresh Ed25519 client-session identity and fresh WireGuard keys; no exit-facing v4

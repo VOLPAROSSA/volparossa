@@ -157,6 +157,29 @@ Integreer de core in de volgende applicaties, met behoud van hun bestaande bruik
 - **volparossa-bank:** een decentrale financiële toepassing voor een gezamenlijk gecoördineerde aandelenportefeuille waarvan de onderliggende stukken eigendom van de participanten zijn. Gebruik **ROIC × FCF-yield**, niet absolute FCF, als uitgangspunt voor de weging; beide invoerwaarden moeten niet-negatief zijn. Leg definities, verslagperioden, waarderingsmomenten, valuta en gegevensherkomst vast. Onderzoek en realiseer interne en externe microtransacties en decentrale prijsvorming die zowel zelfstandig als aanvullend op bestaande systemen kunnen functioneren. Houd rekening met werkelijk geaggregeerd economisch eigendom en toepasselijke concentratie- en meldgrenzen; gebruik geen opsplitsing om eigendom te verhullen. Begin met onderzoek en uitvoerbare simulaties. Echte financiële dienstverlening vereist afzonderlijk vastgestelde bevoegdheden, juridische inrichting en aansluitingen; deelname aan VOLPAROSSA activeert geen beleggingen, financiële accounts of betalingen.
 - **volparossa-citizen:** een decentrale toepassing voor voorstellen, beraadslaging en referenda, van gemeentelijk tot mondiaal niveau, die naast bestaande democratische instellingen kan functioneren en daarmee kan samenwerken. Onderzoek geschikte open-source bouwstenen en werk de gekozen opzet uit in uitvoerbare simulaties. Hergebruik de transport-, opslag- en computefuncties van de core; houd specifieke bestuursregels in de toepassing. Ondersteun inclusieve identiteitsregistratie, controleerbare stemgerechtigdheid, geheime stemming en verifieerbare uitkomsten. Onderscheid technische stemuitslagen van daadwerkelijk erkende bestuurlijke of juridische bevoegdheid.
 
+### DeGoog en toestemmingsregels in VOLPAROSSA Browser
+
+Maak DeGoog de standaardzoekmachine in een nieuw profiel. Respecteer een eerder
+gekozen zoekmachine en laat de gebruiker die keuze op elk moment wijzigen.
+Onderzoek en realiseer waar haalbaar een gedeelde index van herbruikbare openbare
+bronnen. Gebruik Network voor het ophalen, Cache voor hergebruik en verversing,
+Storage voor herstelkopieën van de index en het gedeelde brein op Compute voor indexering,
+rangschikking en AI-samenvattingen met bronverwijzingen. Meet de kwaliteit en
+actualiteit van de resultaten, het aantal externe verzoeken en het herhaalde
+rekenwerk. Houd persoonlijke zoekopdrachten, zoekgeschiedenis en profielen buiten
+openbare indexen, cache en leertaken. DeGoog moet ook werken bij uitval van één
+instantie, binnen de bestaande privacy-, bron- en terugvalregels.
+
+Laat het gedeelde brein ontbrekende, verouderde en falende Consent-O-Matic-regels
+opsporen, ontwikkelen en testen. Laat het immuunsysteem onafhankelijk toetsen of
+de regel de toestemmingskeuzes uitvoert, de privacy beschermt en de site bruikbaar
+houdt. Verspreid goedgekeurde versies van de aanvullende lijst via DICN en laat
+aangesloten browsers ze op de achtergrond verifiëren en toepassen. Maak intrekking
+en herstel naar een vertrouwde versie mogelijk. Behoud de upstream-regels,
+uBlock Origin, overige privacyvoorzieningen en de keuzes van de gebruiker.
+De [Browser-specificatie](../applications/APPLICATIONS.md#browser) verwijst naar
+de functionele proeven voor zoeken en toestemming.
+
 <a id="studio"></a>
 
 ### VOLPAROSSA Studio, decentralized hosting and shared AI
@@ -382,16 +405,52 @@ Laat het wederzijdse immuunsysteem doorwerken in netwerk, cache, storage, comput
 Laat inhoudelijke beoordeling van privégegevens lokaal of binnen een daarvoor toegelaten beschermde uitvoeringsomgeving plaatsvinden. Deel waar mogelijk alleen noodzakelijke, controleerbare beslis- en uitvoeringsbewijzen, zonder gevoelige inhoud openbaar te maken.
 Het immuunsysteem vervangt geen technische toegangscontrole, vertrouwelijkheidsbescherming of wettelijke verantwoordelijkheden. Bescherm privacy en versleuteling; beloof geen volledige inhoudscontrole, foutloze beoordeling, absolute veiligheid of juridische risicoloosheid.
 
+Beoordeel wijzigingsvoorstellen van mensen en AI op hun directe, indirecte en
+cumulatieve gevolgen voor functionaliteit, veiligheid, privacy, decentralisatie,
+continuïteit en de fundamentele doelen. Vergelijk ook reeksen kleine wijzigingen
+met eerder aanvaarde eisen en een vertrouwde versie. Bescherm tegen interne en
+externe sabotage, waaronder geleidelijke uitholling, schadelijke code en
+afhankelijkheden, gecompromitteerde agents, samenspanning, ongeautoriseerde
+centralisatie en ontmanteling van beoordelings-, beveiligings-, publicatie- of
+herstelmechanismen.
+
+Laat onafhankelijke beoordelaars werken onder de regels en bevoegdheden die
+vóór het voorstel golden. Een voorstel kan zijn eigen toetsingsvoorwaarden of
+bevoegdheden nooit bepalen. Leg redenen en bewijs controleerbaar vast en maak
+herbeoordeling mogelijk. Laat legitieme beveiligingscorrecties, architectuurwijzigingen
+en rechtmatig genomen bestuursbesluiten onder de geldende procedure doorgaan.
+Gebruikers houden zeggenschap over hun eigen apparaat, gegevens en deelname.
+De functionele proeven omvatten zowel een sluipende
+aantasting als een legitieme wijziging. [Beoordeling en herstel](../services/DECENTRALIZED_AGENTS.md#review-of-proposed-changes)
+
 ## Autonoom onderhoud en updates
-Ontwikkel autonoom onderhoud van de core en alle huidige en toekomstige repositories binnen de GitHub-organisatie VOLPAROSSA. Laat het decentrale brein onderzoek, implementatie, controles en onafhankelijke beoordelingen verdelen.
-Publiceer goedgekeurde wijzigingen automatisch via branches, pull requests, toegestane merges en releases, binnen expliciete organisatie- en repositorybevoegdheden. Houd GitHub-publicatierechten en releasebevoegdheden buiten gewone agentworkers. Laat agents niet hun eigen wijzigingen goedkeuren, hun bevoegdheden verruimen of hun beoordelingsvoorwaarden omzeilen.
-Realiseer automatische verspreiding en installatie van bevoegde releases voor de geïnstalleerde VOLPAROSSA-componenten op alle clients. Gebruik waar passend het decentrale netwerk voor distributie, maar laat iedere client zelfstandig de releasebevoegdheid, authenticiteit, integriteit, actualiteit en compatibiliteit controleren.
+Realiseer de volledige cyclus voor zelfverbetering en softwareontwikkeling van de
+core en alle huidige en toekomstige VOLPAROSSA-repositories via decentraal Git.
+Laat het gedeelde brein onderzoek en ontwikkeltaken verdelen. Deelnemers kunnen
+de broncode en historie ophalen, wijzigingen voorstellen, onafhankelijk beoordelen,
+bouwen, testen en binnen hun bevoegdheden samenvoegen. Publicatie,
+updatedistributie en herstel moeten blijven werken wanneer GitHub, GitHub Actions
+en andere centrale ontwikkelvoorzieningen ontbreken. Hergebruik de DICN-lagen.
+Beoordeel Radicle als mogelijke open-source bouwsteen op
+hergebruik, privacy, onafhankelijkheid en herstelbaarheid.
+
+Werk GitHub automatisch bij als vervangbare publieke spiegel van goedgekeurde,
+openbare versies. Laat de bevoegde decentrale publicatie de historie bepalen.
+Scheid het uitvoeren van taken, onafhankelijke beoordeling, publicatie, spiegelen
+en vrijgeven van releases. Houd publicatie- en releasebevoegdheden buiten gewone
+agentworkers. Realiseer automatische decentrale verspreiding en installatie van
+bevoegde releases voor de geïnstalleerde VOLPAROSSA-componenten op alle clients.
+Iedere client controleert zelfstandig de releasebevoegdheid, authenticiteit,
+integriteit, actualiteit en compatibiliteit. Het
+[onderhoudsontwerp](../services/REPOSITORY_MAINTENANCE.md) beschrijft de
+functionele verificatie bij uitval van de spiegel en herstel vanaf peers.
+
 Bouw gefaseerde uitrol, zichtbare status, pauzemogelijkheid en herstel bij mislukking. Behoud instellingen, identiteiten, privégegevens, opgeslagen fragmenten en lopende verplichtingen. Respecteer platformrechten en laat updates zichzelf geen ruimere bevoegdheden geven. Willekeurige peerinhoud, modeluitvoer of een GitHub-commit is op zichzelf geen installatiebevoegdheid.
 
 ## Uitvoering en voortgang
 Prioriteit is daadwerkelijk werkende functionaliteit. Schrap geen afgesproken functies en presenteer ontbrekende werking niet als voltooid. Werk in grotere, samenhangende gebruiksscenario’s die van begin tot eind uitvoerbaar zijn, met expliciete afhankelijkheden en resterende werkzaamheden.
 Gebruik tijdens het bouwen compilatie en gerichte functionele proeven, met behoud van privacygrenzen en bescherming van de ontwikkelhost. Bewijs de essentiële werking van echte datapaden, beschermde netwerkuitvoering, herstel, bevoegdheden, transactieconsistentie en automatische installatie voordat die als functioneel worden beschouwd. Presenteer simulaties, losse componenttests of lokale demonstraties niet als bewijs van een volledig werkende gedistribueerde dienst.
-De door de eigenaar aangewezen centrale bouwchat coördineert de ontwikkeling van VOLPAROSSA. Oudere bouwsessies worden niet hervat. Beheer namens de eigenaar de repositories, pull requests, branches, worktrees, workflows, GitHub Actions en instellingen. Neem bruikbare wijzigingen over, sluit achterhaalde pull requests en ruim overbodige branches en worktrees op zodra de relevante bron en resultaten terug te vinden zijn.
+De door de eigenaar aangewezen centrale bouwchat coördineert de ontwikkeling van VOLPAROSSA. Oudere bouwsessies worden niet hervat. Beheer namens de eigenaar de huidige repositories, pull requests, branches, worktrees, workflows, GitHub Actions en instellingen. De bouwchat bepaalt zelfstandig wanneer de decentrale ontwikkelcyclus, sabotagebescherming, DeGoog en de aanvullende Consent-O-Matic-lijst binnen de volledige ontwikkeling aan bod komen. Neem bruikbare wijzigingen over, sluit achterhaalde pull requests en ruim overbodige branches en worktrees op zodra de relevante bron en resultaten terug te vinden zijn.
 
 Integreer afgeronde mijlpalen regelmatig in main en ruim volledig geïntegreerde branches op zonder ongepubliceerd werk te verliezen. Beoordeel nieuwe ideeën expliciet op gevolgen voor architectuur, volgorde en resterend werk; laat begonnen integraties niet ongemerkt liggen.
 Meet voortgang aan aantoonbaar werkende gebruiksscenario’s. Werk README en overige documentatie gebundeld bij en houd visie, geïmplementeerde werking en resterend werk duidelijk gescheiden. Uitgebreide regressiecontroles, aanvullende hardening, verdere optimalisatie en releasepolish volgen nadat de gewenste functionaliteit is geïntegreerd.
@@ -411,8 +470,10 @@ Verbeter efficiëntie en kwaliteit in alle VOLPAROSSA-repositories naast de func
 ontwikkeling. Pak gemeten gedeelde knelpunten aan met samenhangende, omkeerbare
 verbeteringen in ontwikkeling, runtimegebruik en onderhoudbaarheid. Behoud werking,
 privacy, interoperabiliteit en onafgerond werk. Houd ontwikkel-AI buiten de
-productruntime; gebruik standaard publieke hosted runners zonder betaalde diensten
-of extra betaalde opslag te activeren. Onderbouw prestatieclaims met metingen.
+productruntime. Gebruik voor het huidige ontwikkelwerk standaard publieke hosted
+runners zonder betaalde diensten of extra betaalde opslag te activeren. De
+decentrale ontwikkelcyclus moet dezelfde vereiste controles zelfstandig kunnen
+uitvoeren. Onderbouw prestatieclaims met metingen.
 
 Duurzame publieke groei omvat vindbaarheid, contributiemogelijkheden, documentatie,
 visuele communicatie en voorbereiding op financiering voor de organisatie,
