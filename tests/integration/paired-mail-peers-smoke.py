@@ -22,7 +22,7 @@ REPORT_NAME = PREFIX + "-smoke.json"
 NAMES = {REPORT_NAME, "paired-mail-supply.json", PREFIX + "-lifecycle.json", "a01-expected-peers.json",
     *(f"{PREFIX}-{role}-{operation}.json" for role in ROLES for operation in ("init", "pair")),
     *(name for phase in FLOW_MINIMUM for name in (f"{PREFIX}-{phase}.json", f"{PREFIX}-{phase}-live-selection.json",
-        f"{PREFIX}-{phase}-route-diagnostic.json", f"{PREFIX}-{phase}-gates.json",
+        f"{PREFIX}-{phase}-route-diagnostic.json", f"{PREFIX}-{phase}-preselection.json", f"{PREFIX}-{phase}-gates.json",
         f"content-provider-mail-peers-{phase}-control.json", *(f"{PREFIX}-{phase}-{role}.json" for role in PEER["INTERFACES"])))}
 read, require = BASE["read"], BASE["require"]
 SHA = re.compile(r"[0-9a-f]{64}")
@@ -204,6 +204,14 @@ def assemble(root, revision, status, blocker, cleanup, remaining, before, after)
 def main(args):
     if args == ["export-names"]:
         print("\n".join(sorted(NAMES)))
+    elif len(args) == 3 and args[0] == "selection-events" and args[2] in FLOW_MINIMUM:
+        root = Path(args[1])
+        prefix = f"{PREFIX}-{args[2]}"
+        diagnostics = runpy.run_path(str(HERE / "private-storage-maintenance-smoke.py"))
+        observation = diagnostics["closed_preselection_events"](
+            root / f"{prefix}-events.private", root / f"{prefix}-start.private", root / f"{prefix}-end.private")
+        diagnostics["validate_preselection_diagnostic"](observation)
+        print(json.dumps(observation, sort_keys=True))
     elif len(args) == 9 and args[0] == "assemble":
         print(json.dumps(assemble(Path(args[1]), *args[2:]), sort_keys=True, separators=(",", ":")))
     elif len(args) == 3 and args[0] == "report":

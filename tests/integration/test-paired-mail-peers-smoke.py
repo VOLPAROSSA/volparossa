@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Regression checks for independent participants and original signed provider evidence."""
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import runpy
@@ -55,6 +57,25 @@ class IndependentMail(unittest.TestCase):
             self.assertFalse({"actors", "app", "network"} & set(report))
             with self.assertRaises(ValueError):
                 V["validate"](report, "0"*40)
+
+    def test_selection_observer_only_exports_counts_inside_the_failed_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for suffix, content in (
+                ("start", "100\n"), ("end", "110\n"),
+                ("events", "99\tlevel=0\tevent=PRESELECTION_SAMPLE_NO_EXIT\tsession=ab12\tpath=-\n"
+                           "101\tlevel=0\tevent=PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS\tsession=ab12\tpath=-\n"),
+            ):
+                p = root / f"paired-mail-peers-receive-{suffix}.private"
+                p.write_text(content)
+                p.chmod(0o600)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                V["main"](["selection-events", tmp, "receive"])
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["observed_reason"], "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS")
+            self.assertEqual(result["counts"]["PRESELECTION_SAMPLE_NO_EXIT"], 0)
+            self.assertNotIn("ab12", output.getvalue())
 
 
 if __name__ == "__main__":

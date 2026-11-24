@@ -1428,7 +1428,8 @@ PAIRED_MAIL_PEERS_NAMES = {
 } | {
     name for phase in ("enroll", "send", "receive") for name in (
         f"paired-mail-peers-{phase}.json", f"paired-mail-peers-{phase}-live-selection.json",
-        f"paired-mail-peers-{phase}-route-diagnostic.json", f"paired-mail-peers-{phase}-gates.json",
+        f"paired-mail-peers-{phase}-route-diagnostic.json", f"paired-mail-peers-{phase}-preselection.json",
+        f"paired-mail-peers-{phase}-gates.json",
         f"content-provider-mail-peers-{phase}-control.json",
         *(f"paired-mail-peers-{phase}-{role}.json" for role in ("client", "relay4", "exit")),
     )

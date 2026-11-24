@@ -92,13 +92,27 @@ paired_peer_route() {
     peer_discovery_deadline=$(($(date +%s) + 60))
     while ! { CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli "$peer_node" peers \
             >"$WORK/$peer_prefix-peers.private" &&
-        awk -v a="$R0_PEER" -v b="$R1_PEER" -v c="$R2_PEER" '
+        awk -v a="$R0_PEER" -v b="$R1_PEER" -v c="$R2_PEER" -v e="$EXIT_PEER" '
             ($1 == a || $1 == b || $1 == c) && $2 == "roles=0b010" { seen[$1] = 1 }
-            END { exit !(seen[a] && seen[b] && seen[c]) }' "$WORK/$peer_prefix-peers.private"; }; do
-        [ "$(date +%s)" -lt "$peer_discovery_deadline" ] || fail PAIRED_MAIL_PEER_RELAY_DISCOVERY_UNAVAILABLE
+            $1 == e && $2 == "roles=0b100" { seen[e] = 1 }
+            END { exit !(seen[a] && seen[b] && seen[c] && seen[e]) }' "$WORK/$peer_prefix-peers.private"; }; do
+        [ "$(date +%s)" -lt "$peer_discovery_deadline" ] || fail PAIRED_MAIL_PEER_DISCOVERY_UNAVAILABLE
         sleep 1
     done
-    content_replication_select "$peer_node" "$peer_prefix" || fail PAIRED_MAIL_PEER_ROUTE_UNAVAILABLE
+    peer_selection_start=$(date +%s%3N)
+    if ! content_replication_select "$peer_node" "$peer_prefix"; then
+        # Only the closed projection leaves the guest. A missing diagnostic
+        # preserves the selector's refusal and never authorizes another draw.
+        (umask 077
+         printf '%s\n' "$peer_selection_start" >"$WORK/$peer_prefix-start.private" &&
+         date +%s%3N >"$WORK/$peer_prefix-end.private" &&
+         CONTENT_REPLICATION_COMMAND_TIMEOUT=5s content_replication_cli "$peer_node" logs --limit 400 \
+             >"$WORK/$peer_prefix-events.private" &&
+         python3 -I -B "$source_directory/tests/integration/paired-mail-peers-smoke.py" selection-events \
+             "$WORK" "$peer_phase" >"$WORK/$peer_prefix-preselection.part" &&
+         mv "$WORK/$peer_prefix-preselection.part" "$WORK/$peer_prefix-preselection.json") || :
+        fail PAIRED_MAIL_PEER_ROUTE_UNAVAILABLE
+    fi
     peer_context=$(jq -er '.route_context_id' "$WORK/$peer_prefix-selection.json")
     content_mailbox_cli "$peer_node" content status >"$WORK/$peer_prefix-status.json" || fail PAIRED_MAIL_PEER_ROUTE_STATUS_FAILED
     provider_control_peer=$(jq -er '.control_relay_peer_id | select(length > 0)' "$WORK/$peer_prefix-status.json")

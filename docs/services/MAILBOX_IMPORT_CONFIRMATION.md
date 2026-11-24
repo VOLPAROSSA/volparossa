@@ -172,6 +172,11 @@ On `ab17c375` the sender deposited 91,992 encrypted bytes at both custodians
 while the recipient was offline. It reopened the original send after removing
 the input. The restarted recipient received `NO_ELIGIBLE_PATHS` during route
 selection. The guest exited before Stalwart import, cleaned up its objects and
-matched the host digests. Each phase now waits for the three fixture relay
-advertisements before calling the route selector. A timeout identifies
-incomplete discovery. [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45409332468)
+matched the host digests. [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45409332468)
+
+On `454c7482` the recipient observed all three relay advertisements before
+its initial enrollment. The selector returned `NO_ELIGIBLE_PATHS` before a
+mailbox grant was created. Each phase now waits for the primary Exit
+advertisement as well. If selection still fails, a bounded event summary
+counts recognized reasons inside the selection window. The original event
+ring stays private to the guest. [Enrollment trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45413088618)
