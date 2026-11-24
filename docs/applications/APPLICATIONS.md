@@ -52,6 +52,23 @@ Its cooperation with uBlock Origin must preserve necessary website functions and
 The browser-specific kill switch starts **off**, permitting visible ordinary-Internet fallback when the overlay is
 unavailable. It must not bypass a policy denial or weaken another core consumer's defaults.
 
+The planned default search engine is **DeGoog**. Firefox must retain a user's choice
+of another engine across updates. Use Network for authorized requests, Cache
+for eligible public sources and index updates, Storage for encrypted recovery
+copies and shared Compute for indexing, ranking and source-linked AI summaries. Querying the public
+web grants no permission to publish a person's query, history or profile. Search must
+work without a designated VOLPAROSSA server. Apply the existing origin, freshness
+and rights checks to public material. [Content contract](../services/CONTENT_NETWORK_PROPOSAL.md)
+· [Browser search requirements and acceptance](https://github.com/VOLPAROSSA/volparossa-browser/blob/main/docs/CORE_INTEGRATION.md#degoog-search)
+
+For cookie consent, the shared brain should detect missing or failing rules, propose
+repairs and test them against reproducible public or synthetic banners. The immune
+system independently reviews the change before browsers automatically receive and
+apply an authenticated supplementary Consent-O-Matic list in the background. Reuse
+the publication, revocation and recovery mechanisms shared with other content.
+Consent rules must respect the user's choices alongside upstream rules, uBlock
+Origin and the other privacy controls. [Browser consent requirements and acceptance](https://github.com/VOLPAROSSA/volparossa-browser/blob/main/docs/BUNDLED_EXTENSIONS.md#supplementary-consent-o-matic-rules)
+
 Privacy/sidebar and scoped protected-TCP milestones have real browser evidence. Complete
 network/cache integration and useful shared AI remain in development. The target is not
 an exclusively local chatbot. [Core browser-network contract](BROWSER_NETWORK.md)

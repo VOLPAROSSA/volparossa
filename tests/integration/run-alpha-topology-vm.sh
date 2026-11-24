@@ -1565,7 +1565,7 @@ COOPERATIVE_CODE_NAMES = {name.replace("agent-cooperative-browser-", "agent-coop
                           for name in COOPERATIVE_BROWSER_NAMES
                           if name != "agent-cooperative-browser-panel.json"} | {"agent-cooperative-code-driver.json"}
 COOPERATIVE_CODE_PROPOSAL_NAMES = {f"agent-cooperative-code-proposal-{name}.json" for name in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control")
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor")
 } | {name for name in COOPERATIVE_BROWSER_NAMES if not name.startswith("agent-cooperative-browser-")}
 COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
@@ -2667,6 +2667,13 @@ if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative
     printf '%s  /home/vpci/cooperative-code.tar\n' "$code_archive_sha256" | sha256sum --check --strict -
     python3 -B tests/integration/cooperative-code-bundle.py unpack \
         /home/vpci/cooperative-code.tar /home/vpci/cooperative-code-inputs "$code_manifest_sha256" "$scenario"
+    if [ "$scenario" = agent-cooperative-code-proposal ] && \
+            jq -e '.frontend == "vscodium"' /home/vpci/cooperative-code-inputs/INPUTS.json >/dev/null; then
+        # This input was authenticated by the exact Core fixture during unpack.
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            libgtk-3-0t64 libnss3 libnspr4 libatk-bridge2.0-0t64 libasound2t64 libgbm1 \
+            libxkbcommon0 libcups2t64 libxdamage1 libxrandr2 fonts-dejavu-core
+    fi
 fi
 test -x tests/packaging/debian13-package-lifecycle.sh
 if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ] || [ "$scenario" = signal-mailbox ]; then

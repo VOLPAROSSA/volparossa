@@ -332,6 +332,23 @@ and the [Bank TEST transfer example](https://github.com/VOLPAROSSA/volparossa-ba
   observed lifetime countdown. Its raw snapshots differed.
   [Four-validator run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44426288636) · [Original build, consensus and cleanup receipts](../development/evidence/bank-validators-44426288636)
 
+### Bank owner cancellation
+
+Core `3fb7e249` installed the Bank TEST authorizer from `a65eb8a3` for its
+four-validator Debian 13 trial. The owner committed 70 of 100 TEST units and
+reserved another 10. The signed cancellation released those 10 to the payer.
+After the signing seed was removed and one validator restarted, the reopened
+reservation, payment and cancellation ran again in block 25. All four stores
+agreed at height 26. The balances remained 30 and 70 and the cancellation
+kept receipt sequence 4.
+[Validator receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-inner.json) · [Passing run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/2)
+
+The first attempt failed the outer host check when finite IPv6 lifetimes
+increased. The second attempt used the same source and guard. It observed
+normal lifetime countdown, removed the private keys and owned namespaces,
+and passed. Independent light-client finality remains open.
+[First host receipt](../development/evidence/bank-validators-44564082860/attempt-1/transaction-abci-acceptance.json) · [First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/1) · [Passing host receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-acceptance.json)
+
 ## Native Firefox ordinary tabs
 
 Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
@@ -517,6 +534,12 @@ Signal Desktop processed delivery receipts for two simulated encrypted peers. Af
 Signal Desktop exported a 198,352-byte encrypted backup. When two of three Storage providers went offline, two of four fragments remained readable and the owner received no partial output. After one provider returned, the owner recovered all four fragments and imported the original backup in Signal. All three providers reported zero remaining usage after cleanup. [Native Signal and Storage trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44444982433)
 
 With Thunderbird closed, the owner’s Stalwart server accepted a second message over local SMTP. It rejected an unknown local recipient and external forwarding. After Stalwart restarted on the same SQLite database, the owner recovered both the original import and the delivered message, including its stored transport headers. This exercised an isolated loopback mail server. [Source-bound Thunderbird and Stalwart receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/5bb90ec3be8c168fd58a19e2d03f626f6560d96b/third_party/thunderbird-stalwart-owner-smtp)
+
+## Paired Mail delivery
+
+On Core `b9c01e97` and Mail `30cc423a`, the paired sender and receiver used separate application processes behind one Core client. Two providers confirmed custody of the encrypted message. After the sender profile was removed and one provider reopened its store, the owner retrieved the message over a fresh protected route. Stalwart returned all 90,139 original MIME bytes before either provider acknowledged import. The next fetch was empty. The sender and receiver phases recorded six and seven Exit MPTCP flows respectively. The guest host snapshots matched and cleanup left zero owned objects. [Protected route and application receipt](../development/evidence/paired-mail-44553382181/paired-mail-smoke.json) · [Hosted topology trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44553382181)
+
+In the earlier local-provider trial on Mail `30cc423a`, Stalwart restarted after losing its import reply. The retry recovered the same 429-byte message, and a fresh Thunderbird profile opened it over implicit TLS. On Mail `94f3162d`, the sending Thunderbird profile submitted both a saved draft and a newly composed message. The recipient opened them in its Inbox. Automatic pickup later delivered a third message after reconnection. [Original import and recovery receipt](../development/evidence/mail-owner-44547309790/peer-mail.json) · [Sender and receiver trial](https://github.com/VOLPAROSSA/volparossa-mail/actions/runs/44562762968)
 
 ## Latest completed integration evidence
 

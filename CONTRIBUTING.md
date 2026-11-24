@@ -21,10 +21,8 @@ for actionable work. Report vulnerabilities through [SECURITY.md](SECURITY.md).
    and the [build instructions](docs/development/OPERATIONS.md#build-and-package).
    `./scripts/check-system.sh` inspects without installing or changing networking;
    package installation is a separate explicit operation.
-3. Follow the [shared workflow](docs/development/CODEX_WORKFLOW.md). Preserve
-   unrelated and unpublished work, assign non-overlapping write scopes, and make
-   changes reviewable. Coding clients select suitable models/tools dynamically;
-   no particular vendor, model or agent arrangement is required.
+3. Follow the [shared workflow](docs/development/WORKFLOW.md) for reviewable
+   changes and apply its [commit attribution rules](docs/development/WORKFLOW.md#commit-attribution).
 4. Select verification for the changed behavior. Documentation needs link and
    technical-claim checks; code needs focused checks of its changed boundaries.
    Real network claims require disposable namespaces or the documented VM,
