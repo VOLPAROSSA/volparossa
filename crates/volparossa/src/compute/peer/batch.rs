@@ -7,6 +7,8 @@ use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
+const FINAL_OBSERVATION_SECONDS: u64 = 30;
+
 pub(super) mod output;
 mod ready_queue;
 
@@ -398,7 +400,7 @@ pub(super) async fn observe_existing(
         rpc::Operation::Poll(handle.binding.clone())
     };
     let phase = RpcPhase::of(&operation);
-    let first = exchange(socket, &provider, operation).await;
+    let first = status_exchange(socket, &provider, operation).await;
     let status = match first {
         Ok(outcome) => Some(job_in_phase(outcome, handle, phase)?),
         Err(_) => None,
@@ -421,7 +423,7 @@ async fn follow_status(
         }
         let cancel = *cancelled.borrow() || now()? >= handle.binding.expires_unix_seconds;
         if cancel {
-            let outcome = exchange(
+            let outcome = status_exchange(
                 socket,
                 provider,
                 rpc::Operation::Cancel(handle.binding.clone()),
@@ -439,12 +441,44 @@ async fn follow_status(
             rpc::Operation::Poll(handle.binding.clone())
         };
         let phase = RpcPhase::of(&operation);
-        match exchange(socket, provider, operation).await {
+        match status_exchange(socket, provider, operation).await {
             Ok(outcome) => status = Some(job_in_phase(outcome, handle, phase)?),
             Err(_) if now()? < handle.binding.expires_unix_seconds => {}
             Err(error) => return Err(error),
         }
     }
+}
+
+fn poll_budget(remaining: u64) -> Duration {
+    let reserve = FINAL_OBSERVATION_SECONDS.min(remaining / 2);
+    Duration::from_secs(remaining - reserve)
+}
+
+async fn status_exchange(
+    socket: &Path,
+    provider: &VerifyingKey,
+    operation: rpc::Operation,
+) -> Result<rpc::Outcome> {
+    let phase = RpcPhase::of(&operation);
+    let (rpc::Operation::Poll(binding) | rpc::Operation::Cancel(binding)) = &operation else {
+        return exchange(socket, provider, operation).await;
+    };
+    let at = now()?;
+    let expiry = binding.expires_unix_seconds;
+    let budget = if phase == RpcPhase::Poll && at < expiry {
+        // A stalled read must not consume the last opportunity to observe this job.
+        poll_budget(expiry - at)
+    } else if at >= expiry && at - expiry < FINAL_OBSERVATION_SECONDS {
+        // Leave time for the queue to obtain a joined receipt after this last
+        // exchange. The original owner cancellation/expiry still applies.
+        Duration::from_secs((FINAL_OBSERVATION_SECONDS - (at - expiry)).div_ceil(2))
+    } else {
+        return exchange(socket, provider, operation).await;
+    };
+    timeout(budget, exchange(socket, provider, operation))
+        .await
+        .context("compute_peer_status_observation_timeout")
+        .map_err(|error| rpc_failure(error, RpcDiagnostic::ExchangeUnconfirmed { phase }))?
 }
 
 pub(super) fn assignments_for(
