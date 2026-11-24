@@ -357,3 +357,17 @@ fn public_inventory_profile_never_widens_private_receipt_or_signing_input_reads(
         .unwrap();
     assert!(read_inventory(&path).is_err());
 }
+
+#[test]
+fn independent_native_review_must_select_the_bundle_before_signing() {
+    let sha = [0xabu8; 32];
+    let expected = std::ffi::OsString::from(hex::encode(sha));
+    assert_eq!(super::site::reviewed_digest(&sha, None).unwrap(), expected);
+    assert_eq!(
+        super::site::reviewed_digest(&sha, Some(expected.clone())).unwrap(),
+        expected
+    );
+    for changed in ["", "not-a-digest", &hex::encode([0u8; 32])] {
+        assert!(super::site::reviewed_digest(&sha, Some(changed.into())).is_err());
+    }
+}
