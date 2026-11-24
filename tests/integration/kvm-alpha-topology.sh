@@ -3754,7 +3754,7 @@ write_config() {
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
     if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
         content_replication_configure_node
-    elif [ "$paired_mail_peers" = yes ]; then
+    elif [ "${paired_mail_peers:-no}" = yes ]; then
         content_replication_configure_node
     fi
     if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
@@ -4256,7 +4256,7 @@ launch_agent() {
             set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed $WORK/agent-jobs-user"
         fi
     fi
-    if [ "$paired_mail_peers" = yes ] && [ "$node" = relay4 ]; then
+    if [ "${paired_mail_peers:-no}" = yes ] && [ "$node" = relay4 ]; then
         set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
     if [ "$scenario" = content-replication ] || [ "$agent_train_loop" = yes ]; then
