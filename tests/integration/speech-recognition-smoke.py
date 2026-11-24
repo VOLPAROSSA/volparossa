@@ -80,7 +80,8 @@ def execute(root, output, revision):
     scratch.mkdir(mode=0o700)
     subprocess.run([*fixture, "prepare", recordings], timeout=40, check=True)
     (output / "speech-reference.json").write_bytes((recordings / "reference.json").read_bytes())
-    synthesized = runpy.run_path(str(HERE / "speech-synthesis-smoke.py"))["generate"](root, recordings, output, revision)
+    synthesized = runpy.run_path(str(HERE / "speech-synthesis-smoke.py"))["generate"](
+        root, recordings, output, revision, lifecycle)
     receipt = {"version": 1, "source_revision": revision, "model_sha256": MODEL_SHA,
                "scope": "synthetic_english_speech", "passed": False, "phase": "recognition"}
     try:

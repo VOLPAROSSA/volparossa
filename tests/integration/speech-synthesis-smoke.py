@@ -24,7 +24,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def generate(root, references, output, revision):
+def generate(root, references, output, revision, lifecycle):
     require(os.geteuid() != 0 and subprocess.check_output(["systemd-detect-virt", "--vm"]).strip() == b"kvm")
     directory = root / "synthesis"
     directory.mkdir(mode=0o700)
@@ -45,7 +45,19 @@ def generate(root, references, output, revision):
         command = [CLI, "compute", "synthesize", "--input", text, "--output", wave, "--voice", voice]
         preview = json.loads(subprocess.check_output(command, timeout=5))
         require(preview["execute"] is False and not wave.exists())
-        result = json.loads(subprocess.check_output([*command, "--execute"], timeout=25))
+        trace = directory / (name + ".log")
+        with trace.open("xb") as log:
+            result = subprocess.run([*command, "--execute"], stdout=log, timeout=25,
+                                    env=dict(os.environ, NO_COLOR="1",
+                                             RUST_LOG="off,volparossa::compute::private_diagnostic=debug"))
+        if result.returncode:
+            failure = {"version": 1, "source_revision": revision, "passed": False,
+                       "phase": "synthesis", "clip": name, "lifecycle": lifecycle(trace)}
+            (output / "speech-synthesis-smoke.json").write_text(json.dumps(failure, sort_keys=True) + "\n")
+            raise ValueError("speech synthesis command did not complete")
+        lines = trace.read_bytes().splitlines()
+        require(0 < len(lines) <= 32 and len(lines[-1]) <= 16384)
+        result = json.loads(lines[-1])
         pcm = FIXTURE["original_wave"](wave, 16000)
         data = wave.read_bytes()
         require(pcm == original_pcm and result["audio_samples"] == len(pcm) // 2 and result["synthetic"] is True
