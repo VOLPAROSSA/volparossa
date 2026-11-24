@@ -45,6 +45,8 @@ pub(crate) enum Command {
     Invite(Invite),
     /// Register this invitation at both providers and require two actual signed confirmations.
     Enroll(Enrollment),
+    /// Verify an original invitation against the trusted recipient and the unlocked sender locally.
+    VerifyInvitation(SenderInvitation),
     /// Encrypt and deposit one message at both providers; preserve local ciphertext for retries.
     Send(Send),
     /// Discover the private inbox and decrypt messages into a NEW private directory, then acknowledge.
@@ -93,13 +95,21 @@ pub(crate) struct Enrollment {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct Send {
+pub(crate) struct SenderInvitation {
     /// Original privately received invitation, verified against --owner-key.
     #[arg(long)]
     invitation: PathBuf,
     /// Independently authenticated recipient Ed25519 key, not inferred from the invitation.
     #[arg(long, value_parser = parse_publisher_key)]
     owner_key: VerifyingKey,
+    #[command(flatten)]
+    unlock: Unlock,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Send {
+    #[command(flatten)]
+    authority: SenderInvitation,
     /// Explicit plaintext file; required for a new message, never sent to the agent/provider.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     input: Option<PathBuf>,
@@ -115,8 +125,6 @@ pub(crate) struct Send {
     /// New-message lifetime; also bounded by the invitation's original expiry.
     #[arg(long, default_value_t = 86_400, value_parser = clap::value_parser!(u64).range(1..=2_678_400))]
     lifetime_seconds: u64,
-    #[command(flatten)]
-    unlock: Unlock,
     #[command(flatten)]
     limits: Limits,
 }
@@ -157,6 +165,13 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
         Command::Invite(args) => invite(&args)?,
         Command::Enroll(args) => enroll(&args, socket).await?,
+        Command::VerifyInvitation(args) => {
+            let (_, grant) = args.verify()?;
+            serde_json::json!({"operation":"mailbox_verify_invitation",
+                "invitation_sha256":hex::encode(grant.grant_id()), "owner_key":hex::encode(grant.owner_key()),
+                "sender_key":hex::encode(grant.sender_key()), "expires_unix_seconds":grant.validity().expires,
+                "network_used":false})
+        }
         Command::Send(args) => send(&args, socket).await?,
         Command::Receive(args) => receive(&args, socket).await?,
         Command::Fetch(args) => import::fetch(&args, socket).await?,
@@ -249,13 +264,20 @@ async fn enroll(args: &Enrollment, socket: &Path) -> Result<serde_json::Value> {
     )
 }
 
+impl SenderInvitation {
+    fn verify(&self) -> Result<(SigningKey, VerifiedMailboxGrant)> {
+        let signer = self.unlock.signer()?;
+        let grant = read_grant(&self.invitation, &self.owner_key)?;
+        ensure!(
+            signer.verifying_key().as_bytes() == grant.sender_key(),
+            "unlocked identity is not the invitation's allowed sender"
+        );
+        Ok((signer, grant))
+    }
+}
+
 async fn send(args: &Send, socket: &Path) -> Result<serde_json::Value> {
-    let signer = args.unlock.signer()?;
-    let grant = read_grant(&args.invitation, &args.owner_key)?;
-    ensure!(
-        signer.verifying_key().as_bytes() == grant.sender_key(),
-        "unlocked identity is not the invitation's allowed sender"
-    );
+    let (signer, grant) = args.authority.verify()?;
     let (publication, ciphertext) = prepare_message(args, &grant, &signer)?;
     let verified = publication.verify(&signer.verifying_key(), now_seconds()?)?;
     let id = *verified.manifest_id();

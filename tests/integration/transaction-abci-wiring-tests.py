@@ -100,11 +100,18 @@ class TransactionWiring(unittest.TestCase):
         receipt = dict(source_revision=FIXTURE.bank.source_revision(), authorizer_sha256="1" * 64,
                        genesis_ledger="f" * 64, seed_removed=True, reopened_without_seed=True,
                        reserve_sha256=reserve, commit_sha256=commit)
+        reserved = dict(operation_id="a" * 64, reservation_id="a" * 64, command_sha256="4" * 64,
+                        sequence=3, state="Reserved", consensus_certificate=False)
+        cancelled = reserved | dict(operation_id="b" * 64, command_sha256="5" * 64, sequence=4, state="Cancelled")
+        receipt["cancellation"] = dict(released_units=10, receipts=[reserved, cancelled],
+                                       reopened_sha256=cancelled["command_sha256"], retry_height=20)
         inner["bank_authorizer"] = receipt
         self.validate(records, bank_sha256="1" * 64)
         with self.assertRaises(ValueError):
             self.validate(records)
-        for field, wrong in (("source_revision", "e" * 40), ("authorizer_sha256", "e" * 64),
+        for field, wrong in (("cancellation", {}), ("cancellation", receipt["cancellation"] | {"retry_height": 18}),
+                             ("cancellation", receipt["cancellation"] | {"receipts": [reserved, reserved]}),
+                             ("source_revision", "e" * 40), ("authorizer_sha256", "e" * 64),
                              ("genesis_ledger", "5" * 64), ("seed_removed", False),
                              ("reserve_sha256", commit), ("reopened_without_seed", 1), ("extra", "debug")):
             inner["bank_authorizer"] = receipt | {field: wrong}
