@@ -2,7 +2,9 @@
 
 use std::{panic, slice};
 
-use crate::{DpsBridgeError, DpsGeodeticClaimV1, DpsQualityV1, MAX_DPS_INPUT_BYTES, assess_quality};
+use crate::{
+    DpsBridgeError, DpsGeodeticClaimV1, DpsQualityV1, MAX_DPS_INPUT_BYTES, assess_quality,
+};
 
 #[cfg(test)]
 mod tests;
