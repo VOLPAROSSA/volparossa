@@ -252,5 +252,27 @@
         "full_mit_header": true
       }
     ]
+  },
+  {
+    "package": "jsonschema-regex-0.61.2",
+    "url": "https://raw.githubusercontent.com/Stranger6667/jsonschema/0e82636fde8b2afb5e712ede6c261166ea10fc17/LICENSE",
+    "sha256": "117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038",
+    "vcs": {
+      "git": {
+        "sha1": "0e82636fde8b2afb5e712ede6c261166ea10fc17"
+      },
+      "path_in_vcs": "crates/jsonschema-regex"
+    }
+  },
+  {
+    "package": "jsonschema-value-0.61.2",
+    "url": "https://raw.githubusercontent.com/Stranger6667/jsonschema/0e82636fde8b2afb5e712ede6c261166ea10fc17/LICENSE",
+    "sha256": "117829c3ca21efb132d81a44b55363d395ab8eea18526873bc828da4c0e5f038",
+    "vcs": {
+      "git": {
+        "sha1": "0e82636fde8b2afb5e712ede6c261166ea10fc17"
+      },
+      "path_in_vcs": "crates/jsonschema-value"
+    }
   }
 ]
