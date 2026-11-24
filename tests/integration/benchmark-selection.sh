@@ -109,6 +109,12 @@ benchmark_route_diagnostic_prefix() {
         benchmark_diagnostic_prefix=cloud-private-file
     elif [ "${image_snapshot:-no}" = yes ]; then
         benchmark_diagnostic_prefix=image-snapshot
+    elif [ "${paired_mail_peers:-no}" = yes ]; then
+        case ${benchmark_label:-} in
+            paired-mail-peers-enroll|paired-mail-peers-send|paired-mail-peers-receive)
+                benchmark_diagnostic_prefix=$benchmark_label ;;
+            *) return 1 ;;
+        esac
     elif [ "${signal_mailbox:-no}" = yes ] || [ "${paired_mail:-no}" = yes ]; then
         case ${benchmark_label:-} in
             content-mailbox-send|content-mailbox-receive)

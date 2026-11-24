@@ -19,6 +19,7 @@ private_storage_handoff=no
 signal_backup=no
 signal_backup_fragments=no
 paired_mail=no
+paired_mail_peers=no
 signal_mailbox=no
 private_storage_fragments=no
 private_storage_maintenance=no
@@ -97,6 +98,10 @@ print_plan() {
             '  wrong requester, actual fixed-device unavailability, then exhausted one-attempt grant;' \
             '  five-role privacy plus control captures and exact cleanup; no fake firmware or private task;' \
             '  two selected distinct relays are not proof of two-subflow bulk traffic.'
+        return
+    fi
+    if [ "$paired_mail_peers" = yes ]; then
+        printf '%s\n' 'Two independently operated Core Clients, external signed custodians and exact Stalwart readback.'
         return
     fi
     if [ "$paired_mail" = yes ]; then
@@ -815,6 +820,7 @@ while [ "$#" -gt 0 ]; do
             private_storage_handoff=no
             signal_backup=no
             signal_backup_fragments=no
+            paired_mail_peers=no
             paired_mail=no
             signal_mailbox=no
             private_storage_fragments=no
@@ -858,6 +864,7 @@ while [ "$#" -gt 0 ]; do
                 agent-cooperative-browser) scenario=agent-jobs; agent_cooperative_browser=yes; wifi_link=no; uplink_link=no ;;
                 agent-cooperative-browser-discovered) scenario=agent-jobs; agent_cooperative_browser=yes; agent_cooperative_browser_discovered=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup) scenario=content-custody; signal_backup=yes; wifi_link=no; uplink_link=no ;;
+                paired-mail-peers) scenario=content-mailbox; paired_mail_peers=yes; wifi_link=no; uplink_link=no ;;
                 paired-mail) scenario=content-mailbox; paired_mail=yes; wifi_link=no; uplink_link=no ;;
                 signal-mailbox) scenario=content-mailbox; signal_mailbox=yes; wifi_link=no; uplink_link=no ;;
                 signal-backup-fragments) scenario=content-custody; signal_backup=yes; signal_backup_fragments=yes; private_storage_fragments=yes; wifi_link=no; uplink_link=no ;;
@@ -2372,7 +2379,11 @@ cleanup() {
         content_contribution_publish_cleanup || original_status=1
     fi
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
-        content_mailbox_cleanup || original_status=1
+        if [ "$paired_mail_peers" = yes ]; then
+            paired_mail_peers_cleanup || original_status=1
+        else
+            content_mailbox_cleanup || original_status=1
+        fi
         if [ "$paired_mail" = yes ] && command -v paired_mail_cleanup >/dev/null 2>&1; then
             paired_mail_cleanup || original_status=1
         fi
@@ -2693,7 +2704,11 @@ cleanup() {
     elif [ "$scenario" = content-repair ]; then
         content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
-        content_mailbox_finalize_report "$original_status" || original_status=1
+        if [ "$paired_mail_peers" = yes ]; then
+            paired_mail_peers_finalize "$original_status" || original_status=1
+        else
+            content_mailbox_finalize_report "$original_status" || original_status=1
+        fi
         if [ "$paired_mail" = yes ]; then paired_mail_finalize "$original_status" || original_status=1; fi
         if [ "$signal_mailbox" = yes ]; then signal_mailbox_finalize_report "$original_status" || original_status=1; fi
     elif [ "$signal_backup_fragments" = yes ]; then
@@ -3048,6 +3063,12 @@ if [ "$scenario" = content-mailbox ]; then
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-mailbox-smoke.sh
     . "$source_directory/tests/integration/content-mailbox-smoke.sh"
+    if [ "$paired_mail_peers" = yes ]; then
+        # shellcheck source=tests/integration/content-replication-smoke.sh
+        . "$source_directory/tests/integration/content-replication-smoke.sh"
+        # shellcheck source=tests/integration/paired-mail-peers-smoke.sh
+        . "$source_directory/tests/integration/paired-mail-peers-smoke.sh"
+    fi
     if [ "$paired_mail" = yes ]; then
         # shellcheck source=tests/integration/paired-mail-smoke.sh
         . "$source_directory/tests/integration/paired-mail-smoke.sh"
@@ -3528,7 +3549,6 @@ ip -n "$R3" route add 46.162.3.1/32 via 10.241.23.2 dev r3x src 48.164.4.1
 ip -n "$R4" route add 43.159.1.1/32 via 10.241.14.1 dev r4c src 49.165.5.1
 ip -n "$R4" route add 40.156.1.1/32 via 10.241.50.2 dev r4b1 src 49.165.5.1
 ip -n "$R4" route add 41.157.2.1/32 via 10.241.51.2 dev r4b2 src 49.165.5.1
-ip -n "$R4" route add 46.162.3.1/32 via 10.241.24.2 dev r4x src 49.165.5.1
 ip -n "$R5" route add 43.159.1.1/32 via 10.241.15.1 dev r5c src 50.166.6.1
 ip -n "$R5" route add 40.156.1.1/32 via 10.241.52.2 dev r5b1 src 50.166.6.1
 ip -n "$R5" route add 41.157.2.1/32 via 10.241.53.2 dev r5b2 src 50.166.6.1
@@ -3552,7 +3572,21 @@ ip -n "$EXIT_NODE" route add 42.158.0.1/32 via 10.241.20.1 dev xr0 src 46.162.3.
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 48.164.4.1/32 via 10.241.23.1 dev xr3 src 46.162.3.1
-ip -n "$EXIT_NODE" route add 49.165.5.1/32 via 10.241.24.1 dev xr4 src 46.162.3.1
+if [ "$paired_mail_peers" = yes ]; then
+    # R4 is the Mail recipient. Only R3 and R5 serve the Exit in this trial.
+    # Both ends of the unused origin link remain up for the packet observers.
+    for peer_address in 46.162.3.1 10.241.24.2; do
+        ip -n "$R4" route add unreachable "$peer_address/32"
+        if ip -n "$R4" route get "$peer_address" >/dev/null 2>&1; then fail DIRECT_CLIENT_EXIT_REACHABLE; fi
+    done
+    for peer_address in 49.165.5.1 10.241.24.1; do
+        ip -n "$EXIT_NODE" route add unreachable "$peer_address/32"
+        if ip -n "$EXIT_NODE" route get "$peer_address" >/dev/null 2>&1; then fail DIRECT_CLIENT_EXIT_REACHABLE; fi
+    done
+else
+    ip -n "$R4" route add 46.162.3.1/32 via 10.241.24.2 dev r4x src 49.165.5.1
+    ip -n "$EXIT_NODE" route add 49.165.5.1/32 via 10.241.24.1 dev xr4 src 46.162.3.1
+fi
 ip -n "$EXIT_NODE" route add 50.166.6.1/32 via 10.241.25.1 dev xr5 src 46.162.3.1
 ip -n "$EXIT2_NODE" route add 42.158.0.1/32 via 10.241.26.1 dev x2r0 src 51.167.7.1
 for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
@@ -3587,6 +3621,9 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
+elif [ "$paired_mail_peers" = yes ]; then
+    for cr_index in 0 1 2; do content_replication_client_link "$cr_index"; done
+    content_replication_client_filters
 elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
@@ -3771,6 +3808,8 @@ write_config() {
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
     if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
+        content_replication_configure_node
+    elif [ "${paired_mail_peers:-no}" = yes ]; then
         content_replication_configure_node
     fi
     if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
@@ -4271,6 +4310,9 @@ launch_agent() {
         if [ "$scenario" = agent-jobs ]; then
             set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed $WORK/agent-jobs-user"
         fi
+    fi
+    if [ "${paired_mail_peers:-no}" = yes ] && [ "$node" = relay4 ]; then
+        set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
     if [ "$scenario" = content-replication ] || [ "$agent_train_loop" = yes ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-replication-seed"
@@ -7308,7 +7350,7 @@ if [ "$scenario" = content-provider ]; then
     exit 0
 fi
 if [ "$scenario" = content-mailbox ]; then
-    content_mailbox_run
+    if [ "$paired_mail_peers" = yes ]; then paired_mail_peers_run; else content_mailbox_run; fi
     exit 0
 fi
 if [ "$scenario" = agent-jobs ]; then

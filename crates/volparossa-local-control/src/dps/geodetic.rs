@@ -11,7 +11,10 @@
 
 use std::fmt;
 
-use super::MAX_DPS_COMPONENT_METRES;
+use super::{
+    DPS_SERVICE_VERSION, DpsAssessRequest, FrameKind, MAX_DPS_COMPONENT_METRES,
+    NavigationAuthentication, PositionFrame, PositionObservation, SourceKind,
+};
 
 #[cfg(test)]
 mod tests;
@@ -138,6 +141,41 @@ impl Wgs84GeodeticPosition {
 }
 
 impl EcefCoordinates {
+    /// Prepare one unverified position for assessment within five seconds of observation.
+    /// The three IDs bind observation, source and correlation group within this request.
+    /// The caller supplies a three-dimensional comparison radius of unknown confidence.
+    pub fn single_claim_request(
+        self,
+        source: SourceKind,
+        identifiers: [[u8; 16]; 3],
+        comparison_radius_metres: f64,
+        observed_at_unix_ms: u64,
+    ) -> DpsAssessRequest {
+        let frame = PositionFrame {
+            kind: FrameKind::Wgs84Ecef as i32,
+            local_frame_id: vec![],
+        };
+        let [x_metres, y_metres, z_metres] = self.components_metres;
+        DpsAssessRequest {
+            dps_version: DPS_SERVICE_VERSION,
+            desired_frame: Some(frame.clone()),
+            maximum_age_ms: 5000,
+            observations: vec![PositionObservation {
+                observation_id: identifiers[0].to_vec(),
+                source_id: identifiers[1].to_vec(),
+                declared_independence_group: identifiers[2].to_vec(),
+                source_kind: source as i32,
+                frame: Some(frame),
+                x_metres,
+                y_metres,
+                z_metres,
+                supplied_radius_metres: comparison_radius_metres,
+                observed_at_unix_ms,
+                navigation_authentication: NavigationAuthentication::Unknown as i32,
+            }],
+        }
+    }
+
     /// Explicitly access Cartesian `[x, y, z]` metres to populate an existing observation.
     pub const fn components_metres(self) -> [f64; 3] {
         self.components_metres
