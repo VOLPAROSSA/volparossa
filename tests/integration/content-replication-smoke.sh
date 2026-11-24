@@ -14,22 +14,27 @@ content_replication_configure_node() {
     esac
 }
 
+content_replication_client_link() {
+    cr_index=$1
+    case $cr_index in
+        0) cr_namespace=$R0; cr_public=42.158.0.1; cr_segment=90 ;;
+        1) cr_namespace=$R1; cr_public=44.160.1.1; cr_segment=94 ;;
+        2) cr_namespace=$R2; cr_public=45.161.2.1; cr_segment=92 ;;
+    esac
+    link_nodes "$R4" "ar$cr_index" "10.241.$cr_segment.1/30" \
+        "$cr_namespace" "r${cr_index}a" "10.241.$cr_segment.2/30"
+    ip -n "$R4" route add "$cr_public/32" via "10.241.$cr_segment.2" \
+        dev "ar$cr_index" src 49.165.5.1
+    ip -n "$cr_namespace" route add 49.165.5.1/32 via "10.241.$cr_segment.1" \
+        dev "r${cr_index}a" src "$cr_public"
+}
+
 content_replication_extend_network() {
     # Three candidates provide a distinct control relay plus two actual data relays.
     # The new client legs carry real WG/control packets; the supplier links permit only
     # generic UDP41000 discovery. All links and rules die with their registered namespaces.
     for cr_index in 0 1 2; do
-        case $cr_index in
-            0) cr_namespace=$R0; cr_public=42.158.0.1; cr_segment=90 ;;
-            1) cr_namespace=$R1; cr_public=44.160.1.1; cr_segment=94 ;;
-            2) cr_namespace=$R2; cr_public=45.161.2.1; cr_segment=92 ;;
-        esac
-        link_nodes "$R4" "ar$cr_index" "10.241.$cr_segment.1/30" \
-            "$cr_namespace" "r${cr_index}a" "10.241.$cr_segment.2/30"
-        ip -n "$R4" route add "$cr_public/32" via "10.241.$cr_segment.2" \
-            dev "ar$cr_index" src 49.165.5.1
-        ip -n "$cr_namespace" route add 49.165.5.1/32 via "10.241.$cr_segment.1" \
-            dev "r${cr_index}a" src "$cr_public"
+        content_replication_client_link "$cr_index"
         cr_segment=$((cr_segment + 1))
         link_nodes "$cr_namespace" "rp$cr_index" "10.241.$cr_segment.1/30" \
             "$R5" "pr$cr_index" "10.241.$cr_segment.2/30"
@@ -63,6 +68,10 @@ table inet vpa_replication_control_$cr_index {
 RULES
     done
     done
+    content_replication_client_filters
+}
+
+content_replication_client_filters() {
     # Isolate this fixture's three-candidate graph before any agent starts. The primary Client
     # cannot use the later replica as its control relay or contact either supplier directly.
     ip netns exec "$CLIENT" nft -f - <<'RULES'

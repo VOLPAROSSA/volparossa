@@ -51,6 +51,7 @@ on:
           - content-replication
           - content-mailbox
           - paired-mail
+          - paired-mail-peers
           - dns-cache
           - agent-training
           - agent-owner-priority
@@ -159,7 +160,7 @@ jobs:
           "private-storage-peer", "private-storage-replicas", "signal-backup",
           "signal-backup-fragments", "signal-mailbox", "private-storage-handoff", "private-storage-fragments",
           "private-storage-maintenance", "image-snapshot", "cloud-private-file",
-          "cloud-private-upload", "content-repair", "content-replication", "content-mailbox", "paired-mail",
+          "cloud-private-upload", "content-repair", "content-replication", "content-mailbox", "paired-mail", "paired-mail-peers",
           "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel",
           "agent-private-task", "agent-private-code", "agent-private-conversation",
           "agent-native-coding", "agent-private-browser", "browser-network", "agent-reasoning",
@@ -286,7 +287,10 @@ jobs:
           sh -n tests/integration/content-mailbox-smoke.sh
           python3 -B tests/integration/test-content-mailbox-smoke.py
           sh -n tests/integration/paired-mail-smoke.sh
+          sh -n tests/integration/paired-mail-peers-smoke.sh
           python3 -B tests/integration/test-paired-mail-smoke.py
+          python3 -B tests/integration/test-paired-mail-peer-capture.py
+          python3 -B tests/integration/test-paired-mail-peers-smoke.py
           sh -n tests/integration/content-replication-smoke.sh
           python3 -B tests/integration/test-content-replication-smoke.py
           python3 -B tests/integration/test-content-replication-capture.py
@@ -537,7 +541,7 @@ jobs:
           printf 'VOLPAROSSA_ALPHA_IMAGE=%s\n' "$image" >>"$GITHUB_ENV"
 
       - name: Open the original native Mail QA ZIP and bind the tested guest runtime
-        if: inputs.scenario == 'paired-mail'
+        if: inputs.scenario == 'paired-mail' || inputs.scenario == 'paired-mail-peers'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I -B tests/integration/paired-mail-bundle.py fetch "$RUNNER_TEMP/paired-mail-transfer.tar"
@@ -562,7 +566,7 @@ jobs:
           map_args=()
           if [[ $MAP_TRAFFIC == true ]]; then map_args=(--map-traffic); fi
           mail_args=()
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" = paired-mail; then
+          if [[ $VOLPAROSSA_ALPHA_SCENARIO == paired-mail || $VOLPAROSSA_ALPHA_SCENARIO == paired-mail-peers ]]; then
             mail_args=(--paired-mail-bundle "$RUNNER_TEMP/paired-mail-transfer.tar")
           fi
           package_args=()
@@ -1958,18 +1962,25 @@ jobs:
             "$(jq -r '.host_state.after_sha256' "$report")"
 
       - name: Verify offline paired Mail, exact Stalwart readback and both signed ACKs
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'paired-mail'
+        if: always() && (env.VOLPAROSSA_ALPHA_SCENARIO == 'paired-mail' || env.VOLPAROSSA_ALPHA_SCENARIO == 'paired-mail-peers')
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           output="$VOLPAROSSA_ALPHA_OUTPUT"
-          python3 -I -B tests/integration/paired-mail-smoke.py report "$output/paired-mail-smoke.json" "$GITHUB_SHA"
+          scenario="$VOLPAROSSA_ALPHA_SCENARIO"
+          report="$output/$scenario-smoke.json"
+          python3 -I -B "tests/integration/$scenario-smoke.py" report "$report" "$GITHUB_SHA"
+          if [[ $scenario == paired-mail-peers ]]; then
+            host_state_filter='.host_state[$side]'
+          else
+            host_state_filter='.mailbox.host_state[$side]'
+          fi
           jq -e --slurpfile pin tests/integration/paired-mail-pins.json '.mail_revision == $pin[0].mail_revision and .zip_sha256 == $pin[0].actions.zip_sha256 and .runtime_sha256 == $pin[0].actions.runtime_sha256' "$output/paired-mail-supply.json"
           for phase in before after; do
             actual=$(sha256sum "$output/host-state-$phase.json" | cut -d" " -f1)
-            test "$actual" = "$(jq -r --arg side "${phase}_sha256" '.mailbox.host_state[$side]' "$output/paired-mail-smoke.json")"
+            test "$actual" = "$(jq -r --arg side "${phase}_sha256" "$host_state_filter" "$report")"
           done
 
       - name: Require actual mailbox deposits inbox decryption and acknowledgement

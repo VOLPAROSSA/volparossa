@@ -86,6 +86,24 @@ content_mailbox_identity() {
         2>"$WORK/content-mailbox-$mailbox_identity_role-public.err" || fail MAILBOX_PUBLIC_KEY_FAILED
 }
 
+content_mailbox_rebind_control() {
+    if [ "$provider_control_peer" != "$mailbox_previous_control" ]; then
+        # Remove only the exact fixture-owned control links after the previous capture drained.
+        # Their peer ends and /32 routes disappear with the interfaces; other links remain.
+        for mailbox_link in 0 1; do
+            ip -n "$provider_control_ns" link del "cp$mailbox_link" || fail MAILBOX_CONTROL_LINK_CLEANUP_FAILED
+            ip netns exec "$provider_control_ns" nft delete table inet "vpa_content_control_$mailbox_link" \
+                || fail MAILBOX_CONTROL_FILTER_CLEANUP_FAILED
+            if [ "$mailbox_link" = 0 ]; then mailbox_old_node=$provider_node_a
+            else mailbox_old_node=$provider_node_b; fi
+            content_provider_node "$mailbox_old_node" || fail MAILBOX_PROVIDER_INVALID
+            ip netns exec "$provider_ns" nft delete table inet "vpa_content_control_$mailbox_link" \
+                || fail MAILBOX_CONTROL_FILTER_CLEANUP_FAILED
+        done
+        content_provider_control_underlay
+    fi
+}
+
 content_mailbox_route() {
     mailbox_route_phase=$1
     benchmark_select_route "content-mailbox-$mailbox_route_phase" mptcp || fail MAILBOX_ROUTE_UNAVAILABLE
@@ -106,21 +124,7 @@ content_mailbox_route() {
         jq -e --arg peer "$provider_control_peer" --arg a "$provider_node_a" --arg b "$provider_node_b" \
             '.[$a] != $peer and .[$b] != $peer' "$WORK/a01-expected-peers.json" >/dev/null \
             || fail MAILBOX_RECEIVER_CONTROL_IS_PROVIDER
-        if [ "$provider_control_peer" != "$mailbox_previous_control" ]; then
-            # Remove only the exact fixture-owned control links after the previous capture drained.
-            # Their peer ends and /32 routes disappear with the interfaces; other links remain.
-            for mailbox_link in 0 1; do
-                ip -n "$provider_control_ns" link del "cp$mailbox_link" || fail MAILBOX_CONTROL_LINK_CLEANUP_FAILED
-                ip netns exec "$provider_control_ns" nft delete table inet "vpa_content_control_$mailbox_link" \
-                    || fail MAILBOX_CONTROL_FILTER_CLEANUP_FAILED
-                if [ "$mailbox_link" = 0 ]; then mailbox_old_node=$provider_node_a
-                else mailbox_old_node=$provider_node_b; fi
-                content_provider_node "$mailbox_old_node" || fail MAILBOX_PROVIDER_INVALID
-                ip netns exec "$provider_ns" nft delete table inet "vpa_content_control_$mailbox_link" \
-                    || fail MAILBOX_CONTROL_FILTER_CLEANUP_FAILED
-            done
-            content_provider_control_underlay
-        fi
+        content_mailbox_rebind_control
     fi
     mailbox_previous_control=$provider_control_peer
     mailbox_phase_context=$(jq -er '.route_context_id' "$WORK/content-mailbox-$mailbox_route_phase-selection.json")
@@ -173,24 +177,7 @@ content_mailbox_phase_finish() {
     fi
 }
 
-content_mailbox_run() {
-    PHASE=content-mailbox-prepare
-    mailbox_control_gid=$(getent group volparossa-users | cut -d: -f3)
-    case $mailbox_control_gid in ''|*[!0-9]*) fail MAILBOX_CONTROL_GROUP_INVALID ;; esac
-    [ "$mailbox_control_gid" != "$AGENT_GID" ] || fail MAILBOX_CONTROL_GROUP_INVALID
-    mailbox_user=$WORK/client-fixtures/mailbox
-    if [ -e "$mailbox_user" ] || [ -L "$mailbox_user" ]; then fail MAILBOX_USER_STATE_NOT_NEW; fi
-    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$mailbox_user"
-    content_mailbox_identity sender
-    content_mailbox_identity owner
-    mailbox_sender=$(jq -er '.identity_public_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-mailbox-sender-public.json")
-    mailbox_owner=$(jq -er '.identity_public_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-mailbox-owner-public.json")
-    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
-        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/content-mailbox-smoke.py" input "$mailbox_user/sender/input.bin" \
-        || fail MAILBOX_INPUT_FAILED
-    content_mailbox_route send
-    mailbox_sender_context=$mailbox_phase_context
+content_mailbox_open_providers() {
     for mailbox_node in "$provider_node_a" "$provider_node_b"; do
         # Independently configured permanent fixture identity, never a key inferred from discovery.
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
@@ -211,6 +198,44 @@ content_mailbox_run() {
     done
     mailbox_key_a=$(jq -er '.identity_public_key_hex' "$WORK/content-mailbox-$provider_node_a-public.json")
     mailbox_key_b=$(jq -er '.identity_public_key_hex' "$WORK/content-mailbox-$provider_node_b-public.json")
+}
+
+content_mailbox_reopen_provider() {
+    PHASE=content-mailbox-provider-reopen
+    mailbox_inode=$(stat -Lc '%i' "$WORK/state-$provider_node_b/mailbox-cache")
+    content_mailbox_cli "$provider_node_b" content stop >"$WORK/content-mailbox-restart-stop.json" \
+        2>"$WORK/content-mailbox-restart-stop.err" || fail MAILBOX_PROVIDER_STOP_FAILED
+    content_mailbox_endpoint "$provider_node_b" || fail MAILBOX_PROVIDER_INVALID
+    [ -z "$(ip netns exec "$provider_ns" ss -H -ltn 'sport = :18080')" ] || fail MAILBOX_STOPPED_LISTENER_PRESENT
+    content_mailbox_serve "$provider_node_b" restart-reopen yes
+    jq -n --arg node "$provider_node_b" --argjson before "$mailbox_inode" \
+        --argjson after "$(stat -Lc '%i' "$WORK/state-$provider_node_b/mailbox-cache")" \
+        --slurpfile stop "$WORK/content-mailbox-restart-stop.json" \
+        --slurpfile reopen "$WORK/content-mailbox-restart-reopen.json" \
+        '{provider_node:$node,cache_inode_before:$before,cache_inode_after:$after,
+          cache_mode:"0700",listener_absent_between:true,reuse_cache:true,stop:$stop[0],reopen:$reopen[0]}' \
+        >"$WORK/content-mailbox-restart.json"
+}
+
+content_mailbox_run() {
+    PHASE=content-mailbox-prepare
+    mailbox_control_gid=$(getent group volparossa-users | cut -d: -f3)
+    case $mailbox_control_gid in ''|*[!0-9]*) fail MAILBOX_CONTROL_GROUP_INVALID ;; esac
+    [ "$mailbox_control_gid" != "$AGENT_GID" ] || fail MAILBOX_CONTROL_GROUP_INVALID
+    mailbox_user=$WORK/client-fixtures/mailbox
+    if [ -e "$mailbox_user" ] || [ -L "$mailbox_user" ]; then fail MAILBOX_USER_STATE_NOT_NEW; fi
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$mailbox_user"
+    content_mailbox_identity sender
+    content_mailbox_identity owner
+    mailbox_sender=$(jq -er '.identity_public_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-mailbox-sender-public.json")
+    mailbox_owner=$(jq -er '.identity_public_key_hex | select(test("^[0-9a-f]{64}$"))' "$WORK/content-mailbox-owner-public.json")
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/content-mailbox-smoke.py" input "$mailbox_user/sender/input.bin" \
+        || fail MAILBOX_INPUT_FAILED
+    content_mailbox_route send
+    mailbox_sender_context=$mailbox_phase_context
+    content_mailbox_open_providers
     content_mailbox_cli client content mailbox invite --sender-key "$mailbox_sender" \
         --provider-key "$mailbox_key_a" --provider-key "$mailbox_key_b" \
         --invitation "$mailbox_user/invitation.bin" --max-bytes 4194304 --max-messages 4 --lifetime-seconds 3600 \
@@ -249,20 +274,7 @@ content_mailbox_run() {
     fi
     rm -- "$mailbox_user/sender-manifest.bin" || fail MAILBOX_SENDER_MANIFEST_REMOVAL_FAILED
     benchmark_disconnect_route content-mailbox-sender || fail MAILBOX_SENDER_ROUTE_CLEANUP_FAILED
-    PHASE=content-mailbox-provider-reopen
-    mailbox_inode=$(stat -Lc '%i' "$WORK/state-$provider_node_b/mailbox-cache")
-    content_mailbox_cli "$provider_node_b" content stop >"$WORK/content-mailbox-restart-stop.json" \
-        2>"$WORK/content-mailbox-restart-stop.err" || fail MAILBOX_PROVIDER_STOP_FAILED
-    content_mailbox_endpoint "$provider_node_b" || fail MAILBOX_PROVIDER_INVALID
-    [ -z "$(ip netns exec "$provider_ns" ss -H -ltn 'sport = :18080')" ] || fail MAILBOX_STOPPED_LISTENER_PRESENT
-    content_mailbox_serve "$provider_node_b" restart-reopen yes
-    jq -n --arg node "$provider_node_b" --argjson before "$mailbox_inode" \
-        --argjson after "$(stat -Lc '%i' "$WORK/state-$provider_node_b/mailbox-cache")" \
-        --slurpfile stop "$WORK/content-mailbox-restart-stop.json" \
-        --slurpfile reopen "$WORK/content-mailbox-restart-reopen.json" \
-        '{provider_node:$node,cache_inode_before:$before,cache_inode_after:$after,
-          cache_mode:"0700",listener_absent_between:true,reuse_cache:true,stop:$stop[0],reopen:$reopen[0]}' \
-        >"$WORK/content-mailbox-restart.json"
+    content_mailbox_reopen_provider
     content_mailbox_route receive
     [ "$mailbox_phase_context" != "$mailbox_sender_context" ] || fail MAILBOX_RECEIVER_ROUTE_NOT_FRESH
     PHASE=content-mailbox-receive

@@ -92,6 +92,53 @@ class SignalBackupWiring(unittest.TestCase):
         self.assertIn("host-state-before.json", gate)
         self.assertIn("host-state-after.json", gate)
 
+    def test_complete_mail_archive_allows_larger_independent_client_report_only(self):
+        start = DRIVER.index('    if [ "$scenario" = paired-mail ]', DRIVER.index("# The exact closed receipt files"))
+        end = DRIVER.index('\nelif [ "$scenario" = private-storage-fragments ]', start)
+        for scenario, name, size, accepted in (
+            ("paired-mail-peers", "paired-mail-peers-smoke.json", 262144, True),
+            ("paired-mail-peers", "paired-mail-peers-smoke.json", 262145, False),
+            ("paired-mail-peers", "paired-mail-peers-send.json", 131073, False),
+            ("paired-mail", "paired-mail-smoke.json", 131073, False),
+        ):
+            with self.subTest(name=name, size=size), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                published = root / "alpha-output"
+                published.mkdir()
+                payload = b"x" * size
+                (published / name).write_bytes(payload)
+                (published / "private.key").write_bytes(b"PRIVATE")
+                script = 'scenario=$1\n' + DRIVER[start:end].replace("/home/vpci", directory)
+                result = subprocess.run(["sh", "-eu", "-c", script, "guest-export", scenario],
+                                        cwd=HERE.parents[1], capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                archive = root / "alpha-output.tar.gz"
+                self.assertEqual(archive.exists(), accepted)
+                if accepted:
+                    with tarfile.open(archive) as bundle:
+                        self.assertEqual(bundle.getnames(), [name])
+                        self.assertEqual(bundle.extractfile(name).read(), payload)
+
+    def test_incomplete_mail_archive_preserves_only_published_aggregate_above_default_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, opt = root / "home", root / "opt"
+            published = home / "alpha-output"
+            work = opt / ("va." + "a" * 32 + ".abc123")
+            published.mkdir(parents=True)
+            work.mkdir(parents=True)
+            name = "paired-mail-peers-smoke.json"
+            component = "paired-mail-peers-send.json"
+            payload = b"prefix" + bytes(143259)
+            for path in (published / name, published / component, work / name):
+                path.write_bytes(payload)
+            archive = MODULE["collect"](home, opt, "a" * 40, "paired-mail-peers", 1,
+                                        root / "no-cgroups", root / "no-proc")
+            with tarfile.open(archive) as bundle:
+                self.assertEqual(bundle.extractfile(f"published/{name}").read(), payload)
+                for path in (f"published/{component}.tail", f"work-1/{name}.tail"):
+                    self.assertEqual(bundle.extractfile(path).read(), payload[-131072:])
+
     def test_fragment_variant_has_separate_pins_proof_and_closed_failure_surface(self):
         fixture = runpy.run_path(str(HERE / "signal-backup-fragments-smoke.py"))
         extras = {"signal-backup-provision.json", "host-state-before.json", "host-state-after.json",
