@@ -276,3 +276,46 @@ fn assert_restored_site(root: &Path, key: &[u8; 32], candidate: &str, first_html
     assert_eq!(site.asset("/index.html").unwrap().bytes, first_html);
     assert!(!root.join("absent.sock").exists());
 }
+
+#[test]
+fn independent_terminal_reviews_and_signs_the_displayed_site_snapshot() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let identity = IdentityStore::new(root.join("identity.key"))
+        .create(&Passphrase::new("owner-review-fixture-password").unwrap())
+        .unwrap();
+    let key = identity.ed25519_public_key_bytes().unwrap();
+    let digest = pack(root, "first", "tested.vps", b"<h1>Reviewed page</h1>");
+    let status = Command::new("python3")
+        .current_dir(root)
+        .args([
+            "-I",
+            "-B",
+            "-c",
+            include_str!("studio_site_restore/owner_review.py"),
+            env!("CARGO_BIN_EXE_volparossa"),
+            &hex::encode(key),
+            &digest,
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let signed = volparossa_content::SignedManifest::decode(
+        &fs::read(root.join("reviewed.manifest")).unwrap(),
+    )
+    .unwrap();
+    let publisher = ed25519_dalek::VerifyingKey::from_bytes(&key).unwrap();
+    let verified = signed
+        .verify(
+            &publisher,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+    assert_eq!(hex::encode(verified.object_sha256()), digest);
+    assert_eq!(verified.metadata().revision, 5);
+    assert_eq!(verified.metadata().name, "site-review-fixture");
+    assert_eq!(verified.metadata().content_type, SITE_CONTENT_TYPE);
+}

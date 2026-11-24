@@ -21,7 +21,16 @@ The distinct `local_site_preview_ready` and `local_site_preview_closed` reports 
 
 An explicit `volparossa content site pack --directory export --output site.bundle --review-receipt` returns a separate schema-1 `site_pack_preparation` receipt. The normal pack receipt stays unchanged when the flag is absent. The review receipt binds the exact bundle SHA-256 and byte count to a canonical inventory of asset paths, content types, sizes and SHA-256 digests. The packer hashes each asset as it reads it and hashes the exact bytes it writes to the temporary bundle. It checks the bounded receipt before publishing the output and returns it after the file and directory have been synchronized.
 
-This receipt contains no absolute input/output path, identity or signing secret. It explicitly requires review and grants no native consent, signature, publisher authority, network publication or permission. A future native review controller must independently bind publisher, name, revision, expiry and an explicit user decision before using the existing checked publication command. Editor/MCP requests and this preparation receipt cannot approve publication.
+This receipt contains no absolute input/output path, identity or signing secret. It explicitly requires review and grants no native consent, signature, publisher authority, network publication or permission. An owner can review the actual bundle in a separate terminal before using the encrypted identity. Keep the editor, its tools and remote workers outside this terminal and the identity store.
+
+```sh
+volparossa content publish --review-site --input site.bundle \
+  --expected-input-sha256 "$REVIEWED_BUNDLE_SHA256" --expected-publisher-key "$PUBLISHER_KEY" \
+  --identity "$IDENTITY" --name "$SITE_NAME" --revision 1 --lifetime-seconds 3600 \
+  --cache ./signed-site-cache --manifest ./publication.pb
+```
+
+Core takes one bounded snapshot and derives its own inventory. The terminal displays each asset's escaped path, MIME type, byte count and SHA-256, plus the publisher, site name, revision, bundle digest, absolute expiry and local output paths. Enter cancels. Typing the displayed confirmation starts the identity unlock. The command signs the same snapshot and reports its reviewed digest. Signed content stays in the local cache until a separate contribution. The terminal and local OS must be trusted by the owner. The terminal receipt records the interaction and carries no independent proof of the operator's identity.
 
 ## Hosted proof
 

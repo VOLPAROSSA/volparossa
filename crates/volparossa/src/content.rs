@@ -301,6 +301,9 @@ pub(crate) struct Publish {
     /// Require these exact reviewed bytes; SHA-256 is a byte binding, not publication authority.
     #[arg(long, value_parser = parse_input_sha256)]
     expected_input_sha256: Option<[u8; 32]>,
+    /// Review the site inventory and release in your controlling terminal before offline signing.
+    #[arg(long, requires = "expected_publisher_key", conflicts_with_all = ["contribute", "passphrase_file"])]
+    review_site: bool,
     /// New private cache directory, unless --reuse-cache opens an existing owned cache.
     #[arg(long)]
     cache: PathBuf,
@@ -321,7 +324,11 @@ pub(crate) struct Publish {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     revision: u64,
     /// Authenticated media type, such as application/octet-stream.
-    #[arg(long, default_value = "application/octet-stream")]
+    #[arg(
+        long,
+        default_value = "application/octet-stream",
+        default_value_if("review_site", "true", volparossa_content::site::SITE_CONTENT_TYPE)
+    )]
     content_type: String,
     /// Signed lifetime in seconds (at most 31 days); reading never extends validity.
     #[arg(long, default_value_t = 86_400, value_parser = clap::value_parser!(u64).range(1..=MAX_VALIDITY_SECONDS))]
@@ -389,6 +396,7 @@ impl Publish {
         Self {
             input: args.input,
             expected_input_sha256: None,
+            review_site: false,
             cache: args.cache,
             reuse_cache: args.reuse_cache,
             contribute: false,
@@ -412,6 +420,7 @@ impl Publish {
         Self {
             input: args.input,
             expected_input_sha256: None,
+            review_site: false,
             cache: args.cache,
             reuse_cache: args.reuse_cache,
             contribute: false,
@@ -803,15 +812,22 @@ fn publish(args: &Publish) -> Result<Published> {
     ensure_new_output(&args.manifest)?;
     let input = open_regular(&args.input, MAX_OBJECT_BYTES)?;
     let length = input.metadata()?.len();
-    let mut input = reviewed_input::Input::new(input, length, args.expected_input_sha256)?;
-    let now = now_seconds()?;
-    let expires = args.expiry(now)?;
+    let (mut input, now, expires) = if args.review_site {
+        site::review::prepare(args, input, length)?
+    } else {
+        let input = reviewed_input::Input::new(input, length, args.expected_input_sha256)?;
+        let now = now_seconds()?;
+        (input, now, args.expiry(now)?)
+    };
     let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
     if args
         .expected_publisher_key
         .is_some_and(|expected| expected != signer.verifying_key())
     {
         bail!("content publisher does not match the expected publisher key");
+    }
+    if args.review_site && now_seconds()? >= expires {
+        bail!("site signing authorization expired during identity unlock");
     }
     let expected_public = signer.verifying_key().to_bytes();
     let mut manifest_output = tempfile::NamedTempFile::new_in(output_parent(&args.manifest))?;
@@ -847,7 +863,7 @@ fn publish(args: &Publish) -> Result<Published> {
         .persist_noclobber(&args.manifest)
         .map_err(|error| error.error)
         .context("cannot publish new manifest without overwriting an existing entry")?;
-    let report = serde_json::json!({
+    let mut report = serde_json::json!({
         "operation": "offline_content_publish",
         "network_publication": false,
         "manifest": args.manifest,
@@ -861,6 +877,10 @@ fn publish(args: &Publish) -> Result<Published> {
         "chunks": verified.chunks().len(),
         "expires_unix_seconds": expires,
     });
+    if args.review_site {
+        report["terminal_reviewed_bundle_sha256"] =
+            serde_json::json!(hex::encode(verified.object_sha256()));
+    }
     Ok(Published {
         report,
         signed: manifest,
@@ -1535,6 +1555,7 @@ mod tests {
         let mut publish_args = Publish {
             input: root.join("input.bin"),
             expected_input_sha256: None,
+            review_site: false,
             cache: root.join("publisher-cache"),
             reuse_cache: false,
             contribute: false,

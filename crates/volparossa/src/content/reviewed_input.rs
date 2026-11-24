@@ -23,12 +23,21 @@ enum Source {
 }
 
 impl Input {
-    pub(super) fn new(mut file: File, length: u64, expected: Option<[u8; 32]>) -> Result<Self> {
+    pub(super) fn new(file: File, length: u64, expected: Option<[u8; 32]>) -> Result<Self> {
         let Some(expected) = expected else {
             return Ok(Self {
                 source: Source::Streaming(file),
             });
         };
+        Self::with_review(file, length, Some(expected), |_, _| Ok(())).map(|(input, ())| input)
+    }
+
+    pub(super) fn with_review<T>(
+        mut file: File,
+        length: u64,
+        expected: Option<[u8; 32]>,
+        review: impl FnOnce(&[u8], [u8; 32]) -> Result<T>,
+    ) -> Result<(Self, T)> {
         if length > MAX_OBJECT_BYTES {
             bail!("content input snapshot exceeds the object size limit");
         }
@@ -49,13 +58,18 @@ impl Input {
         {
             bail!("content input snapshot exceeds its declared length");
         }
-        if <[u8; 32]>::from(Sha256::digest(&*bytes)) != expected {
+        let digest: [u8; 32] = Sha256::digest(&*bytes).into();
+        if expected.is_some_and(|value| value != digest) {
             bail!("content input does not match the expected SHA-256");
         }
+        let decision = review(&bytes, digest)?;
         // Only the snapshot survives this branch: signing cannot reread a mutable source file.
-        Ok(Self {
-            source: Source::Reviewed { bytes, offset: 0 },
-        })
+        Ok((
+            Self {
+                source: Source::Reviewed { bytes, offset: 0 },
+            },
+            decision,
+        ))
     }
 }
 

@@ -236,6 +236,23 @@ impl SiteBundle {
         })
     }
 
+    /// Inspect every asset in canonical order without copying the caller's encoded payload.
+    /// The complete index and all ranges are validated before yielding the first asset.
+    pub fn inspect(
+        encoded: &[u8],
+    ) -> Result<impl ExactSizeIterator<Item = SiteAssetSource<&[u8]>>, SiteError> {
+        let assets = Self::asset_ranges(encoded, encoded.len())?;
+        Ok(assets.into_iter().map(move |asset| {
+            let reader = &encoded[asset.bytes];
+            SiteAssetSource {
+                path: asset.path,
+                content_type: asset.content_type,
+                length: reader.len() as u64,
+                reader,
+            }
+        }))
+    }
+
     /// Number of checked assets, including the HTML entry point.
     #[must_use]
     pub fn asset_count(&self) -> usize {
