@@ -56,7 +56,23 @@ system value; these priorities impose no fixed application/model/agent order.
 
 The owner-designated central build chat maintains the current work across repositories. The organization queue links to the open work and the protected project goal records its mandate. For local checkout paths, use `git worktree list` in the selected repository. [Organization maintenance](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md) · [Project goal](development/GOAL.md)
 
-The automatic upload candidate continues in Core #279. The resident model trials retain their source-specific workflow revisions and original outcomes. The October index preserves the earlier branches, machine-local paths and failed trials as historical evidence. [Upload candidate](https://github.com/VOLPAROSSA/volparossa/pull/279) · [Resident model evidence](status/applications.md#protected-compute-evidence) · [October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies)
+### Development pause on 24 November 2026
+
+The owner paused functional development in the central build session. The full
+[development goal](development/GOAL.md) remains open. The rows below identify
+the source-specific checks and outstanding work at this checkpoint.
+
+| Integration | Verified observation and resumption point |
+| --- | --- |
+| Storage, Image and Cloud | Image and Cloud each committed eight copies in run 45408914106. On the follow-up the client restarted and received `NO_ELIGIBLE_PATHS` on twelve route selections before reaching either app. Restore, repair, deletion and zero provider usage still need a joined result. [Storage evidence](https://github.com/VOLPAROSSA/volparossa/pull/467) · [Latest failure and resumption point](https://github.com/VOLPAROSSA/volparossa/pull/279#issuecomment-7136333557) |
+| Mail | Independent clients delivered all 90,139 MIME bytes into Stalwart and acknowledged both mailbox providers on Core `ec90f352`. The guest exited successfully, but the host truncated the aggregate. The follow-up preserves the complete named file and its original receipts. [Independent-client PR and latest result](https://github.com/VOLPAROSSA/volparossa/pull/462) |
+| Studio | Two fresh native WebKit processes reopened the authored site. All five exported files matched the original Silex export. Core signed the nine-chunk bundle and a separate local browser read it. Follow the protected-main trial for independent retrieval of this export with the publisher offline. [Native producer](https://github.com/VOLPAROSSA/volparossa-studio/pull/20) |
+| Map and DPS | An installed Android 15 x86-64 app passed four foreground position tests and both ordinary offline routes on Core `b6fa12bc`. Bind a subsequent emulator run to the final integrated Core revision. Physical accuracy measurements remain open. [Original result](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/45424320264) · [Core ABI](https://github.com/VOLPAROSSA/volparossa/pull/464) |
+| Browser and Code | Browser's coordinator assembled a hierarchical answer but its original run confirmed only 21 of 23 terminal receipts. The latest VSCodium planner observed one local model worker and rejected an unknown tool before public delegation. [Browser ownership and latest run](https://github.com/VOLPAROSSA/volparossa/pull/422) · [Original planner diagnostics](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45425334685) |
+| Shared speech | Whisper tiny transcribed both original synthetic clips, with four word errors out of eight on one and one out of eight on the other. Only the second met the per-clip target. A separately initiated small-model trial uses the same clips and limit. The synthesis draft has a compiler correction and still needs execution. [Recognition trials](https://github.com/VOLPAROSSA/volparossa/pull/466) · [Synthesis draft](https://github.com/VOLPAROSSA/volparossa/pull/468) |
+
+Earlier sources, machine-local paths and original failed trials remain in the
+[October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies).
 
 ## Detailed trial records
 
