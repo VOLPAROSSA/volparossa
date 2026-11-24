@@ -121,11 +121,12 @@ pub(super) async fn deposit_retained(
             retained.journal.last_state != Some(ReceiptState::Deleted as i32),
             "this archive was explicitly deleted; resume cannot resurrect it"
         );
-        let initial = observe_or_reserve(socket, grant, signer, retained).await?;
+        let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
+        let initial =
+            observe_or_reserve(socket, grant, signer, retained, &mut retry_available).await?;
         if initial == ReceiptState::Committed {
             return Ok(());
         }
-        let mut retry_available = MAINTENANCE_TURN.try_with(|_| ()).is_err();
         let mut offset = retained.journal.last_stored_bytes;
         ensure!(
             offset <= length && (offset == length || offset % CHUNK_BYTES as u64 == 0),
@@ -219,7 +220,7 @@ pub(super) async fn existing(
     let grant = retained
         .journal
         .grant(&args.provider_key, &signer.verifying_key())?;
-    // Only explicit deposit --resume may repeat Reserve to reconcile a lost first reply.
+    // Only deposit may repeat Reserve to reconcile a lost first reply.
     // Progress, renewal and deletion must not allocate an unseen initial reservation.
     let (name, operation) = if delete {
         ("delete", StorageOperation::Delete)
@@ -377,14 +378,7 @@ async fn exchange_with_recovery(
     if operation == StorageOperation::Finalize
         && target.lease_id.is_some()
         && grant.limits().rights.allows(StorageOperation::Progress)
-        && error
-            .downcast_ref::<wire::WireError>()
-            .is_some_and(|failure| {
-                matches!(failure, wire::WireError::Io(_) | wire::WireError::Timeout)
-            })
-        && error
-            .downcast_ref::<super::outcome::AgentOutcome>()
-            .is_some_and(super::outcome::AgentOutcome::interrupted_reading_receipt)
+        && interrupted_receipt(&error)
     {
         *retry_available = false;
         let progress = remote(
@@ -404,11 +398,21 @@ async fn exchange_with_recovery(
     Err(error)
 }
 
+fn interrupted_receipt(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<wire::WireError>()
+        .is_some_and(|failure| matches!(failure, wire::WireError::Io(_) | wire::WireError::Timeout))
+        && error
+            .downcast_ref::<super::outcome::AgentOutcome>()
+            .is_some_and(super::outcome::AgentOutcome::interrupted_reading_receipt)
+}
+
 async fn observe_or_reserve(
     socket: &Path,
     grant: &VerifiedStorageGrant,
     signer: &SigningKey,
     retained: &mut LockedJournal,
+    retry_available: &mut bool,
 ) -> Result<ReceiptState> {
     let operation = if retained.journal.lease.is_some() {
         StorageOperation::Progress
@@ -421,16 +425,27 @@ async fn observe_or_reserve(
         .journal
         .target()
         .context(Boundary::new(operation, Stage::JournalOpen))?;
-    let reply = remote_with_journal(
-        socket,
-        grant,
-        signer,
-        target,
-        operation,
-        &[],
-        Some(retained),
-    )
-    .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(REMOTE_TIMEOUT_SECONDS);
+    let exchange = async |journal: &mut LockedJournal| {
+        remote_with_journal(socket, grant, signer, target, operation, &[], Some(journal)).await
+    };
+    let reply = match exchange(retained).await {
+        Err(error)
+            if *retry_available
+                && matches!(operation, StorageOperation::Reserve { .. })
+                && interrupted_receipt(&error)
+                && tokio::time::Instant::now() < deadline =>
+        {
+            // A fresh challenge for the identical reservation returns its existing lease if
+            // the provider received the first request. Keep the same per-copy recovery budget.
+            *retry_available = false;
+            match tokio::time::timeout_at(deadline, exchange(retained)).await {
+                Ok(Ok(reply)) => reply,
+                _ => return Err(error),
+            }
+        }
+        result => result?,
+    };
     retained
         .journal
         .apply(reply.receipt.result())
