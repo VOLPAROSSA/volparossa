@@ -106,7 +106,7 @@ class RoutedNativeMailbox(unittest.TestCase):
             out = Path(folder)
             console = out/"console"
             console.write_bytes(b"private-serial-sentinel")
-            for scenario in ("signal-backup","signal-backup-fragments","signal-mailbox","paired-mail","content-mailbox"):
+            for scenario in ("signal-backup","signal-backup-fragments","signal-mailbox","paired-mail","paired-mail-peers","content-mailbox"):
                 subprocess.run(["sh","-eu","-c",function+'\nscenario=$1; output_directory=$2; decoder_mode=historical-v1; copy_vm_console "$3"',
                                 "sh",scenario,out,console],check=True)
                 copy = out/"vm-console.log"

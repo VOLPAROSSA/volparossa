@@ -417,6 +417,29 @@ It scored four errors on the bicycle recording and one on the station recording.
 Natural speech, additional languages and confidential remote execution need their
 own observations. [Tiny-model run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45425123392)
 
+## Owner-local speech generation
+
+The Debian 13 trial on Core `dc7c0849a4a6e0ffe6debbe94f407ad2c1707da2` ran
+the owner-local synthesis CLI for two English phrases and one Dutch phrase.
+The three marked mono 16 kHz WAV files had the exact PCM of the separately
+generated eSpeak NG references. Generation took 49, 43 and 45 ms for bicycle,
+station and Dutch, respectively. The test checked private file permissions,
+synthetic marking and refusal to overwrite each output. The same guest passed
+the two marked English files to Whisper small. Both had zero word errors in
+eight words, with recognition times of 11,169 and 10,874 ms. The host verifier
+bound each scored result to its marked input.
+[Original CLI results, references and digests](../development/evidence/speech-synthesis-45508315595) ·
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45508315595) ·
+[3,168-byte original archive, SHA-256 `df6c3864…7b6ff0d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45508315595/artifacts/14975541644)
+
+The prior trial on `5cc97bbb` stopped at the first bicycle synthesis when Core
+could not confirm worker cleanup. It exported the independent references.
+The later instrumentation records closed lifecycle facts if synthesis fails
+again. The exact cause of the earlier refusal remains unresolved. Spoken
+dialogue, real-time interruption and owner-authorized remote private speech
+need separate trials. [Original failed job](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506349600/job/138842451029) ·
+[Original guest archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506349600/artifacts/14974371326)
+
 ## Protected Compute evidence
 
 The public resident model completed two turns on `6ac9f2a8`, and PR332 merged
