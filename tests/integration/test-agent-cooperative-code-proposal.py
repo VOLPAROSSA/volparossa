@@ -341,15 +341,17 @@ jq() { return 83; }
             projects.mkdir(parents=True, mode=0o700)
             original = os.umask(0o077)
             try:
-                command = helper["service"](staging / "root", account, staging / "editor", staging / "public.sock")
+                command = helper["service"](staging / "root", account, staging / "editor",
+                                            staging / "public.sock", staging / "private.sock")
             finally:
                 os.umask(original)
-            for name in (".", "opt", "etc", "usr", "var", "var/lib", "workbench"):
+            for name in (".", "opt", "opt/volparossa-runtime", "etc", "usr", "var", "var/lib", "workbench"):
                 self.assertEqual((staging / "root" / name).stat().st_mode & 0o777, 0o755)
             self.assertEqual((staging / "root/var/lib/volparossa").readlink(), Path("/workbench/session/home"))
             self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
             self.assertEqual(projects.stat().st_mode & 0o777, 0o700)
             self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((projects / "private.sock").stat().st_mode & 0o777, 0o600)
             self.assertIn("--property=PrivateNetwork=yes", command)
             self.assertIn("--property=User=volparossa", command)
             self.assertIn("--property=RootDirectory=" + str(staging / "root"), command)

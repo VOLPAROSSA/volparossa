@@ -67,11 +67,13 @@ def service(root, code, release, owner_socket, planner_socket=None):
                 f"{code}/runtime/node:/opt/volparossa-node", f"{owner_socket}:/workbench/public.sock"]
     driver = "public_peer_editor_ui.cjs"
     if planner_socket is not None:
-        (root / "opt/volparossa-runtime").mkdir(mode=0o755)
+        runtime = root / "opt/volparossa-runtime"
+        runtime.mkdir()
+        runtime.chmod(0o755)
         (code / "projects/private.sock").touch(mode=0o600, exist_ok=False)
         readonly.append(f"{planner_socket}:/workbench/private.sock")
         for asset in ("opencode", "build-report.json"):
-            (root / "opt/volparossa-runtime" / asset).touch()
+            (runtime / asset).touch()
             readonly.append(f"{code}/runtime/{asset}:/opt/volparossa-runtime/{asset}")
         driver = "public_peer_planner_ui.cjs"
     # This root already belongs exclusively to this invocation. On ext4,
