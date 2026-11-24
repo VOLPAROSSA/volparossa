@@ -1,0 +1,1 @@
+{"acknowledged_source_retirement": true, "all_eleven_copies_deleted": true, "delete_retry_idempotent": true, "duplicate_replacements": 0, "final_payload_charge": 0, "foreground_copy_deleted": true, "original_identities_retained": true, "owner_worker_starts": 2, "pending_retirements": 0, "staging_removed": true}
