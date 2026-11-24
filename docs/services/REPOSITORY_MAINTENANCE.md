@@ -1,29 +1,55 @@
 # Cooperative repository maintenance
 
-User-requested extension, 2026-10-01. **Agreed direction, not an implemented
-autonomous maintainer or update channel.**
+Development goal agreed on 2026-10-01 and extended on 2026-11-24.
 
 ## Outcome
 
-The shared VOLPAROSSA brain should maintain and improve the core and all current
-and future repositories in the VOLPAROSSA GitHub organization. Participating
-agents distribute investigation, implementation, tests and review; the immune
-system checks the work before authorized changes are published to the appropriate
-repository. Routine approved work should not require a human to copy patches or
-click every merge. This does not authorize agents to enlarge their own powers.
+The shared VOLPAROSSA brain should maintain Core and all current and future
+VOLPAROSSA repositories through decentralized Git. Peers must be able to propose
+and review changes, build and test them, publish authorized revisions and
+releases, and deliver verified updates using the DICN. This includes changes
+to the maintenance software itself. Routine approved work can proceed
+automatically within the powers granted to each participant.
 
-Development and review can be decentralized. Publication to GitHub necessarily
-still depends on GitHub and an organization-authorized publishing capability;
-it is not a claim that GitHub itself is decentralized.
+GitHub is the intended automatically updated, replaceable public mirror.
+Current GitHub workflows and repository protections govern work there. The
+target cycle must work with GitHub, GitHub Actions and other central development
+services unavailable.
+
+## Decentralized Git and DICN reuse
+
+Replicate Git objects, accepted refs and the evidence needed to interpret them
+across independently operated peers. Retain the review, decision history and
+build inputs needed to continue work from another peer. Bind each canonical
+revision to the repository's previously authorized governance and decision.
+Conflicting heads require verification against that history before publication
+continues. Popularity and mirror state confer no authority.
+
+Evaluate Radicle's repository identities, signed refs, peer replication and
+collaborative objects for patches and reviews. Compare an upstream integration
+with ordinary Git objects and existing DICN services. Check routing and metadata
+privacy, private-project access, recovery after seed loss, interoperability and
+the ability to export code and decision history before selecting a component.
+Record which DICN gaps it fills and which responsibilities remain with Core.
+[Radicle protocol guide](https://radicle.dev/guides/protocol)
+
+Use Network for permitted peer discovery and transport, Storage for encrypted
+recovery copies, and existing signed publications and retention for durable
+public replicas. Cache serves verified public build inputs and artifacts.
+Compute supplies isolated builds, tests and reviews.
+Reuse the existing scheduler and Code's scoped workspace tools for real file
+reads, edits and checks. Make pinned toolchains, dependencies, build recipes
+and declared test inputs obtainable from authorized replicas so one registry,
+runner, seed or model service cannot halt the cycle.
 
 ## One task, exact authority
 
-Every task must bind the immutable repository ID and organization, exact base
-commit, intended change, permitted paths and tools, resource budget, privacy
-class and policy version. Repository names alone are insufficient: renames,
-transfers and forks must not silently redirect authority. New organization
-repositories can be discovered automatically, but execution/publication must
-first enroll their actual identity under the organization's configured policy.
+Every task must bind the immutable, forge-independent repository ID and enrolling
+authority, exact base commit, intended change, permitted paths and tools,
+resource budget, privacy class and policy version. Repository names alone are insufficient: renames,
+transfers and forks must not silently redirect authority. Bind any mirror's
+repository ID separately. Newly discovered repositories require enrollment
+under the project's configured policy before agents may act on them.
 Unknown repository-specific build instructions do not grant new permissions.
 
 Public source may be assigned to suitable peers. Private repositories, secrets,
@@ -48,7 +74,11 @@ flowchart LR
     R --> Q
     Q -->|Accepted exact revision| P[Authorized publisher]
     Q -->|Rejected or uncertain| W
-    P --> G[Repository branch / PR / permitted merge]
+    P --> G[Accepted decentralized Git revision]
+    G -->|Authorized public refs| M[Automatic public mirror]
+    G --> A[Separate release decision]
+    A -->|Authorized public release material| M
+    A -->|Authorized exact artifacts| D[Peer distribution and client verification]
 ```
 
 The decision binds the candidate/base commits, patch and artifact digests, actual
@@ -68,20 +98,35 @@ Agents can propose improvements to their own maintained source. Such a proposal
 cannot change the policy, trusted-reviewer set, credentials or safeguards used to
 judge itself. Governance/permission changes require separately authorized
 authority, not a repository patch or another model's assertion.
+Apply the shared immune review to human and agent proposals, including
+cumulative damage across revisions, authorized governance changes and
+recovery of compromised components. [Review of proposed changes](DECENTRALIZED_AGENTS.md#review-of-proposed-changes)
 
 ## Publication is a separate capability
 
-Use an organization-authorized publisher with short-lived, least-privilege
-repository-scoped credentials; do not distribute a GitHub token to workers or
-cache it. A GitHub App installation is a suitable integration surface, not an app
-that has already been installed or authorized by this feature.
+An authorized publisher revalidates the exact approved revision, base and
+repository identity against current policy before advancing the canonical ref.
+Use short-lived, repository-scoped credentials and preserve the proposal,
+review and authorization record. The publisher has no permission to override
+required checks, force-push a default branch, disable protections or expand
+its own access. Reconcile duplicate requests with an existing publication and
+expose cancellation or failure.
 
-The publisher revalidates the exact approved revision and current repository
-identity/state, creates an auditable branch/PR, and merges only under configured
-repository rules. It cannot bypass required checks, force-push the default branch,
-silently disable protections or grant itself broader permissions. Duplicate or
-retried requests must reconcile with existing publication rather than make
-unbounded branches/releases. Cancellation and visible failure states are required.
+Enable independently operated, previously authorized participants to carry out
+publication and release decisions under the applicable thresholds if a publisher
+or signing host disappears. Preserve the threshold and independent-review
+requirements during failover. Report the affected operation as unavailable if
+the remaining participants lack authority.
+
+When a public revision or release is authorized, automatically mirror the
+permitted refs and public release material to the configured GitHub repository.
+Scope any short-lived GitHub App credentials to that repository and keep them
+out of workers and caches. Mirror delay or failure may leave the public view
+stale while peers continue development and updates. Reconcile a recovered or
+replacement mirror with the verified public revision and artifact digests.
+If divergent refs would require overwriting history, report the conflict and
+use the configured recovery policy. Mirror-only pushes, PRs and CI statuses
+may supply proposals or evidence but cannot advance canonical state.
 
 Release publication is a separate policy action from source merging. Signed
 provenance should bind the source, isolated build and exact released bytes.
@@ -137,28 +182,21 @@ installer, prove code correctness or supply the rollout/recovery mechanism above
 The exact maintained implementation, artifact formats and platform adapters remain
 to be selected and pinned before executable integration.
 
-## Implementation order and honest status
+## Functional verification
 
-1. Finish actual bounded coding through `volparossa-code`: real file read, edit
-   and test results with enforced workspace permissions. A model-generated tool
-   proposal alone is not a complete coding agent.
-2. Add immutable repository-task enrollment and disposable execution through the
-   existing compute scheduler, not a second organization-specific peer network.
-3. Add separate evidence-bound review and policy decisions; exercise changed
-   commits, conflicting reviews and replay attempts without publication secrets.
-4. Connect one scoped publisher and demonstrate branch/PR publication for a
-   synthetic task. Then enable policy-authorized merges and release publication,
-   with ordinary repository protections and clear failure recovery.
-5. Implement client verification, staged activation and failure recovery with
-   synthetic signed releases in disposable environments before enabling real
-   automatic updates. Then extend enrollment across the organization and new
-   repositories while preserving permissions, licenses and interface contracts.
+The central build chat chooses when to schedule this work within the full goal.
+Use disposable multi-peer environments, enrolled test repositories and synthetic
+releases to verify each capability before using it for production publication.
+Keep public-object admission, independent code review, repository publication,
+release signing and client activation separately authorized.
 
-The existing public-object whitelist quorum is not automatically a code-review
-or GitHub publishing authority. No background maintenance loop, organization-wide
-publisher, independent code-review quorum or automatic release service is
-implemented by this document. Existing tooling used by the development assistant
-is also not proof that the deployed VOLPAROSSA brain can perform these actions.
+| Scenario | Required observation |
+| --- | --- |
+| Self-improvement without a central service | With GitHub, Actions and central registries, model endpoints and runners inaccessible, retrieve an enrolled project and pinned inputs from peers. Exercise a scoped change to the maintenance component through Code, independent build and review, accepted Git ref, separate release decision and automatic update on an eligible client. Record matching revisions, decisions and installed digest. |
+| Publication under disagreement | Submit a changed candidate, stale base, conflicting decision or replay. Peers retain the last authorized ref and release. An independently approved successor can then advance them within the applicable permissions. |
+| Mirror outage and replacement | Keep the mirror unavailable through two accepted revisions and a release. Restore it, then repeat with a replacement destination. Read back the public refs and release digests and confirm that retries converge without duplicates or disclosure of private material. A mirror-only ref cannot become a canonical update. |
+| Decentralized recovery | Remove the original publisher and isolate a compromised replica. Recover source, review history, trusted release metadata and artifacts from independent replicas. With sufficient surviving authority, publish a reviewed successor. A fresh client with its provisioned root must verify the eligible release and reject substituted bytes. A previously updated client must reject metadata older than its trusted counters. |
+| Activation and owner control | Interrupt a staged update, exercise owner pause and fail the new version's health check. Demonstrate compatible recovery, preserved private state and trust counters, and a subsequent authorized update. |
 
 ## Primary integration references
 
