@@ -49,6 +49,22 @@ Before shared wire/interface allocation, inspect current and retained integratio
 heads; preserve field ownership and compatibility. Make ordinary scoped development,
 commit and push decisions autonomously; branch protections and release authority apply.
 
+### Commit attribution for Erik's Codex work
+
+For work that Erik Le Blansch authors with Codex, use his GitHub account
+`erikleblansch` as the sole author. Configure each new working clone for his
+tasks with his account-linked Git identity before creating source commits.
+
+```sh
+git config --local user.name erikleblansch
+git config --local user.email 58982453+erikleblansch@users.noreply.github.com
+```
+
+Use that identity for delegated commits too. Omit tool co-author trailers from
+Erik's commits and the final squash message. Check the source authors before
+merging, since GitHub can credit them when it creates the squash commit.
+Preserve the authorship of other contributors when integrating their work.
+
 ## Verify and record
 
 Choose checks for the changed behavior and actual risk. Use narrow formatter/compile
