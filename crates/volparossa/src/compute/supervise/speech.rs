@@ -4,17 +4,17 @@ use super::{
     Context as _, Duration, ExecutionDeadline, Path, Result, Value, collect_completion,
     confirm_cleanup, ensure, lifetime::OwnedLifetimes, observe,
 };
-use tokio::{
-    io::AsyncWriteExt as _, process::Child, signal::unix::Signal, time::MissedTickBehavior,
-};
+use std::future::Future;
+use tokio::{io::AsyncWriteExt as _, process::Child, time::MissedTickBehavior};
 
 pub(in crate::compute) async fn run(
     mut child: Child,
     request: &Value,
     stage: &Path,
     seconds: u16,
-    mut interrupt: Signal,
+    cancelled: impl Future<Output = ()>,
 ) -> Result<(Value, u64)> {
+    tokio::pin!(cancelled);
     let pid = child.id().context("compute_speech_pid")?;
     let mut lifetimes = OwnedLifetimes::capture(pid);
     let mut peak_rss = 0;
@@ -36,7 +36,7 @@ pub(in crate::compute) async fn run(
         loop {
             tokio::select! {
                 biased;
-                _ = interrupt.recv() => anyhow::bail!("compute_owner_cancelled"),
+                () = &mut cancelled => anyhow::bail!("compute_owner_cancelled"),
                 () = &mut deadline => return Err(ExecutionDeadline.into()),
                 result = &mut completion => {
                     let (value, status) = result?;

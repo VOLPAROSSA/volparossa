@@ -1898,7 +1898,8 @@ jobs:
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           jq -e --arg rev "$GITHUB_SHA" '.source_revision == $rev and .passed and .score.passed and
-            .live_worker_cancelled_and_joined and ([.score.clips[].passed] == [true,true])' \
+            .live_worker_cancelled_and_joined and .signals == ["SIGINT","SIGTERM"] and
+            .digital_silence_refused and ([.score.clips[].passed] == [true,true])' \
             "$VOLPAROSSA_ALPHA_OUTPUT/speech-recognition-smoke.json"
 
       - name: Retain the two synthetic speech results and original trial outcome

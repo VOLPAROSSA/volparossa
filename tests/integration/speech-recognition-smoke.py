@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 
 HERE = Path(__file__).resolve().parent
 MODEL_SHA = "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
@@ -39,7 +40,7 @@ def python_worker(root_pid):
     return None
 
 
-def cancelled(command, scratch):
+def cancelled(command, scratch, owner_signal):
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
         descriptor = None
         try:
@@ -51,7 +52,7 @@ def cancelled(command, scratch):
                     break
                 time.sleep(0.025)
             require(descriptor is not None)
-            child.send_signal(signal.SIGINT)
+            child.send_signal(owner_signal)
             stdout, stderr = child.communicate(timeout=10)
             require(child.returncode != 0 and not stdout and b"compute_owner_cancelled" in stderr)
             wait = select.poll()
@@ -90,8 +91,18 @@ def execute(root, output, revision):
         receipt["score"] = json.loads(score.stdout)
         require(score.returncode == 0 and receipt["score"]["passed"])
         receipt["phase"] = "cancellation"
-        cancelled([*command, recordings / "bicycle.wav"], scratch)
-        receipt.update(passed=True, phase="complete", live_worker_cancelled_and_joined=True)
+        for owner_signal in (signal.SIGINT, signal.SIGTERM):
+            cancelled([*command, recordings / "bicycle.wav"], scratch, owner_signal)
+        receipt.update(live_worker_cancelled_and_joined=True, signals=["SIGINT", "SIGTERM"])
+        receipt["phase"] = "silence"
+        quiet = recordings / "silence.wav"
+        with wave.open(str(quiet), "wb") as stream:
+            stream.setparams((1, 2, 16000, 1600, "NONE", "not compressed"))
+            stream.writeframes(bytes(1600 * 2))
+        denied = subprocess.run([*command, quiet], capture_output=True, timeout=15)
+        require(denied.returncode != 0 and not denied.stdout and b"compute_speech_no_signal" in denied.stderr
+                and not any(scratch.iterdir()))
+        receipt.update(passed=True, phase="complete", digital_silence_refused=True)
     finally:
         (output / "speech-recognition-smoke.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
 

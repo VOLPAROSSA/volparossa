@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    future::Future,
     io::Write as _,
     os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
@@ -81,6 +82,12 @@ fn samples(bytes: &[u8]) -> Result<usize> {
                         && (1..=MAX_SAMPLES).contains(&(size / 2)),
                     "compute_speech_duration"
                 );
+                ensure!(
+                    payload
+                        .chunks_exact(2)
+                        .any(|sample| sample != &payload[..2]),
+                    "compute_speech_no_signal"
+                );
                 count = Some(size / 2);
             }
             _ => {}
@@ -118,6 +125,15 @@ pub(super) async fn run(args: &Options) -> Result<()> {
             "compute_speech_directory_overlap"
         );
     }
+    // Register both termination paths before any private data is read or staged.
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let cancelled = async move {
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
+    };
     let _lease = super::runtime_lease(&args.runtime_root)?;
     super::supervise::headroom()?;
     let bytes = super::private_task::read_owned_file(&args.input, MAX_WAVE_BYTES)?;
@@ -127,7 +143,7 @@ pub(super) async fn run(args: &Options) -> Result<()> {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&args.work_parent)?;
     let started = Instant::now();
-    let result = recognize(args, staging.path(), bytes).await;
+    let result = recognize(args, staging.path(), bytes, cancelled).await;
     let (reply, peak_rss) = super::private_task::finish_owned(staging, result)?;
     let text = reply["transcript"]
         .as_str()
@@ -148,7 +164,12 @@ pub(super) async fn run(args: &Options) -> Result<()> {
     Ok(())
 }
 
-async fn recognize(args: &Options, stage: &Path, bytes: Vec<u8>) -> Result<(Value, u64)> {
+async fn recognize(
+    args: &Options,
+    stage: &Path,
+    bytes: Vec<u8>,
+    cancelled: impl Future<Output = ()>,
+) -> Result<(Value, u64)> {
     let audio = stage.join("input.wav");
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -162,7 +183,6 @@ async fn recognize(args: &Options, stage: &Path, bytes: Vec<u8>) -> Result<(Valu
     getrandom::fill(&mut id).map_err(|_| anyhow::anyhow!("compute_randomness"))?;
     let request =
         json!({"version":1,"id":hex::encode(id),"threads":args.threads,"language":args.language});
-    let interrupt = signal(SignalKind::interrupt())?;
     let child = super::sandbox::speech_command(
         &args.runtime_root,
         &args.model_root,
@@ -172,7 +192,7 @@ async fn recognize(args: &Options, stage: &Path, bytes: Vec<u8>) -> Result<(Valu
     )
     .spawn()
     .context("compute_speech_spawn")?;
-    super::supervise::speech::run(child, &request, stage, args.max_seconds, interrupt).await
+    super::supervise::speech::run(child, &request, stage, args.max_seconds, cancelled).await
 }
 
 #[cfg(test)]
@@ -187,12 +207,18 @@ mod tests {
         data.extend(len.to_le_bytes());
         data.resize(data.len() + count * 2, 0);
         data[4..8].copy_from_slice(&(len + 36).to_le_bytes());
+        if count > 0 {
+            data[44] = 1;
+        }
         data
     }
 
     #[test]
     fn only_one_bounded_mono_pcm16_recording_is_admitted() {
-        assert_eq!(samples(&wave(1)).unwrap(), 1);
+        assert_eq!(samples(&wave(2)).unwrap(), 2);
+        let mut silent = wave(4);
+        silent[44..].fill(0);
+        assert!(samples(&silent).is_err());
         assert_eq!(samples(&wave(MAX_SAMPLES)).unwrap(), MAX_SAMPLES);
         assert!(samples(&wave(0)).is_err());
         assert!(samples(&wave(MAX_SAMPLES + 1)).is_err());
