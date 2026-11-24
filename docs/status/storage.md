@@ -401,7 +401,7 @@ snapshot events and one no-exit event. The owner observed Core loss and advanced
 its cursor from 3 to 4. A second termination interrupted owner cleanup. The
 original receipt records neither a joined owner nor a process exit status.
 Guest cleanup removed its objects and its network snapshots matched. The
-applications had not started. [KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177) · [35,674-byte archive, SHA-256 `eb2279cb…01a5f045`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177/artifacts/14934864537)
+applications had not started. [Original JSON receipts](../development/evidence/storage-maintenance-45419750177) · [KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177) · [35,674-byte archive, SHA-256 `eb2279cb…01a5f045`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177/artifacts/14934864537)
 
 The next trial runs on `f176b1b7`, which binds bounded discovery observations
 to the terminal Connect interval and retains the restarted client's peer
