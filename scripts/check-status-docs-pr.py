@@ -51,8 +51,12 @@ def document(oid):
 
 
 def anchors(text):
+    if '<!--' in text or '-->' in text:
+        raise FullSuite
     found = set()
     for heading in re.findall(r'^#{1,6} +(.+?)\s*$', text, re.MULTILINE):
+        if '[' in heading or ']' in heading:
+            raise FullSuite
         slug = re.sub(r'[^\w -]', '', heading.lower()).replace(' ', '-')
         fragment = slug
         i = 1
