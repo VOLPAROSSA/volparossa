@@ -1725,6 +1725,31 @@ class MaintenanceEvidence(unittest.TestCase):
             self.assertEqual((result['turn']['cursor_before'], result['turn']['cursor_after']), (6, 7))
             self.assertNotIn('SECRET', json.dumps(result))
 
+    def test_repeated_term_preserves_first_error_and_joins_owned_child(self):
+        # Isolate signal dispositions and the synthetic child from the test runner.
+        script = """
+import runpy, signal, sys
+worker = runpy.run_path(sys.argv[1])
+owner = worker['OwnerProcess']([sys.executable, '-c', 'import time; time.sleep(60)'])
+signal.signal(signal.SIGTERM, worker['interrupted'])
+try:
+    try:
+        try:
+            signal.raise_signal(signal.SIGTERM)
+        finally:
+            signal.raise_signal(signal.SIGTERM)
+            owner.close()
+    except worker['FixtureInterrupted'] as failure:
+        assert worker['failure_code'](failure) == 'termination_signal'
+    else:
+        raise AssertionError('first termination was lost')
+    assert owner.process.poll() is not None and all(not thread.is_alive() for thread in owner.threads)
+finally:
+    owner.close()
+"""
+        subprocess.run([sys.executable, '-B', '-c', script, str(HERE / 'private-storage-maintenance-smoke.py')],
+            check=True, capture_output=True, timeout=10)
+
     def test_owner_timeout_is_not_replaced_by_cleanup_io_failure(self):
         namespace = CHECK['run_turn'].__globals__
         original = subprocess.TimeoutExpired('SECRET_COMMAND', 650)

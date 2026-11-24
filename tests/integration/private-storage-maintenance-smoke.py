@@ -703,7 +703,16 @@ class FixtureInterrupted(InterruptedError):
     """The fixture's own TERM handler, not an arbitrary OS read/write failure."""
 
 
-def interrupted(_signal, _frame):
+TERMINATION_REQUESTED = False
+
+
+def interrupted(_signum, _frame):
+    # timeout can forward TERM to the process group after the supervisor has
+    # already begun unwinding. Let the first interruption finish bounded cleanup.
+    global TERMINATION_REQUESTED
+    if TERMINATION_REQUESTED:
+        return
+    TERMINATION_REQUESTED = True
     raise FixtureInterrupted('fixture interrupted')
 
 
