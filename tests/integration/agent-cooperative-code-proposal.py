@@ -396,7 +396,9 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
 
 
 PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "editor_failed", "runtime_inputs",
-    "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server"}
+    "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server",
+    "owner_verifier", "runtime_preparation", "model_task", "model_request_bound", "model_conversation",
+    "model_transport", "model_execution", "runtime_cleanup"}
 
 
 def workbench_driver(value, successful=False, *, planner=False):
@@ -413,8 +415,12 @@ def workbench_driver(value, successful=False, *, planner=False):
                 and value.get("local_model_profile") in (None, PROFILE)
                 and all(type(value.get(k)) is int and 0 <= value[k] <= 12
                         for k in ("approved_edits", "approved_commands", "approved_checks")), "planner observation")
+        if "owner_planner_approved" in value:
+            fields.add("owner_planner_approved")
+            require(type(value["owner_planner_approved"]) is bool
+                    and (not value["local_planner_started"] or value["owner_planner_approved"]), "planner approval")
         if successful:
-            require(value["local_planner_started"] and value["model_requested_delegation"]
+            require(value.get("owner_planner_approved") is True and value["local_planner_started"] and value["model_requested_delegation"]
                     and value["local_model_profile"] == PROFILE and value["approved_edits"] > 0
                     and value["approved_checks"] > 0, "model-directed public proposal and local approvals")
     require(type(value) is dict and set(value) == fields and value["version"] == 1
