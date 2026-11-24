@@ -3,7 +3,7 @@
 This is the current execution index for the complete [DICN goal](development/GOAL.md),
 including [DPS](development/GOAL.md#dps) and
 [Studio/hosting](development/GOAL.md#studio). Use [AGENTS.md](../AGENTS.md)
-for engineering boundaries and the [development workflow](development/CODEX_WORKFLOW.md)
+for engineering boundaries and the [development workflow](development/WORKFLOW.md)
 for scoped execution. A milestone does not reduce the agreed goal.
 
 [Current work](#current-integration-and-active-work) ·
@@ -17,12 +17,12 @@ for scoped execution. A milestone does not reduce the agreed goal.
 | Workstream | Recorded checkpoint; next boundary |
 | --- | --- |
 | Network | Two independent runners built identical Core and DNS worker packages at `428e2899`. Both passed A01–A15 and the Debian 13 install, upgrade and removal trial. One 32 MiB mixed-link transfer measured 1.437× the WAN-only throughput. The earlier trial measured 0.972×. [Acceptance and packages](status/network.md#network-baseline-and-remaining-proof) · [Both mixed-link runs](https://github.com/VOLPAROSSA/volparossa/pull/439) |
-| Storage / Image / Cloud | Immich recovered an album after provider loss. OpenCloud separately recovered an interrupted upload and served two cold downloads. In the combined run on `3dedd5f0`, Image timed out reading a reservation receipt. Provider A retained one lease and 199,787 reserved bytes after cleanup. Cloud had not started. Joint repair, cold restoration and zero usage remain open. [Storage trials](status/storage.md#storage-consumer-and-provider-evidence) · [Combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44568672976) |
+| Storage / Image / Cloud | Immich recovered an album after provider loss. OpenCloud separately recovered an interrupted upload and served two cold downloads. In the combined twelve-node run on `648e204a`, each app published four fragments with two copies and 1,598,292 committed bytes. The exercise stopped while checking the physical storage charge after the authenticated Cloud read. Joint cold restoration, remote deletion and zero application-provider usage remain open. [Storage trials](status/storage.md#storage-consumer-and-provider-evidence) · [Combined run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45408914106) |
 | Protected Compute | Public two-turn execution and corruption rejection passed. A two-path trial authenticated the provider’s refusal when the protected device was unavailable. Hardware-backed private workload execution remains open. [Verified trial](status/applications.md#protected-compute-evidence) |
 | Studio | The native Silex desktop saved a page with a unique visible edit, reopened it in two fresh processes and quit normally on protected Studio main. In a separate trial, Firefox rendered the signed Silex export from a holder while the publisher was offline. Joining the native desktop export to that hosting path remains open. [Native desktop](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/44547586924) · [Independent hosting](https://github.com/VOLPAROSSA/volparossa/actions/runs/44384131952) |
 | DPS / Map | On the real Monaco graph, synthetic signed traffic advisories changed a driving route from 1,083.24 m to 3,746.96 m. Expiry and replacement each restored the original geometry. The native desktop compared 1,489 expiry frames and 15 removal frames. Field positioning accuracy and mobile peer routing remain open. [Native traffic trial](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/44539811197) |
-| Cache / Weather | The Android 16 emulator and iPhone 16 Pro Max simulator each hid the expired ECMWF forecast, displayed a failed refresh and recovered after a second request. On iOS the source temperature was 7.115 °C. The four screenshots record the original display precision. NOAA remained available through the cycle. Physical-device validation remains open. [Android receipts](https://github.com/VOLPAROSSA/volparossa-weather/tree/3d1e6384a2ced86e3239598cac2173c5ff0696b8/docs/evidence/android-44514675704) · [iPhone trial and screenshots](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44542699817) |
-| Code / Browser AI | Two tabs in a source-built Firefox each downloaded 32 MiB over protected connections. Detaching one preserved the other. The coding, cooperative job and protected inference trials have separate acceptance criteria. [Native browser trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054) |
+| Cache / Weather | The installed Android 16 app hid the expired ECMWF forecast, showed a failed refresh and recovered to signed revision 2 after the second tap. The source temperature for that run was −0.154 °C. NOAA remained available throughout. The iPhone 16 Pro Max simulator previously exercised the same expiry and recovery with a 7.115 °C forecast. Physical-device validation remains open. [Android receipts and APK identity](https://github.com/VOLPAROSSA/volparossa-weather/tree/92bab93ec8d44accd6d02806741ea7a282e0ed9a/docs/evidence/android-45408377786) · [iPhone trial and screenshots](https://github.com/VOLPAROSSA/volparossa-weather/actions/runs/44542699817) |
+| Code / Browser AI | The installed VSCodium extension enrolled one owner-selected public file. A peer returned the replacement. The owner approved the edit and the check separately, and an independent check passed using the original tests. The local OpenCode planner still needs its own end-to-end result. Two source-built Firefox tabs each downloaded 32 MiB over protected connections and detaching one preserved the other. Long-running cooperative job reconciliation remains open. [VSCodium trial and receipts](COOPERATIVE_CODE.md#public-peer-coding-in-the-native-vscodium-workbench) · [Native Firefox trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44434221054) |
 | Transactions / Bank | Four validators committed a 70 TEST payment and released a separate 10 TEST reservation on its owner’s signed cancellation. After restart they replayed the same signed bytes and retained all 100 TEST units. In a separate signed auction, independent readers can recalculate the indicative price from a frozen roster and fictitious limit orders. Full finality coverage, funding and external settlement remain open. [Cancellation and replay](status/applications.md#bank-owner-cancellation) · [Auction reader](https://github.com/VOLPAROSSA/volparossa-bank/blob/6e234caf6d13eb37b58e192e57d52d2cc6c49fee/docs/PAPER_AUCTION.md) |
 | Mail | Two independent Core clients took turns offline. Two providers retained the encrypted message until the recipient recovered all 90,139 MIME bytes in Stalwart. Both providers signed the acknowledgements, and the next fetch was empty. A separate trial covered the Thunderbird sender and Inbox. Public Internet reception remains open. [Mail trials and receipts](status/applications.md#paired-mail-delivery) |
 | Chat | Two standalone Signal Desktops exchanged a message while each correspondent was offline in turn. One Core client carried their traffic through the protected twelve-node topology to two independent providers. The recipient reopened its SQLCipher profile, the sender observed Delivered and both provider inboxes emptied. Separately, automatic delivery survived a worker restart on local provider sockets. [Protected transport and captures](https://github.com/VOLPAROSSA/volparossa/actions/runs/44538844389) · [Automatic delivery](https://github.com/VOLPAROSSA/volparossa-chat/actions/runs/44548794182) |
@@ -52,27 +52,40 @@ system value; these priorities impose no fixed application/model/agent order.
    keep runtime performance evidence separate from CI savings and respect the
    existing outreach, financial/legal, publication and host authority boundaries.
 
+The central build chat will schedule four additions within the full goal as
+their dependencies permit. Decentralized Git and update delivery depend on
+replicated source, isolated builds and release authority. Sabotage review needs
+independent decision history and recoverable trusted versions. DeGoog search
+and the supplementary Consent-O-Matic list depend on verified public content,
+scoped Compute and Browser integration. These are planned capabilities. Their
+functional trials are specified in the [acceptance guide](development/TESTING.md#development-cycle-and-browser-acceptance).
+
 ### Retained branches and resumption dependencies
 
 The owner-designated central build chat maintains the current work across repositories. The organization queue links to the open work and the protected project goal records its mandate. For local checkout paths, use `git worktree list` in the selected repository. [Organization maintenance](https://github.com/VOLPAROSSA/.github/blob/main/MAINTENANCE.md) · [Project goal](development/GOAL.md)
 
-### Development pause on 24 November 2026
+The combined Storage trial continues in Core #279 with Image #8 and Cloud #15.
+On Core `29b82140` the restarted client exhausted twelve route selections before
+either application started. Restore, repair, deletion and final provider usage
+still need one successful joint run. [Restart trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177) · [Storage candidate](https://github.com/VOLPAROSSA/volparossa/pull/279)
 
-The owner paused functional development in the central build session. The full
-[development goal](development/GOAL.md) remains open. The rows below identify
-the source-specific checks and outstanding work at this checkpoint.
+The installed Android Map trial covered four foreground position cases and two
+ordinary offline routes on the earlier Core ABI. The next trial will bind the
+installed app to the integrated ABI. The Silex desktop producer exported five
+files and signed the nine-chunk bundle. The combined Studio trial follows this
+export through hosting with the publisher offline.
+[Map evidence](https://github.com/VOLPAROSSA/volparossa-map/pull/31) · [Core ABI](https://github.com/VOLPAROSSA/volparossa/pull/464) · [Silex producer](https://github.com/VOLPAROSSA/volparossa-studio/pull/20) · [Hosting trial](https://github.com/VOLPAROSSA/volparossa-studio/actions/runs/45505780043)
 
-| Integration | Verified observation and resumption point |
-| --- | --- |
-| Storage, Image and Cloud | Image and Cloud each committed eight copies in run 45408914106. On the follow-up the client restarted and received `NO_ELIGIBLE_PATHS` on twelve route selections before reaching either app. Restore, repair, deletion and zero provider usage still need a joined result. [Storage evidence](https://github.com/VOLPAROSSA/volparossa/pull/467) · [Latest failure and resumption point](https://github.com/VOLPAROSSA/volparossa/pull/279#issuecomment-7136333557) |
-| Mail | On Core `d272a11b`, Stalwart recovered all 90,139 MIME bytes across two independent Core clients. Both providers acknowledged and emptied their inboxes. The normal host export retained the complete 143,213-byte aggregate and its original receipts. Public Internet reception and current native client composition remain open. [Full independent-client result](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424248328) |
-| Studio | Two fresh native WebKit processes reopened the authored site. All five exported files matched the original Silex export. Core signed the nine-chunk bundle and a separate local browser read it. Follow the protected-main trial for independent retrieval of this export with the publisher offline. [Native producer](https://github.com/VOLPAROSSA/volparossa-studio/pull/20) |
-| Map and DPS | An installed Android 15 x86-64 app passed four foreground position tests and both ordinary offline routes on Core `b6fa12bc`. Bind a subsequent emulator run to the final integrated Core revision. Physical accuracy measurements remain open. [Original result](https://github.com/VOLPAROSSA/volparossa-map/actions/runs/45424320264) · [Core ABI](https://github.com/VOLPAROSSA/volparossa/pull/464) |
-| Browser and Code | Browser's coordinator assembled a hierarchical answer but its original run confirmed only 21 of 23 terminal receipts. The latest VSCodium planner observed one local model worker and rejected an unknown tool before public delegation. [Browser ownership and latest run](https://github.com/VOLPAROSSA/volparossa/pull/422) · [Original planner diagnostics](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45425334685) |
-| Shared speech | Whisper tiny transcribed both original synthetic clips, with four word errors out of eight on one and one out of eight on the other. Only the second met the per-clip target. A separately initiated small-model trial uses the same clips and limit. The synthesis draft has a compiler correction and still needs execution. [Recognition trials](https://github.com/VOLPAROSSA/volparossa/pull/466) · [Synthesis draft](https://github.com/VOLPAROSSA/volparossa/pull/468) |
+The local coding planner rejected an unknown tool before public delegation. The
+Firefox trial on `19fdeedb` reached a hierarchical answer and a second task's
+cancellation. Its independent route binding check failed. The speech recognition
+trial using Whisper small passed on the same clips on which tiny missed the
+per-clip word-error target. Synthetic speech generation has its own open trial.
+[Code planner](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45425334685) · [Firefox](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424897092) · [Recognition](https://github.com/VOLPAROSSA/volparossa/actions/runs/45427534478) · [Synthesis](https://github.com/VOLPAROSSA/volparossa/pull/468)
 
-Earlier sources, machine-local paths and original failed trials remain in the
-[October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies).
+The [prior checkpoint](https://github.com/VOLPAROSSA/volparossa/blob/d212a0b7389a129db8454ea9c401c5bd0105d424/docs/IMPLEMENTATION_STATUS.md#development-pause-on-24-november-2026)
+and [October checkout index](https://github.com/VOLPAROSSA/volparossa/blob/425b888963243259bc269f8c8d30513660df3095/docs/IMPLEMENTATION_STATUS.md#retained-branches-and-resumption-dependencies)
+retain the original sources, trial results and resumption details.
 
 ## Detailed trial records
 
