@@ -91,7 +91,7 @@ use volparossa_local_control::{
     LogLevel, PeerSummary, PolicySnapshot as AgentPolicySnapshot, Reachability,
 };
 use volparossa_metrics::MetricsRegistry;
-use volparossa_peerstore::PeerStore;
+use volparossa_peerstore::{PeerStore, PeerStoreError};
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
@@ -12850,12 +12850,25 @@ impl DiscoveryRuntime {
         }
 
         let now = UnixTime::from_secs(now_ms / 1_000);
-        if !actor_record_exact
-            && self
+        // A restarted actor must receive the envelope on a current authenticated
+        // exchange. The persisted bytes only corroborate that reply. A mixed
+        // Relay/Exit advertisement cannot establish its former provenance here.
+        let durable_record = actor_record_exact
+            || match self
                 .store
                 .upsert_advertisement(&advertisement, &envelope, now)
-                .is_err()
-        {
+            {
+                Ok(()) => true,
+                Err(PeerStoreError::StaleAdvertisement)
+                    if new_record && capability_expiry_ms > now_ms && roles.relay != roles.exit =>
+                {
+                    self.store
+                        .contains_exact_advertisement(&advertisement, &envelope, now)
+                        .unwrap_or(false)
+                }
+                Err(_) => false,
+            };
+        if !durable_record {
             if matches!(&provenance, AdvertisementProvenance::DirectRelay { .. }) {
                 self.record_privacy_conflict(
                     peer,
@@ -21204,7 +21217,7 @@ mod tests {
             original.signed_envelope(),
             now_ms,
             TimePolicy::default(),
-            &mut ReplayCache::new(1).unwrap(),
+            &mut ReplayCache::new(1).expect("scratch replay"),
         )
         .unwrap()
         .into_message();
@@ -23026,6 +23039,84 @@ mod tests {
             assert!(!forwarded_exit_republish_preserves_authority(
                 &old, &changed, deadline
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn reopened_peerstore_requires_a_fresh_provenance_for_an_exact_advertisement() {
+        for (relay, exit) in [(true, false), (false, true), (true, true)] {
+            let mut fixture = fixture(test_client_roles());
+            let service = Identity::generate();
+            let peer = *service.peer_id();
+            let now_ms = unix_millis();
+            let now = UnixTime::from_secs(now_ms / 1_000);
+            let roles = RolesConfig {
+                client: false,
+                relay,
+                exit,
+            };
+            let response = service_advertisement(
+                &service,
+                roles,
+                &fixture.policy,
+                2,
+                generate_nonce(),
+                now_ms,
+                &fixture.directory,
+            );
+            let envelope = response.signed_envelope();
+            let verified = verify_control_message::<WireAdvertisement>(
+                envelope,
+                now_ms,
+                TimePolicy::default(),
+                &mut ReplayCache::new(1).expect("scratch replay"),
+            )
+            .expect("signed original");
+            let original = convert_advertisement(verified.message(), now).expect("original");
+            fixture
+                .runtime
+                .store
+                .upsert_advertisement(&original, envelope, now)
+                .expect("retain original");
+            fixture.runtime.store =
+                PeerStore::open(fixture.directory.path().join("peers.sqlite")).expect("reopen");
+            let control = Identity::generate();
+            let control = install_control(&mut fixture, &control, now_ms);
+            let deadline = now_ms + 15_000;
+            let provenance = || {
+                if relay {
+                    AdvertisementProvenance::DirectRelay {
+                        authenticated_peer: peer,
+                    }
+                } else {
+                    forwarded_provenance(&control, &service, deadline)
+                }
+            };
+            if !relay {
+                fixture.runtime.mark_forwarded_exit_target(peer, deadline);
+            }
+            assert!(!fixture.runtime.direct_relays.contains_key(&peer));
+            assert!(fixture.runtime.forwarded_exits.is_empty());
+            let accepted = fixture
+                .runtime
+                .ingest_advertisement(peer, response.clone(), provenance(), &fixture.state)
+                .await;
+            assert_eq!(accepted.is_some(), relay != exit);
+            assert_eq!(
+                fixture.runtime.direct_relays.contains_key(&peer),
+                relay && !exit
+            );
+            assert_eq!(
+                fixture.runtime.forwarded_exits.len(),
+                usize::from(exit && !relay)
+            );
+            assert!(
+                fixture
+                    .runtime
+                    .ingest_advertisement(peer, response, provenance(), &fixture.state)
+                    .await
+                    .is_none()
+            );
         }
     }
 

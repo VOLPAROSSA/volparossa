@@ -87,6 +87,41 @@ fn rejects_missing_provenance_and_replayed_advertisements() {
 }
 
 #[test]
+fn exact_advertisement_confirmation_is_read_only_and_sequence_bound() {
+    let mut store = PeerStore::open_in_memory().expect("store");
+    let now = UnixTime::from_secs(1_100);
+    let value = advertisement(2, 1_300);
+    store
+        .upsert_advertisement(&value, SIGNED_ENVELOPE, now)
+        .expect("persist");
+    assert!(
+        store
+            .contains_exact_advertisement(&value, SIGNED_ENVELOPE, now)
+            .expect("match")
+    );
+    for (candidate, envelope) in [
+        (advertisement(1, 1_300), SIGNED_ENVELOPE),
+        (advertisement(2, 1_301), SIGNED_ENVELOPE),
+        (value.clone(), b"another signed envelope".as_slice()),
+    ] {
+        assert!(
+            !store
+                .contains_exact_advertisement(&candidate, envelope, now)
+                .expect("not an exact match")
+        );
+    }
+    assert!(
+        store
+            .contains_exact_advertisement(&value, SIGNED_ENVELOPE, UnixTime::from_secs(1_301))
+            .is_err()
+    );
+    assert!(matches!(
+        store.upsert_advertisement(&value, SIGNED_ENVELOPE, now),
+        Err(PeerStoreError::StaleAdvertisement)
+    ));
+}
+
+#[test]
 fn retains_bounded_samples_and_computes_local_p25() {
     let mut store = PeerStore::open_in_memory().expect("store");
     let value = advertisement(1, 1_300);
