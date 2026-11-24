@@ -1901,6 +1901,7 @@ jobs:
             .live_worker_cancelled_and_joined and .signals == ["SIGINT","SIGTERM"] and
             .digital_silence_refused and ([.score.clips[].passed] == [true,true])' \
             "$VOLPAROSSA_ALPHA_OUTPUT/speech-recognition-smoke.json"
+          python3 -B tests/integration/speech-recognition-fixture.py verify-export "$VOLPAROSSA_ALPHA_OUTPUT" "$GITHUB_SHA"
 
       - name: Retain the two synthetic speech results and original trial outcome
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'speech-recognition' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
@@ -1910,11 +1911,13 @@ jobs:
           if-no-files-found: warn
           path: |
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-recognition-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-reference.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-bicycle.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-station.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/current-phase
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/guest-exit-status
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-recognition-smoke.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-reference.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-bicycle.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-station.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-incomplete.json
