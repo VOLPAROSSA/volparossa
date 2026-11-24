@@ -180,3 +180,19 @@ mailbox grant was created. Each phase now waits for the primary Exit
 advertisement as well. If selection still fails, a bounded event summary
 counts recognized reasons inside the selection window. The original event
 ring stays private to the guest. [Enrollment trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45413088618)
+
+On `ec90f352` Stalwart imported the original 90,139 MIME bytes. Both
+custodians signed the post-import acknowledgement, and the next fetch
+returned zero messages. The Exit recorded 2, 2 and 7 MPTCP/TLS completions
+during enrollment, send and receive. All nine client and Exit captures
+recorded zero direct client–Exit packets and zero packet-socket drops.
+The guest exited successfully and the host snapshots matched.
+[Independent-client trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45417945039)
+
+The workflow failed while exporting its 143,265-byte aggregate under the
+131,072-byte per-file limit. Rebuilding the aggregate from the original
+component receipts reproduced the recorded size and every byte of the
+retained 131,072-byte suffix. The reconstructed report’s SHA-256 is
+`da114df7ff868572152522a3bf8723179293f390c3f41161593624512f643a03`.
+The named independent-client aggregate now has a 262,144-byte export limit.
+[Original diagnostic archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/45417945039/artifacts/14934826398)

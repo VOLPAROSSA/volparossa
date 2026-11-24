@@ -2106,6 +2106,8 @@ def collect(home, opt, revision, scenario, guest_status,
             per_file = 1048576
         if scenario == "protected-quote" and path.name == "protected-quote-route.json":
             per_file = 262144
+        if scenario == "paired-mail-peers" and relative == "published/paired-mail-peers-smoke.json":
+            per_file = 262144
         observed = read_tail(path, min(per_file, TOTAL_LIMIT - total))
         if observed is None:
             continue
@@ -2968,7 +2970,11 @@ elif [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments 
         case $name in ''|*[!a-z0-9_.-]*) exit 1 ;; esac
         candidate=/home/vpci/alpha-output/$name
         if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
-            [ "$(stat -Lc '%s' "$candidate")" -le 131072 ] || exit 1
+            size=$(stat -Lc '%s' "$candidate") || exit 1
+            case $scenario:$name in
+                paired-mail-peers:paired-mail-peers-smoke.json) [ "$size" -le 262144 ] || exit 1 ;;
+                *) [ "$size" -le 131072 ] || exit 1 ;;
+            esac
             printf '%s\n' "$name"
         fi
     done >/home/vpci/signal-backup-export.list
