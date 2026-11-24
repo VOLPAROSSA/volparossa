@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Exercise the visible Firefox tab menu and GTK chooser on the fixture's private X display."""
+from contextlib import contextmanager
 import ctypes as ct
 import json
 import os
 from pathlib import Path
 import re
+import select
+import socket
 import subprocess
 import time
 
@@ -254,3 +257,123 @@ def release_tabs(client, work):
     finally:
         display.close()
     client.script('Services.wm.getMostRecentWindow("navigator:browser").__volparossaTrialUI.finish()')
+
+
+SIDEBAR = 'const win = Services.wm.getMostRecentWindow("navigator:browser");'
+PROVIDER_VIEW = SIDEBAR + """
+const doc = win.SidebarController.browser.contentDocument;
+const selector = doc.getElementById("provider"), menu = selector.getBoundingClientRect();
+const choices = Array.from(selector.options).filter(option => !option.hidden && !option.disabled);
+const byId = id => doc.getElementById(id);
+const panel = byId("volparossa-cooperative-compute");
+const view = doc.defaultView, scale = view.devicePixelRatio;
+return {
+  selected: selector.value,
+  preference: Services.prefs.getStringPref("browser.ml.chat.provider"),
+  eligible: choices.map(option => option.value).filter(value =>
+    value === "volparossa:public" || value === "volparossa:private").length === 2,
+  publicIndex: choices.findIndex(option => option.value === "volparossa:public"),
+  privateIndex: choices.findIndex(option => option.value === "volparossa:private"),
+  privatePanel: !!byId("volparossa-private-compute"),
+  publicPanel: !!panel,
+  visible: menu.width > 0 && menu.height > 0,
+  open: selector.matches(":open"),
+  center: [(view.mozInnerScreenX + menu.x + menu.width / 2) * scale,
+           (view.mozInnerScreenY + menu.y + menu.height / 2) * scale],
+  review: panel?.dataset.state === "review",
+  consentPending: byId("volparossa-public-consent")?.checked === false &&
+    byId("volparossa-public-rights")?.checked === false &&
+    byId("volparossa-public-license")?.value === "" &&
+    byId("volparossa-public-submit")?.disabled === true,
+  prefilled: byId("volparossa-public-question")?.value === "Synthetic demo question" &&
+    byId("volparossa-public-context")?.value === "Public fixture text"
+};
+"""
+
+
+@contextmanager
+def observe_uncontacted_public_socket(work):
+    """Keep attempted public connections observable even if a caller immediately disconnects."""
+    path = Path(work) / "pre-consent.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        try:
+            path.chmod(0o600)
+            listener.listen(1)
+            yield str(path)
+            if select.select([listener], [], [], 0)[0]:
+                raise ValueError("public compute socket contacted before consent")
+        finally:
+            path.unlink()
+
+
+def exercise_provider_selector(client, report, public_socket):
+    """Move the built-in selector with physical input and follow Firefox's public Ask entry point."""
+    def view():
+        return client.script(PROVIDER_VIEW)
+
+    def selected(state, name):
+        return (state["visible"] and state["eligible"] and state["selected"] == state["preference"] == name
+                and state["privatePanel"] == (name == "volparossa:private")
+                and state["publicPanel"] == (name == "volparossa:public"))
+
+    def pick(display, current, index, name):
+        if not 0 <= index < 32:
+            raise ValueError("unknown provider selector option")
+        display.point(current["center"], 1)
+        wait_for(lambda: view()["open"], "native provider menu did not open")
+        display.key("Home")
+        for _ in range(index):
+            display.key("Down")
+        display.key("Return")
+        def observe():
+            state = view()
+            return state if selected(state, name) else None
+        return wait_for(observe, "provider selection did not reach the requested panel")
+
+    report["provider_selector_phase"] = "sidebar"
+    client.script(SIDEBAR + """
+      Services.prefs.setStringPref("browser.volparossa.compute.public_socket", arguments[0]);
+      Services.prefs.setBoolPref("browser.ml.chat.enabled", true);
+      Services.prefs.setStringPref("browser.ml.chat.provider", "volparossa:private");
+      return (async () => {
+        await win.SidebarController.promiseInitialized;
+        await win.SidebarController.show("viewGenaiChatSidebar");
+        const sidebar = win.SidebarController.browser.contentWindow;
+        await sidebar.browserPromise;
+        if (sidebar.document.documentURI !== "chrome://browser/content/genai/chat.html") {
+          throw new Error("provider_sidebar_document");
+        }
+      })();
+    """, [public_socket])
+    display = Display()
+    try:
+        private = view()
+        if not selected(private, "volparossa:private"):
+            raise ValueError("private native sidebar missing")
+        report["provider_selector_phase"] = "public-option"
+        public = pick(display, private, private["publicIndex"], "volparossa:public")
+        if not public["review"] or not public["consentPending"]:
+            raise ValueError("public selector did not open an unapproved review")
+        report["provider_selector_phase"] = "public-ask"
+        client.script(SIDEBAR + """
+          const {GenAI} = ChromeUtils.importESModule("resource:///modules/GenAI.sys.mjs");
+          return GenAI.handleAskChat({label: "Synthetic demo question"},
+            {window: win, selection: "Public fixture text"});
+        """)
+        review = view()
+        if not (selected(review, "volparossa:public") and review["prefilled"] and
+                review["consentPending"] and review["review"]):
+            raise ValueError("public Ask did not retain review and consent")
+        report["provider_selector_phase"] = "private-option"
+        pick(display, review, review["privateIndex"], "volparossa:private")
+    finally:
+        display.close()
+    report["provider_selector_phase"] = "sidebar-close"
+    client.script(SIDEBAR + 'return win.SidebarController.hide();')
+    wait_for(lambda: client.script(SIDEBAR + 'return !win.SidebarController.isOpen;'),
+             "provider sidebar did not close")
+    report["provider_selector"] = dict(physical_provider_changes=2, native_ask_prefill=True,
+        public_rights_and_consent_clear=True, public_license_empty=True, public_submit_disabled=True,
+        sidebar_closed=True)
+    report["provider_selector_phase"] = "public-socket-check"

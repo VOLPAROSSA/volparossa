@@ -77,7 +77,7 @@ class SignalBackupWiring(unittest.TestCase):
     def test_complete_archive_and_workflow_use_dedicated_proof(self):
         archive = DRIVER.split("# The exact closed receipt files", 1)[1].split("\nelse\n", 1)[0]
         self.assertIn('"tests/integration/$scenario-smoke.py" export-names', archive)
-        self.assertIn('if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then', DRIVER)
+        self.assertIn('if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ] || [ "$scenario" = signal-mailbox ]; then', DRIVER)
         self.assertIn('stat -Lc', archive)
         self.assertIn(' -le 131072', archive)
         self.assertIn(' -T /home/vpci/signal-backup-export.list', archive)
@@ -85,7 +85,7 @@ class SignalBackupWiring(unittest.TestCase):
         workflow = (HERE.parents[1] / ".github/workflows/alpha-topology.yml").read_text()
         self.assertIn("          - signal-backup\n", workflow)
         self.assertIn("(inputs.scenario == 'signal-backup' || inputs.scenario == 'signal-backup-fragments' "
-                      "|| inputs.scenario == 'private-storage-maintenance') && 150", workflow)
+                      "|| inputs.scenario == 'signal-mailbox' || inputs.scenario == 'private-storage-maintenance') && 150", workflow)
         gate = workflow.split("      - name: Require real Signal encrypted backup", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn('test "$TOPOLOGY_EXIT_CODE" = 0', gate)
         self.assertIn('signal-backup-smoke.py report "$report" "$GITHUB_SHA"', gate)

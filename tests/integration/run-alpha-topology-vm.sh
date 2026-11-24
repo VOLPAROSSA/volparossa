@@ -14,6 +14,7 @@ approval=no
 image_path=
 mpquic_path=
 package_path=
+paired_mail_bundle=
 native_runtime_path=
 host_tools_directory=
 output_directory=
@@ -48,7 +49,7 @@ guest_memory_for_scenario() {
     # per-worker limits and the owner's spare-memory reserve stay unchanged.
     case $scenario in
         agent-reasoning|agent-private-conversation|agent-native-coding|agent-native-editor|agent-cooperative-code-proposal) printf '8192\n' ;;
-        signal-backup|signal-backup-fragments) printf '6144\n' ;;
+        signal-backup|signal-backup-fragments|signal-mailbox) printf '6144\n' ;;
         agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-policy-assessment|cloud-private-file|cloud-private-upload|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code) printf '6144\n' ;;
         *) printf '4096\n' ;;
     esac
@@ -72,7 +73,8 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|signal-mailbox|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|paired-mail|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment]' \
+        '       paired-mail also requires --paired-mail-bundle PATH for its source-bound native Mail runtime.' \
         '       --package is required only for alpha; --mpquic is unnecessary for standalone Wi-Fi/model/private-browser/transaction-TEST proofs.' \
         '       agent-cooperative-code also requires --code-bundle DIRECTORY --code-manifest-sha256 SHA256.' \
         '       --native-runtime PATH is required for agent-native-coding or agent-native-editor (exact verified bundle).' \
@@ -393,6 +395,8 @@ print_plan() {
             '  exact two protected relay paths, real physical-interface accounting, fresh private cache;' \
             '  stop the original provider, then Client retrieves Q from Relay4 with independent publisher trust;' \
             '  complete role-specific captures and cleanup; no full C03/C04, browser or speed claim.'
+    elif [ "$scenario" = paired-mail ]; then
+        printf '%s\n' 'Run two signed Mail deposit/fetch phases through protected MPTCP routes with native Signal and Stalwart.'
     elif [ "$scenario" = content-mailbox ]; then
         printf '%s\n' \
             'Mailbox scenario: two independently trusted providers; normal invite/enroll/send/receive CLI;' \
@@ -444,6 +448,8 @@ print_plan() {
             'Private-storage-handoff scenario: three pinned providers over ordinary protected MPTCP/TLS;' \
             '  retain pending physical charge, resume A/B -> B/C with verified C restore before Delete(A);' \
             '  independently restore B/C after source removal, bounded six-phase captures and exact cleanup.'
+    elif [ "$scenario" = signal-mailbox ]; then
+        printf '%s\n' 'Stage exact pinned Signal source and run two standalone Desktops over independently served protected mailbox routes.'
     elif [ "$scenario" = signal-backup-fragments ]; then
         printf '%s\n' \
             'Signal-backup-fragments: real Signal encrypted backup export/import with eight encrypted fragment copies;' \
@@ -590,7 +596,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|signal-mailbox|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|paired-mail|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --code-bundle)
@@ -675,6 +681,11 @@ while [ "$#" -gt 0 ]; do
             mpquic_path=$2
             shift
             ;;
+        --paired-mail-bundle)
+            if [ "$#" -lt 2 ] || [ -n "$paired_mail_bundle" ]; then usage >&2; exit 64; fi
+            paired_mail_bundle=$2
+            shift
+            ;;
         --package)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             package_path=$2
@@ -726,7 +737,7 @@ fi
 if [ "$mode" = preview ]; then
     [ "$scenario" = weather-decoder-abi ] || [ "$decoder_mode_set" = no ] || exit 64
     if [ "$approval" != no ] \
-        || [ -n "$image_path$mpquic_path$package_path$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_native_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source$studio_handoff$studio_evidence_sha256$image_handoff$image_return$image_revision" ]; then
+        || [ -n "$image_path$mpquic_path$package_path$paired_mail_bundle$native_runtime_path$host_tools_directory$output_directory$expected_commit$code_bundle$code_manifest_sha256$browser_native_bundle$browser_native_manifest_sha256$browser_filter_bundle$browser_filter_manifest_sha256$weather_client_bundle$weather_client_manifest_sha256$weather_android_source$decoder_abi_inputs$decoder_source$studio_handoff$studio_evidence_sha256$image_handoff$image_return$image_revision" ]; then
         usage >&2
         exit 64
     fi
@@ -909,6 +920,13 @@ case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$("$mpquic_path" --api-version)" = 7 ] || exit 64
 MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
 fi
+if [ "$scenario" = paired-mail ]; then
+    case $paired_mail_bundle in /*) ;; *) exit 64 ;; esac
+    [ "$(readlink -f -- "$paired_mail_bundle")" = "$paired_mail_bundle" ] && [ -f "$paired_mail_bundle" ] || exit 64
+    [ "$(stat -Lc '%s' "$paired_mail_bundle")" -le 180000000 ] || exit 64
+else
+    [ -z "$paired_mail_bundle" ] || exit 64
+fi
 PACKAGE_SHA256=none
 if [ -n "$package_path" ]; then
 [ "$(readlink -f -- "$package_path")" = "$package_path" ] || exit 64
@@ -1016,6 +1034,17 @@ stop_qemu_child() {
     return 0
 }
 
+copy_vm_console() {
+    case $scenario in
+        signal-backup|signal-backup-fragments|signal-mailbox|paired-mail) return 0 ;;
+    esac
+    if [ "$decoder_mode" != historical-v1 ]; then
+        tail -c 131072 "$1" >"$output_directory/vm-console.log"
+    else
+        install -m 0600 "$1" "$output_directory/vm-console.log"
+    fi
+}
+
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
@@ -1042,11 +1071,7 @@ cleanup() {
         printf '%s\n' 'QEMU exit unconfirmed; private VM scratch retained' >&2
     fi
     if [ "$FINISHED" = no ] && [ -f "$RUN_DIRECTORY/console.log" ]; then
-        if [ "$decoder_mode" != historical-v1 ]; then
-            tail -c 131072 "$RUN_DIRECTORY/console.log" >"$output_directory/vm-console.log" 2>/dev/null || true
-        else
-            install -m 0600 "$RUN_DIRECTORY/console.log" "$output_directory/vm-console.log" 2>/dev/null || true
-        fi
+        copy_vm_console "$RUN_DIRECTORY/console.log" 2>/dev/null || true
     fi
     if [ -f "$RUN_DIRECTORY/qemu.stderr" ]; then
         # Preserve startup failures too: there may not be a serial console yet.
@@ -1219,6 +1244,7 @@ CONSOLE=$RUN_DIRECTORY/console.log
 guest_disk_size=16G
 [ "$scenario" != signal-backup ] || guest_disk_size=32G
 [ "$scenario" != signal-backup-fragments ] || guest_disk_size=32G
+[ "$scenario" != signal-mailbox ] || guest_disk_size=32G
 qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$OVERLAY" "$guest_disk_size"
 ssh-keygen -q -t ed25519 -N '' -C volparossa-alpha-kvm-user -f "$SSH_KEY"
 ssh-keygen -q -t ed25519 -N '' -C volparossa-alpha-kvm-host -f "$HOST_KEY"
@@ -1392,6 +1418,18 @@ HANDOFF_NAMES = {"a01-expected-peers.json"} | {
     *(f"private-storage-handoff-{phase}-privacy-{role}.json"
       for role in ("client", "relay0", "relay1", "relay2", "exit")),
 )}
+PAIRED_MAIL_NAMES = {"paired-mail-smoke.json", "paired-mail-supply.json", "content-mailbox-smoke.json",
+                     "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"} | {
+    n for phase in ("send", "receive") for n in (
+        f"paired-mail-{phase}.json", f"paired-mail-{phase}-route-diagnostic.json", f"content-mailbox-paired-{phase}-live-selection.json",
+        f"content-mailbox-paired-{phase}-gates.json", f"content-provider-mailbox-paired-{phase}-control.json",
+        *(f"content-mailbox-paired-{phase}-privacy-{r}.json" for r in ("client","relay0","relay1","relay2","exit")))}
+SIGNAL_MAILBOX_NAMES = {"signal-backup-provision.json", "host-state-before.json", "host-state-after.json",
+                        "guest-exit-status", "current-phase", "signal-mailbox-smoke.json", "signal-mailbox-native.json",
+                        "content-mailbox-smoke.json", "content-mailbox-desktop-live-selection.json",
+                        "content-mailbox-desktop-gates.json", "content-provider-mailbox-desktop-control.json",
+         "signal-mailbox-send-route-diagnostic.json", "signal-mailbox-receive-route-diagnostic.json"} | {
+    f"content-mailbox-desktop-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
 SIGNAL_NAMES = {"a01-expected-peers.json", "signal-backup-provision.json",
                 "host-state-before.json", "host-state-after.json", "guest-exit-status", "current-phase"} | {
     f"signal-backup-{name}.json" for name in (
@@ -1511,7 +1549,7 @@ COOPERATIVE_CODE_NAMES = {name.replace("agent-cooperative-browser-", "agent-coop
                           for name in COOPERATIVE_BROWSER_NAMES
                           if name != "agent-cooperative-browser-panel.json"} | {"agent-cooperative-code-driver.json"}
 COOPERATIVE_CODE_PROPOSAL_NAMES = {f"agent-cooperative-code-proposal-{name}.json" for name in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control")
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor")
 } | {name for name in COOPERATIVE_BROWSER_NAMES if not name.startswith("agent-cooperative-browser-")}
 COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
@@ -1795,7 +1833,9 @@ def collect(home, opt, revision, scenario, guest_status,
                    "package-lifecycle.stdout", "package-lifecycle.stderr")]
     if scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal"):
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
-    if scenario in ("signal-backup", "signal-backup-fragments"):
+    if scenario == "paired-mail":
+        candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt")]
+    if scenario in ("signal-backup", "signal-backup-fragments", "signal-mailbox"):
         # Never collect raw native/runner/build logs or arbitrary content-* files.
         candidates = [(home / "guest-phase.txt", "driver/guest-phase.txt"),
                       (home / "signal-backup-runtime/provision.json", "driver/signal-backup-provision.json")]
@@ -1869,9 +1909,12 @@ def collect(home, opt, revision, scenario, guest_status,
                 names = COOPERATIVE_CODE_PROPOSAL_NAMES
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(names))
             continue
-        if scenario in ("signal-backup", "signal-backup-fragments"):
+        if scenario == "paired-mail":
+            candidates.extend((root / name, f"{label}/{name}") for name in sorted(PAIRED_MAIL_NAMES))
+            continue
+        if scenario in ("signal-backup", "signal-backup-fragments", "signal-mailbox"):
             candidates.extend((root / name, f"{label}/{name}") for name in sorted(
-                SIGNAL_FRAGMENT_NAMES if scenario == "signal-backup-fragments" else SIGNAL_NAMES))
+                SIGNAL_MAILBOX_NAMES if scenario == "signal-mailbox" else SIGNAL_FRAGMENT_NAMES if scenario == "signal-backup-fragments" else SIGNAL_NAMES))
             continue
         if scenario == "transaction-abci":
             # Closed receipts only: never scan validator stores, account seeds or logs.
@@ -2149,7 +2192,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("weather-decoder-abi", "alpha", "datapath", "reciprocity", "reciprocity-private-dns", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth", "mptcp-refill",
-                           "sharing", "download-sharing", "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "protected-quote", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
+                           "sharing", "download-sharing", "wifi-mesh", "transaction-abci", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "protected-quote", "private-storage-peer", "private-storage-replicas", "signal-backup", "signal-backup-fragments", "signal-mailbox", "private-storage-handoff", "private-storage-fragments", "private-storage-maintenance", "image-snapshot", "cloud-private-file", "cloud-private-upload", "content-custody", "content-repair", "content-replication", "content-mailbox", "paired-mail", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-private-code", "agent-private-conversation", "agent-native-coding", "agent-native-editor", "agent-private-browser", "browser-network", "agent-reasoning", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-cooperative-browser", "agent-cooperative-browser-discovered", "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation", "agent-policy-assessment"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -2284,7 +2327,7 @@ case $scenario in
         ;;
     *) [ "$#" -eq 5 ] || exit 64 ;;
 esac
-case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
+case $scenario in weather-decoder-abi|alpha|datapath|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-mesh|transaction-abci|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|signal-mailbox|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|paired-mail|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 prepare_current_compiler() {
@@ -2526,7 +2569,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
 if [ "$scenario" = browser-network ] && [ -n "$browser_source_manifest" ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends xvfb xauth x11-utils libxtst6
 fi
-if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then
+if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ] || [ "$scenario" = signal-mailbox ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
         bubblewrap xvfb xauth libgtk-3-0t64 libnss3 libnspr4 libgbm1 libasound2t64 \
         libpulse0 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcups2t64 \
@@ -2570,6 +2613,11 @@ if [ "$scenario" = reciprocity-private-dns ]; then
 fi
 tar -xzf source.tar.gz
 cd source
+if [ "$scenario" = paired-mail ]; then
+    guest_phase paired-mail-runtime
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends bubblewrap ca-certificates
+    python3 -I -B tests/integration/paired-mail-bundle.py stage /home/vpci/paired-mail-transfer.tar /var/tmp/volparossa-paired-mail-runtime
+fi
 prepare_current_compiler
 test -x tests/integration/kvm-alpha-topology.sh
 if [ "$browser_filter_manifest_sha256" != none ]; then
@@ -2600,12 +2648,20 @@ if [ "$scenario" = agent-cooperative-code ] || [ "$scenario" = agent-cooperative
     printf '%s  /home/vpci/cooperative-code.tar\n' "$code_archive_sha256" | sha256sum --check --strict -
     python3 -B tests/integration/cooperative-code-bundle.py unpack \
         /home/vpci/cooperative-code.tar /home/vpci/cooperative-code-inputs "$code_manifest_sha256" "$scenario"
+    if [ "$scenario" = agent-cooperative-code-proposal ] && \
+            jq -e '.frontend == "vscodium"' /home/vpci/cooperative-code-inputs/INPUTS.json >/dev/null; then
+        # This input was authenticated by the exact Core fixture during unpack.
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            libgtk-3-0t64 libnss3 libnspr4 libatk-bridge2.0-0t64 libasound2t64 libgbm1 \
+            libxkbcommon0 libcups2t64 libxdamage1 libxrandr2 fonts-dejavu-core
+    fi
 fi
 test -x tests/packaging/debian13-package-lifecycle.sh
-if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then
+if [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ] || [ "$scenario" = signal-mailbox ]; then
     guest_phase signal-backup-provision
     set --
     [ "$scenario" != signal-backup-fragments ] || set -- --trial fragments
+    [ "$scenario" != signal-mailbox ] || set -- --trial mailbox
     python3 -B tests/integration/signal-backup-provision.py provision \
         /home/vpci/signal-backup-runtime --download "$@"
 elif [ "$scenario" = image-snapshot ]; then
@@ -2763,7 +2819,7 @@ if [ "$scenario" = alpha ]; then
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|protected-quote|private-storage-peer|private-storage-replicas|signal-backup|signal-backup-fragments|signal-mailbox|private-storage-handoff|private-storage-fragments|private-storage-maintenance|image-snapshot|cloud-private-file|cloud-private-upload|content-custody|content-repair|content-replication|content-mailbox|paired-mail|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-private-code|agent-private-conversation|agent-native-coding|agent-native-editor|agent-private-browser|browser-network|agent-reasoning|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-cooperative-browser|agent-cooperative-browser-discovered|agent-cooperative-code|agent-cooperative-code-proposal|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment) topology_scenario=$scenario ;; esac
 guest_phase topology
 set --
 if [ -n "$studio_evidence_sha256" ]; then
@@ -2887,12 +2943,17 @@ elif [ "$scenario" = agent-cooperative-browser ] || [ "$scenario" = agent-cooper
         fi
     done </home/vpci/cooperative-export.list
     tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz -T "$export_list"
-elif [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ]; then
+elif [ "$scenario" = signal-backup ] || [ "$scenario" = signal-backup-fragments ] || [ "$scenario" = signal-mailbox ] || [ "$scenario" = paired-mail ]; then
     # The exact closed receipt files are the entire artifact surface, on failure too.
-    cp -- /home/vpci/signal-backup-runtime/provision.json /home/vpci/alpha-output/signal-backup-provision.json
+    if [ "$scenario" = paired-mail ]; then
+        provision_name=paired-mail-supply.json
+    else
+        provision_name=signal-backup-provision.json
+        cp -- /home/vpci/signal-backup-runtime/provision.json "/home/vpci/alpha-output/$provision_name"
+    fi
     {
         python3 -B "tests/integration/$scenario-smoke.py" export-names
-        printf '%s\n' signal-backup-provision.json host-state-before.json host-state-after.json guest-exit-status current-phase
+        printf '%s\n' "$provision_name" host-state-before.json host-state-after.json guest-exit-status current-phase
     } | sort -u | while IFS= read -r name; do
         case $name in ''|*[!a-z0-9_.-]*) exit 1 ;; esac
         candidate=/home/vpci/alpha-output/$name
@@ -3138,6 +3199,7 @@ done
 [ "$ssh_attempt" -lt 240 ] || { tail -c 131072 "$CONSOLE" >&2; exit 1; }
 ssh_base sudo -n cloud-init status --wait >/dev/null
 scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
+if [ "$scenario" = paired-mail ]; then scp_to "$paired_mail_bundle" /home/vpci/paired-mail-transfer.tar; fi
 if [ -n "${studio_handoff:-}" ]; then
     ssh_base mkdir -m 0700 /home/vpci/studio-topology-handoff
     for studio_file in site.vps manifest.bin evidence.json; do
@@ -3219,6 +3281,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-policy-assessment ] || driver_time_bound=3600s
 [ "$scenario" != signal-backup ] || driver_time_bound=7200s
 [ "$scenario" != signal-backup-fragments ] || driver_time_bound=7200s
+[ "$scenario" != signal-mailbox ] || driver_time_bound=7200s
 case $scenario in
     transaction-abci)
         set --
@@ -3361,13 +3424,7 @@ if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"
     printf '%s\n' 'refusing topology output containing private-key material' >&2
     exit 1
 fi
-if [ "$scenario" != signal-backup ] && [ "$scenario" != signal-backup-fragments ]; then
-    if [ "$decoder_mode" != historical-v1 ]; then
-        tail -c 131072 "$CONSOLE" >"$output_directory/vm-console.log"
-    else
-        install -m 0600 "$CONSOLE" "$output_directory/vm-console.log"
-    fi
-fi
+copy_vm_console "$CONSOLE"
 ssh_bounded 15s sudo -n systemctl poweroff >/dev/null 2>&1 || true
 if ! stop_qemu_child normal; then
     [ "$GUEST_STATUS" -ne 0 ] || GUEST_STATUS=1

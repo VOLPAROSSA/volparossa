@@ -694,6 +694,26 @@ class Trial:
         require(samples >= 8 and elapsed >= seconds, "partition_missing_coverage")
         return {"heights": start, "samples": samples, "observation_seconds": round(elapsed, 3)}
 
+    def bank_cancellation(self):
+        """Exercise a separate reservation and release while the 70-unit payment stays committed."""
+        receipts = []
+        operation = secrets.token_hex(32)
+        for action, terms, state, balances in (
+                ("reserve", {"recipient": self.recipient, "units": 10}, "Reserved", (20, 10, 70)),
+                ("cancel", {"reservation": operation}, "Cancelled", (30, 0, 70))):
+            identifier = operation if action == "reserve" else secrets.token_hex(32)
+            command = self.sign(action, identifier, **terms)
+            self.broadcast(1, command)
+            executed = self.wait(lambda: self.tx_result(command))
+            require(executed["tx_result"].get("code", 0) == 0, "bank_cancellation_rejected")
+            self.wait(lambda: self.balances(*balances))
+            receipt = query(0, "/test/operation", bytes.fromhex(identifier))
+            require(receipt["state"] == state and receipt["reservation_id"] == operation
+                    and receipt["command_sha256"] == hashlib.sha256(command).hexdigest(), "bank_cancellation_receipt")
+            self.wait(lambda: self.same_receipts([receipt]))
+            receipts.append(receipt)
+        return command, receipts
+
     def run(self):
         self.setup()
         self.phase = "startup"
@@ -742,6 +762,7 @@ class Trial:
         self.checkpoint("commit", debited_units=70, credited_units=70, conserved_units=100,
                         **self.wait(lambda: self.converged(int(committed["height"]) + 1)))
         if self.bank_owner is not None:
+            cancellation, cancellation_receipts = self.bank_cancellation()
             (self.work / "payer.seed").unlink()
             self.report["checkpoints"]["commit"]["bank_command_sha256"] = [
                 receipt["command_sha256"] for receipt in original_receipts]
@@ -796,6 +817,8 @@ class Trial:
                     "bank_authorization_key_present")
             retry_commands = [self.bank_owner.replay(op, original) for op, original in
                               zip((operations[winner], commit_operation), retry_commands, strict=True)]
+            cancel_op = cancellation_receipts[1]["operation_id"]
+            retry_commands.append(self.bank_owner.replay(cancel_op, cancellation))
         retry_start = max(int(rpc(n, "status")["sync_info"]["latest_block_height"]) for n in range(4))
         for command in retry_commands:
             self.broadcast(3, command)
@@ -805,16 +828,20 @@ class Trial:
         self.wait(lambda: self.same_receipts(original_receipts))
         self.checkpoint("crash_replay", crashed_node=3, post_commit_restart=True,
                         height_before_restart=before,
-                        retry_start_height=retry_start, retry_committed_heights=retry_heights,
+                        retry_start_height=retry_start, retry_committed_heights=retry_heights[:2],
                         retry_result_codes=[0, 0], unchanged_balances=True, unchanged_receipts=True,
                         original_receipt_sequences=[receipt["sequence"] for receipt in original_receipts],
                         second_abci_execution_proven=True, **converged)
         if self.bank_owner is not None:
-            reopened = [hashlib.sha256(raw).hexdigest() for raw in retry_commands]
+            self.wait(lambda: self.same_receipts(cancellation_receipts))
+            reopened = [hashlib.sha256(raw).hexdigest() for raw in retry_commands[:2]]
             self.report["checkpoints"]["crash_replay"]["bank_command_sha256"] = reopened
             self.report["bank_authorizer"] = dict(source_revision=bank.source_revision(),
                 authorizer_sha256=self.args.bank_authorizer_sha256, genesis_ledger=self.ledger, seed_removed=True,
-                reopened_without_seed=True, reserve_sha256=reopened[0], commit_sha256=reopened[1])
+                reopened_without_seed=True, reserve_sha256=reopened[0], commit_sha256=reopened[1],
+                cancellation={"released_units": 10, "receipts": cancellation_receipts,
+                              "reopened_sha256": hashlib.sha256(retry_commands[2]).hexdigest(),
+                              "retry_height": retry_heights[2]})
         self.report["acceptance"] = True
 
     def finish(self):

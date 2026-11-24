@@ -24,7 +24,7 @@ pub use ordered::{
     Block, BlockOutcome, BlockReceipt, BlockTime, CommandFailure, MAX_BLOCK_BYTES,
     MAX_BLOCK_COMMANDS, OrderedStore, StagedBlock,
 };
-pub use wire::SignedCommand;
+pub use wire::{CommandSigner, SignedCommand};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
