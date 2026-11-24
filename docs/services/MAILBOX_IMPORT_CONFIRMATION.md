@@ -151,3 +151,19 @@ SHA-256 `3f4cc66aeee04d1ad992eb5ac7eaba36fc561b142a9fdb4b0b99d93ec87c53e2`.
 [Guest run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44553382181) ·
 [Original report](../development/evidence/paired-mail-44553382181/paired-mail-smoke.json) ·
 [Native Mail producer](https://github.com/VOLPAROSSA/volparossa-mail/actions/runs/44547309790)
+
+### Two independent Mail clients
+
+The `paired-mail-peers` scenario gives each correspondent a separate Core
+agent and private profile. R4 runs the recipient. Only R3 and R5 serve the
+mailbox at the Exit. On `77c71187` the recipient enrolled with both providers,
+then the guest failed to read the Exit’s private event log. The enrollment
+captures also recorded three UDP/41000 packets from the Exit to R4 over the
+physical link used by other fixtures to serve content. [Original trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564630267)
+
+The guest observer reads the service logs. Before starting the agents the
+fixture verifies that the recipient and Exit cannot route directly to each
+other’s public or link address. Both ends of the physical link stay under
+capture. This scenario tests delivery with both clients isolated from the
+Exit. Discovery behavior between directly reachable peers requires a separate
+measurement.

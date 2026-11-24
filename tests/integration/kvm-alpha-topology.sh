@@ -3494,7 +3494,6 @@ ip -n "$R3" route add 46.162.3.1/32 via 10.241.23.2 dev r3x src 48.164.4.1
 ip -n "$R4" route add 43.159.1.1/32 via 10.241.14.1 dev r4c src 49.165.5.1
 ip -n "$R4" route add 40.156.1.1/32 via 10.241.50.2 dev r4b1 src 49.165.5.1
 ip -n "$R4" route add 41.157.2.1/32 via 10.241.51.2 dev r4b2 src 49.165.5.1
-ip -n "$R4" route add 46.162.3.1/32 via 10.241.24.2 dev r4x src 49.165.5.1
 ip -n "$R5" route add 43.159.1.1/32 via 10.241.15.1 dev r5c src 50.166.6.1
 ip -n "$R5" route add 40.156.1.1/32 via 10.241.52.2 dev r5b1 src 50.166.6.1
 ip -n "$R5" route add 41.157.2.1/32 via 10.241.53.2 dev r5b2 src 50.166.6.1
@@ -3518,7 +3517,21 @@ ip -n "$EXIT_NODE" route add 42.158.0.1/32 via 10.241.20.1 dev xr0 src 46.162.3.
 ip -n "$EXIT_NODE" route add 44.160.1.1/32 via 10.241.21.1 dev xr1 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 45.161.2.1/32 via 10.241.22.1 dev xr2 src 46.162.3.1
 ip -n "$EXIT_NODE" route add 48.164.4.1/32 via 10.241.23.1 dev xr3 src 46.162.3.1
-ip -n "$EXIT_NODE" route add 49.165.5.1/32 via 10.241.24.1 dev xr4 src 46.162.3.1
+if [ "$paired_mail_peers" = yes ]; then
+    # R4 is the Mail recipient. Only R3 and R5 serve the Exit in this trial.
+    # Both ends of the unused origin link remain up for the packet observers.
+    for peer_address in 46.162.3.1 10.241.24.2; do
+        ip -n "$R4" route add unreachable "$peer_address/32"
+        if ip -n "$R4" route get "$peer_address" >/dev/null 2>&1; then fail DIRECT_CLIENT_EXIT_REACHABLE; fi
+    done
+    for peer_address in 49.165.5.1 10.241.24.1; do
+        ip -n "$EXIT_NODE" route add unreachable "$peer_address/32"
+        if ip -n "$EXIT_NODE" route get "$peer_address" >/dev/null 2>&1; then fail DIRECT_CLIENT_EXIT_REACHABLE; fi
+    done
+else
+    ip -n "$R4" route add 46.162.3.1/32 via 10.241.24.2 dev r4x src 49.165.5.1
+    ip -n "$EXIT_NODE" route add 49.165.5.1/32 via 10.241.24.1 dev xr4 src 46.162.3.1
+fi
 ip -n "$EXIT_NODE" route add 50.166.6.1/32 via 10.241.25.1 dev xr5 src 46.162.3.1
 ip -n "$EXIT2_NODE" route add 42.158.0.1/32 via 10.241.26.1 dev x2r0 src 51.167.7.1
 for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
