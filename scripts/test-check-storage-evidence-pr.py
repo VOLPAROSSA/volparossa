@@ -117,10 +117,15 @@ class EvidenceChanges(unittest.TestCase):
 
     def test_required_check_cannot_be_green_on_a_skipped_or_invalid_route(self):
         workflow = (HERE.parent / '.github/workflows/quality.yml').read_text()
-        gate = workflow.split('      - name: Require a complete workspace suite or verified original evidence', 1)[1]
+        gate = workflow.split('      - name: Require a complete workspace suite or a verified PR-only check', 1)[1]
         shell = gate.split('        run: |', 1)[1]
         for event, classifier, route, build, passed in (
             ('pull_request', 'success', 'verified', 'skipped', True),
+            ('pull_request', 'success', 'status', 'skipped', True),
+            ('pull_request', 'failure', 'status', 'skipped', False),
+            ('push', 'success', 'status', 'skipped', False),
+            ('pull_request', 'success', 'status-invalid', 'skipped', False),
+            ('pull_request', 'success', 'status-invalid', 'success', False),
             ('push', 'skipped', '', 'success', True),
             ('pull_request', 'failure', '', 'success', True),
             ('pull_request', 'success', 'full', 'skipped', False),

@@ -5,8 +5,8 @@ blake3	1.8.5	CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception	93a431c78a5
 const-str	0.4.3	MIT	a549b512ced97f5ec6569823dbce08916cd611f3	const-str-a549b512
 futures-bounded	0.2.4	MIT	7a9b5a96663835c1234df5251fe88df75d26fb86	-
 if-watch	3.2.2	MIT OR Apache-2.0	f6271229b3505bb1e245aad3d078bf571bb4e20e	-
-jsonschema-regex	0.50.1	MIT	60a563d3e7a3e9b4facb2abb15c6b30687e06050	jsonschema-60a563d3
-jsonschema-value	0.50.1	MIT	60a563d3e7a3e9b4facb2abb15c6b30687e06050	jsonschema-60a563d3
+jsonschema-regex	0.61.2	MIT	0e82636fde8b2afb5e712ede6c261166ea10fc17	jsonschema-0e82636f	7e41151614b6c927e21982be8bef5a26741ae5a0ae6a781eedee2aa930a980e6	crates/jsonschema-regex
+jsonschema-value	0.61.2	MIT	0e82636fde8b2afb5e712ede6c261166ea10fc17	jsonschema-0e82636f	1515b9a91134ef67d7bac95c2d76fbc7e383c4c55ee544204ceec8088f881fef	crates/jsonschema-value
 libp2p	0.56.0	MIT	2ac0ca97a82e161a4bf56ecdfc3a46dd69af302c	rust-libp2p
 libp2p-allow-block-list	0.6.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
 libp2p-autonat	0.15.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p

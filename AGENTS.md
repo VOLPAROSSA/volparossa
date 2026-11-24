@@ -1,42 +1,13 @@
 # VOLPAROSSA repository instructions
 
-These instructions apply to this repository with Codex, OpenCode and other coding
-agents. The user's latest scoped instructions take precedence over older records.
-
 ## Scope and reading
 
 - Build the complete DICN development alpha in `docs/development/GOAL.md`, including
   its integrated DPS and Studio/hosting requirements. A milestone never reduces agreed scope.
-- Start with the task and `docs/IMPLEMENTATION_STATUS.md`. For a full project
-  resumption, read GOAL; for bounded work, read the affected requirements and topic
-  sections. Use `docs/README.md` as the index and the application's own guidance.
-  Do not load historical ledgers, source snapshots or unrelated specifications by default.
-- Follow the [shared development workflow](docs/development/CODEX_WORKFLOW.md)
-  across repositories and coding clients. GOAL is the single goal reference
-  when switching clients or sessions. `docs/development/TESTING.md#requirement-preservation`
-  covers preservation checks when requirements or source records change; no ritual
-  rereading or verification is needed per task.
-
-## Autonomous execution and coordination
-
-- Choose models, reasoning effort, agents/subagents, skills, tools, context and
-  parallelism dynamically for the task's complexity, uncertainty, risk and cost,
-  using capabilities actually available in the current client. Reassess as needed.
-  There are no required model names, vendors, fixed role assignments or project
-  concurrency quotas. This replaces all earlier development model-routing rules.
-- Delegate independent bounded work when it helps. Give each assignment the goal,
-  source revision, owned paths/worktree, relevant contracts and expected evidence.
-  Avoid duplicate exploration and concurrent writers to the same files. The
-  coordinating agent integrates results; use independent review where correctness,
-  privacy or consequential integration warrants it. Agents may not approve their
-  own work or gain publication/release authority through delegation.
-- Choose implementation details, priorities, checks and scoped commit/push timing
-  autonomously. Preserve unrelated changes, unfinished work and branch protections.
-  Ask only for consequential authority outside the agreed scope: private disclosure,
-  real funds, host changes, permission expansion or bypassing release controls.
-- Keep project requirements, implementation evidence and development-tool choices
-  distinct. Client settings may constrain model switching; report actual limitations
-  rather than claiming a prompt changed configuration or enabled automatic routing.
+- Follow the [shared development workflow](docs/development/WORKFLOW.md) for
+  task-scoped reading, coordination, commit attribution, verification and handover.
+  Use the [documentation index](docs/README.md) to find Core topics and application
+  guidance.
 
 ## Network and privacy invariants
 
@@ -140,11 +111,7 @@ agents. The user's latest scoped instructions take precedence over older records
   approval. No curl-pipe-shell, untagged containers, unpinned Git dependencies or
   silently downloaded binaries. Preserve dirty worktrees and unique evidence;
   recover or retire checkouts through the shared workflow.
-- Integrate useful executable slices. Run the smallest relevant formatter/compile
-  check and functional smoke; broaden checks for affected boundaries and integration.
-  Reuse exact-source results; do not rerun completed trials because a conversation
-  ended. Full quality commands and acceptance requirements are in
-  `docs/development/TESTING.md`, not mandatory steps for every small edit.
+- Core quality commands and acceptance requirements are in [testing](docs/development/TESTING.md).
 - Test canonical encoding, signatures/replay/TTL, advertisements, policy, scoring,
   diversity/capacity, reservations, framing, versions, cleanup and configuration.
   Bound external input/resources; fuzz the specified parsers; use secure randomness
