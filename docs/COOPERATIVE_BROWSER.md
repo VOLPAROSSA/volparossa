@@ -152,6 +152,19 @@ context must retain the original physical control relay, both data relays and
 the Exit. The five private packet captures and both provider exchanges remain
 part of the final acceptance check.
 
+On Core `19fdeedf`, two discovered peers executed the 4,096-byte public Firefox
+selection. The first task completed 21 jobs with two synthesis levels. The
+second task cancelled two live workers and reconciled both terminal receipts.
+The independent observer verified consent before dispatch and the termination of
+every observed worker. The route sampler stopped after 114 valid samples and
+287 completed flows, with zero failed flows counted through that sample. Its
+`route_binding/invalid` result identifies the operation but leaves the specific
+comparison unresolved. The guest restored its original host state and retained
+zero topology objects. The full trial failed the route check. The 36,785-byte
+original ZIP has SHA-256
+`adcc978cceb01bd0a358f12dc35755cf7adabc8659f056b3ac4f2f31b088faf9`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424897092) · [Original reports](development/evidence/browser-cooperative-45424897092)
+
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker
 PID and start time before deliberate broker shutdown. Every observed transient

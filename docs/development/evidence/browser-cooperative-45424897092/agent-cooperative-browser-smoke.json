@@ -1,0 +1,76 @@
+{
+  "report_kind": "volparossa-cooperative-browser",
+  "schema_version": 1,
+  "source_revision": "19fdeedfbad0a17d6965615f5137a8bbfc49ea63",
+  "runner_exit_status": 1,
+  "phase": "agent-cooperative-browser-panel",
+  "observed_blocker": "COOPERATIVE_BROWSER_PEER_PROOF_FAILED",
+  "evidence": null,
+  "host_state": {
+    "acceptance_id": "A15",
+    "after_sha256": "2fee6736059790ed03dd828c32c5c1a9de5cb31197e5ef534104f37d5e84efbb",
+    "before_sha256": "2fee6736059790ed03dd828c32c5c1a9de5cb31197e5ef534104f37d5e84efbb",
+    "compared": [
+      "links",
+      "addresses",
+      "routes",
+      "rules",
+      "DNS",
+      "nftables",
+      "WireGuard/VPN state",
+      "relevant forwarding sysctls",
+      "pre-existing named network namespaces"
+    ],
+    "schema_version": 1,
+    "scope": "disposable KVM guest root network namespace outside owned namespaces",
+    "success": true,
+    "unchanged": true
+  },
+  "preselection_diagnostic": {
+    "version": 1,
+    "state": "unknown",
+    "observed_reason": "unknown",
+    "uncertainty": "ring_at_capacity",
+    "scope": "retained_client_log_ring_not_last_attempt_proof",
+    "limit": 400,
+    "records": 400,
+    "counts": {
+      "PRESELECTION_SAMPLE_NO_EXIT": 0,
+      "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS": 0,
+      "PRESELECTION_SAMPLE_INVALID_POLICY": 0,
+      "PRESELECTION_SAMPLE_INVALID_SNAPSHOT": 0,
+      "PRESELECTION_SAMPLE_ENTROPY": 0
+    },
+    "unrecognized_reason_records": 0
+  },
+  "cleanup": {
+    "complete": true,
+    "remaining_owned_objects": 0
+  },
+  "success": false,
+  "inventory_diagnostic": {
+    "version": 1,
+    "scope": "last_valid_inventory_not_route_readiness",
+    "deadline_seconds": 60,
+    "attempts": 211,
+    "query_timeouts": 0,
+    "query_nonzero": 0,
+    "invalid_replies": 0,
+    "last_query_outcome": "complete",
+    "last_valid_presence": {
+      "relay0": true,
+      "relay1": true,
+      "relay2": true,
+      "relay3": true,
+      "relay4": true,
+      "relay5": true,
+      "exit": true,
+      "exit2": true
+    },
+    "ready": true
+  },
+  "trial_contract": "discovered-360m",
+  "scenario": "agent-cooperative-browser-discovered",
+  "model_profile": "smollm2-360m-v1",
+  "provider_selection": "protected_provider_eligibility_discovery"
+}
