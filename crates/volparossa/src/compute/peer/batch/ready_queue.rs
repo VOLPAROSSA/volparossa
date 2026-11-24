@@ -398,11 +398,12 @@ async fn finish(
 /// Observe a joined worker before moving on to the next batch. Brokers decide
 /// whether a receipt still exists. Later retries cannot restart this window.
 async fn observe_just_expired(socket: &Path, handle: &JobHandle) -> Option<rpc::JobStatus> {
-    let elapsed = now()
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .ok()?
-        .checked_sub(handle.binding.expires_unix_seconds)?;
-    let remaining = FINAL_OBSERVATION_SECONDS.checked_sub(elapsed)?;
-    if remaining == 0 {
+        .checked_sub(Duration::from_secs(handle.binding.expires_unix_seconds))?;
+    let remaining = FINAL_OBSERVATION.checked_sub(elapsed)?;
+    if remaining.is_zero() {
         return None;
     }
     let provider = parse_key(&handle.provider_key).ok()?;
@@ -417,10 +418,7 @@ async fn observe_just_expired(socket: &Path, handle: &JobHandle) -> Option<rpc::
             sleep(Duration::from_secs(2)).await;
         }
     };
-    timeout(Duration::from_secs(remaining), poll)
-        .await
-        .ok()
-        .flatten()
+    timeout(remaining, poll).await.ok().flatten()
 }
 
 fn completed(
@@ -894,10 +892,19 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_poll_respects_the_remaining_execution_lease() {
-        assert_eq!(poll_budget(70), Duration::from_secs(40));
-        assert_eq!(poll_budget(32), Duration::from_secs(16));
-        assert_eq!(poll_budget(2), Duration::from_secs(1));
-        assert_eq!(poll_budget(1), Duration::from_secs(1));
+        assert_eq!(
+            poll_budget(Duration::from_secs(70)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            poll_budget(Duration::from_secs(32)),
+            Duration::from_secs(16)
+        );
+        assert_eq!(poll_budget(Duration::from_secs(2)), Duration::from_secs(1));
+        assert_eq!(
+            poll_budget(Duration::from_millis(350)),
+            Duration::from_millis(175)
+        );
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("agent.sock");
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();

@@ -7,7 +7,7 @@ use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
-const FINAL_OBSERVATION_SECONDS: u64 = 30;
+const FINAL_OBSERVATION: Duration = Duration::from_secs(30);
 
 pub(super) mod output;
 mod ready_queue;
@@ -449,9 +449,8 @@ async fn follow_status(
     }
 }
 
-fn poll_budget(remaining: u64) -> Duration {
-    let reserve = FINAL_OBSERVATION_SECONDS.min(remaining / 2);
-    Duration::from_secs(remaining - reserve)
+fn poll_budget(remaining: Duration) -> Duration {
+    remaining - FINAL_OBSERVATION.min(remaining / 2)
 }
 
 async fn status_exchange(
@@ -463,15 +462,15 @@ async fn status_exchange(
     let (rpc::Operation::Poll(binding) | rpc::Operation::Cancel(binding)) = &operation else {
         return exchange(socket, provider, operation).await;
     };
-    let at = now()?;
-    let expiry = binding.expires_unix_seconds;
+    let at = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let expiry = Duration::from_secs(binding.expires_unix_seconds);
     let budget = if phase == RpcPhase::Poll && at < expiry {
         // A stalled read must not consume the last opportunity to observe this job.
         poll_budget(expiry - at)
-    } else if at >= expiry && at - expiry < FINAL_OBSERVATION_SECONDS {
+    } else if at >= expiry && at - expiry < FINAL_OBSERVATION {
         // Leave time for the queue to obtain a joined receipt after this last
         // exchange. The original owner cancellation/expiry still applies.
-        Duration::from_secs((FINAL_OBSERVATION_SECONDS - (at - expiry)).div_ceil(2))
+        (FINAL_OBSERVATION - (at - expiry)) / 2
     } else {
         return exchange(socket, provider, operation).await;
     };
