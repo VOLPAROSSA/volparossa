@@ -816,7 +816,7 @@ mod tests {
             )
             .await;
         };
-        let (event, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        let (event, ()) = timeout(Duration::from_secs(15), async {
             tokio::join!(
                 finish(&socket, handle.clone(), first, true, activity),
                 provider_replies
