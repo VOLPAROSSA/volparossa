@@ -19,6 +19,23 @@ const VALIDITY: Validity = Validity {
 };
 
 #[test]
+fn previously_provisioned_unclamped_x25519_key_keeps_its_public_identity() {
+    // Alice's public test vector from RFC 7748 section 6.1. Older HPKE releases
+    // could serialize these unclamped input bits when provisioning a recipient.
+    let mut secret = Zeroizing::new([0; 32]);
+    hex::decode_to_slice(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        &mut *secret,
+    )
+    .expect("RFC private test vector");
+    let recipient = RecipientKeyPair::from_private_key(secret).expect("import existing key");
+    assert_eq!(
+        hex::encode(recipient.public_key()),
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+    );
+}
+
+#[test]
 fn intended_recipient_reads_reopened_ciphertext_replicas_after_publisher_storage_is_gone() {
     let root = tempfile::tempdir().expect("test root");
     let origin = tempfile::tempdir_in(root.path()).expect("publisher directory");
