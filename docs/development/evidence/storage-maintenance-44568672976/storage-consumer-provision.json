@@ -1,0 +1,167 @@
+{
+  "application_restore_proven": false,
+  "guest_only": true,
+  "immich_or_opencloud_server_started": false,
+  "kind": "storage-consumer-maintenance-runtime-provision",
+  "original_licenses_retained": true,
+  "peer_storage_proven": false,
+  "pins": {
+    "runtime": {
+      "bytes": 31633904,
+      "files": {
+        "LICENSE": {
+          "bytes": 157606,
+          "sha256": "148eacf7863ef4329224a29398623077200a27194aa075569faf4a0a85566ca5"
+        },
+        "bin/node": {
+          "bytes": 125989464,
+          "sha256": "bc17c508ffeed0ec622934f9b7fa72f8e78da65350e63c3eceb56fa688aa5e12"
+        }
+      },
+      "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647",
+      "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz",
+      "version": "24.19.0"
+    },
+    "sources": {
+      "cloud": {
+        "files": {
+          "LICENSE": {
+            "bytes": 35149,
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          },
+          "THIRD_PARTY_LICENSES.md": {
+            "bytes": 4992,
+            "sha256": "5f5aa20f0bcce57a70101cacba4415d417b57c26375ee09eced57b76ee2f5b00"
+          },
+          "scripts/cloud-serve.mjs": {
+            "bytes": 11253,
+            "sha256": "c572d5a05f902d5eceb0375746fd28876980c49e60fc1473a5898b7e413c3baa"
+          },
+          "scripts/private_catalog.py": {
+            "bytes": 5370,
+            "sha256": "a1a27b71a488b462cad9f509d9328d9994e23ea2869d6cc5e9239410cc065fd5"
+          },
+          "scripts/private_file.py": {
+            "bytes": 13621,
+            "sha256": "b310596862a4265e010f80e774db36888ea154ffbd59114719b8e31abca36338"
+          },
+          "scripts/recovery-web-assets.mjs": {
+            "bytes": 5098,
+            "sha256": "e1232e533d132adb180b6c7afb14b891a2afc8f043ccf3106c139cba8452dea5"
+          },
+          "src/opencloud-dav.mjs": {
+            "bytes": 9820,
+            "sha256": "43e10509e2af910cb1899f40860200eb6c7a359b9108fdd7ba2f32320cfc61d9"
+          },
+          "src/owner-uploads.mjs": {
+            "bytes": 17462,
+            "sha256": "31f753199d1d6b55ac2688f18f7ce6ab2d12f040f480075c61f66816f298c5d2"
+          },
+          "src/private-catalog.mjs": {
+            "bytes": 21139,
+            "sha256": "c8da0e49e961217bd8d6e39c6b15db5ffb638e45609a45c96d1cdf62af9bcbeb"
+          },
+          "src/private-dav-server.mjs": {
+            "bytes": 26216,
+            "sha256": "963aa21d8f2bf7a9e90f316fbcf60b521178425a7cb2f2a7573b5ff028afb399"
+          },
+          "src/private-file.mjs": {
+            "bytes": 11454,
+            "sha256": "f9bc85bf5bb70e8dcf035da96e7b4138e520c89266d8112624d5d95f7bf37796"
+          },
+          "src/private-resource-id.mjs": {
+            "bytes": 1070,
+            "sha256": "975dd651540b2bacee1193036b2639e9b078f1299dbf453991caee42732dfd65"
+          },
+          "src/recovery-web-metadata.mjs": {
+            "bytes": 6565,
+            "sha256": "5a350701d31fc1add78bc0abbd44831157539a53b878041cd66f6d4626345f56"
+          },
+          "src/storage-maintenance.mjs": {
+            "bytes": 4110,
+            "sha256": "2822b9088fc08502e1a7dad534a05e746a76650ee1c9f8b03bdfd733202cac8f"
+          },
+          "src/storage-upload-maintenance.mjs": {
+            "bytes": 21870,
+            "sha256": "147fd8a990b274ecbb6ee51525d6821cbd198c267e2c5d293567972b56e63da1"
+          },
+          "third_party/volparossa-image-source.json": {
+            "bytes": 1347,
+            "sha256": "27a46387cefccd6692545089496277708c896229fbd5560b637fc992cc885f44"
+          },
+          "vendor/volparossa-image/LICENSE": {
+            "bytes": 35149,
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          },
+          "vendor/volparossa-image/core-storage.mjs": {
+            "bytes": 53669,
+            "sha256": "64d5eca0f4bd3de3b0898cbf60c905abc40d917a173c0ef897570c7cb43dcc4f"
+          },
+          "vendor/volparossa-image/immich_snapshot.py": {
+            "bytes": 25820,
+            "sha256": "ecf98b1410cec1e0c954616a763a3ce74fb3a03f6f799c5e5f266edd09872e3c"
+          }
+        },
+        "repository": "https://github.com/VOLPAROSSA/volparossa-cloud",
+        "revision": "08be97111c323df95af68b3331eabd260957d0e4"
+      },
+      "image": {
+        "files": {
+          "LICENSE": {
+            "bytes": 35149,
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+          },
+          "scripts/immich_snapshot.py": {
+            "bytes": 25820,
+            "sha256": "ecf98b1410cec1e0c954616a763a3ce74fb3a03f6f799c5e5f266edd09872e3c"
+          },
+          "scripts/snapshot-storage.mjs": {
+            "bytes": 14078,
+            "sha256": "ad82775c3790efaca2547eff0f7caac685efe15cba40a846ca224607bba6ecdb"
+          },
+          "src/core-storage.mjs": {
+            "bytes": 53669,
+            "sha256": "64d5eca0f4bd3de3b0898cbf60c905abc40d917a173c0ef897570c7cb43dcc4f"
+          }
+        },
+        "repository": "https://github.com/VOLPAROSSA/volparossa-image",
+        "revision": "21988efc1ba112a9840e0f052f4e4d0dc56a9d63"
+      }
+    },
+    "version": 10
+  },
+  "pins_sha256": "beaf6a9467caf25a98d148713016f2e961c967ae366c65288e1fe2182bad1758",
+  "runtime_files_verified": true,
+  "sdk_or_browser_provisioned": false,
+  "shared_adapter_verified": true,
+  "source_files_verified": true,
+  "storage_enrollment_created": false,
+  "success": true,
+  "tools": {
+    "gpg": {
+      "bytes": 1230080,
+      "package": "gpg",
+      "package_version": "2.4.7-21+deb13u1+b5",
+      "sha256": "7c9d2f9416aabcd10199e2984439f49612644a948279ac56bdf70d69c8958ddf"
+    },
+    "gpg-agent": {
+      "bytes": 456184,
+      "package": "gpg-agent",
+      "package_version": "2.4.7-21+deb13u1+b5",
+      "sha256": "6855b10b86292329d6b8185e6e55a10fed0c6406756d3d04feb4633e7aaafff4"
+    },
+    "gpgconf": {
+      "bytes": 171560,
+      "package": "gpgconf",
+      "package_version": "2.4.7-21+deb13u1+b5",
+      "sha256": "17ea11378c9d71166df855b73a66333fbf8095cb8da7d3a474bd325e3ca726db"
+    },
+    "tar": {
+      "bytes": 458280,
+      "package": "tar",
+      "package_version": "1.35+dfsg-3.1",
+      "sha256": "38adf50825f773d353d6bda1a7cd70c22f8877823e44821c1d2bd0a52ddc3871"
+    }
+  },
+  "version": 10
+}

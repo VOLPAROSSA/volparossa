@@ -26,6 +26,8 @@ set -- \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-rust-dependencies.sh \
     scripts/check-shell.sh \
+    scripts/ci-run-summary.sh \
+    scripts/test-ci-run-summary.sh \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
     scripts/run-fuzz.sh \

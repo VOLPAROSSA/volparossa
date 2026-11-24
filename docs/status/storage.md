@@ -350,6 +350,18 @@ objects and its before/after network digests matched. Shared repair, cold
 restore and the separate finite upload lifecycle remain open.
 [Original 81,883-byte archive, SHA-256 `c90eb64a…c01ae792`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44537092652/artifacts/14539650755) · [Original reports](../development/evidence/storage-maintenance-44537092652)
 
+The twelve-node trial on `3dedd5f0` stopped at Image publication. The owner
+sent RESERVE for fragment 2, copy 1. Its one reported failure was an I/O error
+while waiting for the receipt. The agent recorded an operation timeout reading
+the remote receipt. Image deletion was unconfirmed and Cloud had no archive.
+Provider A retained one lease with 199,787 reserved bytes. Providers B and C
+reported zero leases and bytes. The usage receipt identifies the provider but
+does not identify the fragment. The separate Core lifecycle deleted all eleven
+copies and its three providers reported zero usage. Local cleanup completed
+and the guest network snapshots matched. Shared repair and cold restore still
+require a completed trial.
+[Original 95,189-byte archive, SHA-256 `bec95299…e3b7ac0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/44568672976/artifacts/14557796765) · [Original reports](../development/evidence/storage-maintenance-44568672976)
+
 ## Automatic upload integration candidate
 
 Upload profiles 1–6 retain their application pins and finite authorization
@@ -365,3 +377,19 @@ contracts. Both upload export paths validate the two diagnostic sidecars.
 The joined trial must demonstrate authenticated upload, automatic enrollment
 under finite authority, provider withdrawal, repair, two cold restorations
 across restart, deletion and cleanup. That trial remains pending.
+
+### Joint publication and the authenticated Cloud read
+
+Core `648e204a` repeated the Image and Cloud maintenance trial after the foreground
+reservation-receipt change. This run pinned Image `21988efc` and Cloud `08be9711`. Both apps published four fragments with two copies
+per fragment. Each reported 799,146 logical ciphertext bytes, 1,598,292 committed
+payload bytes, eight copy records and zero uncertain payload bytes. The publication
+observer passed its 56-completion lower bound and joined. Earlier combined trials
+also reached publication. [Earlier run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44367739602) · [Original publication report](../development/evidence/storage-maintenance-45408914106/storage-consumer-publish.json)
+
+The exercise reached `cloud_authenticated_read` and rejected the `repair_charge`
+check. The receipt does not identify the failing field. The guest network digests
+matched, the topology reported zero remaining owned objects and the local fixture
+was removed. The separate Core fragment lifecycle reported zero usage at its three
+providers. Remote cleanup and provider usage for the two application deposits
+remain unconfirmed. [Original exercise and cleanup reports](../development/evidence/storage-maintenance-45408914106) · [110,808-byte original archive, SHA-256 `90f4619e…80c022e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45408914106/artifacts/14933057121)
