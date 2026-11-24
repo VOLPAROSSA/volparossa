@@ -65,13 +65,14 @@ class ContextSampler(unittest.TestCase):
 
     def test_same_context_cannot_change_broker_or_permute_path_ids(self):
         a = 'a' * 32
-        for before, control, after in (
-                (paths(a, reverse=True), status(0), paths(a, reverse=True)),
-                (paths(a, 1), status(1), paths(a, 1)),
-                (paths(a), status(1), paths(a))):
+        for before, control, after, code in (
+                (paths(a, reverse=True), status(0), paths(a, reverse=True), 'binding_changed'),
+                (paths(a, 1), status(1), paths(a, 1), 'binding_changed'),
+                (paths(a), status(1), paths(a), 'binding_policy_invalid')):
             coverage = M['Coverage'](10, POLICY)
             coverage.route(paths(a), status(0), paths(a))
-            with self.assertRaises(ValueError): coverage.route(before, control, after)
+            with self.assertRaises(M['OLD']['RouteMismatch']) as failure: coverage.route(before, control, after)
+            self.assertEqual(failure.exception.code, code)
             self.assertEqual(len(coverage.route_bindings), 1)
             self.assertEqual(coverage.current_context, a)
 
@@ -126,7 +127,9 @@ class ContextSampler(unittest.TestCase):
         for i in range(8):
             context = f'{i + 1:032x}'
             coverage.route(paths(context), status(0), paths(context))
-        with self.assertRaises(ValueError): coverage.route(paths('f' * 32), status(0), paths('f' * 32))
+        with self.assertRaises(M['OLD']['RouteMismatch']) as failure:
+            coverage.route(paths('f' * 32), status(0), paths('f' * 32))
+        self.assertEqual(failure.exception.code, 'context_limit')
         for policy in ({}, dict(POLICY, extra=True), dict(exit_peer_id='exit', relay_peers={'relay0':'r0'}),
                 dict(exit_peer_id='r0', relay_peers=POLICY['relay_peers']),
                 dict(exit_peer_id='exit', relay_peers=dict(relay0='r0', relay1='r0', relay2='r2'))):
@@ -199,16 +202,16 @@ class ContextSampler(unittest.TestCase):
 
     def test_actual_query_bounds_and_parsers_reject_without_starting_owner(self):
         a, b = 'a' * 32, 'b' * 32
-        for index, raw, expected_operation, expected_queries in (
-                (0, b'x' * 65537, 'paths_before', 1),
-                (1, b'x' * 65537, 'control_status', 2),
-                (2, b'x' * 65537, 'paths_after', 3),
-                (3, b'x' * (262144 + 1), 'exit_log_query', 4),
-                (0, b'PRIVATE MALFORMED', 'route_binding', 3),
-                (1, b'{"control_relay_peer_id":"PRIVATE"}', 'route_binding', 3),
-                (2, b'', 'route_binding', 3),
-                (2, paths(b), 'route_binding', 3),
-                (3, b'PRIVATE MALFORMED', 'coverage', 4)):
+        for index, raw, expected_operation, expected_code, expected_queries in (
+                (0, b'x' * 65537, 'paths_before', 'invalid', 1),
+                (1, b'x' * 65537, 'control_status', 'invalid', 2),
+                (2, b'x' * 65537, 'paths_after', 'invalid', 3),
+                (3, b'x' * (262144 + 1), 'exit_log_query', 'invalid', 4),
+                (0, b'PRIVATE MALFORMED', 'route_binding', 'paths_before_invalid', 3),
+                (1, b'{"control_relay_peer_id":"PRIVATE"}', 'route_binding', 'control_invalid', 3),
+                (2, b'', 'route_binding', 'paths_after_invalid', 3),
+                (2, paths(b), 'route_binding', 'bracket_changed', 3),
+                (3, b'PRIVATE MALFORMED', 'coverage', 'invalid', 4)):
             replies = snapshot(a, 0, OLD['event'](9)); replies[index] = raw
             diagnostic = {}
             with self.subTest(index=index, operation=expected_operation), \
@@ -218,7 +221,7 @@ class ContextSampler(unittest.TestCase):
                             client='/synthetic/client', policy=POLICY, diagnostic=diagnostic):
                         self.fail('invalid observation admitted owner')
             self.assertEqual(query.call_count, expected_queries)
-            self.assertEqual((diagnostic['operation'], diagnostic['code']), (expected_operation, 'invalid'))
+            self.assertEqual((diagnostic['operation'], diagnostic['code']), (expected_operation, expected_code))
             self.assertNotIn('PRIVATE', repr(diagnostic) + str(failure.exception))
 
     def test_parse_time_is_in_same_sample_budget(self):
@@ -283,6 +286,10 @@ class ContextSampler(unittest.TestCase):
         original = dict(version=1, kind='consumer-route-sampler-failure', phase='sampling',
             operation='route_binding', code='invalid', samples=2, completed=3, failed=0)
         M['validate_diagnostic'](original)
+        for code in M['ROUTE_CODES']:
+            M['validate_diagnostic'](dict(original, code=code))
+            with self.assertRaises(ValueError):
+                M['validate_diagnostic'](dict(original, operation='control_status', code=code))
         for change in (dict(version=True), dict(kind='PRIVATE'), dict(phase='PRIVATE'),
                 dict(operation='PRIVATE'), dict(code='PRIVATE'), dict(samples=513),
                 dict(completed=512001), dict(failed=-1), dict(raw='PRIVATE')):
