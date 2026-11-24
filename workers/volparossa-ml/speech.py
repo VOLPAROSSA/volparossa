@@ -77,14 +77,14 @@ def transcribe(request):
         # Whisper removes EOS from its default short-form text tensor. The documented
         # structured output preserves decoder input and EOS for completion validation.
         output = model.generate(**features, task="transcribe", language=language, do_sample=False,
-                                num_beams=1, max_new_tokens=128, return_timestamps=False,
+                                num_beams=5, max_new_tokens=128, return_timestamps=False,
                                 return_dict_in_generate=True)
     with stage("SPEECH_RESULT_INVALID"):
         tokens = output.sequences
         require(int(tokens[0, -1]) == model.generation_config.eos_token_id)
         text = tokenizer.batch_decode(tokens, skip_special_tokens=True)[0].strip()
         require(0 < len(text.encode("utf-8")) <= 4096 and not any(ord(char) < 32 for char in text))
-    return dict(language=language, transcript=text, audio_samples=len(signal), model_profile="whisper-tiny-v1")
+    return dict(language=language, transcript=text, audio_samples=len(signal), model_profile="whisper-small-v1")
 
 
 def main():

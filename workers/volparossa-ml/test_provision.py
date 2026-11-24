@@ -49,8 +49,8 @@ class ProvisionTests(unittest.TestCase):
                         PROVISION.load_pins(profile, task_graph_decoder=True)
                     self.assertEqual(plain["wheels"], base["wheels"])
                     weights = next(row for row in plain["files"] if row["path"] == "model.safetensors")
-                    self.assertEqual((weights["bytes"], weights["sha256"]), (151061672,
-                        "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"))
+                    self.assertEqual((weights["bytes"], weights["sha256"]), (966995080,
+                        "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b"))
                     continue
                 selected = PROVISION.load_pins(profile, task_graph_decoder=True)
                 self.assertEqual(selected["wheels"][:38], plain["wheels"])

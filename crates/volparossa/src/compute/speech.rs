@@ -25,7 +25,7 @@ pub(crate) struct Options {
     /// Explicitly provisioned private CPU runtime.
     #[arg(long)]
     runtime_root: PathBuf,
-    /// Read-only source-pinned Whisper tiny model directory.
+    /// Read-only source-pinned Whisper small model directory.
     #[arg(long)]
     model_root: PathBuf,
     /// Existing private mode-0700 parent for the ephemeral input snapshot.
@@ -127,7 +127,7 @@ pub(super) async fn run(args: &Options) -> Result<()> {
         println!(
             "{}",
             json!({"version":1,"operation":"compute_transcribe","execute":false,
-            "model_profile":"whisper-tiny-v1","language":args.language,"max_audio_seconds":30,
+            "model_profile":"whisper-small-v1","language":args.language,"max_audio_seconds":30,
             "threads":args.threads,"max_seconds":args.max_seconds,"network_access":false})
         );
         return Ok(());
@@ -169,7 +169,7 @@ pub(super) async fn run(args: &Options) -> Result<()> {
         .as_str()
         .context("compute_speech_reply")?;
     ensure!(
-        reply["model_profile"] == "whisper-tiny-v1"
+        reply["model_profile"] == "whisper-small-v1"
             && reply["language"] == args.language
             && reply["audio_samples"].as_u64() == Some(count as u64)
             && !text.trim().is_empty()
@@ -177,7 +177,7 @@ pub(super) async fn run(args: &Options) -> Result<()> {
             && !text.chars().any(char::is_control),
         "compute_speech_reply"
     );
-    let summary: Value = json!({"version":1,"operation":"compute_transcribe","model_profile":"whisper-tiny-v1",
+    let summary: Value = json!({"version":1,"operation":"compute_transcribe","model_profile":"whisper-small-v1",
         "language":args.language,"transcript":text,"audio_samples":count,"elapsed_ms":started.elapsed().as_millis(),
         "max_observed_rss_bytes":peak_rss,"cleanup":{"complete":true}});
     println!("{summary}");

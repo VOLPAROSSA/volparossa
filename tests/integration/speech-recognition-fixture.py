@@ -144,7 +144,7 @@ def score_clip(phrase, recording, result):
                             "cleanup", "transcript", "elapsed_ms", "max_observed_rss_bytes"}
             and type(result["version"]) is int and result["version"] == 1
             and result["operation"] == "compute_transcribe"
-            and result["model_profile"] == "whisper-tiny-v1" and result["language"] == "en"
+            and result["model_profile"] == "whisper-small-v1" and result["language"] == "en"
             and type(result["audio_samples"]) is int and result["audio_samples"] == recording["samples"]
             and set(result["cleanup"]) == {"complete"} and result["cleanup"]["complete"] is True
             and isinstance(transcript, str) and bool(transcript.strip()) and len(transcript.encode()) <= 4096)
@@ -176,7 +176,7 @@ def score(directory, exported=False):
         clips[name] = score_clip(phrase, recording, load(result_path))
     require(len({row["reference_wav_sha256"] for row in clips.values()}) == len(clips))
     passed = all(row["passed"] for row in clips.values())
-    return {"version": 1, "scope": "synthetic_english_speech", "model_profile": "whisper-tiny-v1",
+    return {"version": 1, "scope": "synthetic_english_speech", "model_profile": "whisper-small-v1",
             "maximum_word_error_rate_per_clip": 0.25, "clips": clips, "passed": passed}
 
 
@@ -185,7 +185,7 @@ def verify_export(directory, revision):
     receipt = load(directory / "speech-recognition-smoke.json")
     require(type(receipt["version"]) is int and receipt["version"] == 1
             and receipt["source_revision"] == revision and receipt["scope"] == "synthetic_english_speech"
-            and receipt["model_sha256"] == "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"
+            and receipt["model_sha256"] == "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b"
             and receipt["passed"] is True and receipt["phase"] == "complete"
             and receipt["live_worker_cancelled_and_joined"] is True
             and receipt["signals"] == ["SIGINT", "SIGTERM"] and receipt["digital_silence_refused"] is True)

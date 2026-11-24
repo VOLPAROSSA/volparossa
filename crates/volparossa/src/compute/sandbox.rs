@@ -109,7 +109,7 @@ pub(super) fn speech_command(
     max_seconds: u16,
 ) -> Command {
     let pins = serde_json::json!(include_str!(
-        "../../../../workers/volparossa-ml/model-pins-whisper-tiny.json"
+        "../../../../workers/volparossa-ml/model-pins-whisper-small.json"
     ));
     let source = format!(
         "PINS_JSON = {pins}\n{}",
