@@ -174,6 +174,18 @@ its host state and retained zero owned objects. The original 36,798-byte ZIP
 has SHA-256 `5db37edd7389e541c2a0da6fa7b7536deb8e3db6b7fd217a0860f637f33b6b03`.
 [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506355803) · [Original reports](development/evidence/browser-cooperative-45506355803)
 
+On Core `dcf46253`, the sampler received a control reply that failed validation
+after 111 valid samples, 289 completed flows and zero failed flows. The first
+Firefox task retained eight terminal receipts. Two refinement jobs expired
+without confirmed terminal replies. The client's final event window counted
+54 exact provider responses that lacked requested targets. The initial control
+relay separately recorded 18 successful offer replies, and both enrolled
+providers recorded successful registrations. These node windows lack per-request
+correlation and cover only the tail of the trial. Guest cleanup confirmed zero
+owned objects and the host snapshots matched. The original 33,407-byte archive
+has SHA-256 `4e157cca57bf74dee5d7a42be828c0a35f0a5e6bc99c731ed09d479897f68a67`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512806565) · [Original reports](development/evidence/browser-cooperative-45512806565)
+
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker
 PID and start time before deliberate broker shutdown. Every observed transient
