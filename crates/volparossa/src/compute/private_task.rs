@@ -137,6 +137,13 @@ pub(super) fn validate_profile_input(mode: Mode, raw: &[u8], profile: ModelProfi
 }
 
 fn read_input(path: &Path) -> Result<Vec<u8>> {
+    let raw = read_owned_file(path, MAX_INPUT_BYTES)?;
+    validate_input(&raw)?;
+    Ok(raw)
+}
+
+/// Snapshot one explicitly selected, private, bounded ordinary file.
+pub(super) fn read_owned_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     ensure!(
         path.is_absolute() && fs::canonicalize(path)? == path,
         "compute_private_input_path"
@@ -151,14 +158,14 @@ fn read_input(path: &Path) -> Result<Vec<u8>> {
             && info.uid() == nix::unistd::geteuid().as_raw()
             && info.nlink() == 1
             && info.mode() & 0o777 == 0o600
-            && info.len() <= MAX_INPUT_BYTES,
+            && info.len() <= limit,
         "compute_private_input_file"
     );
     let mut raw = Vec::new();
     Read::by_ref(&mut file)
-        .take(MAX_INPUT_BYTES + 1)
+        .take(limit + 1)
         .read_to_end(&mut raw)?;
-    validate_input(&raw)?;
+    ensure!(raw.len() as u64 <= limit, "compute_private_input_bound");
     Ok(raw)
 }
 
@@ -225,20 +232,24 @@ impl Staged {
     }
 
     fn finish(self, result: Result<Value>) -> Result<Value> {
-        if result
-            .as_ref()
-            .is_err_and(|error| error.downcast_ref::<CleanupUnconfirmed>().is_some())
-        {
-            // Keep only this exact owned tree. Never remove inputs still possibly
-            // mounted by a live worker and never emit an answer or a false cleanup flag.
-            let _ = self.directory.keep();
-            return Err(CleanupUnconfirmed.into());
-        }
-        self.directory
-            .close()
-            .map_err(|_| anyhow::anyhow!("compute_private_storage_cleanup_failed"))?;
-        result
+        finish_owned(self.directory, result)
     }
+}
+
+/// Dispose of the snapshot only after the exact worker lifetime was joined.
+pub(super) fn finish_owned<T>(directory: tempfile::TempDir, result: Result<T>) -> Result<T> {
+    if result
+        .as_ref()
+        .is_err_and(|error| error.downcast_ref::<CleanupUnconfirmed>().is_some())
+    {
+        // Keep only this exact owned tree for recovery if the worker may still hold a mount.
+        let _ = directory.keep();
+        return Err(CleanupUnconfirmed.into());
+    }
+    directory
+        .close()
+        .map_err(|_| anyhow::anyhow!("compute_private_storage_cleanup_failed"))?;
+    result
 }
 
 fn preview(args: &Options) -> Value {

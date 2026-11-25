@@ -19,6 +19,7 @@ mod resources;
 mod sandbox;
 mod serving_snapshot;
 mod spare_capacity;
+mod speech;
 mod supervise;
 mod task_plan;
 mod train_cycle;
@@ -50,6 +51,8 @@ pub(crate) enum Command {
     Run(Box<Options>),
     /// Answer one private local question without publishing inputs or using peer executors.
     PrivateTask(Box<private_task::Options>),
+    /// Transcribe an explicitly selected local recording with an offline CPU model.
+    Transcribe(Box<speech::Options>),
     /// Serve bounded same-owner private questions locally; never exports them to peers.
     PrivateServe(Box<private_serve::Options>),
     /// Explicit public-input resident guest fixture; not confidential peer admission.
@@ -179,6 +182,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Capacity => return spare_capacity::diagnostic(),
         Command::Run(options) => options,
         Command::PrivateTask(options) => return private_task::run(&options).await,
+        Command::Transcribe(options) => return speech::run(&options).await,
         Command::PrivateServe(options) => return private_serve::run(*options).await,
         Command::ResidentGuest(options) => return resident_guest::run(*options).await,
         Command::ResidentPublicTrial(options) => {

@@ -3,7 +3,7 @@
 //! Observation never signals a process. Only the existing owned `Child` is killed/reaped.
 //! A PID reused by another lifetime is neither followed nor treated as a live old worker.
 
-use std::{collections::BTreeSet, fs::File, io::Read as _, path::Path};
+use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 
 use anyhow::{Context as _, Result, ensure};
 use tokio::time::{Duration, Instant};
@@ -150,10 +150,19 @@ fn record(pid: u32) -> Result<Option<Record>> {
             return Err(anyhow::Error::new(error).context("compute_private_process_stat_open"));
         }
     };
+    read_record(pid, file)
+}
+
+fn read_record(pid: u32, file: impl Read) -> Result<Option<Record>> {
     let mut raw = String::new();
-    file.take(8193)
-        .read_to_string(&mut raw)
-        .context("compute_private_process_stat_read")?;
+    if let Err(error) = file.take(8193).read_to_string(&mut raw) {
+        // Linux procfs keeps this descriptor bound to the original process. If
+        // that process was reaped after open, read returns ESRCH, even on PID reuse.
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(anyhow::Error::new(error).context("compute_private_process_stat_read"));
+    }
     ensure!(raw.len() <= 8192, "compute_private_process_stat_bound");
     parse_record(pid, &raw).map(Some)
 }
@@ -201,6 +210,24 @@ mod tests {
         assert_eq!(observed.parent, 11);
         assert!(parse_record(78, &raw).is_err());
         assert!(parse_record(77, "77 (incomplete) S 11").is_err());
+    }
+
+    #[test]
+    fn stat_opened_before_reap_reports_only_the_original_lifetime_gone() {
+        let mut child = std::process::Command::new("/usr/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stat = File::open(format!("/proc/{pid}/stat")).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(read_record(pid, stat).unwrap().is_none());
+
+        // Both an unreadable file descriptor and a malformed observation fail closed.
+        let directory = File::open("/proc/self").unwrap();
+        assert!(read_record(pid, directory).is_err());
+        assert!(read_record(pid, &b"incomplete"[..]).is_err());
     }
 
     #[tokio::test]

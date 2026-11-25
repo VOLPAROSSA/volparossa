@@ -170,13 +170,30 @@ describes the trust assumptions for these exercises.
 
 ## Audio, images and natural conversation
 
-Requested on 2026-10-04; **not implemented multimodal inference**. The current
-compute contracts and admitted model profiles are text-oriented. Transporting,
+The owner-local `volparossa compute transcribe` command accepts a mode-0600
+mono 16 kHz PCM16 WAV of up to 30 seconds. It shares the compute runtime lease,
+offline CPU sandbox, resource bounds and worker lifetime cleanup. The command
+returns the transcript to its caller after cleanup. The public compute contracts
+and conversational model profiles remain text-oriented. Transporting,
 caching or privately storing an image or recording does not mean that a model
 can interpret it. The requested shared brain should understand images and spoken
 audio, generate spoken responses and eventually support fluid, interruptible
 voice conversations. Video understanding is a further extension with greater
 processing and bandwidth demands; it is not supplied by image storage.
+
+Provision `whisper-small-v1` through the explicit pinned ML provisioner. To
+transcribe a supplied English recording, invoke the following from its owner
+account using absolute paths to the private file and provisioned directories.
+
+```sh
+volparossa compute transcribe --language en --input /path/to/clip.wav \
+  --runtime-root /path/to/provision/venv --model-root /path/to/provision/model \
+  --work-parent /path/to/private-work --execute
+```
+
+The selected language is a Whisper language code. Each call uses fresh worker
+state and explicit authorization. The opt-in `speech-recognition` topology trial
+scores two independently synthesized recordings and interrupts a live worker.
 
 Implement this in useful stages: image interpretation and speech recognition,
 then streamed speech generation and conversational coordination. Reuse suitable
@@ -208,8 +225,7 @@ Evaluate comprehension, transcription, voice intelligibility, interruption,
 end-to-end latency and resource cost against stable reference tasks. More peers
 can supply capacity and more eligible learning opportunities; neither more peers
 nor additional training alone proves better understanding or a human-quality
-conversation. This section records the requested direction, not a completed
-worker, training loop or real-time speech datapath.
+conversation. Shared multimodal training, confidential remote speech recognition and a real-time voice datapath remain open.
 
 ## Agreed content-policy examples
 
