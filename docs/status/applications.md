@@ -466,8 +466,18 @@ as `other`. It contains no numeric errno. The observer now treats only Linux
 `ESRCH` on an already opened process-stat descriptor as disappearance of that
 exact process. A deterministic check opens the descriptor before reaping the
 child and reads it afterwards.
-[Original failed trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512520095) ·
+[Original failure receipt](../development/evidence/speech-stability-45512520095/speech-synthesis-smoke.json) ·
 [Original 1,113-byte receipt archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512520095/artifacts/14976838219)
+
+On `862c5a68`, the deterministic procfs test passed in the Debian guest. All
+32 repeated synthesis calls then completed, each returning the byte-identical
+marked bicycle WAV in a new private file and confirming worker cleanup. The
+three original PCM comparisons still passed. Each English recording had zero
+word errors in eight words and the live SIGINT and SIGTERM checks passed.
+The 32 calls share one guest and run consecutive, independent worker processes.
+[Original receipts](../development/evidence/speech-stability-45515457352) ·
+[Hosted run and deterministic test](https://github.com/VOLPAROSSA/volparossa/actions/runs/45515457352/job/138873602466) ·
+[3,175-byte archive, SHA-256 `4756786b…eed75b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45515457352/artifacts/14977514071)
 
 ## Protected Compute evidence
 
