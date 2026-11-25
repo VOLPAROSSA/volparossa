@@ -16,6 +16,9 @@ use volparossa_content::{
 };
 use volparossa_identity::{IdentityStore, Passphrase};
 
+#[path = "studio_site_restore/inspection.rs"]
+mod inspection;
+
 const SITE: &str = "public-editions";
 
 fn command(root: &Path, args: &[&str]) -> Command {
@@ -140,6 +143,8 @@ fn publisher_restores_previous_site_bytes_as_a_new_local_revision() {
     assert_ne!(candidate, competing);
     fs::remove_file(root.join("identity.key")).unwrap();
     fs::remove_file(root.join("passphrase")).unwrap();
+
+    inspection::check(root, &key_hex, &first_sha, &original, &candidate);
 
     let restore = |path: &str, id: &str| {
         command(

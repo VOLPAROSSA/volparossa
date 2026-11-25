@@ -1046,6 +1046,23 @@ unambiguous UTF-8 paths. Keep secrets outside this explicitly public directory. 
 bundle is never written over an existing file. HTML, CSS, JavaScript, images, fonts and media are
 indexed into one signed publication; no files are extracted while viewing.
 
+#### Inspect a signed release before recovery
+
+A reader with a trusted publisher key can inspect an original site manifest while the
+owner and contribution service are offline. If an independent record identifies the
+release, pass its manifest ID to reject other signed editions of the same site.
+
+```sh
+volparossa content site inspect --publisher-key "$PUBLISHER_KEY" \
+  --manifest ./site.v1.pb --expected-manifest-id "$SOURCE_MANIFEST_ID"
+```
+
+The command checks the signature, site content type and signed validity interval at the
+current time. Its JSON records the manifest ID, publisher, name, revision, bundle hash,
+byte and chunk counts, creation and expiry. Inspect each historical manifest needed
+for a restore. Verifying the corresponding bundle bytes or checking availability
+requires a separate read of the content.
+
 #### Confirm availability after an interrupted contribution
 
 If the acknowledgement from `content contribute` was lost, check the original signed site

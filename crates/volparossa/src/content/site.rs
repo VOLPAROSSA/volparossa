@@ -24,8 +24,10 @@ use super::{FetchName, Limits, ensure_new_output, output_parent};
 pub(crate) enum Command {
     /// Pack regular static files; dotfiles and dot-directories are excluded, symlinks rejected.
     Pack(Pack),
+    /// Verify a signed site manifest offline and report its authenticated release metadata.
+    Inspect(Inspect),
     /// Check whether the active local contribution service can deliver this exact signed site.
-    Confirm(Confirm),
+    Confirm(SignedSite),
     /// Activate a reviewed, owner-signed successor that restores a previous site in your local cache.
     Restore(Box<restore::Restore>),
     /// Fetch a named signed website, then expose only its verified assets on a local browser URL.
@@ -48,13 +50,22 @@ pub(crate) struct Pack {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct Confirm {
+pub(crate) struct SignedSite {
     /// Original signed manifest retained by the publisher.
     #[arg(long)]
     manifest: PathBuf,
     /// Independently trusted public key of the named publisher.
     #[arg(long, value_parser = super::parse_publisher_key)]
     publisher_key: VerifyingKey,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Inspect {
+    #[command(flatten)]
+    site: SignedSite,
+    /// Optionally require this exact independently selected signed release.
+    #[arg(long, value_parser = super::parse_input_sha256)]
+    expected_manifest_id: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Args)]
@@ -112,18 +123,50 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Open(args) => viewer::run(*args, socket).await?,
         Command::Preview(args) => preview::run(*args).await?,
         Command::Restore(args) => println!("{}", restore::run(&args)?),
+        Command::Inspect(args) => println!("{}", inspect(&args)?),
         Command::Confirm(args) => println!("{}", confirm(&args, socket).await?),
     }
     Ok(())
 }
 
-async fn confirm(args: &Confirm, socket: &Path) -> Result<serde_json::Value> {
+fn verified_site(args: &SignedSite) -> Result<volparossa_content::VerifiedManifest> {
     let bytes = super::read_manifest_bytes(&args.manifest)?;
     let manifest = volparossa_content::SignedManifest::decode(&bytes)?
         .verify(&args.publisher_key, super::now_seconds()?)?;
     if manifest.metadata().content_type != SITE_CONTENT_TYPE || manifest.length() == 0 {
         bail!("expected a signed native site publication");
     }
+    Ok(manifest)
+}
+
+fn inspect(args: &Inspect) -> Result<serde_json::Value> {
+    let manifest = verified_site(&args.site)?;
+    if args
+        .expected_manifest_id
+        .is_some_and(|pin| pin != *manifest.manifest_id())
+    {
+        bail!("signed site differs from the selected manifest ID");
+    }
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "operation": "offline_site_inspect",
+        "publisher_key": hex::encode(manifest.publisher()),
+        "name": manifest.metadata().name,
+        "revision": manifest.metadata().revision,
+        "content_type": manifest.metadata().content_type,
+        "manifest_id": hex::encode(manifest.manifest_id()),
+        "bundle_sha256": hex::encode(manifest.object_sha256()),
+        "bundle_bytes": manifest.length(),
+        "chunks": manifest.chunks().len(),
+        "created_unix_seconds": manifest.validity().created,
+        "expires_unix_seconds": manifest.validity().expires,
+        "bundle_bytes_verified": false,
+        "network_retrieval": false,
+    }))
+}
+
+async fn confirm(args: &SignedSite, socket: &Path) -> Result<serde_json::Value> {
+    let manifest = verified_site(args)?;
     super::named_download::confirm_local(&args.publisher_key, &manifest, SITE_CONTENT_TYPE, socket)
         .await?;
     Ok(serde_json::json!({
