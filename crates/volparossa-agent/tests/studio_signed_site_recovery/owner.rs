@@ -102,11 +102,12 @@ impl OwnerTerminal {
             ("Cache          ", "source-cache"),
         ] {
             let path = fixture.path(name);
-            let line = format!(
-                "{label}{}",
-                path.as_os_str().as_encoded_bytes().escape_ascii()
-            );
-            if !body.lines().any(|item| item == line) {
+            let expected = path
+                .as_os_str()
+                .as_encoded_bytes()
+                .escape_ascii()
+                .to_string();
+            if field(body, label) != Some(expected.as_str()) {
                 return Err("owner_output_path");
             }
         }
@@ -126,36 +127,45 @@ impl OwnerTerminal {
     }
 }
 
+fn field<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let mut values = body.lines().filter_map(|line| line.strip_prefix(label));
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
 pub(super) fn verify_display(body: &str, publisher: &str, packed: &Packed) -> Result<u64> {
-    let lines: Vec<_> = body.lines().collect();
     let expected = [
-        format!("Publisher key  {publisher}"),
-        format!("Site name      \"{NAME}\""),
-        "Revision       1".to_owned(),
-        "Cache limits   33554432 bytes, 128 chunks, 67108864 bytes minimum free".to_owned(),
-        format!("Bundle SHA-256 {}", hex::encode(packed.sha)),
-        format!(
-            "{} bytes in the bundle. {} public assets:",
-            packed.bytes.len(),
-            packed.assets.len()
+        ("Publisher key  ", publisher.to_owned()),
+        ("Site name      ", format!("\"{NAME}\"")),
+        ("Revision       ", "1".to_owned()),
+        (
+            "Cache limits   ",
+            "33554432 bytes, 128 chunks, 67108864 bytes minimum free".to_owned(),
         ),
+        ("Bundle SHA-256 ", hex::encode(packed.sha)),
     ];
-    if !expected.iter().all(|line| lines.contains(&line.as_str())) {
+    let summary = format!(
+        "{} bytes in the bundle. {} public assets:",
+        packed.bytes.len(),
+        packed.assets.len()
+    );
+    let mut summaries = body
+        .lines()
+        .filter(|line| line.contains(" bytes in the bundle. "));
+    if !expected
+        .iter()
+        .all(|(label, value)| field(body, label) == Some(value.as_str()))
+        || summaries.next() != Some(summary.as_str())
+        || summaries.next().is_some()
+    {
         return Err("owner_display_binding");
     }
-    let mut expiries = lines
-        .iter()
-        .filter_map(|line| line.strip_prefix("Expires at     "));
-    let expires = expiries
-        .next()
+    let expires = field(body, "Expires at     ")
         .and_then(|value| value.strip_suffix(" UTC (Unix seconds)"))
         .and_then(|value| value.parse().ok())
         .ok_or("owner_display_expiry")?;
-    if expiries.next().is_some() {
-        return Err("owner_display_expiry");
-    }
     let bundle = SiteBundle::inspect(&packed.bytes).map_err(|_| "owner_site_index")?;
-    let mut displayed = lines.iter().copied().filter(|line| line.starts_with("  "));
+    let mut displayed = body.lines().filter(|line| line.starts_with("  "));
     for asset in bundle {
         let row = packed
             .assets

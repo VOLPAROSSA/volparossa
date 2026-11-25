@@ -413,6 +413,9 @@ fn terminal_owner_requires_every_original_asset_and_the_signed_context() {
         tty.replace("33554432", "33554431"),
         tty.replace("UTC (Unix seconds)", "local"),
         format!("{tty}  /extra.html\n"),
+        format!("{tty}Publisher key  {}\n", "cd".repeat(32)),
+        format!("{tty}Revision       3\n"),
+        format!("{tty}0 bytes in the bundle. 0 public assets:\n"),
         format!("{tty}Expires at     1700000001 UTC (Unix seconds)\n"),
     ] {
         assert!(check(&changed).is_err());
