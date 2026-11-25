@@ -236,9 +236,20 @@ jobs:
           python3 -B tests/integration/test-private-storage-flow-observer.py
           python3 -B tests/integration/test-private-storage-fragments-wiring.py
           sh -n tests/integration/private-storage-maintenance-smoke.sh
-          python3 -B tests/integration/test-private-storage-maintenance-smoke.py
+          # These two independent suites use their own temporary fixture directories.
+          storage_start=$SECONDS
+          storage_report="$RUNNER_TEMP/maintenance-source-checks.log"
+          python3 -B tests/integration/test-private-storage-maintenance-smoke.py >"$storage_report" 2>&1 &
+          storage_pid=$!
+          wiring_status=0
+          python3 -B tests/integration/test-private-storage-maintenance-wiring.py || wiring_status=$?
+          receipt_status=0
+          wait "$storage_pid" || receipt_status=$?
+          cat "$storage_report"
+          printf 'Storage receipt and wiring suites took %s seconds together. Receipt exit %s, wiring exit %s.\n' \
+            "$((SECONDS - storage_start))" "$receipt_status" "$wiring_status"
+          test "$receipt_status" = 0 && test "$wiring_status" = 0 || exit 1
           python3 -B tests/integration/test-private-storage-log-sampler.py
-          python3 -B tests/integration/test-private-storage-maintenance-wiring.py
           sh -n tests/integration/storage-consumer-maintenance-smoke.sh
           sh -n tests/integration/storage-consumer-control-underlay.sh
           sh -n tests/integration/storage-consumer-network.sh
