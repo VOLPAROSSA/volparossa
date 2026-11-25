@@ -25,7 +25,7 @@ use volparossa_content::VerifiedManifest;
 use super::{
     Progress, Result,
     fixture::{Fixture, executable_stamp, private_file, read_private},
-    process::{bounded, cli},
+    process::{Invocation, bounded, cli},
     site::Packed,
 };
 
@@ -65,7 +65,15 @@ pub(super) async fn refusals(
             b"local site reviewed input digest differs".as_slice(),
         ),
     ] {
-        let result = cli(f, preview_args(f, &key, &hash), p, work, total, true).await?;
+        let result = cli(
+            f,
+            preview_args(f, &key, &hash),
+            p,
+            work,
+            total,
+            Invocation::Negative,
+        )
+        .await?;
         result.rejection(expected)?;
         p.count(|c| c.cli_rejections += 1);
     }

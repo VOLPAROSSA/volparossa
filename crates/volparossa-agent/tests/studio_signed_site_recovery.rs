@@ -6,6 +6,8 @@
 mod browser;
 #[path = "studio_signed_site_recovery/fixture.rs"]
 mod fixture;
+#[path = "studio_signed_site_recovery/owner.rs"]
+mod owner;
 #[path = "studio_signed_site_recovery/process.rs"]
 mod process;
 #[path = "studio_signed_site_recovery/scenario.rs"]

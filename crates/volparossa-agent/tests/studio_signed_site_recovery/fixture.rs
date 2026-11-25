@@ -13,6 +13,9 @@ use volparossa_identity::{IdentityStore, Passphrase};
 
 use super::Result;
 
+pub(super) const FIXTURE_PASSPHRASE: &[u8] =
+    b"disposable explicitly public native-content fixture passphrase";
+
 pub(super) struct Fixture {
     pub(super) directory: tempfile::TempDir,
     pub(super) socket: PathBuf,
@@ -32,10 +35,12 @@ impl Fixture {
             fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700))
                 .map_err(|_| "fixture_permissions")?;
         }
-        let phrase = b"disposable explicitly public native-content fixture passphrase";
-        private_file(&root.join("credentials/identity-passphrase"), phrase)?;
+        private_file(
+            &root.join("credentials/identity-passphrase"),
+            FIXTURE_PASSPHRASE,
+        )?;
         let created = IdentityStore::new(root.join("state/identity.key"))
-            .create(&Passphrase::new(phrase).map_err(|_| "fixture_passphrase")?)
+            .create(&Passphrase::new(FIXTURE_PASSPHRASE).map_err(|_| "fixture_passphrase")?)
             .map_err(|_| "fixture_identity")?;
         let publisher = VerifyingKey::from_bytes(
             &created

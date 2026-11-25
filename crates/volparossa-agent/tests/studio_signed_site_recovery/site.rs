@@ -16,7 +16,7 @@ use volparossa_content::{
 use super::{
     Progress, Result,
     fixture::{Fixture, read_inventory, read_private},
-    process::cli,
+    process::{Invocation, cli},
 };
 
 pub(super) const MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -73,7 +73,7 @@ pub(super) async fn pack(
         p,
         work,
         total,
-        false,
+        Invocation::Plain,
     )
     .await?
     .json()?;
@@ -245,9 +245,6 @@ pub(super) async fn publish(
     let native_review = std::env::var_os("VOLPAROSSA_STUDIO_NATIVE_REVIEW_SHA256");
     let has_native_review = native_review.is_some();
     let reviewed = reviewed_digest(&packed.sha, native_review)?;
-    if has_native_review {
-        println!("\nSTUDIO_NATIVE_OWNER_REVIEW {}", hex::encode(packed.sha));
-    }
     let mut args = vec![
         "publish".into(),
         "--input".into(),
@@ -270,11 +267,20 @@ pub(super) async fn publish(
         lifetime.to_string().into(),
         "--identity".into(),
         f.path("state/identity.key").into_os_string(),
-        "--passphrase-file".into(),
-        f.path("credentials/identity-passphrase").into_os_string(),
     ];
+    let mode = if has_native_review {
+        args.push("--review-site".into());
+        Invocation::Owner(packed, lifetime)
+    } else {
+        args.extend([
+            "--passphrase-file".into(),
+            f.path("credentials/identity-passphrase").into_os_string(),
+        ]);
+        Invocation::Plain
+    };
     limits(&mut args);
-    let value = cli(f, args, p, work, total, false).await?.json()?;
+    let result = cli(f, args, p, work, total, mode).await?;
+    let value = result.json()?;
     let encoded = read_private(
         &f.path("manifest.pb"),
         u64::try_from(MAX_MANIFEST_BYTES).map_err(|_| "manifest_limit")?,
@@ -283,16 +289,22 @@ pub(super) async fn publish(
         .map_err(|_| "manifest_shape")?
         .verify(&f.publisher, now()?)
         .map_err(|_| "manifest_auth")?;
-    if manifest.length() != u64::try_from(packed.bytes.len()).map_err(|_| "bundle_length")?
+    let validity = manifest.validity();
+    let signed_lifetime = validity.expires.checked_sub(validity.created);
+    let bound_deadline = match result.approved_expiry {
+        Some(expires) => {
+            expires == validity.expires
+                && value["terminal_reviewed_bundle_sha256"] == hex::encode(packed.sha)
+                && signed_lifetime.is_some_and(|seconds| (1..=lifetime).contains(&seconds))
+        }
+        None => !has_native_review && signed_lifetime == Some(lifetime),
+    };
+    if !bound_deadline
+        || manifest.length() != u64::try_from(packed.bytes.len()).map_err(|_| "bundle_length")?
         || manifest.object_sha256() != &packed.sha
         || manifest.metadata().name != NAME
         || manifest.metadata().revision != 1
         || manifest.metadata().content_type != SITE_CONTENT_TYPE
-        || manifest
-            .validity()
-            .expires
-            .checked_sub(manifest.validity().created)
-            != Some(lifetime)
         || value["operation"] != "offline_content_publish"
         || value["network_publication"] != false
         || value["publisher_key_hex"] != hex::encode(f.publisher.as_bytes())
@@ -302,6 +314,13 @@ pub(super) async fn publish(
         || value["expires_unix_seconds"].as_u64() != Some(manifest.validity().expires)
     {
         return Err("publication_binding");
+    }
+    if let Some(expires) = result.approved_expiry {
+        println!("\nSTUDIO_NATIVE_OWNER_REVIEW {}", hex::encode(packed.sha));
+        println!(
+            "STUDIO_NATIVE_TERMINAL_APPROVAL {} {expires}",
+            hex::encode(manifest.manifest_id())
+        );
     }
     Ok((encoded, manifest))
 }
@@ -332,7 +351,9 @@ pub(super) async fn handoff(
         "--public-content".into(),
     ];
     limits(&mut args);
-    let value = cli(f, args, p, work, total, false).await?.json()?;
+    let value = cli(f, args, p, work, total, Invocation::Plain)
+        .await?
+        .json()?;
     if value["operation"] != format!("content_{operation}")
         || value["manifest_id"] != hex::encode(manifest.manifest_id())
         || value["content_bytes"].as_u64() != Some(manifest.length())
@@ -369,7 +390,9 @@ pub(super) async fn assemble(
         f.path("reconstructed.bundle").into_os_string(),
     ];
     limits(&mut args);
-    let value = cli(f, args, p, work, total, false).await?.json()?;
+    let value = cli(f, args, p, work, total, Invocation::Plain)
+        .await?
+        .json()?;
     let bytes = read_private(&f.path("reconstructed.bundle"), MAX_BYTES)?;
     if bytes != packed.bytes
         || <[u8; 32]>::from(Sha256::digest(&bytes)) != packed.sha
