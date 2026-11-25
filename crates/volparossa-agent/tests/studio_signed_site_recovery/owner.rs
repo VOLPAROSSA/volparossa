@@ -29,7 +29,7 @@ async fn ready<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     loop {
         match attempt() {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                sleep(Duration::from_millis(5)).await
+                sleep(Duration::from_millis(5)).await;
             }
             result => return result,
         }
