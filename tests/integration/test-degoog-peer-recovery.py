@@ -12,6 +12,13 @@ M = runpy.run_path(str(HERE / 'degoog-peer-recovery.py'))
 
 
 class PublicIndex(unittest.TestCase):
+    def test_publisher_cannot_attest_its_own_custody(self):
+        holder = 'a0' * 32
+        for invalid in (holder, holder.upper()):
+            with self.subTest(key=invalid), self.assertRaisesRegex(ValueError, 'distinct enrolled keys'):
+                M['PEER']['require_independent_publisher'](invalid, holder)
+        M['PEER']['require_independent_publisher']('b0' * 32, holder)
+
     def test_original_and_changed_archive(self):
         raw = (HERE / 'fixtures' / 'degoog-public-index.zip').read_bytes()
         index = M['read_index'](io.BytesIO(raw))

@@ -24,6 +24,11 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def require_independent_publisher(publisher_key, holder_key):
+    require(re.fullmatch(r'[0-9a-f]{64}', publisher_key) and publisher_key != holder_key,
+            'publication and custody must use distinct enrolled keys')
+
+
 def recover(cli, control, parent, cache, holder_key, holder_peer, name, make_source, inspect_download):
     require(os.geteuid() != 0 and [n for _, n in socket.if_nameindex()] == ['lo'],
             'requires an unprivileged disposable receiver without an external interface')
@@ -46,6 +51,7 @@ def recover(cli, control, parent, cache, holder_key, holder_peer, name, make_sou
             unlock = ['--identity', identity, '--passphrase-file', secret]
             command('init', *unlock)
             key = json.loads(command('content', 'recipient-key', *unlock))['identity_public_key_hex']
+            require_independent_publisher(key, holder_key)
             manifest, store = source / 'manifest.bin', source / 'chunks'
             published = json.loads(command('content', 'publish', '--input', artifact, '--expected-input-sha256', sha,
                 '--expected-publisher-key', key, '--cache', store, '--manifest', manifest, '--name', name,
@@ -94,6 +100,7 @@ def verify_peer(receipt, topology, source, name, contents, expected_sha):
     peer = custody['expected_peers'][nodes[0]]
     require(holder == receipt['holder_key'] == checks['C']['peer_key'](peer) and peer == receipt['holder_peer'],
             'unexpected custody source')
+    require_independent_publisher(receipt['publisher_key'], holder)
     require(0 < len(contents) <= 65536, 'public fixture exceeds its size bound')
     sha = hashlib.sha256(contents).digest()
     signed = bytes.fromhex(receipt['signed_manifest'])
