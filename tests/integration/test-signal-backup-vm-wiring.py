@@ -94,7 +94,7 @@ class SignalBackupWiring(unittest.TestCase):
 
     def test_complete_mail_archive_allows_larger_independent_client_report_only(self):
         start = DRIVER.index('    if [ "$scenario" = paired-mail ]', DRIVER.index("# The exact closed receipt files"))
-        end = DRIVER.index('\nelif [ "$scenario" = private-storage-fragments ]', start)
+        end = DRIVER.index('\nelif ', start)
         for scenario, name, size, accepted in (
             ("paired-mail-peers", "paired-mail-peers-smoke.json", 262144, True),
             ("paired-mail-peers", "paired-mail-peers-smoke.json", 262145, False),
