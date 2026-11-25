@@ -136,7 +136,6 @@ agent_jobs_broker() {
         set -- --model-profile smollm2-360m-v1
     fi
     if [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ]; then
-        # Only explicitly enrolled owners enable structured principle inference.
         set -- "$@" --principle-inference-v4
     fi
     if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
