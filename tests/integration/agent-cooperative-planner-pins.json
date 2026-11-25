@@ -1,5 +1,5 @@
 {
-  "code_revision": "36ac5d02b33d84cc5aad39e786538fa0d478b381",
+  "code_revision": "1c9ade332762650468532aad285451bd45aac566",
   "files": {
     "code/scripts/opencode_session.cjs": {
       "bytes": 13260,
@@ -10,12 +10,12 @@
       "sha256": "ba0a8041b26deec930f8292136f62177fa389c7956605337e4fa111d13ce6bbe"
     },
     "code/scripts/public_peer_editor_ui.cjs": {
-      "bytes": 16559,
-      "sha256": "d20618c5c85d5b861de879ab0a4096d08af40d85505b5b9e6a5848fe4e061433"
+      "bytes": 16639,
+      "sha256": "10cdc640d70fcd7afb537ead906ef9c0d90b052c2eff8412f3a8bb9278ae62a0"
     },
     "code/scripts/public_peer_planner_ui.cjs": {
-      "bytes": 5283,
-      "sha256": "d71094369a3c7d9142133d5ee33483b8269392bd699460aca150f13b97e6eca4"
+      "bytes": 5557,
+      "sha256": "89cbda0eaaf1c91be37fa93ff38f0082d8793268e510951c1444d06c04cb76af"
     },
     "code/scripts/smoke_opencode_cooperation.cjs": {
       "bytes": 20828,
@@ -26,8 +26,8 @@
       "sha256": "bda47f06f6cb4c7722c4584922b4965cd4c9a8dfdcd888bdca15fe59d6a63bc1"
     },
     "code/src/extension.cjs": {
-      "bytes": 28399,
-      "sha256": "af7f1ea0d1c120eefddeb1b33b5ba93a814a5aeb7d7ac4ebe620fedbddb294de"
+      "bytes": 28444,
+      "sha256": "288e624470a10b9f9819ea2e5c37f6a256b217fc09cf206eb69dd106103184a2"
     },
     "code/src/opencode-bridge.cjs": {
       "bytes": 8807,
