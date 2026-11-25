@@ -75,7 +75,7 @@ def digest(path):
 def check_pins():
     require(re.fullmatch(r"[0-9a-f]{40}", CHAT_REVISION or "")
             and CHAT_REVISION != "0" * 40, "reviewed chat revision is required")
-    require(len(FILES) == (26 if MAILBOX_TRIAL else 17 if FRAGMENT_TRIAL else 14)
+    require(len(FILES) == (27 if MAILBOX_TRIAL else 17 if FRAGMENT_TRIAL else 14)
             and sum(size for size, _ in FILES.values()) <= 1024 * 1024)
     for name, (size, sha) in FILES.items():
         path = Path(name)
@@ -100,6 +100,7 @@ def select_fragment_trial(mailbox=False):
         expected.update({
             "overlay/ts/services/mailbox/content.preload.ts",
             "overlay/ts/services/mailbox/files.node.ts",
+            "overlay/ts/services/mailbox/ledger.node.ts",
             "overlay/ts/services/mailbox/packet.node.ts",
             "overlay/ts/services/mailbox/session.preload.ts",
             "patches/signal-mailbox.patch",

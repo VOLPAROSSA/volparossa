@@ -25,16 +25,21 @@ def receipt():
                 cleanup=cleanup, host_state=host, independent_sender_node_claimed=False, full_c07_claimed=False,
                 full_alpha_acceptance_claimed=False, mailbox=evidence)
     phase = copy.deepcopy(evidence["phases"]["receive"])
-    phase["gates"].update(exit_mptcp_tls_completed=12, exact_provider_lookups=12)
+    phase["gates"].update(event_baseline_unix_ms=2000, exit_mptcp_tls_completed=12, exact_provider_lookups=12)
+    worker_route = copy.deepcopy(phase)
+    worker_route["gates"]["event_baseline_unix_ms"] = 4000
     native = dict(chat_revision=PINS["chat_revision"], signal_revision=PINS["signal_revision"],
+                  mode="desktop", started_unix_ms=2010, finished_unix_ms=3000,
                   two_signed_grants_enrolled=True, private_test_state_removed=True, control_socket_gid_checked=True,
                   native=SMOKE["NATIVE"].copy(), native_runtime_sha256={n:"c"*64 for n in (
                     "node_modules/electron/dist/electron", "node_modules/@signalapp/ringrtc/build/linux/libringrtc-x64.node",
                     "node_modules/@signalapp/libsignal-client/prebuilds/linux-x64/@signalapp+libsignal-client.node",
                     "node_modules/@signalapp/sqlcipher/prebuilds/linux-x64/@signalapp+sqlcipher.node",
                     "bundles/main.js", "bundles/preload/main.js", "bundles/workers/sql.js")})
-    return dict(source_revision=SOURCE,report_kind="volparossa-signal-mailbox",success=True,mailbox=base,
-                desktops=native,desktop_route=phase,host_state=host,cleanup=cleanup)
+    return dict(schema_version=2,source_revision=SOURCE,report_kind="volparossa-signal-mailbox",success=True,mailbox=base,
+                desktops=native,desktop_route=phase,host_state=host,cleanup=cleanup,
+                worker=dict(copy.deepcopy(native), mode="worker", started_unix_ms=4010, finished_unix_ms=5000,
+                            native=SMOKE["WORKER"].copy()), worker_route=worker_route)
 
 
 class RoutedNativeMailbox(unittest.TestCase):
@@ -61,7 +66,9 @@ class RoutedNativeMailbox(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "phase"
             self.assertEqual(observed(marker), "bootstrap")
-            for value in ("offline-compose", "outgoing-row", "private-outbox", "outbox-binding"):
+            for value in ("offline-compose", "outgoing-row", "private-outbox", "outbox-binding",
+                          "worker-delivery-receipt", "worker-sender-pickup", "worker-confirmed-provider-check",
+                          "worker-interrupted-restart"):
                 marker.write_text(value)
                 self.assertEqual(observed(marker), value)
             for value in (b"unrelated detail", b"x" * 70, bytes([255])):
@@ -76,11 +83,34 @@ class RoutedNativeMailbox(unittest.TestCase):
                        lambda r:r["desktop_route"]["gates"].update(exact_provider_lookups=11),
                        lambda r:r["desktop_route"]["privacy"]["client"].update(direct_client_exit_packets=1),
                        lambda r:r["desktops"].update(chat_revision="0"*40),
+                       lambda r:r.update(schema_version=1),
+                       lambda r:r.update(worker_route=copy.deepcopy(r["desktop_route"])),
+                       lambda r:r["worker"].update(started_unix_ms=2500),
+                       lambda r:r["worker"].update(mode="desktop"),
+                       lambda r:r["worker"]["native"].update(worker_killed_after_pickup=False),
+                       lambda r:r["worker"]["native"].update(original_row_delivered_after_restart=1),
+                       lambda r:r["worker_route"]["privacy"]["client"].update(direct_client_exit_packets=1),
+                       lambda r:r["worker"]["native_runtime_sha256"].update({"bundles/main.js": "e"*64}),
                        lambda r:r["desktop_route"]["selected_route"].update(route_context_id="9"*32)):
             modified = copy.deepcopy(record)
             change(modified)
             with self.assertRaises(ValueError):
                 SMOKE["verified"](modified, SOURCE)
+
+    def test_worker_capture_is_admitted_only_in_the_signal_mailbox_overlay(self):
+        driver = (HERE / "kvm-alpha-topology.sh").read_text()
+        gate = driver[driver.index("start_privacy_observers() {"):]
+        gate = gate[:gate.index("    esac") + len("    esac")] + "\n}\n"
+        for scenario, signal, prefix, accepted in (
+                ("content-mailbox", "yes", "content-mailbox-worker-privacy", True),
+                ("content-mailbox", "no", "content-mailbox-worker-privacy", False),
+                ("content-provider", "yes", "content-mailbox-worker-privacy", False),
+                ("content-mailbox", "yes", "content-mailbox-unreviewed-privacy", False)):
+            with self.subTest(scenario=scenario, signal=signal, prefix=prefix):
+                result = subprocess.run(["sh", "-c", gate +
+                    'scenario=$1; signal_mailbox=$2; start_privacy_observers "$3"',
+                    "observer-admission", scenario, signal, prefix])
+                self.assertEqual(result.returncode == 0, accepted)
 
     def test_guest_export_is_closed_and_matches_driver(self):
         names=SMOKE["NAMES"]

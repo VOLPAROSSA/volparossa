@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 RUNTIME = Path("/home/vpci/signal-backup-runtime")
 INSIDE = Path("/tmp/r/providers")
@@ -88,6 +89,9 @@ def native_failure_phase(path):
         "stock-acknowledgements", "pair", "offline-send", "offline-compose", "outgoing-row",
         "private-outbox", "outbox-binding", "provider-custody", "offline-fetch", "recipient-reopen",
         "confirm-native-import", "peer-receipt", "sender-reopen", "complete",
+        "worker-outgoing", "worker-offline-pickup", "worker-native-confirmation", "worker-confirmed-provider-check",
+        "worker-delivery-receipt", "worker-sender-pickup", "worker-interrupted-restart",
+        "worker-sender-restart", "worker-recipient-row", "worker-handoff-retirement",
     }
     try:
         with path.open("rb") as source:
@@ -99,7 +103,9 @@ def native_failure_phase(path):
     return phase if phase in phases else "unknown"
 
 
-def launch(parent, cli, control, providers):
+def launch(parent, cli, control, mode, providers):
+    require(mode in ("desktop", "worker"), "expected a native trial mode")
+    started_ms = time.time_ns() // 1_000_000
     os.umask(0o077)
     require(os.geteuid() != 0 and parent.stat().st_uid == os.geteuid() and stat.S_IMODE(parent.stat().st_mode) == 0o700,
             "private worker-owned directory required")
@@ -130,6 +136,8 @@ def launch(parent, cli, control, providers):
                   (Path(shutil.which("Xvfb")).resolve(strict=True), "/trial/Xvfb")]
         command = sandbox(private, candidate, node, fixture, runner["TARGET"], driver, mounts)
         command.append("--prepared-providers")
+        if mode == "worker":
+            command.append("--worker")
         # Desktop logs, user databases, grants and test account keys remain private in this guest.
         with (private / "desktop.log").open("xb") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=420)
@@ -137,19 +145,21 @@ def launch(parent, cli, control, providers):
             print(json.dumps({"native_trial_completed": False, "phase": native_failure_phase(private / "phase")}))
             raise ValueError("native Desktop trial failed")
         observed = json.loads((private / "result.json").read_bytes())
-        require(json.dumps(observed, sort_keys=True) == json.dumps(runner["OBSERVATIONS"], sort_keys=True),
+        require(json.dumps(observed, sort_keys=True) == json.dumps(
+                    runner["WORKER_OBSERVATIONS" if mode == "worker" else "OBSERVATIONS"], sort_keys=True),
                 "native Desktop observations differ")
         receipt = dict(native=observed, chat_revision=provision["chat_revision"], signal_revision=provision["signal_revision"],
                        native_runtime_sha256=provision["runtime_sha256"], two_signed_grants_enrolled=True,
                        control_socket_gid_checked=True)
     require(not list(parent.iterdir()), "private Desktop state remains")
-    print(json.dumps(dict(receipt, private_test_state_removed=True), sort_keys=True))
+    print(json.dumps(dict(receipt, mode=mode, started_unix_ms=started_ms, finished_unix_ms=time.time_ns() // 1_000_000,
+                          private_test_state_removed=True), sort_keys=True))
 
 
 if __name__ == "__main__":
     try:
-        require(len(sys.argv) == 6, "expected private directory, Core CLI, client socket and two provider keys")
-        launch(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:])
+        require(len(sys.argv) == 7, "expected private directory, Core CLI, client socket, native mode and two provider keys")
+        launch(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], sys.argv[5:])
     except (ValueError, OSError, KeyError, subprocess.SubprocessError):
         print("SIGNAL_MAILBOX_NATIVE_FAILED", file=sys.stderr)
         raise SystemExit(1) from None

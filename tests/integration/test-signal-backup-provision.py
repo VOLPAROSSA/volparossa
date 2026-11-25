@@ -122,6 +122,17 @@ class SignalProvision(unittest.TestCase):
         with patch.dict(candidate["select_fragment_trial"].__globals__, read_json=lambda _path: value), self.assertRaises(ValueError):
             candidate["select_fragment_trial"]()
 
+    def test_mailbox_trial_admits_the_pinned_runtime_and_requires_its_native_ledger(self):
+        candidate = runpy.run_path(str(Path(__file__).with_name("signal-backup-provision.py")))
+        select = candidate["select_fragment_trial"]
+        select(mailbox=True)
+        pins = json.loads(Path(__file__).with_name("signal-mailbox-pins.json").read_bytes())
+        self.assertEqual(select.__globals__["CHAT_REVISION"], pins["chat_revision"])
+        ledger = "overlay/ts/services/mailbox/ledger.node.ts"
+        del pins["files"][ledger]
+        with patch.dict(select.__globals__, read_json=lambda _path: pins), self.assertRaises(ValueError):
+            select(mailbox=True)
+
     def test_exact_revision_and_small_source_allowlist_required(self):
         MODULE["check_pins"]()
         for revision in ("", "main", "0" * 40, "f" * 41):
