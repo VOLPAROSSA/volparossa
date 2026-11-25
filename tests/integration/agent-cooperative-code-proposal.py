@@ -395,7 +395,9 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
     "trust_page", "trust_grant", "trust_close", "workbench_failed"}
 
 
-PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "editor_failed", "runtime_inputs",
+PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "planner_result_model",
+    "planner_result_submission", "planner_result_completion", "planner_result_edit", "planner_result_digest",
+    "planner_result_check", "planner_result_ids", "editor_failed", "runtime_inputs",
     "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server",
     "owner_verifier", "runtime_preparation", "model_task", "model_request_bound", "model_conversation",
     "model_transport", "model_execution", "model_output", "model_tool_choice", "model_budget", "model_busy",
