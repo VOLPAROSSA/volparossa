@@ -47,6 +47,9 @@ pub(crate) struct Fetch {
     source_publisher_key: VerifyingKey,
     #[arg(long, value_parser = parse_manifest)]
     source_manifest_id: [u8; 32],
+    /// Recomputed digest of the complete Git subject selected by this recipient.
+    #[arg(long, value_parser = parse_manifest)]
+    repository_proposal_sha256: Option<[u8; 32]>,
     /// Two selected assessors, in the original assessment order.
     #[arg(long, required = true, value_parser = parse_key)]
     provider_key: Vec<VerifyingKey>,
@@ -54,6 +57,56 @@ pub(crate) struct Fetch {
     limits: crate::content::Limits,
     #[arg(long)]
     execute: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RepositoryReview {
+    /// Original portable assessment bytes recovered from a public holder.
+    #[arg(long)]
+    bundle: PathBuf,
+    /// Independently enrolled original requester, proposal author and publication.
+    #[arg(long, value_parser = parse_key)]
+    requester_key: VerifyingKey,
+    #[arg(long, value_parser = parse_key)]
+    source_publisher_key: VerifyingKey,
+    #[arg(long, value_parser = parse_manifest)]
+    source_manifest_id: [u8; 32],
+    /// Digest recomputed from the enrolled Git objects, including the complete change.
+    #[arg(long, value_parser = parse_manifest)]
+    repository_proposal_sha256: [u8; 32],
+    /// Enrolled providers in the original assessment order.
+    #[arg(long, required = true, value_parser = parse_key)]
+    provider_key: Vec<VerifyingKey>,
+}
+
+pub(in crate::compute::peer) fn verify_repository_review(args: &RepositoryReview) -> Result<()> {
+    println!("{}", repository_review_value(args)?);
+    Ok(())
+}
+
+fn repository_review_value(args: &RepositoryReview) -> Result<Value> {
+    let bytes = storage::read(&args.bundle, policy_bundle::MAX_BYTES)?;
+    let (enrolled, assessment) = replay_bundle(&bytes, &args.requester_key, &std::env::temp_dir())?;
+    check_repository_proposal(
+        Some(args.repository_proposal_sha256),
+        &enrolled.scope,
+        &args.provider_key,
+    )?;
+    ensure!(
+        enrolled.scope.source_publisher_key == hex::encode(args.source_publisher_key.as_bytes())
+            && enrolled.scope.source_manifest_id == hex::encode(args.source_manifest_id)
+            && enrolled.providers
+                == [
+                    hex::encode(args.provider_key[0].as_bytes()),
+                    hex::encode(args.provider_key[1].as_bytes())
+                ],
+        "compute_repository_review_authorities"
+    );
+    Ok(
+        json!({"operation":"compute_verify_repository_review", "scope":enrolled.scope,
+        "providers":enrolled.providers,"review":assessment, "source_expires":enrolled.expires,
+        "repository_ref_updated":false,"release_authorized":false}),
+    )
 }
 
 pub(in crate::compute::peer) fn pack(args: &Pack) -> Result<()> {
@@ -208,6 +261,11 @@ pub(in crate::compute::peer) async fn fetch(args: &Fetch, socket: &Path) -> Resu
             && now()? < downloaded.expires,
         "compute_policy_bundle_selected_authorities"
     );
+    super::check_repository_proposal(
+        args.repository_proposal_sha256,
+        &enrolled.scope,
+        &args.provider_key,
+    )?;
     let result = replay(retained.path(), &requester)?;
     retained.close()?;
     ensure!(now()? < downloaded.expires, "compute_policy_bundle_expired");

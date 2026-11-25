@@ -82,6 +82,33 @@ reads, edits and checks. Make pinned toolchains, dependencies, build recipes
 and declared test inputs obtainable from authorized replicas so one registry,
 runner, seed or model service cannot halt the cycle.
 
+### Enrolled proposals and portable peer review
+
+An author can prepare one small public text change with
+`python3 scripts/repository-review-subject.py --public-bundle <bundle> --bundle-sha256 <expected-digest> --repository-id <enrolled-uuid> --base <commit> --candidate <commit> --path <file>`.
+The adapter checks the two complete Git commits in a fresh bare repository,
+requires one direct parent and one changed ordinary file, and emits the complete
+before/after text, file path, repository ID, commit IDs and patch digest in the
+512-byte native assessment subject. Both participants select the source pins
+independently of the proposal. The enrollment currently supports SHA-1 Git
+objects, a maximum 1 MiB bundle, and UTF-8 text in a regular non-executable file.
+
+The author signs the emitted bytes as a public `text/plain` native publication.
+The requester supplies its independently recomputed SHA-256 to
+`volparossa compute peer policy-assess --repository-proposal-sha256 <digest>`
+with the normal publisher, manifest, two distinct provider keys and
+`--portable-receipts` inputs. Both selected reviewers must differ from the
+author. `policy-pack` retains the source signature and original signed requests
+and responses for the two assessments and two cross-reviews.
+
+Another participant can recover both the public Git bundle and the portable
+review from custody, rerun the Git adapter and inspect the original assessment
+with `volparossa compute peer verify-repository-review --bundle <assessment.bundle> --requester-key <requester> --source-publisher-key <author> --source-manifest-id <manifest> --repository-proposal-sha256 <recomputed-digest> --provider-key <first> --provider-key <second>`.
+The result records a historical review. Updating a canonical ref, deploying a
+release or executing a proposed change requires separate existing authority.
+Authenticated identities and four recorded statements establish attribution.
+Human independence and semantic correctness remain separate questions.
+
 ## One task, exact authority
 
 Every task must bind the immutable, forge-independent repository ID and enrolling

@@ -164,7 +164,7 @@ jq() { return 83; }
     def test_inventory_scope_preserves_all_eight_roles_and_original_privacy(self):
         source = (HERE / "kvm-alpha-topology.sh").read_text()
         self.assertIn("agent-cooperative-code-proposal) scenario=agent-jobs;", source)
-        self.assertIn('if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ]; then', source)
+        self.assertIn('if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then', source)
         self.assertIn('ip -n "$CLIENT" route add unreachable "$forbidden/32"', source)
         for node, address in (("exit", "46.162.3.1"), ("exit2", "51.167.7.1")):
             self.assertIn(f'write_config {node} acceptance-{node.replace("2", "-two")} false true {address} \\\n'

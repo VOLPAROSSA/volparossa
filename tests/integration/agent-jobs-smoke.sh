@@ -28,10 +28,10 @@ agent_jobs_prepare() {
     jobs_batch_pid=
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_root"
     set -- "$jobs_root"
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- "$@" smollm2-360m-v1
     fi
-    if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+    if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ]; then
         set -- "$@" --task-graph-decoder
     fi
     jobs_prepare_command=prepare
@@ -132,11 +132,10 @@ agent_jobs_broker() {
     if [ "${agent_cooperative_code_proposal:-no}" = yes ]; then
         set -- --model-profile qwen3-0.6b-v1 --code-proposal-v6
     fi
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ] || [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
     fi
-    if [ "${agent_policy_assessment:-no}" = yes ]; then
-        # Explicit owner opt-in; no other fixture advertises structured principle inference.
+    if [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ]; then
         set -- "$@" --principle-inference-v4
     fi
     if { [ "${agent_successor_serving:-no}" = yes ] || [ "${agent_active_recovery:-no}" = yes ] || [ "${agent_autonomous_aggregation:-no}" = yes ]; } && [ "$jobs_node" = "$provider_node_a" ]; then
@@ -350,7 +349,7 @@ agent_jobs_setup() {
         [ "$provider_node_b" = relay5 ] || fail RECOVERY_NODE_LAYOUT_CHANGED
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail RECOVERY_CONTROL_NOT_INDEPENDENT
-    elif [ "${agent_jobs_peer_recovery:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
+    elif [ "${agent_jobs_peer_recovery:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ] || [ "${agent_repository_review:-no}" = yes ]; then
         jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
             "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
         content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
@@ -409,6 +408,10 @@ agent_jobs_run() {
     fi
     if [ "${agent_active_recovery:-no}" = yes ]; then
         agent_active_recovery_run
+        return
+    fi
+    if [ "${agent_repository_review:-no}" = yes ]; then
+        repository_review_run
         return
     fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then
@@ -553,6 +556,10 @@ agent_jobs_finalize_report() {
     fi
     if [ "${agent_active_recovery:-no}" = yes ]; then
         agent_active_recovery_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_repository_review:-no}" = yes ]; then
+        repository_review_finalize "$jobs_status"
         return
     fi
     if [ "${agent_policy_assessment:-no}" = yes ]; then

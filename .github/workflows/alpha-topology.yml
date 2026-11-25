@@ -91,6 +91,7 @@ on:
           - agent-adapter-aggregation
           - agent-autonomous-aggregation
           - agent-policy-assessment
+          - agent-repository-review
       image_revision:
         description: Exact reviewed VOLPAROSSA Image commit for image-immich
         type: string
@@ -173,7 +174,7 @@ jobs:
           "agent-public-network-sources", "agent-task-graph", "agent-ready-dag",
           "agent-model-planning", "agent-model-task-graph", "agent-successor-serving",
           "agent-active-recovery", "agent-adapter-aggregation", "agent-autonomous-aggregation",
-          "agent-policy-assessment"
+          "agent-policy-assessment", "agent-repository-review"
         ]
 
     steps:
@@ -656,7 +657,7 @@ jobs:
             printf '%s\n' 'Scope: fictitious TEST only; no Byzantine equivocation, VOLPAROSSA overlay, independent-device or real-settlement proof.' >>"$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-loss || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-follow || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-peer-recovery || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-ready-queue || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-package-queue || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-task || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-document || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-cooperative-browser || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-cooperative-browser-discovered || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-collection || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-network-sources || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-task-graph || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-ready-dag || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-model-planning || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-model-task-graph || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-successor-serving || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-policy-assessment; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-loss || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-follow || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-peer-recovery || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-ready-queue || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-jobs-package-queue || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-task || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-document || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-cooperative-browser || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-cooperative-browser-discovered || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-collection || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-public-network-sources || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-task-graph || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-ready-dag || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-model-planning || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-model-task-graph || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-successor-serving || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-active-recovery || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-adapter-aggregation || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-autonomous-aggregation || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-policy-assessment || test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-repository-review; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/$VOLPAROSSA_ALPHA_SCENARIO-smoke.json"
             if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-cooperative-browser-discovered; then
               report="$VOLPAROSSA_ALPHA_OUTPUT/agent-cooperative-browser-smoke.json"
@@ -1828,6 +1829,15 @@ jobs:
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Verify the recovered Git proposal and original peer review
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-repository-review'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          python3 -B tests/integration/repository-review-smoke.py report "$VOLPAROSSA_ALPHA_OUTPUT" "$GITHUB_SHA"
 
       - name: Require real protected public policy assessments and original receipt replay
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-policy-assessment'

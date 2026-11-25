@@ -60,6 +60,8 @@ pub(crate) enum Command {
     PolicyPack(Box<policy_assessment::transfer::Pack>),
     /// Retrieve and independently recheck a selected assessment package without activating policy.
     PolicyFetch(Box<policy_assessment::transfer::Fetch>),
+    /// Reopen an enrolled Git proposal's original signed assessments and cross-reviews offline.
+    VerifyRepositoryReview(Box<policy_assessment::transfer::RepositoryReview>),
     /// Automatically derive one immutable native-object policy proposal from four signed judgments.
     PolicyPropose(Box<policy_assessment::object_policy::Propose>),
     /// Independently replay a proposal's evidence and sign with this configured authority only.
@@ -285,6 +287,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Document(args) => return document::run(&args, socket).await,
         Command::PolicyAssess(args) => return policy_assessment::run(&args, socket).await,
         Command::PolicyPack(args) => return policy_assessment::transfer::pack(&args),
+        Command::VerifyRepositoryReview(args) => {
+            return policy_assessment::transfer::verify_repository_review(&args);
+        }
         Command::PolicyFetch(args) => {
             return policy_assessment::transfer::fetch(&args, socket).await;
         }

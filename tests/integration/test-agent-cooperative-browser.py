@@ -743,24 +743,30 @@ class CooperativeBrowserProof(unittest.TestCase):
                                    '    agent_jobs_private "$jobs_prepare_command" "$@"')
         broker_body = shell.split('agent_jobs_broker() {', 1)[1].split('\n}\n', 1)[0]
         broker = bounded_selector(broker_body, '    set --\n',
-                                  '    if [ "${agent_policy_assessment:-no}" = yes ]; then')
+                                  '    if { [ "${agent_successor_serving:-no}" = yes ]')
         for scenario in ("agent-cooperative-browser", "agent-cooperative-browser-discovered",
-                         "agent-cooperative-code", "agent-cooperative-code-proposal"):
+                         "agent-cooperative-code", "agent-cooperative-code-proposal", "agent-repository-review", "agent-policy-assessment"):
             discovered = scenario == "agent-cooperative-browser-discovered"
             proposal = scenario == "agent-cooperative-code-proposal"
+            structured = scenario in ("agent-repository-review", "agent-policy-assessment")
             initial = ('jobs_root=/fixture/jobs\nagent_cooperative_browser_discovered="$1"\n'
-                       'agent_cooperative_code_proposal="$2"\n')
+                       'agent_cooperative_code_proposal="$2"\nagent_repository_review="$3"\nagent_policy_assessment="$4"\n')
             expected = ["prepare-code-proposal" if proposal else "prepare", "/fixture/jobs"]
-            if discovered:
+            if discovered or structured:
                 expected.append("smollm2-360m-v1")
-            broker_expected = (["--model-profile", "smollm2-360m-v1"] if discovered else
+            if structured:
+                expected.append("--task-graph-decoder")
+            broker_expected = (["--model-profile", "smollm2-360m-v1"] if discovered or structured else
                                ["--model-profile", "qwen3-0.6b-v1", "--code-proposal-v6"] if proposal else [])
+            if structured:
+                broker_expected.append("--principle-inference-v4")
             for selector, wanted in ((prepare + '\nprintf "%s\\0" "$jobs_prepare_command"\n', expected),
                                      (broker, broker_expected)):
                 # Only execute actual argument-selection text, never install/systemd/model commands.
                 command = initial + selector + '\nfor value do printf "%s\\0" "$value"; done\n'
                 result = subprocess.run(["sh", "-c", command, "test", "yes" if discovered else "no",
-                                         "yes" if proposal else "no"], env={"PATH": os.defpath},
+                                         "yes" if proposal else "no", "yes" if scenario == "agent-repository-review" else "no",
+                                         "yes" if scenario == "agent-policy-assessment" else "no"], env={"PATH": os.defpath},
                                         capture_output=True, timeout=3, check=True)
                 got = result.stdout.decode().split("\0")[:-1] if result.stdout else []
                 self.assertEqual(got, wanted)
