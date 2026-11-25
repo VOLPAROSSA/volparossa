@@ -801,15 +801,32 @@ def phase_with_core(root, selected, exit_socket, flow_root, provision, deadline,
     sampler_failure = sampler['SamplerFailure'] if NETWORK_VERSION == 1 else sampler['OLD']['SamplerFailure']
     activity = ACTIVITY['capture'](binary, root.parents[1], root, selected) if (
         PROFILE_VERSION in (7, 8, 9, 10) and NETWORK_VERSION == 2) else nullcontext()
+    owner_result = None
     try:
         with activity, sampler['capture'](
                 binary, Path(exit_socket), baseline, minimum, client=client,
                 **{('scope' if NETWORK_VERSION == 1 else 'policy'): scope}, diagnostic=diagnostic) as coverage:
-            value, report_hash = (node_phase(root, selected, provision, deadline) if request_stage is None else
+            owner_result = (node_phase(root, selected, provision, deadline) if request_stage is None else
                 node_phase(root, selected, provision, deadline, request_stage=request_stage))
     except sampler_failure:
-        if NETWORK_VERSION == 2: raise NetworkPhaseFailure(selected, diagnostic) from None
-        raise
+        if NETWORK_VERSION != 2:
+            raise
+        failure = NetworkPhaseFailure(selected, diagnostic)
+        if owner_result is not None:
+            value, report_hash = owner_result
+            failure.report.update(node=value, node_report_sha256=report_hash, provision_sha256=provision,
+                node_joined=True, protected_flow_proven=False)
+            if PROFILE_VERSION == 10:
+                # Bind cleanup of the two retained deposits to this failed observer and
+                # the exact already validated owner receipt. A write failure leaves the
+                # observer failure intact and makes this cleanup path unavailable.
+                try:
+                    write_json(root / f'storage-consumer-{selected}-network-failure.json',
+                        dict(phase=selected, node_report_sha256=report_hash, sampler=dict(diagnostic)))
+                except (OSError, ValueError):
+                    pass
+        raise failure from None
+    value, report_hash = owner_result
     summary = coverage.report(joined=coverage.joined)
     sampler['validate_summary'](summary, baseline, minimum)
     require(summary['exit_log_sampling_version'] == (3 if NETWORK_VERSION == 2 else 2)
@@ -856,6 +873,7 @@ def cleanup_tree(root):
     files, directories, total = [], [], 0
     original = private_directory(root)
     top_files = {'consumer-binding.json', *(f'storage-consumer-{p}.json' for p in PHASES),
+        *(f'storage-consumer-{p}-network-failure.json' for p in RELEASE_PHASES),
         *(ACTIVITY['private_name'](phase) for phase in ACTIVITY['PHASES']),
         *(CORRELATION['private_name'](phase) for phase in CORRELATION['PHASES'])}
 
@@ -897,9 +915,20 @@ RELEASE_PHASES = ('publish', 'exercise', 'finish')
 
 def require_failed_phase(root, phase):
     require(phase in RELEASE_PHASES and PROFILE_VERSION == 10, 'release_scope')
-    failure = private_json(root / f'storage-consumer-{phase}.json')
-    require(type(failure) is dict and failure.get('phase') == phase and failure.get('passed') is False
-        and failure.get('kind') == 'storage-consumer-maintenance', 'release_scope')
+    raw = file_bytes(root / f'storage-consumer-{phase}.json', MAX_REPORT)
+    owner = json.loads(raw)
+    require(type(owner) is dict and owner.get('phase') == phase and type(owner.get('passed')) is bool
+        and owner.get('kind') == 'storage-consumer-maintenance', 'release_scope')
+    if owner['passed']:
+        try:
+            marker = private_json(root / f'storage-consumer-{phase}-network-failure.json')
+        except FileNotFoundError:
+            raise ValueError('release_scope') from None
+        keys(marker, ('phase', 'node_report_sha256', 'sampler'))
+        require(marker['phase'] == phase and marker['node_report_sha256'] == hashlib.sha256(raw).hexdigest(),
+            'release_scope')
+        sampler = runpy.run_path(str(HERE / 'storage-consumer-route-sampler.py'))
+        sampler['validate_diagnostic'](marker['sampler'])
     no_fixture_processes(root)
 
 

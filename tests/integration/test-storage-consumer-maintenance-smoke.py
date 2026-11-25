@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Inert receipt/authority and owned-child tests; no GPG, core, VM or network."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
 import json
@@ -1085,6 +1085,28 @@ class ConsumerOrchestration(unittest.TestCase):
                 release(*args)
             self.assertEqual(len(command_log), 5)
 
+    def test_observer_failure_cleanup_requires_the_exact_successful_owner_receipt(self):
+        phase = 'exercise'
+        diagnostic = dict(version=1, kind='consumer-route-sampler-failure', phase='sampling',
+            samples=7, completed=0, failed=0, operation='route_binding', code='control_invalid')
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(G, PROFILE_VERSION=10,
+                no_fixture_processes=lambda root: None):
+            root = Path(tmp)
+            receipt = root / 'storage-consumer-exercise.json'
+            M['write_json'](receipt, dict(phase=phase, kind='storage-consumer-maintenance', passed=True))
+            marker = root / 'storage-consumer-exercise-network-failure.json'
+            expected = dict(phase=phase, node_report_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                sampler=diagnostic)
+            for update in [dict(phase='publish'), dict(node_report_sha256='0' * 64),
+                    dict(sampler=dict(diagnostic, code='unexpected')), {}]:
+                M['write_json'](marker, dict(expected, **update))
+                if update:
+                    with self.assertRaises(ValueError):
+                        M['require_failed_phase'](root, phase)
+                else:
+                    M['require_failed_phase'](root, phase)
+                marker.unlink()
+
     def test_actual_staged_import_and_pin_closure_without_download_or_execution(self):
         # The guest stages individual files, not this whole checkout. Exercise
         # the actual runpy/load_pins closure in that same sparse arrangement.
@@ -1333,6 +1355,28 @@ class ConsumerOrchestration(unittest.TestCase):
         self.assertEqual((result['version'], result['network_version'], result['control_underlay_sha256']), (2, 2, 'd' * 64))
         self.assertEqual(writes[0][1]['exit_log_sampling_version'], 3)
         self.assertTrue(writes[0][1]['exit_log_sampler_joined'])
+        # The owner can finish while the independent sampler refuses the route.
+        # Keep its original validated receipt, mark the protected gate failed,
+        # and write only the bound cleanup marker.
+        writes.clear()
+        owner = report('exercise')
+        replies = [SimpleNamespace(stdout=raw) for raw in initial] + [subprocess.CalledProcessError(1, ['PRIVATE'])]
+        with patch.dict(os.environ, env), patch.dict(G, PROFILE_VERSION=10, NETWORK_VERSION=2,
+                ACTIVITY=dict(G['ACTIVITY'], capture=lambda *_: nullcontext()),
+                private_json=lambda *_: dict(coreBinary='/fixed/core', controlSocket='/fixed/client'),
+                validate_locations=lambda *_: (Path('/fixed/core'), Path('/fixed/client')),
+                private_directory=lambda *_: None, node_phase=lambda *_: (owner, 'b' * 64),
+                write_json=lambda *args: writes.append(args)), patch.object(subprocess, 'run', side_effect=replies):
+            with self.assertRaises(M['NetworkPhaseFailure']) as rejected:
+                M['phase'](root, 'exercise', work / 'runtime-exit/control/agent.sock',
+                    work / 'client-fixtures/private-storage-user', PROVISION, time.monotonic() + 1)
+        failed = rejected.exception.report
+        self.assertFalse(failed['passed'])
+        self.assertFalse(failed['protected_flow_proven'])
+        self.assertTrue(failed['node_joined'])
+        self.assertEqual(failed['node'], owner)
+        self.assertEqual(writes, [(root / 'storage-consumer-exercise-network-failure.json',
+            dict(phase='exercise', node_report_sha256=failed['node_report_sha256'], sampler=failed['sampler']))])
         original = M['NodePhaseFailure'](diagnostic_failure(3), 'b' * 64, PROVISION)
         for owner_failure in (False, True):
             writes.clear()
