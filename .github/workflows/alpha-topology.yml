@@ -215,6 +215,7 @@ jobs:
           python3 -B tests/integration/test-protected-quote-route-wiring.py
           sh -n tests/integration/content-custody-smoke.sh
           python3 -B tests/integration/test-content-custody-smoke.py
+          python3 -B tests/integration/test-public-git-recovery.py
           sh -n tests/integration/private-storage-peer-smoke.sh
           python3 -B tests/integration/test-private-storage-peer-smoke.py
           sh -n tests/integration/private-storage-replicas-smoke.sh
@@ -1494,6 +1495,8 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-custody-smoke.json"
           python3 -B tests/integration/content-custody-smoke.py report "$report" "$GITHUB_SHA"
+          python3 -B tests/integration/public-git-recovery.py verify-host \
+            "$VOLPAROSSA_ALPHA_OUTPUT/content-custody-git-recovery.json" "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

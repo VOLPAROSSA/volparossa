@@ -25,13 +25,35 @@ revision to the repository's previously authorized governance and decision.
 Conflicting heads require verification against that history before publication
 continues. Popularity and mirror state confer no authority.
 
-Evaluate Radicle's repository identities, signed refs, peer replication and
-collaborative objects for patches and reviews. Compare an upstream integration
-with ordinary Git objects and existing DICN services. Check routing and metadata
-privacy, private-project access, recovery after seed loss, interoperability and
-the ability to export code and decision history before selecting a component.
-Record which DICN gaps it fills and which responsibilities remain with Core.
-[Radicle protocol guide](https://radicle.dev/guides/protocol)
+### Source recovery and Radicle
+
+Use a self-contained Git bundle for the first public source-recovery trial.
+A reader with an independently selected publisher, signed manifest and expected Git
+ref and commit can recover history using ordinary Git and the existing Core
+content transport. Bundle prerequisites would require a separate trusted source,
+so the fresh-repository trial requires a complete bundle. Check the expected ref
+and commit and run Git object validation after retrieval. A fetched repository
+supplies source bytes. Approval of a new canonical ref and installation of a
+release each require their own decision. [Git bundle format and verification](https://git-scm.com/docs/git-bundle)
+
+Radicle Heartwood addresses a different part of the cycle. Its repository ID
+derives from the initial identity document and remains stable across renames.
+Delegates and a threshold govern changes. Signed refs bind advertised Git refs
+to a peer. Patches, reviews and issues are stored as collaborative Git objects.
+These properties make it a candidate for transferring review history along
+with source. A plain source-branch bundle omits review objects and delegate
+history unless those refs are explicitly included. The reviewed source declares
+MIT or Apache-2.0 licensing. [Identity document and visibility](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/identity/doc.rs) · [Signed refs](https://github.com/radicle-dev/heartwood/tree/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/storage/refs/sigrefs) · [Patch objects](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/cob/patch.rs) · [Source licenses](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/Cargo.toml)
+
+Heartwood uses Noise-authenticated peer sessions and disseminates availability
+and ref announcements through gossip. For private repositories, delegates and
+allowed node identities can obtain the source. An authorized seed holding a
+readable repository is a trusted recipient. Before enabling an adapter, verify
+which participants can observe repository interests, how the adapter uses the
+DICN transport, and whether a fresh node can recover both code and review history
+after seed loss. Keep private work out of the public trial. An integration must
+map accepted refs to VOLPAROSSA's independently authorized policy, evidence,
+release authority and recovery counters. [Radicle protocol and replication](https://radicle.dev/guides/protocol)
 
 Use Network for permitted peer discovery and transport, Storage for encrypted
 recovery copies, and existing signed publications and retention for durable

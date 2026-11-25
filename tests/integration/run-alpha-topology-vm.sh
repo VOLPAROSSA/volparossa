@@ -1315,7 +1315,7 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "mptcp-refill-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
-              "content-custody-smoke.json", "content-custody-evidence.json",
+              "content-custody-smoke.json", "content-custody-evidence.json", "content-custody-git-recovery.json",
               "private-storage-peer-smoke.json", "private-storage-peer-evidence.json",
               "private-storage-replicas-smoke.json", "private-storage-replicas-evidence.json",
               "private-storage-handoff-smoke.json", "private-storage-handoff-evidence.json",
