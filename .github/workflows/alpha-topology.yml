@@ -1904,10 +1904,10 @@ jobs:
         run: |
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
-          python3 -B tests/integration/speech-recognition-fixture.py verify-export "$VOLPAROSSA_ALPHA_OUTPUT" "$GITHUB_SHA"
+          python3 -B tests/integration/speech-recognition-fixture.py verify-export "$VOLPAROSSA_ALPHA_OUTPUT" "$GITHUB_SHA" --require-dutch
           python3 -B tests/integration/speech-synthesis-smoke.py "$VOLPAROSSA_ALPHA_OUTPUT" "$GITHUB_SHA"
 
-      - name: Retain the two synthetic speech results and original trial outcome
+      - name: Retain the three synthetic speech results and original trial outcome
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'speech-recognition' && env.VOLPAROSSA_ALPHA_OUTPUT != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1919,6 +1919,7 @@ jobs:
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-reference.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-bicycle.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-station.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/speech-dutch.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/current-phase
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/guest-exit-status
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-recognition-smoke.json
@@ -1926,6 +1927,7 @@ jobs:
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-reference.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-bicycle.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-station.json
+            ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/published/speech-dutch.json
             ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}/vm-incomplete.json
 
       - name: Require real owner-local private inference and exact cleanup

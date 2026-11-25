@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Generate two synthetic reference clips and score original Core transcription results."""
+"""Generate synthetic English and Dutch reference clips and score original Core transcription results."""
 import argparse
 from array import array
 import hashlib
@@ -14,10 +14,13 @@ import tempfile
 import unicodedata
 import wave
 
-PHRASES = {
+ENGLISH_PHRASES = {
     "bicycle": "The green bicycle is next to the window.",
     "station": "We will meet at the station on Sunday.",
 }
+PHRASES = {**ENGLISH_PHRASES, "dutch": "De trein vertrekt morgen om negen uur."}
+VOICES = {"bicycle": "en-us", "station": "en-us", "dutch": "nl"}
+SCOPES = {1: "synthetic_english_speech", 2: "synthetic_english_and_dutch_speech"}
 ENGINE = "1.52.0+dfsg-5"
 PACKAGES = ("espeak-ng", "espeak-ng-data", "libespeak-ng1")
 RATE = 16000
@@ -99,7 +102,7 @@ def prepare(directory):
     with tempfile.TemporaryDirectory(dir=directory, prefix="synth-") as temporary:
         for name, phrase in PHRASES.items():
             intermediate = Path(temporary) / (name + ".wav")
-            subprocess.run(["/usr/bin/espeak-ng", "-v", "en-us", "-s", "145",
+            subprocess.run(["/usr/bin/espeak-ng", "-v", VOICES[name], "-s", "145",
                 "-w", str(intermediate), phrase], check=True, timeout=15, cwd=temporary,
                 env={"PATH": "/usr/bin:/bin", "LANG": "C", "HOME": temporary},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -111,8 +114,8 @@ def prepare(directory):
                 wav.setparams((1, 2, RATE, len(raw) // 2, "NONE", "not compressed"))
                 wav.writeframes(raw)
             recordings[name] = {"samples": len(raw) // 2, "sha256": sha256(destination.read_bytes())}
-    evidence = {"version": 1, "source": "espeak-ng", "packages": packages,
-                "voice": "en-us", "words_per_minute": 145, "recordings": recordings}
+    evidence = {"version": 2, "source": "espeak-ng", "packages": packages,
+                "voices": VOICES, "words_per_minute": 145, "recordings": recordings}
     with (directory / "reference.json").open("x") as out:
         json.dump(evidence, out, sort_keys=True)
 
@@ -127,24 +130,27 @@ def load(path):
 
 
 def validate_reference(reference):
-    require(type(reference["version"]) is int and reference["version"] == 1
-            and reference["source"] == "espeak-ng"
+    version = reference["version"]
+    require(type(version) is int and version in SCOPES and reference["source"] == "espeak-ng"
             and reference["packages"] == {pkg: ENGINE for pkg in PACKAGES}
-            and reference["voice"] == "en-us" and reference["words_per_minute"] == 145
-            and set(reference["recordings"]) == set(PHRASES))
+            and reference["words_per_minute"] == 145)
+    if version == 1:
+        require(reference["voice"] == "en-us" and set(reference["recordings"]) == set(ENGLISH_PHRASES))
+    else:
+        require(reference["voices"] == VOICES and set(reference["recordings"]) == set(PHRASES))
     for recording in reference["recordings"].values():
         require(set(recording) == {"samples", "sha256"} and type(recording["samples"]) is int
                 and 0 < recording["samples"] <= MAX_SECONDS * RATE
                 and re.fullmatch("[0-9a-f]{64}", recording["sha256"]))
 
 
-def score_clip(phrase, recording, result):
+def score_clip(phrase, recording, result, language):
     transcript = result["transcript"]
     require(set(result) == {"version", "operation", "model_profile", "language", "audio_samples",
                             "cleanup", "transcript", "elapsed_ms", "max_observed_rss_bytes"}
             and type(result["version"]) is int and result["version"] == 1
             and result["operation"] == "compute_transcribe"
-            and result["model_profile"] == "whisper-small-v1" and result["language"] == "en"
+            and result["model_profile"] == "whisper-small-v1" and result["language"] == language
             and type(result["audio_samples"]) is int and result["audio_samples"] == recording["samples"]
             and set(result["cleanup"]) == {"complete"} and result["cleanup"]["complete"] is True
             and isinstance(transcript, str) and bool(transcript.strip()) and len(transcript.encode()) <= 4096)
@@ -162,8 +168,9 @@ def score_clip(phrase, recording, result):
 def score(directory, exported=False):
     reference = load(directory / ("speech-reference.json" if exported else "reference.json"))
     validate_reference(reference)
+    version = reference["version"]
     clips = {}
-    for name, phrase in PHRASES.items():
+    for name, phrase in (ENGLISH_PHRASES if version == 1 else PHRASES).items():
         recording = reference["recordings"][name]
         if exported:
             result_path = directory / ("speech-" + name + ".json")
@@ -173,25 +180,27 @@ def score(directory, exported=False):
             samples = len(original_wave(path, RATE)) // 2
             require(recording == {"samples": samples, "sha256": sha256(path.read_bytes())})
             result_path = directory / (name + ".result.json")
-        clips[name] = score_clip(phrase, recording, load(result_path))
+        clips[name] = score_clip(phrase, recording, load(result_path), VOICES[name].split("-")[0])
     require(len({row["reference_wav_sha256"] for row in clips.values()}) == len(clips))
     passed = all(row["passed"] for row in clips.values())
-    return {"version": 1, "scope": "synthetic_english_speech", "model_profile": "whisper-small-v1",
+    return {"version": version, "scope": SCOPES[version], "model_profile": "whisper-small-v1",
             "maximum_word_error_rate_per_clip": 0.25, "clips": clips, "passed": passed}
 
 
-def verify_export(directory, revision):
+def verify_export(directory, revision, require_dutch=False):
     require(re.fullmatch("[a-f0-9]{40}", revision))
     receipt = load(directory / "speech-recognition-smoke.json")
-    require(type(receipt["version"]) is int and receipt["version"] == 1
-            and receipt["source_revision"] == revision and receipt["scope"] == "synthetic_english_speech"
+    require(type(receipt["version"]) is int and receipt["version"] in SCOPES
+            and (not require_dutch or receipt["version"] == 2)
+            and receipt["source_revision"] == revision and receipt["scope"] == SCOPES[receipt["version"]]
             and receipt["model_sha256"] == "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b"
             and receipt["passed"] is True and receipt["phase"] == "complete"
             and receipt["live_worker_cancelled_and_joined"] is True
             and receipt["signals"] == ["SIGINT", "SIGTERM"] and receipt["digital_silence_refused"] is True)
     actual = score(directory, exported=True)
     # JSON comparison also distinguishes Booleans from 0 and 1.
-    require(actual["passed"] and json.dumps(actual, sort_keys=True) == json.dumps(receipt["score"], sort_keys=True))
+    require(actual["passed"] and actual["version"] == receipt["version"]
+            and json.dumps(actual, sort_keys=True) == json.dumps(receipt["score"], sort_keys=True))
     return actual
 
 
@@ -200,13 +209,16 @@ def main():
     parser.add_argument("operation", choices=("prepare", "score", "verify-export"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("revision", nargs="?")
+    parser.add_argument("--require-dutch", action="store_true", help="require the version 2 Dutch and English trial")
     args = parser.parse_args()
+    if args.require_dutch and args.operation != "verify-export":
+        parser.error("--require-dutch requires verify-export")
     if (args.revision is not None) != (args.operation == "verify-export"):
         parser.error("verify-export requires a source revision")
     if args.operation == "prepare":
         prepare(args.directory.absolute())
         return 0
-    result = verify_export(args.directory, args.revision) if args.operation == "verify-export" else score(args.directory)
+    result = verify_export(args.directory, args.revision, args.require_dutch) if args.operation == "verify-export" else score(args.directory)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["passed"] else 1
 

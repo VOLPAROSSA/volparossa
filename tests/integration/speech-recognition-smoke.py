@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Exercise the normal Core CLI on the two authorized synthetic guest recordings."""
+"""Exercise the normal Core CLI on the English and Dutch synthetic guest recordings."""
 import hashlib
 import json
 import os
@@ -73,7 +73,7 @@ def execute(root, output, revision):
             and subprocess.check_output(["systemd-detect-virt", "--vm"], text=True).strip() == "kvm")
     command = ["/home/vpci/target/debug/volparossa", "compute", "transcribe",
                "--runtime-root", root / "runtime/venv", "--model-root", root / "runtime/model",
-               "--work-parent", root / "work", "--language", "en", "--execute", "--input"]
+               "--work-parent", root / "work", "--execute"]
     fixture = [sys.executable, "-B", str(HERE / "speech-recognition-fixture.py")]
     lifecycle = runpy.run_path(str(HERE / "agent-private-conversation.py"))["service_diagnostic"]
     scratch, recordings = root / "work", root / "recordings"
@@ -82,17 +82,18 @@ def execute(root, output, revision):
     (output / "speech-reference.json").write_bytes((recordings / "reference.json").read_bytes())
     synthesized = runpy.run_path(str(HERE / "speech-synthesis-smoke.py"))["generate"](
         root, recordings, output, revision, lifecycle)
-    receipt = {"version": 1, "source_revision": revision, "model_sha256": MODEL_SHA,
-               "scope": "synthetic_english_speech", "passed": False, "phase": "recognition"}
+    contract = runpy.run_path(str(HERE / "speech-recognition-fixture.py"))
+    receipt = {"version": 2, "source_revision": revision, "model_sha256": MODEL_SHA,
+               "scope": contract["SCOPES"][2], "passed": False, "phase": "recognition"}
     try:
-        for name in ("bicycle", "station"):
+        for name, voice in contract["VOICES"].items():
             # The ordinary CLI debug subscriber uses stdout. Keep the full stream private in
             # this synthetic guest and export only the shared closed lifecycle projection.
             trace = recordings / (name + ".log")
             marked_input = synthesized / (name + ".wav")
             input_digest = hashlib.sha256(marked_input.read_bytes()).hexdigest()
             with trace.open("xb") as log:
-                result = subprocess.run([*command, marked_input], stdout=log,
+                result = subprocess.run([*command, "--language", voice.split("-")[0], "--input", marked_input], stdout=log,
                                         env=dict(os.environ, NO_COLOR="1",
                                                  RUST_LOG="off,volparossa::compute::private_diagnostic=debug"),
                                         timeout=150)
@@ -114,15 +115,16 @@ def execute(root, output, revision):
         receipt["score"] = json.loads(score.stdout)
         require(score.returncode in (0, 1) and "clips" in receipt["score"])
         receipt["phase"] = "cancellation"
+        english = [*command, "--language", "en", "--input"]
         for owner_signal in (signal.SIGINT, signal.SIGTERM):
-            cancelled([*command, recordings / "bicycle.wav"], scratch, owner_signal)
+            cancelled([*english, recordings / "bicycle.wav"], scratch, owner_signal)
         receipt.update(live_worker_cancelled_and_joined=True, signals=["SIGINT", "SIGTERM"])
         receipt["phase"] = "silence"
         quiet = recordings / "silence.wav"
         with wave.open(str(quiet), "wb") as stream:
             stream.setparams((1, 2, 16000, 1600, "NONE", "not compressed"))
             stream.writeframes(bytes(1600 * 2))
-        denied = subprocess.run([*command, quiet], capture_output=True, timeout=15)
+        denied = subprocess.run([*english, quiet], capture_output=True, timeout=15)
         require(denied.returncode != 0 and not denied.stdout and b"compute_speech_no_signal" in denied.stderr
                 and not any(scratch.iterdir()))
         receipt.update(digital_silence_refused=True)

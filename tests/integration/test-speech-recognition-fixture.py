@@ -12,9 +12,10 @@ import wave
 F = runpy.run_path(str(Path(__file__).with_name("speech-recognition-fixture.py")))
 
 
-def receipt_inputs(directory):
+def receipt_inputs(directory, version=1):
     recordings = {}
-    for index, (name, phrase) in enumerate(F["PHRASES"].items(), 1):
+    phrases = F["ENGLISH_PHRASES"] if version == 1 else F["PHRASES"]
+    for index, (name, phrase) in enumerate(phrases.items(), 1):
         samples = 400 + index
         path = directory / (name + ".wav")
         with wave.open(str(path), "wb") as wav:
@@ -23,10 +24,11 @@ def receipt_inputs(directory):
         recordings[name] = {"samples": samples, "sha256": F["sha256"](path.read_bytes())}
         result = {"version": 1, "operation": "compute_transcribe", "model_profile": "whisper-small-v1",
             "elapsed_ms": 50, "max_observed_rss_bytes": 20480,
-            "language": "en", "transcript": phrase, "audio_samples": samples, "cleanup": {"complete": True}}
+            "language": F["VOICES"][name].split("-")[0], "transcript": phrase, "audio_samples": samples, "cleanup": {"complete": True}}
         (directory / (name + ".result.json")).write_text(json.dumps(result))
-    (directory / "reference.json").write_text(json.dumps({"version": 1, "source": "espeak-ng",
-        "voice": "en-us", "words_per_minute": 145,
+    voice = {"voice": "en-us"} if version == 1 else {"voices": F["VOICES"]}
+    (directory / "reference.json").write_text(json.dumps({"version": version, "source": "espeak-ng",
+        **voice, "words_per_minute": 145,
         "packages": dict.fromkeys(F["PACKAGES"], F["ENGINE"]), "recordings": recordings}))
 
 
@@ -49,10 +51,10 @@ class SpeechFixture(unittest.TestCase):
             report = F["score"](directory)
             self.assertTrue(report["passed"])
             self.assertEqual(report["clips"]["station"]["word_errors"], 0)
-            self.assertNotIn(F["PHRASES"]["bicycle"], json.dumps(report))
+            self.assertNotIn(F["ENGLISH_PHRASES"]["bicycle"], json.dumps(report))
             path = directory / "station.result.json"
             result = json.loads(path.read_text())
-            result["transcript"] = F["PHRASES"]["bicycle"]
+            result["transcript"] = F["ENGLISH_PHRASES"]["bicycle"]
             path.write_text(json.dumps(result))
             self.assertFalse(F["score"](directory)["passed"])
             result["cleanup"]["complete"] = False
@@ -71,19 +73,45 @@ class SpeechFixture(unittest.TestCase):
                 "signals": ["SIGINT", "SIGTERM"], "digital_silence_refused": True, "score": F["score"](directory)}
             (directory / "speech-recognition-smoke.json").write_text(json.dumps(receipt))
             (directory / "reference.json").rename(directory / "speech-reference.json")
-            for name in F["PHRASES"]:
+            for name in F["ENGLISH_PHRASES"]:
                 (directory / (name + ".result.json")).rename(directory / ("speech-" + name + ".json"))
             self.assertTrue(F["verify_export"](directory, revision)["passed"])
+            with self.assertRaises(ValueError):
+                F["verify_export"](directory, revision, require_dutch=True)
             path = directory / "speech-bicycle.json"
             original = json.loads(path.read_text())
             for key, value in (("elapsed_ms", 51), ("max_observed_rss_bytes", True),
-                               ("transcript", F["PHRASES"]["station"]), ("audio_samples", 1)):
+                               ("transcript", F["ENGLISH_PHRASES"]["station"]), ("audio_samples", 1)):
                 path.write_text(json.dumps(dict(original, **{key: value})))
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     F["verify_export"](directory, revision)
             path.unlink()
             with self.assertRaises(ValueError):
                 F["verify_export"](directory, revision)
+
+    def test_dutch_trial_scores_the_fixed_seven_words_and_checks_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            receipt_inputs(directory, version=2)
+            path = directory / "dutch.result.json"
+            result = json.loads(path.read_text())
+            self.assertEqual(F["score"](directory)["clips"]["dutch"]["reference_words"], 7)
+            for transcript, errors, passed in (
+                ("De trein vertrekt morgen om negen uur.", 0, True),
+                ("De trein vertrekt morgen om 9 uur.", 1, True),
+                ("De trein vertrekt vandaag om 9 uur.", 2, False),
+            ):
+                with self.subTest(transcript=transcript):
+                    path.write_text(json.dumps(dict(result, transcript=transcript)))
+                    report = F["score"](directory)
+                    self.assertEqual(report["clips"]["dutch"]["word_errors"], errors)
+                    self.assertEqual(report["passed"], passed)
+            path.write_text(json.dumps(dict(result, language="en")))
+            with self.assertRaises(ValueError):
+                F["score"](directory)
+            path.unlink()
+            with self.assertRaises(ValueError):
+                F["score"](directory)
 
     def test_changed_pcm_and_duplicate_receipt_fields_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -46,15 +46,9 @@ def generate(root, references, output, revision, lifecycle):
     directory = root / "synthesis"
     directory.mkdir(mode=0o700)
     records = {}
-    for name, phrase in {**FIXTURE["PHRASES"], "dutch": "De trein vertrekt morgen om negen uur."}.items():
-        voice = "nl" if name == "dutch" else "en-us"
-        if name == "dutch":
-            raw = directory / "native.wav"
-            subprocess.run(["/usr/bin/espeak-ng", "-v", voice, "-s", "145", "-w", raw, phrase],
-                           check=True, timeout=10)
-            original_pcm = FIXTURE["to_16k"](FIXTURE["original_wave"](raw, 22050))
-        else:
-            original_pcm = FIXTURE["original_wave"](references / (name + ".wav"), 16000)
+    for name, phrase in FIXTURE["PHRASES"].items():
+        voice = FIXTURE["VOICES"][name]
+        original_pcm = FIXTURE["original_wave"](references / (name + ".wav"), 16000)
         text = directory / (name + ".txt")
         text.write_text(phrase)
         text.chmod(0o600)
@@ -96,9 +90,11 @@ def verify(directory, revision):
     proof = FIXTURE["load"](directory / "speech-synthesis-smoke.json")
     require(re.fullmatch("[a-f0-9]{40}", revision) and proof["version"] == 1 and proof["source_revision"] == revision
             and proof["passed"] is True and proof["completed_repetitions"] == REPEATED_CALLS
-            and set(proof["clips"]) == {"dutch", *FIXTURE["PHRASES"]})
+            and set(proof["clips"]) == set(FIXTURE["PHRASES"]))
     recognition = FIXTURE["load"](directory / "speech-recognition-smoke.json")
-    require(recognition["source_revision"] == revision and set(recognition["recognizer_inputs"]) == set(FIXTURE["PHRASES"]))
+    require(type(recognition["version"]) is int and recognition["version"] in FIXTURE["SCOPES"])
+    scored = FIXTURE["PHRASES"] if recognition["version"] == 2 else FIXTURE["ENGLISH_PHRASES"]
+    require(recognition["source_revision"] == revision and set(recognition["recognizer_inputs"]) == set(scored))
     for name, row in proof["clips"].items():
         response = row["cli"]
         require(re.fullmatch("[a-f0-9]{64}", row["original_pcm_sha256"])
@@ -108,9 +104,9 @@ def verify(directory, revision):
                 and type(row["samples"]) is int and 0 < row["samples"] <= 480000
                 and response["operation"] == "compute_synthesize" and response["version"] == 1
                 and response["execute"] is True and response["synthetic"] is True and response["sample_rate"] == 16000
-                and response["engine"] == "espeak-ng" and response["voice"] == ("nl" if name == "dutch" else "en-us")
+                and response["engine"] == "espeak-ng" and response["voice"] == FIXTURE["VOICES"][name]
                 and response["audio_samples"] == row["samples"] and response["cleanup"]["complete"] is True)
-        if name in FIXTURE["PHRASES"]:
+        if name in scored:
             result_file = directory / ("speech-" + name + ".json")
             original = FIXTURE["load"](result_file)
             require(recognition["recognizer_inputs"][name] == {
