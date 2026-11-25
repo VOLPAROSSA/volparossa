@@ -349,6 +349,25 @@ normal lifetime countdown, removed the private keys and owned namespaces,
 and passed. Independent light-client finality remains open.
 [First host receipt](../development/evidence/bank-validators-44564082860/attempt-1/transaction-abci-acceptance.json) · [First run](https://github.com/VOLPAROSSA/volparossa/actions/runs/44564082860/attempts/1) · [Passing host receipt](../development/evidence/bank-validators-44564082860/attempt-2/transaction-abci-acceptance.json)
 
+### Local planning and cooperative public document trials
+
+The installed VSCodium editor showed the exact public source and obtained owner
+approval to start the local OpenCode planner. On Core `33c56f6a` and Code
+driver `b350bdd8`, an independent observer saw one worker with the pinned
+Qwen weights in the planner's isolated network and confirmed that it ended.
+The editor reported a model-task failure before it handed any task to a public
+peer. The preceding run had observed zero model workers. The successful direct
+editor-to-peer path has its own trial. [Local planner run and original reports](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45422052884) · [Preceding run](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/45419279512) · [Direct editor path](https://github.com/VOLPAROSSA/volparossa-code/actions/runs/44561152211)
+
+On Core `98da34a4`, the coordinator assembled a complete hierarchical answer
+for the enrolled public document. The observer counted 23 workers, and 21 of
+23 job handles had original terminal receipts. Two receipts remained
+unconfirmed at expiry. The route sampler also failed its binding check.
+Firefox reported unconfirmed cleanup, so the full scenario remains open.
+The original archive SHA-256 is
+`ea24f5856ff10dc2d130f6edecd97941e106d85174ce54d07bb0be9523e4f738`.
+[Original topology run and reports](https://github.com/VOLPAROSSA/volparossa/actions/runs/45412759752)
+
 ## Native Firefox ordinary tabs
 
 Core `50b92f8a` compiled Firefox 157.0.1 offline with Browser `c3311ebe`.
@@ -416,6 +435,16 @@ The earlier tiny-model run used the same synthetic samples and 25% per-clip thre
 It scored four errors on the bicycle recording and one on the station recording.
 Natural speech, additional languages and confidential remote execution need their
 own observations. [Tiny-model run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45425123392)
+
+In a separate fixture, 16 repeated synthesis calls completed before the next
+call returned a worker result and then refused cleanup during a process-stat
+read. The typed receipt identifies the operation and classifies the I/O error
+as `other`. It contains no numeric errno. The observer now treats only Linux
+`ESRCH` on an already opened process-stat descriptor as disappearance of that
+exact process. A deterministic check opens the descriptor before reaping the
+child and reads it afterwards.
+[Original failed trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512520095) ·
+[Original 1,113-byte receipt archive](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512520095/artifacts/14976838219)
 
 ## Protected Compute evidence
 
@@ -554,6 +583,10 @@ Signal Desktop exported a 198,352-byte encrypted backup. When two of three Stora
 With Thunderbird closed, the owner’s Stalwart server accepted a second message over local SMTP. It rejected an unknown local recipient and external forwarding. After Stalwart restarted on the same SQLite database, the owner recovered both the original import and the delivered message, including its stored transport headers. This exercised an isolated loopback mail server. [Source-bound Thunderbird and Stalwart receipts](https://github.com/VOLPAROSSA/volparossa-mail/tree/5bb90ec3be8c168fd58a19e2d03f626f6560d96b/third_party/thunderbird-stalwart-owner-smtp)
 
 ## Paired Mail delivery
+
+On Core `d272a11b` and Mail `30cc423a`, the sender and recipient used separate Core agents, control sockets and network namespaces. While the recipient was offline, both custodians accepted 91,992 encrypted bytes. With the sender offline and one custodian restarted, Stalwart imported all 90,139 original MIME bytes. Both custodians signed the acknowledgements after import. The next fetch returned zero messages. Enrollment, send and receive completed 2, 2 and 7 Exit MPTCP/TLS exchanges respectively. All nine captures recorded zero direct client–Exit packets and zero packet-socket drops. Cleanup left zero owned objects and the host snapshots matched. The fixture kept both clients isolated from direct Exit routes. [Original guest report](../development/evidence/paired-mail-peers-45424248328/paired-mail-peers-smoke.json) · [Hosted topology trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424248328)
+
+The 36-file ZIP measured 35,643 bytes with SHA-256 `0352630c680dd0ae2482bb074d2207b6fc8a8b8db86bfc89c832b008c196ee4c`. Its original 143,213-byte guest report has SHA-256 `986038d2481659d78a781fa4e73fb88bb0109439e6983cab92412107e22181ac`. The preceding guest on `ec90f352` also completed delivery, but its 143,265-byte report exceeded the original 131,072-byte export limit. [Original ZIP](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424248328/artifacts/14937032554) · [Earlier export failure](https://github.com/VOLPAROSSA/volparossa/actions/runs/45417945039)
 
 On Core `b9c01e97` and Mail `30cc423a`, the paired sender and receiver used separate application processes behind one Core client. Two providers confirmed custody of the encrypted message. After the sender profile was removed and one provider reopened its store, the owner retrieved the message over a fresh protected route. Stalwart returned all 90,139 original MIME bytes before either provider acknowledged import. The next fetch was empty. The sender and receiver phases recorded six and seven Exit MPTCP flows respectively. The guest host snapshots matched and cleanup left zero owned objects. [Protected route and application receipt](../development/evidence/paired-mail-44553382181/paired-mail-smoke.json) · [Hosted topology trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/44553382181)
 
