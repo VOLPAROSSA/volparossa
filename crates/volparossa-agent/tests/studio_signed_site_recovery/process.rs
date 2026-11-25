@@ -311,16 +311,13 @@ pub(super) async fn cli(
         return Err("operation_deadline");
     }
     let negative = matches!(mode, Invocation::Negative);
-    let (mut command, owner) = match mode {
-        Invocation::Owner(packed, lifetime) => {
-            let (cmd, terminal) = OwnerTerminal::command(fixture)?;
-            (cmd, Some((terminal, packed, lifetime)))
-        }
-        _ => {
-            let mut cmd = Command::new(&fixture.cli);
-            cmd.stdin(Stdio::null());
-            (cmd, None)
-        }
+    let (mut command, owner) = if let Invocation::Owner(packed, lifetime) = mode {
+        let (command, terminal) = OwnerTerminal::command(fixture)?;
+        (command, Some((terminal, packed, lifetime)))
+    } else {
+        let mut command = Command::new(&fixture.cli);
+        command.stdin(Stdio::null());
+        (command, None)
     };
     let mut child = command
         .arg("--control-socket")

@@ -378,6 +378,8 @@ fn independent_native_review_must_select_the_bundle_before_signing() {
 
 #[test]
 fn terminal_owner_requires_every_original_asset_and_the_signed_context() {
+    use std::fmt::Write as _;
+
     let packed = packed();
     let publisher = "ab".repeat(32);
     let mut tty = format!(
@@ -388,16 +390,18 @@ fn terminal_owner_requires_every_original_asset_and_the_signed_context() {
     );
     for row in &packed.assets {
         let path = row["path"].as_str().unwrap();
-        let mime = if path.ends_with(".css") {
+        let mime = if path == "/style.css" {
             "text/css"
         } else {
             "text/html"
         };
-        tty.push_str(&format!(
-            "  {path}  {} bytes  {mime}  {}\r\n",
+        writeln!(
+            tty,
+            "  {path}  {} bytes  {mime}  {}\r",
             row["bytes"],
             row["sha256"].as_str().unwrap()
-        ));
+        )
+        .unwrap();
     }
     let check = |body: &str| super::owner::verify_display(body, &publisher, &packed);
     assert_eq!(check(&tty), Ok(1_700_000_000));
