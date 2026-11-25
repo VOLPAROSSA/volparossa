@@ -1,7 +1,7 @@
 //! Quality-only native adapter to the existing stateless DPS assessor.
 //!
-//! Inputs are bare canonical `DpsAssessRequest` messages, never administrative
-//! control envelopes. This library acquires no sensors, clocks, sockets or files,
+//! Inputs are canonical `DpsAssessRequest` messages or one caller-supplied geodetic
+//! claim. This library acquires no sensors, clocks, sockets or files,
 //! and deliberately returns no positions or request-local identities.
 
 #![deny(unsafe_code)]
@@ -11,7 +11,8 @@ use std::fmt;
 use prost::Message;
 use volparossa_local_control::dps::{
     AssessmentStatus, DPS_SERVICE_VERSION, DpsAssessRequest, DpsAssessment, FrameKind,
-    MAX_DPS_OBSERVATIONS, ObservationDisposition,
+    MAX_DPS_OBSERVATIONS, MAX_DPS_RADIUS_METRES, ObservationDisposition, SourceKind,
+    geodetic::{HeightReference, Wgs84GeodeticPosition},
 };
 
 #[allow(unsafe_code)]
@@ -76,6 +77,59 @@ pub struct DpsQualityV1 {
     pub conflict_count: u32,
     /// Exact mandatory limitation bits zero through six, all set.
     pub limitations_mask: u32,
+}
+
+/// V1 native input for one already-held platform claim. Contains sensitive coordinates.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DpsGeodeticClaimV1 {
+    /// Exactly 1 for caller-asserted WGS84 ellipsoidal height.
+    pub height_reference: u32,
+    /// Must be zero in v1.
+    pub reserved: u32,
+    /// WGS84 latitude in degrees north.
+    pub latitude_degrees: f64,
+    /// WGS84 longitude in degrees east.
+    pub longitude_degrees: f64,
+    /// Height above the WGS84 ellipsoid in metres.
+    pub height_metres: f64,
+    /// Positive 3D comparison radius in metres, of unknown joint confidence.
+    pub comparison_radius_metres: f64,
+    /// Caller-supplied measurement time in Unix milliseconds.
+    pub observed_at_unix_ms: u64,
+}
+
+impl DpsGeodeticClaimV1 {
+    fn assess(self, now_unix_ms: u64) -> Result<DpsQualityV1, DpsBridgeError> {
+        if self.height_reference != 1
+            || self.reserved != 0
+            || !self.comparison_radius_metres.is_finite()
+            || self.comparison_radius_metres <= 0.0
+            || self.comparison_radius_metres > MAX_DPS_RADIUS_METRES
+        {
+            return Err(DpsBridgeError::InvalidRequest);
+        }
+        let ecef = Wgs84GeodeticPosition {
+            latitude_degrees: self.latitude_degrees,
+            longitude_degrees: self.longitude_degrees,
+            height_metres: self.height_metres,
+            height_reference: HeightReference::Wgs84Ellipsoid,
+        }
+        .to_ecef()
+        .map_err(|_| DpsBridgeError::InvalidRequest)?;
+        // With a single observation, constant role labels bind nothing across callers.
+        // They never leave this call or appear in the quality summary.
+        let request = ecef.single_claim_request(
+            SourceKind::Other,
+            [[1; 16], [2; 16], [3; 16]],
+            self.comparison_radius_metres,
+            self.observed_at_unix_ms,
+        );
+        let assessment = request
+            .assess(now_unix_ms)
+            .map_err(|_| DpsBridgeError::InvalidRequest)?;
+        project(&assessment)
+    }
 }
 
 impl DpsQualityV1 {
