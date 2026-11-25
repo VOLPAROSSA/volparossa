@@ -218,6 +218,11 @@ def broker_pid(node):
 
 
 def worker_snapshot(work, node, broker, expected_dataset_sha256=None):
+    expected = None if expected_dataset_sha256 is None else {expected_dataset_sha256}
+    return worker_snapshot_for_datasets(work, node, broker, expected)
+
+
+def worker_snapshot_for_datasets(work, node, broker, expected_dataset_hashes):
     require(identity(broker["pid"]) == broker, "broker changed during observation")
     proc = Path(f"/proc/{broker['pid']}")
     require(Path(os.readlink(proc / "exe")).name == "volparossa", "unexpected broker executable")
@@ -242,11 +247,11 @@ def worker_snapshot(work, node, broker, expected_dataset_sha256=None):
             require(all("ro" in mounts.get(p, []) for p in ("/runtime", "/model", "/dataset.json"))
                     and "rw" in mounts.get("/output", []), "actual worker mounts not isolated")
             datasets = list((private_root / "work").glob("compute-job-*/dataset.json"))
-            if expected_dataset_sha256 is not None:
+            if expected_dataset_hashes is not None:
                 mounted = (root / "dataset.json").stat()
                 datasets = [path for path in datasets if (path.stat().st_dev, path.stat().st_ino)
                             == (mounted.st_dev, mounted.st_ino)]
-                if len(datasets) != 1 or file_hash(datasets[0], 1048576)["sha256"] != expected_dataset_sha256:
+                if len(datasets) != 1 or file_hash(datasets[0], 1048576)["sha256"] not in expected_dataset_hashes:
                     continue
             require(len(datasets) == 1, "expected one actual node-owned job input")
             actual = {"model/model.safetensors": work / "agent-jobs-user/provision/model/model.safetensors",

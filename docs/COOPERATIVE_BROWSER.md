@@ -128,7 +128,13 @@ fixture removed its model runtime, private job roots and publisher key.
 The initial route context was `974ca711032f3c6177157c1a69091737`. The live
 sample after the panel completed returned `9d1373dff2bdba9376f31ab29f05b38b`.
 The Exit capture recorded 615,881 and 564,388 response payload bytes for the two
-providers. The samples do not establish when or why the context changed.
+providers. The first and last observed workers started at 74,607 and 171,892
+Linux clock ticks since guest boot. At 100 ticks per second on x86-64, their
+starts alone span 972.85 seconds. The route existed before the first worker
+and the final comparison followed the last. The default route lifetime was
+600 seconds and the product limit was 900 seconds. The original context could
+therefore no longer be valid at the end of this trial. Its replacement time
+and the route for each intervening flow were not recorded.
 The fixture stopped before its remaining phase-specific transport checks.
 Cleanup left zero owned topology objects and both guest-root snapshots had
 SHA-256 `3db64e4fb6d345423adbd76f7ee84a6a6fe6a5b8b6f8185c210906a4ec7fc4cb`.
@@ -136,6 +142,58 @@ The original Actions ZIP had SHA-256
 `657872ae41b2d7c768a476b75a852355088c67c07a42e6d7382368996c7fb11c`.
 [Retained byte-exact reports](development/evidence/browser-cooperative-44434704508)
 
+The discovered-360M trial now starts the shared protected-route observer
+before the panel can authorize its first task. The observer brackets the
+control-relay query with two matching live path observations and joins fresh
+Exit completion events to those route contexts. It requires a completed flow
+on both the starting and final context, an unbroken sequence of overlapping
+Exit-log samples and at least six completed protected flows. Each sampled
+context must retain the original physical control relay, both data relays and
+the Exit. The five private packet captures and both provider exchanges remain
+part of the final acceptance check.
+
+On Core `19fdeedf`, two discovered peers executed the 4,096-byte public Firefox
+selection. The first task completed 21 jobs with two synthesis levels. The
+second task cancelled two live workers and reconciled both terminal receipts.
+The independent observer verified consent before dispatch and the termination of
+every observed worker. The route sampler stopped after 114 valid samples and
+287 completed flows, with zero failed flows counted through that sample. Its
+`route_binding/invalid` result identifies the operation but leaves the specific
+comparison unresolved. The guest restored its original host state and retained
+zero topology objects. The full trial failed the route check. The 36,785-byte
+original ZIP has SHA-256
+`adcc978cceb01bd0a358f12dc35755cf7adabc8659f056b3ac4f2f31b088faf9`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45424897092) · [Original reports](development/evidence/browser-cooperative-45424897092)
+
+On the integrated Core `442cd948`, the first task again completed its 21 jobs
+and two synthesis levels. The second cancelled two live workers. Both tasks
+confirmed cleanup. The sampler identified a timeout querying `content status`
+after 112 valid samples and 283 completed flows. It had counted zero failed
+flows at that point. The complete route claim remains open. The guest restored
+its host state and retained zero owned objects. The original 36,798-byte ZIP
+has SHA-256 `5db37edd7389e541c2a0da6fa7b7536deb8e3db6b7fd217a0860f637f33b6b03`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506355803) · [Original reports](development/evidence/browser-cooperative-45506355803)
+
+On Core `dcf46253`, the sampler received a control reply that failed validation
+after 111 valid samples, 289 completed flows and zero failed flows. The first
+Firefox task retained eight terminal receipts. Two refinement jobs expired
+without confirmed terminal replies. The client's final event window counted
+54 exact provider responses that lacked requested targets. The initial control
+relay separately recorded 18 successful offer replies, and both enrolled
+providers recorded successful registrations. These node windows lack per-request
+correlation and cover only the tail of the trial. Guest cleanup confirmed zero
+owned objects and the host snapshots matched. The original 33,407-byte archive
+has SHA-256 `4e157cca57bf74dee5d7a42be828c0a35f0a5e6bc99c731ed09d479897f68a67`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512806565) · [Original reports](development/evidence/browser-cooperative-45512806565)
+
+The discovered trial now gives each of the two possible replacement control
+relays the same fixture reachability to the two enrolled providers as the initial
+control relay. Each added link admits the authenticated discovery service's
+UDP port 41000 and drops other traffic and forwarding. The checker reads both
+kernel route directions and the drained packet capture for each replacement
+candidate. Both enrolled workers still have to exchange application traffic
+through the original protected path and Exit. Failure diagnostics read each
+candidate's own bounded event ring.
 
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker

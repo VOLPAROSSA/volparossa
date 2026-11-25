@@ -319,24 +319,56 @@ async fn finish(
     new_submission: bool,
     mut activity: watch::Receiver<bool>,
 ) -> Event {
-    let state = result.as_ref().ok().map(|status| status.state);
+    let mut observe = matches!(
+        result.as_ref().err().and_then(rpc_diagnostic),
+        Some(RpcDiagnostic::BrokerRejected {
+            phase: RpcPhase::Poll,
+            code: rpc::ErrorCode::Missing,
+        })
+    );
+    let mut interval = Duration::from_secs(2);
+    let mut owner_signal_open = true;
     while !*activity.borrow() {
         let Ok(time) = now() else { break };
+        let state = result.as_ref().ok().map(|status| status.state);
         if reusable(state, handle.binding.expires_unix_seconds, time) {
             break;
         }
+        // An authenticated Missing describes one instant. While the queue still
+        // owns this lease, a delayed admission or terminal receipt can become
+        // visible. Observe only the immutable handle. The timer also bounds an
+        // in-flight Poll when cancellation or the original expiry wins.
         tokio::select! {
-            () = sleep(Duration::from_secs(handle.binding.expires_unix_seconds.saturating_sub(time))) => {},
-            _ = activity.changed() => {},
+            biased;
+            changed = activity.changed(), if owner_signal_open => owner_signal_open = changed.is_ok(),
+            () = sleep(Duration::from_secs(handle.binding.expires_unix_seconds - time)) => break,
+            next = async {
+                sleep(interval).await;
+                let provider = parse_key(&handle.provider_key).map_err(anyhow::Error::msg)?;
+                let outcome = status_exchange(socket, &provider, rpc::Operation::Poll(handle.binding.clone())).await?;
+                job_in_phase(outcome, &handle, RpcPhase::Poll)
+            }, if observe => {
+                observe = next.is_ok() || matches!(
+                    next.as_ref().err().and_then(rpc_diagnostic),
+                    Some(RpcDiagnostic::BrokerRejected { phase: RpcPhase::Poll, code: rpc::ErrorCode::Missing }
+                        | RpcDiagnostic::ExchangeUnconfirmed { phase: RpcPhase::Poll })
+                );
+                result = next;
+                interval = (interval * 2).min(Duration::from_secs(30));
+            }
         }
     }
     let owner_stopped = *activity.borrow();
-    if owner_stopped && result.is_err() {
+    let needs_cancel = match &result {
+        Ok(status) => !terminal(status) && !status.cancellation_requested,
+        Err(_) => true,
+    };
+    if owner_stopped && needs_cancel {
         // The original exchange can have failed after remote admission. Owner cancellation
         // still addresses that exact job; unavailable cancellation proves no termination.
         let cancellation = async {
             let provider = parse_key(&handle.provider_key).map_err(anyhow::Error::msg)?;
-            let outcome = exchange(
+            let outcome = status_exchange(
                 socket,
                 &provider,
                 rpc::Operation::Cancel(handle.binding.clone()),
@@ -349,7 +381,44 @@ async fn finish(
             result = Ok(status);
         }
     }
+    if (result.as_ref().is_ok_and(|status| !terminal(status))
+        || matches!(
+            result.as_ref().err().and_then(rpc_diagnostic),
+            Some(RpcDiagnostic::ExchangeUnconfirmed {
+                phase: RpcPhase::Poll | RpcPhase::Cancel
+            })
+        ))
+        && let Some(status) = observe_just_expired(socket, &handle).await
+    {
+        result = Ok(status);
+    }
     Event::Finished(Box::new(handle), result, new_submission)
+}
+
+/// Observe a joined worker before moving on to the next batch. Brokers decide
+/// whether a receipt still exists. Later retries cannot restart this window.
+async fn observe_just_expired(socket: &Path, handle: &JobHandle) -> Option<rpc::JobStatus> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .checked_sub(Duration::from_secs(handle.binding.expires_unix_seconds))?;
+    let remaining = FINAL_OBSERVATION.checked_sub(elapsed)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    let provider = parse_key(&handle.provider_key).ok()?;
+    let poll = async {
+        loop {
+            let operation = rpc::Operation::Poll(handle.binding.clone());
+            let outcome = exchange(socket, &provider, operation).await.ok()?;
+            let status = job_in_phase(outcome, handle, RpcPhase::Poll).ok()?;
+            if terminal(&status) {
+                return Some(status);
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
+    };
+    timeout(remaining, poll).await.ok().flatten()
 }
 
 fn completed(
@@ -750,6 +819,167 @@ mod tests {
                 successor_activation_v1: false,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn missing_poll_observes_the_original_lease_until_a_bound_terminal_reply() {
+        use crate::compute::peer::status_test_peer::serve_one;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("agent.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut handle = diagnostic_handle();
+        let provider = ed25519_dalek::SigningKey::from_bytes(&[19; 32]).verifying_key();
+        handle.provider_key = hex::encode(provider.as_bytes());
+        handle.binding.expires_unix_seconds = now().unwrap() + 60;
+        let expected = rpc::JobStatus {
+            binding: handle.binding.clone(),
+            state: rpc::JobState::Failed,
+            cancellation_requested: false,
+            report_json: None,
+            report_sha256: None,
+            error: Some(rpc::ErrorCode::WorkerFailed),
+        };
+        let missing = rpc::Outcome::Error(rpc::ErrorCode::Missing);
+        let first = job_in_phase(missing.clone(), &handle, RpcPhase::Poll);
+        let (_owner, activity) = watch::channel(false);
+        let provider_replies = async {
+            serve_one(&listener, &handle, false, Some((missing, true))).await;
+            serve_one(
+                &listener,
+                &handle,
+                false,
+                Some((rpc::Outcome::Job(expected.clone()), true)),
+            )
+            .await;
+        };
+        let (event, ()) = timeout(Duration::from_secs(15), async {
+            tokio::join!(
+                finish(&socket, handle.clone(), first, true, activity),
+                provider_replies
+            )
+        })
+        .await
+        .unwrap();
+        let Event::Finished(original, result, true) = event else {
+            panic!("expected the original submission");
+        };
+        assert_eq!(original.binding, handle.binding);
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn expired_missing_poll_stays_unconfirmed() {
+        let handle = diagnostic_handle();
+        let first = job_in_phase(
+            rpc::Outcome::Error(rpc::ErrorCode::Missing),
+            &handle,
+            RpcPhase::Poll,
+        );
+        let (_owner, activity) = watch::channel(false);
+        let event = finish(Path::new("unused"), handle, first, true, activity).await;
+        let Event::Finished(_, result, true) = event else {
+            panic!("expected the original submission");
+        };
+        assert_eq!(
+            rpc_diagnostic(&result.unwrap_err()),
+            Some(&RpcDiagnostic::BrokerRejected {
+                phase: RpcPhase::Poll,
+                code: rpc::ErrorCode::Missing,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_poll_respects_the_remaining_execution_lease() {
+        assert_eq!(
+            poll_budget(Duration::from_secs(70)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            poll_budget(Duration::from_secs(32)),
+            Duration::from_secs(16)
+        );
+        assert_eq!(poll_budget(Duration::from_secs(2)), Duration::from_secs(1));
+        assert_eq!(
+            poll_budget(Duration::from_millis(350)),
+            Duration::from_millis(175)
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("agent.sock");
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let provider = ed25519_dalek::SigningKey::from_bytes(&[19; 32]).verifying_key();
+        let mut handle = diagnostic_handle();
+        handle.binding.expires_unix_seconds = now().unwrap() + 2;
+        let error = timeout(
+            Duration::from_secs(6),
+            status_exchange(&socket, &provider, rpc::Operation::Poll(handle.binding)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            rpc_diagnostic(&error),
+            Some(&RpcDiagnostic::ExchangeUnconfirmed {
+                phase: RpcPhase::Poll
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn just_expired_unconfirmed_exchange_observes_the_join_before_next_batch() {
+        use crate::compute::peer::status_test_peer::serve_one;
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("agent.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut handle = diagnostic_handle();
+        let provider = ed25519_dalek::SigningKey::from_bytes(&[19; 32]).verifying_key();
+        handle.provider_key = hex::encode(provider.as_bytes());
+        handle.binding.expires_unix_seconds = now().unwrap() - 1;
+        let running = rpc::JobStatus {
+            binding: handle.binding.clone(),
+            state: rpc::JobState::Running,
+            cancellation_requested: true,
+            report_json: None,
+            report_sha256: None,
+            error: None,
+        };
+        let joined = rpc::JobStatus {
+            state: rpc::JobState::Cancelled,
+            ..running.clone()
+        };
+        let first = Err(rpc_failure(
+            anyhow::anyhow!("interrupted read"),
+            RpcDiagnostic::ExchangeUnconfirmed {
+                phase: RpcPhase::Poll,
+            },
+        ));
+        let (_owner, activity) = watch::channel(false);
+        let provider_replies = async {
+            for status in [running, joined.clone()] {
+                serve_one(
+                    &listener,
+                    &handle,
+                    false,
+                    Some((rpc::Outcome::Job(status), true)),
+                )
+                .await;
+            }
+        };
+        let (event, ()) = timeout(Duration::from_secs(8), async {
+            tokio::join!(
+                finish(&socket, handle.clone(), first, true, activity),
+                provider_replies
+            )
+        })
+        .await
+        .unwrap();
+        let Event::Finished(original, result, true) = event else {
+            panic!("expected original submission")
+        };
+        assert_eq!(original.binding, handle.binding);
+        assert_eq!(result.unwrap(), joined);
     }
 
     #[test]

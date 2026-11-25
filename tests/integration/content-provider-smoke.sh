@@ -56,25 +56,34 @@ content_provider_control_underlay() {
     provider_control_ns=$provider_ns
     provider_control_ip=$provider_ip
     provider_control_ips=$provider_ip
+    case ${1:-initial} in
+        initial) provider_segment_base=80; provider_back_prefix=pc
+            provider_tag_prefix=; provider_route_prefix=content-provider-control ;;
+        0|1|2)
+            [ "${agent_cooperative_browser_discovered:-no}" = yes ] && [ "$provider_control_node" = "relay$1" ] || return 1
+            provider_segment_base=$((86 + 2 * $1)); provider_back_prefix=bp$1
+            provider_tag_prefix=browser_${1}_; provider_route_prefix=agent-cooperative-browser-$provider_control_node ;;
+        *) return 1 ;;
+    esac
     provider_slot=0
     for provider_node in "$provider_node_a" "$provider_node_b"; do
         content_provider_node "$provider_node" || fail CONTENT_PROVIDER_NODE_INVALID
-        provider_segment=$((80 + provider_slot))
+        provider_segment=$((provider_segment_base + provider_slot))
         link_nodes "$provider_control_ns" "cp$provider_slot" "10.241.$provider_segment.1/30" \
-            "$provider_ns" "pc$provider_slot" "10.241.$provider_segment.2/30"
-        content_provider_filter_link "$provider_control_ns" "$provider_slot" "cp$provider_slot" \
+            "$provider_ns" "$provider_back_prefix$provider_slot" "10.241.$provider_segment.2/30" || return 1
+        content_provider_filter_link "$provider_control_ns" "$provider_tag_prefix$provider_slot" "cp$provider_slot" \
             "$provider_control_ip" "$provider_ip" || fail CONTENT_PROVIDER_CONTROL_FILTER_FAILED
-        content_provider_filter_link "$provider_ns" "$provider_slot" "pc$provider_slot" \
+        content_provider_filter_link "$provider_ns" "$provider_tag_prefix$provider_slot" "$provider_back_prefix$provider_slot" \
             "$provider_ip" "$provider_control_ip" || fail CONTENT_PROVIDER_CONTROL_FILTER_FAILED
         ip -n "$provider_control_ns" route add "$provider_ip/32" \
-            via "10.241.$provider_segment.2" dev "cp$provider_slot" src "$provider_control_ip"
+            via "10.241.$provider_segment.2" dev "cp$provider_slot" src "$provider_control_ip" || return 1
         ip -n "$provider_ns" route add "$provider_control_ip/32" \
-            via "10.241.$provider_segment.1" dev "pc$provider_slot" src "$provider_ip"
+            via "10.241.$provider_segment.1" dev "$provider_back_prefix$provider_slot" src "$provider_ip" || return 1
         # Retain actual kernel-selected routes, not only the intended commands.
         ip -n "$provider_control_ns" -j route get "$provider_ip" \
-            >"$WORK/content-provider-control-$provider_node-out.json"
+            >"$WORK/$provider_route_prefix-$provider_node-out.json" || return 1
         ip -n "$provider_ns" -j route get "$provider_control_ip" \
-            >"$WORK/content-provider-control-$provider_node-back.json"
+            >"$WORK/$provider_route_prefix-$provider_node-back.json" || return 1
         provider_control_ips=$provider_control_ips,$provider_ip
         provider_slot=$((provider_slot + 1))
     done

@@ -1,6 +1,8 @@
 //! Observe/cancel only retained public jobs; no submission, replacement or lease renewal.
 
-use std::{fs, os::unix::fs::DirBuilderExt as _, path::Path, time::Duration};
+use std::{
+    collections::VecDeque, fs, io, os::unix::fs::DirBuilderExt as _, path::Path, time::Duration,
+};
 
 use anyhow::{Context as _, Result, ensure};
 use serde::Serialize;
@@ -44,39 +46,35 @@ async fn run_until(root: &Path, socket: &Path, deadline: Instant) -> Observation
             return observed;
         }
     };
-    for (id, handle) in handles {
-        if terminal.contains(&id) {
-            continue;
+    let mut pending: VecDeque<_> = handles
+        .into_iter()
+        .filter(|(id, _)| !terminal.contains(id))
+        .map(|(id, handle)| (id, handle, None::<(Instant, anyhow::Error)>))
+        .collect();
+    while let Some((id, handle, retry)) = pending.pop_front() {
+        if let Some((earliest, ref error)) = retry {
+            sleep_until(earliest.min(deadline)).await;
+            if Instant::now() >= deadline {
+                observed.failed(error);
+            }
         }
         if Instant::now() >= deadline {
             observed.deadline_reached = true;
             break;
         }
-        observed.attempted += 1;
-        let result = async {
-            let status = settle(socket, &handle, deadline).await?;
-            // New observations are separate from every original attempt/result. Missing,
-            // Running, expired authority and transport failure never manufacture a receipt.
-            let directory = root.join("cleanup-observations");
-            match fs::DirBuilder::new().mode(0o700).create(&directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
-            }
-            super::private_directory(&directory)?;
-            task::write_bytes(
-                &directory.join(format!("receipt-{id}.json")),
-                serde_json::to_vec(
-                    &serde_json::json!({"version":1,"handle":handle,"status":status,
-                    "verified_at_unix_seconds":peer::now()?}),
-                )?
-                .as_slice(),
-                false,
-            )
+        if retry.is_none() {
+            observed.attempted += 1;
         }
-        .await;
+        let result = settle(socket, &handle, deadline)
+            .await
+            .and_then(|status| persist_terminal(root, &id, &handle, &status));
         match result {
             Ok(()) => observed.terminal_persisted += 1,
+            Err(error) if interrupted_status_stream(&error) && Instant::now() < deadline => {
+                // Give every original handle a first observation before retrying.
+                // A lost Cancel reply also resumes with an authenticated Poll.
+                pending.push_back((id, handle, Some((Instant::now() + POLL_INTERVAL, error))));
+            }
             Err(error) => observed.failed(&error),
         }
         if Instant::now() >= deadline {
@@ -84,6 +82,50 @@ async fn run_until(root: &Path, socket: &Path, deadline: Instant) -> Observation
         }
     }
     observed
+}
+
+fn interrupted_status_stream(error: &anyhow::Error) -> bool {
+    matches!(
+        peer::rpc_diagnostic(error),
+        Some(RpcDiagnostic::ExchangeUnconfirmed {
+            phase: RpcPhase::Poll | RpcPhase::Cancel,
+        })
+    ) && error.chain().any(|source| {
+        source.downcast_ref::<io::Error>().is_some_and(|cause| {
+            matches!(
+                cause.kind(),
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+            )
+        })
+    })
+}
+
+fn persist_terminal(
+    root: &Path,
+    id: &str,
+    handle: &JobHandle,
+    status: &rpc::JobStatus,
+) -> Result<()> {
+    // New observations are separate from every original attempt/result. Missing,
+    // Running, expired authority and transport failure never manufacture a receipt.
+    let directory = root.join("cleanup-observations");
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    super::private_directory(&directory)?;
+    task::write_bytes(
+        &directory.join(format!("receipt-{id}.json")),
+        &serde_json::to_vec(
+            &serde_json::json!({"version":1,"handle":handle,"status":status,
+            "verified_at_unix_seconds":peer::now()?}),
+        )?,
+        false,
+    )
 }
 
 async fn exchange_status(

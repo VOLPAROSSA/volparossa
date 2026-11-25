@@ -3,6 +3,43 @@
 # The same real peer graph as agent-public-document, driven by a genuine Gecko panel.
 # shellcheck disable=SC2154,SC2034
 
+# Each replacement control needs the same restricted discovery reachability as the
+# initially selected relay. The original control links and their capture remain live.
+agent_cooperative_browser_prepare_controls() {
+    case $provider_control_node in relay0|relay1|relay2) ;; *) return 1 ;; esac
+    for cooperative_relay in relay0 relay1 relay2; do
+        [ "$cooperative_relay" != "$provider_control_node" ] || continue
+        (
+            provider_control_peer=$(jq -er --arg node "$cooperative_relay" '.[$node]' "$WORK/a01-expected-peers.json") || exit 1
+            content_provider_control_underlay "${cooperative_relay#relay}"
+        ) || return 1
+    done
+}
+
+agent_cooperative_browser_start_control_captures() {
+    [ -z "$CONSUMER_CONTROL_0_PID$CONSUMER_CONTROL_1_PID$CONSUMER_CONTROL_2_PID" ] || return 1
+    for cooperative_relay in relay0 relay1 relay2; do
+        [ "$cooperative_relay" != "$provider_control_node" ] || continue
+        content_provider_node "$cooperative_relay" || return 1
+        cooperative_capture_ns=$provider_ns; cooperative_capture_ips=$provider_ip
+        for cooperative_provider in "$provider_node_a" "$provider_node_b"; do
+            content_provider_node "$cooperative_provider" || return 1
+            cooperative_capture_ips=$cooperative_capture_ips,$provider_ip
+        done
+        cooperative_capture=$WORK/agent-cooperative-browser-control-$cooperative_relay
+        ip netns exec "$cooperative_capture_ns" python3 "$WORK/bin/privacy-observer.py" \
+            content-control "$cooperative_capture.json" "$cooperative_capture.ready" --content-providers \
+            "--content-control=$cooperative_capture_ips" cp0 cp1 >"$cooperative_capture.log" 2>&1 &
+        cooperative_capture_pid=$!
+        case $cooperative_relay in
+            relay0) CONSUMER_CONTROL_0_PID=$cooperative_capture_pid ;;
+            relay1) CONSUMER_CONTROL_1_PID=$cooperative_capture_pid ;;
+            relay2) CONSUMER_CONTROL_2_PID=$cooperative_capture_pid ;;
+        esac
+        wait_observer "$cooperative_capture_pid" "$cooperative_capture.ready" || return 1
+    done
+}
+
 agent_cooperative_browser_python() {
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- --trial discovered-360m "$@"
@@ -45,8 +82,14 @@ agent_cooperative_browser_run() {
     for cooperative_node in relay3 relay4 relay5; do
         cooperative_hidden="$cooperative_hidden $WORK/state-$cooperative_node"
     done
+    cooperative_task_seconds=2400
+    cooperative_driver_seconds=2520
+    cooperative_service_seconds=2700
     set -- --model-profile smollm2-135m-v1 --provider-key "$jobs_key_a" --provider-key "$jobs_key_b"
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        # Allow the first task its full owner budget, followed by independent result and live cancellation checks.
+        cooperative_driver_seconds=$((cooperative_task_seconds + 1200))
+        cooperative_service_seconds=$((cooperative_driver_seconds + 180))
         set -- --model-profile smollm2-360m-v1 --discover-peers --refine-incomplete --refinement-levels 4
     fi
     PHASE=agent-cooperative-browser-service
@@ -58,7 +101,7 @@ agent_cooperative_browser_run() {
         --property=PrivateMounts=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
         --property=ProtectSystem=strict --property=ProtectHome=yes \
         --property="ReadWritePaths=$jobs_source" --property="InaccessiblePaths=$cooperative_hidden" \
-        --property=KillMode=control-group --property=TimeoutStopSec=20s --property=RuntimeMaxSec=2700s \
+        --property=KillMode=control-group --property=TimeoutStopSec=20s --property="RuntimeMaxSec=${cooperative_service_seconds}s" \
         --property="StandardOutput=append:$WORK/agent-cooperative-browser-service.log" \
         --property="StandardError=append:$WORK/agent-cooperative-browser-service.err" \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
@@ -66,7 +109,7 @@ agent_cooperative_browser_run() {
         --runtime-root "$jobs_source/document-runtime" --model-root "$jobs_source/document-model" \
         "$@" --identity "$jobs_source/identity.key" \
         --passphrase-file "$jobs_source/passphrase" --publisher-key "$jobs_publisher" \
-        --max-seconds 600 --max-task-seconds 2400 --threads 2 --execute \
+        --max-seconds 600 --max-task-seconds "$cooperative_task_seconds" --threads 2 --execute \
         || fail COOPERATIVE_BROWSER_SERVICE_FAILED
     cooperative_attempt=0
     while [ ! -S "$cooperative_socket" ]; do
@@ -77,6 +120,9 @@ agent_cooperative_browser_run() {
     [ "$(stat -Lc '%a:%u' "$cooperative_socket")" = "600:$AGENT_UID" ] || fail COOPERATIVE_BROWSER_SOCKET_AUTHORITY
     PHASE=agent-cooperative-browser-panel
     content_custody_phase_start fetch
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        agent_cooperative_browser_start_control_captures || fail COOPERATIVE_BROWSER_CONTROL_CAPTURE_FAILED
+    fi
     # sysusers records the account home but does not create it in this non-package
     # guest. Create only the exact missing home; cleanup removes it only if still empty.
     agent_cooperative_browser_python account-home-prepare "$WORK" || fail COOPERATIVE_BROWSER_HOME_FAILED
@@ -84,18 +130,26 @@ agent_cooperative_browser_run() {
     cooperative_driver_unit=volparossa-alpha-cooperative-browser.service
     [ "$(unit_load_state "$cooperative_driver_unit")" = not-found ] || fail COOPERATIVE_BROWSER_DRIVER_COLLISION
     jobs_units="$jobs_units $cooperative_driver_unit"
-    timeout --signal=INT --kill-after=15s 2520s systemd-run --quiet --wait --collect \
+    set --
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        set -- --owner-task-seconds "$cooperative_task_seconds"
+    fi
+    timeout --signal=INT --kill-after=15s "${cooperative_driver_seconds}s" systemd-run --quiet --wait --collect \
         --unit="$cooperative_driver_unit" --service-type=exec --property=User=volparossa --property=Group=volparossa \
         --property=SetLoginEnvironment=yes --property=NoNewPrivileges=yes --property=UMask=0077 \
         --property=CapabilityBoundingSet= --property=AmbientCapabilities= --property=KillMode=control-group \
-        --property=TimeoutStopSec=20s --property=RuntimeMaxSec=2520s \
+        --property=TimeoutStopSec=20s --property="RuntimeMaxSec=${cooperative_driver_seconds}s" \
         -- python3 -B "$cooperative_root/scripts/smoke_cooperative_compute.py" \
         --stage "$cooperative_root/build/firefox-esr" --output "$cooperative_root/build/cooperative-proof" \
-        --socket "$cooperative_socket" --input "$cooperative_root/input.json" --core-revision "$expected_commit" \
+        --socket "$cooperative_socket" --input "$cooperative_root/input.json" --core-revision "$expected_commit" "$@" \
         >"$WORK/agent-cooperative-browser-driver.log" 2>"$WORK/agent-cooperative-browser-driver.err" &
     jobs_batch_pid=$!
     cooperative_observer_status=0
-    agent_cooperative_browser_python observe "$WORK" "$jobs_batch_pid" \
+    set -- observe "$WORK" "$jobs_batch_pid"
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        set -- observe-routes "$WORK" "$jobs_batch_pid" "$provider_baseline_ms" "$cooperative_driver_seconds"
+    fi
+    agent_cooperative_browser_python "$@" \
         >"$WORK/agent-cooperative-browser-observer.log" 2>"$WORK/agent-cooperative-browser-observer.err" \
         || cooperative_observer_status=$?
     if [ "$cooperative_observer_status" -ne 0 ]; then
@@ -117,7 +171,17 @@ agent_cooperative_browser_run() {
     [ "$cooperative_browser_status" -eq 0 ] || fail COOPERATIVE_BROWSER_PANEL_FAILED
     install -m 0600 "$cooperative_root/build/cooperative-proof/report.json" "$WORK/agent-cooperative-browser-panel.json"
     agent_cooperative_browser_python collect "$WORK" "$expected_commit" || fail COOPERATIVE_BROWSER_RESULT_JOIN_FAILED
-    content_custody_phase_finish 6
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        benchmark_capture_paths content-custody-fetch-live mptcp || fail CUSTODY_LIVE_ROUTE_UNAVAILABLE
+        stop_privacy_observers || fail CUSTODY_CAPTURE_INCOMPLETE
+        content_provider_stop_control_observer || fail CUSTODY_CONTROL_CAPTURE_INCOMPLETE
+        storage_consumer_stop_captures || fail COOPERATIVE_BROWSER_CONTROL_CAPTURE_INCOMPLETE
+        # The sampled Exit log and live route bindings are checked alongside
+        # both provider captures by the final cooperative evidence verifier.
+        test -s "$WORK/content-custody-fetch-gates.json" || fail CUSTODY_PROTECTED_FLOW_INCOMPLETE
+    else
+        content_custody_phase_finish 6
+    fi
     benchmark_disconnect_route agent-jobs || fail COOPERATIVE_BROWSER_ROUTE_CLEANUP_FAILED
     agent_jobs_stop || fail COOPERATIVE_BROWSER_SERVICE_CLEANUP_FAILED
     agent_jobs_cleanup || fail COOPERATIVE_BROWSER_PRIVATE_CLEANUP_FAILED

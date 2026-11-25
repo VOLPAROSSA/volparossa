@@ -1,0 +1,822 @@
+{
+  "no_dispatch_before_consent": true,
+  "real_fragment_peers": [
+    "relay4",
+    "relay5"
+  ],
+  "observed_synthesis_levels": [
+    1,
+    2
+  ],
+  "completed_workers": [
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "package-0000/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "86af53431d4978845cb5ee33e65e7bb7ce9bd1a897891e40a533792c7c0675d1",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 33298,
+        "start_ticks": 43782
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 33296,
+          "start_ticks": 43782
+        },
+        {
+          "pid": 33297,
+          "start_ticks": 43782
+        },
+        {
+          "pid": 33298,
+          "start_ticks": 43782
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "package-0000/work/package-0000/attempt-0000/job-1.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "a0a28c94658f657ab9717fd8449d452f0469308abbac0d1a25962f53d163e6f8",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 33302,
+        "start_ticks": 43785
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 33300,
+          "start_ticks": 43784
+        },
+        {
+          "pid": 33301,
+          "start_ticks": 43784
+        },
+        {
+          "pid": 33302,
+          "start_ticks": 43785
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "f097f1314ade543f80139b214f50eda3ad25810ebec6b0effb501ff51aaf5536",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 33789,
+        "start_ticks": 53674
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 33787,
+          "start_ticks": 53673
+        },
+        {
+          "pid": 33788,
+          "start_ticks": 53674
+        },
+        {
+          "pid": 33789,
+          "start_ticks": 53674
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "770a2458cd508c2e924e4e78e5e7c88b45d63108ba906686099c81d45a744c74",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 33793,
+        "start_ticks": 53676
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 33791,
+          "start_ticks": 53676
+        },
+        {
+          "pid": 33792,
+          "start_ticks": 53676
+        },
+        {
+          "pid": 33793,
+          "start_ticks": 53676
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "3b0455105aa0aaf14ba6082bbab816043f01953d27e29004e704247d166ec1d7",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 34066,
+        "start_ticks": 59669
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 34064,
+          "start_ticks": 59668
+        },
+        {
+          "pid": 34065,
+          "start_ticks": 59668
+        },
+        {
+          "pid": 34066,
+          "start_ticks": 59669
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "72009325e092d3f3f8f38cd6ec35ac66e463ea5f9c65b2b00075676a8db60db2",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 34125,
+        "start_ticks": 60220
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 34123,
+          "start_ticks": 60219
+        },
+        {
+          "pid": 34124,
+          "start_ticks": 60219
+        },
+        {
+          "pid": 34125,
+          "start_ticks": 60220
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "f0941cd7f77ecfbd6d950737051db0395a765f1b8c6d78025410d73f626b886e",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 34488,
+        "start_ticks": 67519
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 34486,
+          "start_ticks": 67519
+        },
+        {
+          "pid": 34487,
+          "start_ticks": 67519
+        },
+        {
+          "pid": 34488,
+          "start_ticks": 67519
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "8b76379aa013428dd4bd104eb5ca7844b2429680abd6c1624b2387f8cb304c81",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 34485,
+        "start_ticks": 67517
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 34483,
+          "start_ticks": 67516
+        },
+        {
+          "pid": 34484,
+          "start_ticks": 67517
+        },
+        {
+          "pid": 34485,
+          "start_ticks": 67517
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "eddbb4239a5ada939e05435a6e35a6f7dbd06872c5708328fa3b3eaff15e5903",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 34758,
+        "start_ticks": 73275
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 34756,
+          "start_ticks": 73274
+        },
+        {
+          "pid": 34757,
+          "start_ticks": 73274
+        },
+        {
+          "pid": 34758,
+          "start_ticks": 73275
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "8bad53bce79551c15f63fa1a2a3978db1da7dbe429d14e13e3cedea264e393a8",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 34797,
+        "start_ticks": 73829
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 34795,
+          "start_ticks": 73829
+        },
+        {
+          "pid": 34796,
+          "start_ticks": 73829
+        },
+        {
+          "pid": 34797,
+          "start_ticks": 73829
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-1/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "da5d43cacb16a9dc61597b6f16a1a57cb9927302c1b795d85a437fb9e744a18e",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 35157,
+        "start_ticks": 80527
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 35155,
+          "start_ticks": 80527
+        },
+        {
+          "pid": 35156,
+          "start_ticks": 80527
+        },
+        {
+          "pid": 35157,
+          "start_ticks": 80527
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-1/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "3828e9a31472a5ca7f5bbe905151e25c327ff92c5c0c0e125bf2af4e89f07792",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 35164,
+        "start_ticks": 80542
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 35162,
+          "start_ticks": 80541
+        },
+        {
+          "pid": 35163,
+          "start_ticks": 80541
+        },
+        {
+          "pid": 35164,
+          "start_ticks": 80542
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-0/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "afd6277d70c5fc94c86c6a39c612c0dede415ef4f06566500c2ec418a6c1438a",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 35410,
+        "start_ticks": 85601
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 35408,
+          "start_ticks": 85600
+        },
+        {
+          "pid": 35409,
+          "start_ticks": 85600
+        },
+        {
+          "pid": 35410,
+          "start_ticks": 85601
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-0/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "b5ed8a7e9796dd99ef4dcbbce93cae278f3553e8770b30f156458a678270cc91",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 35428,
+        "start_ticks": 85901
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 35426,
+          "start_ticks": 85901
+        },
+        {
+          "pid": 35427,
+          "start_ticks": 85901
+        },
+        {
+          "pid": 35428,
+          "start_ticks": 85901
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-1/refinement/child-1/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "d5aab3e77da518cea377d703d83e967a7a135a046ed494c55abae998083f0bf6",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 35810,
+        "start_ticks": 93502
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 35807,
+          "start_ticks": 93502
+        },
+        {
+          "pid": 35808,
+          "start_ticks": 93502
+        },
+        {
+          "pid": 35810,
+          "start_ticks": 93502
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0000/child-0/refinement/child-1/refinement/child-1/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "5bf1ad696d812a744057013b2650621af1101c2fbde32f9aaafea62f7dc2fbba",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 35814,
+        "start_ticks": 93507
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 35812,
+          "start_ticks": 93507
+        },
+        {
+          "pid": 35813,
+          "start_ticks": 93507
+        },
+        {
+          "pid": 35814,
+          "start_ticks": 93507
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-0/refinement/child-0/refinement/child-0/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "3ed0c4d4781bbafd290e0690cc3e32332bad2cf5b56839c655892a004c01e2ec",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 35958,
+        "start_ticks": 95716
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 35956,
+          "start_ticks": 95716
+        },
+        {
+          "pid": 35957,
+          "start_ticks": 95716
+        },
+        {
+          "pid": 35958,
+          "start_ticks": 95716
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "refinement/leaf-0001/child-1/refinement/child-0/refinement/child-0/refinement/child-1/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "857ea6137dff9346eccbf9050f3c74644bb4e11142f0007310e03fbe14913a5e",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 35976,
+        "start_ticks": 95993
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 35974,
+          "start_ticks": 95992
+        },
+        {
+          "pid": 35975,
+          "start_ticks": 95992
+        },
+        {
+          "pid": 35976,
+          "start_ticks": 95993
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay5",
+      "level": 1,
+      "handle_path": "synthesis/level-01-group-0000/package-0000/work/package-0000/attempt-0000/job-1.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "9cf0255180b2d1461549052245fc536133b8219b6046f7478264736e22329225",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 36205,
+        "start_ticks": 101881
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 36203,
+          "start_ticks": 101881
+        },
+        {
+          "pid": 36204,
+          "start_ticks": 101881
+        },
+        {
+          "pid": 36205,
+          "start_ticks": 101881
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": 1,
+      "handle_path": "synthesis/level-01-group-0000/package-0000/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "82cba8f73ae523a5dcc0500ff61fc0d8e300110c480581a099fbe921d942b956",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 36210,
+        "start_ticks": 101888
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 36208,
+          "start_ticks": 101887
+        },
+        {
+          "pid": 36209,
+          "start_ticks": 101888
+        },
+        {
+          "pid": 36210,
+          "start_ticks": 101888
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": 2,
+      "handle_path": "synthesis/level-02-group-0000/package-0000/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "695a871c6d05ac54c9e3acff9324eaa1b433622a9405bd05290b43c13fd6ea19",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 36264,
+        "start_ticks": 107171
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 36262,
+          "start_ticks": 107171
+        },
+        {
+          "pid": 36263,
+          "start_ticks": 107171
+        },
+        {
+          "pid": 36264,
+          "start_ticks": 107171
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    }
+  ],
+  "cancelled_workers": [
+    {
+      "node": "relay5",
+      "level": null,
+      "handle_path": "package-0000/work/package-0000/attempt-0000/job-0.json",
+      "provider_key": "fd51607c57e451ef2f87097972b212ddc36614f26669886986e9e3a6e1450769",
+      "dataset_sha256": "34662cddaaae0baab5318ea0aaefd0ee0bbb2c3255eb1d2888d27b4f850c4bb8",
+      "broker": {
+        "pid": 32644,
+        "start_ticks": 38727
+      },
+      "worker": {
+        "pid": 36311,
+        "start_ticks": 111652
+      },
+      "owned_processes": [
+        {
+          "pid": 32644,
+          "start_ticks": 38727
+        },
+        {
+          "pid": 36309,
+          "start_ticks": 111650
+        },
+        {
+          "pid": 36310,
+          "start_ticks": 111651
+        },
+        {
+          "pid": 36311,
+          "start_ticks": 111652
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    },
+    {
+      "node": "relay4",
+      "level": null,
+      "handle_path": "package-0000/work/package-0000/attempt-0000/job-1.json",
+      "provider_key": "3d25b99421343142d90733efba5a69248c9396bca738110198835a0c6bcbddb5",
+      "dataset_sha256": "51335c930b9d36a9f7e46a9a8c0fb52c8884fb9d0768aeb0b23b4e47dfbfe513",
+      "broker": {
+        "pid": 32556,
+        "start_ticks": 38276
+      },
+      "worker": {
+        "pid": 36318,
+        "start_ticks": 111676
+      },
+      "owned_processes": [
+        {
+          "pid": 32556,
+          "start_ticks": 38276
+        },
+        {
+          "pid": 36316,
+          "start_ticks": 111675
+        },
+        {
+          "pid": 36317,
+          "start_ticks": 111675
+        },
+        {
+          "pid": 36318,
+          "start_ticks": 111676
+        }
+      ],
+      "isolated_live_worker": true,
+      "base_model_sha256": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"
+    }
+  ],
+  "cancel_target_had_live_peer_worker": true,
+  "observed_workers_ended": true
+}

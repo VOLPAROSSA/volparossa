@@ -1,0 +1,404 @@
+{
+  "version": 4,
+  "browser_exit_status": 1,
+  "observer_exit_status": 1,
+  "browser": {
+    "state": "valid",
+    "status": {
+      "version": 1,
+      "phase": "first-task",
+      "failure": "cleanup_unconfirmed"
+    }
+  },
+  "observer": {
+    "state": "valid",
+    "status": {
+      "version": 1,
+      "phase": "completion_check",
+      "failure": "invariant_or_unknown",
+      "invariant_reason": null,
+      "task_count": 1,
+      "observed_workers": 10,
+      "cancel_workers": 0,
+      "counts_saturated": false,
+      "driver_alive": false
+    }
+  },
+  "coordinator": {
+    "state": "valid",
+    "tasks": [
+      {
+        "ordinal": 1,
+        "answer_diagnostic": {
+          "state": "incomplete",
+          "status": {
+            "version": 1,
+            "complete": false,
+            "execution_complete": false,
+            "answer_complete": false,
+            "interrupted": false,
+            "joining": "awaiting_fragments_before_peer_synthesis",
+            "leaf_answers": {
+              "state": "valid",
+              "observed": 2,
+              "counts": {
+                "eos": 0,
+                "json_boundary": 0,
+                "token_limit": 2,
+                "wire_truncated": 0,
+                "empty": 0,
+                "legacy_unknown": 0,
+                "invalid_or_unknown": 0
+              }
+            },
+            "refinement": {
+              "state": "incomplete",
+              "status": {
+                "version": 2,
+                "enabled": true,
+                "complete": false,
+                "reason": "round_budget_exhausted",
+                "split_levels": 4,
+                "stop_reasons": [
+                  "round_budget_exhausted"
+                ],
+                "nodes": [
+                  {
+                    "ordinal": 1,
+                    "level": 1,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 2,
+                    "level": 1,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 3,
+                    "level": 2,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": true,
+                        "answer_complete": true,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "eos"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": true,
+                        "answer_complete": false,
+                        "text_truncated": false,
+                        "generation": {
+                          "state": "valid",
+                          "stop_reason": "token_limit"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 4,
+                    "level": 2,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": false,
+                        "answer_complete": false,
+                        "text_truncated": null,
+                        "generation": {
+                          "state": "absent"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": false,
+                        "answer_complete": false,
+                        "text_truncated": null,
+                        "generation": {
+                          "state": "absent"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "ordinal": 5,
+                    "level": 3,
+                    "complete": false,
+                    "children": [
+                      {
+                        "ordinal": 1,
+                        "complete": false,
+                        "answer_complete": false,
+                        "text_truncated": null,
+                        "generation": {
+                          "state": "absent"
+                        }
+                      },
+                      {
+                        "ordinal": 2,
+                        "complete": false,
+                        "answer_complete": false,
+                        "text_truncated": null,
+                        "generation": {
+                          "state": "absent"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "children_observed": 10,
+                "child_answer_complete": {
+                  "complete": 3,
+                  "incomplete": 7,
+                  "unknown": 0
+                },
+                "child_generation_counts": {
+                  "eos": 3,
+                  "json_boundary": 0,
+                  "token_limit": 3,
+                  "absent": 4,
+                  "invalid_or_unknown": 0
+                },
+                "effective_answers": {
+                  "state": "valid",
+                  "observed": 0,
+                  "counts": {
+                    "eos": 0,
+                    "json_boundary": 0,
+                    "token_limit": 0,
+                    "wire_truncated": 0,
+                    "empty": 0,
+                    "legacy_unknown": 0,
+                    "invalid_or_unknown": 0
+                  }
+                }
+              }
+            },
+            "synthesis": {
+              "state": "absent"
+            }
+          }
+        },
+        "state": "valid",
+        "status": {
+          "answer_complete": false,
+          "cleanup_confirmed": false,
+          "error_class": "none",
+          "execution_complete": false,
+          "execution_ok": true,
+          "local_cleanup_confirmed": true,
+          "phase": "complete",
+          "receipts": {
+            "confirmed": false,
+            "error": "none",
+            "handles": 10,
+            "phase": "missing_terminal",
+            "receipts": 8,
+            "terminal": 8
+          },
+          "reconciliation": {
+            "attempted": 2,
+            "deadline_reached": true,
+            "error": "peer_rpc",
+            "rpc": {
+              "category": "exchange_unconfirmed",
+              "phase": "poll"
+            },
+            "terminal_persisted": 0
+          },
+          "rpc": null,
+          "version": 2
+        },
+        "missing_attempts": {
+          "state": "valid",
+          "jobs": [
+            {
+              "stage": "refinement",
+              "attempt": 0,
+              "expired_at_cleanup": true,
+              "expired_at_batch_record": true,
+              "result": "unconfirmed",
+              "rpc": {
+                "category": "exchange_unconfirmed",
+                "phase": "poll"
+              }
+            },
+            {
+              "stage": "refinement",
+              "attempt": 0,
+              "expired_at_cleanup": true,
+              "expired_at_batch_record": true,
+              "result": "unconfirmed",
+              "rpc": {
+                "category": "exchange_unconfirmed",
+                "phase": "poll"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "rpc_events": {
+    "state": "valid",
+    "baseline_unix_ms": 1795565005854,
+    "limit": 1000,
+    "records": 1000,
+    "window_covers_baseline": false,
+    "matching_failures": 54,
+    "counts": {
+      "COMPUTE_RPC_CHALLENGE_FAILED": 0,
+      "COMPUTE_RPC_DISCOVERY_FAILED": 54,
+      "COMPUTE_RPC_FINAL_POLICY_FAILED": 0,
+      "COMPUTE_RPC_LOCAL_REPLY_FAILED": 0,
+      "COMPUTE_RPC_LOCAL_REQUEST_FAILED": 0,
+      "COMPUTE_RPC_OFFER_BINDING_FAILED": 0,
+      "COMPUTE_RPC_PREEXPORT_CHECK_FAILED": 0,
+      "COMPUTE_RPC_PROVIDER_CLOSE_FAILED": 0,
+      "COMPUTE_RPC_PROVIDER_TLS_FAILED": 0,
+      "COMPUTE_RPC_REPLY_BINDING_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_BINDING_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_CLOSE_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_FLOW_FAILED": 0,
+      "COMPUTE_RPC_ROUTE_SETUP_FAILED": 0,
+      "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED": 0
+    },
+    "discovery_failure_events": 108,
+    "discovery_counts": {
+      "CONTENT_DISCOVERY_CALLER_CLOSED": 0,
+      "CONTENT_DISCOVERY_CLIENT_QUEUE_FULL": 0,
+      "CONTENT_DISCOVERY_CLIENT_ROLE_REJECTED": 0,
+      "CONTENT_DISCOVERY_CONNECTION_ABSENT": 0,
+      "CONTENT_DISCOVERY_CONNECTION_CLOSED": 0,
+      "CONTENT_DISCOVERY_CONNECTION_NO_DIRECT": 0,
+      "CONTENT_DISCOVERY_CONNECTION_REGISTRY_POISONED": 0,
+      "CONTENT_DISCOVERY_CONTROL_CONNECTION_LOST": 0,
+      "CONTENT_DISCOVERY_CONTROL_EXPIRED": 0,
+      "CONTENT_DISCOVERY_CONTROL_LIFETIME_SHORT": 0,
+      "CONTENT_DISCOVERY_CONTROL_MISSING": 0,
+      "CONTENT_DISCOVERY_CONTROL_SELF_REJECTED": 0,
+      "CONTENT_DISCOVERY_DIAL_FAILED": 0,
+      "CONTENT_DISCOVERY_LIMIT_INVALID": 0,
+      "CONTENT_DISCOVERY_LOCAL_DEADLINE": 0,
+      "CONTENT_DISCOVERY_PROTOCOL_UNSUPPORTED": 0,
+      "CONTENT_DISCOVERY_RELAY_AUTHORITY_UNAVAILABLE": 0,
+      "CONTENT_DISCOVERY_RELAY_CONNECTION_INVALID": 0,
+      "CONTENT_DISCOVERY_RELAY_NONCE_INVALID": 0,
+      "CONTENT_DISCOVERY_RELAY_QUERY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_QUEUE_FULL": 0,
+      "CONTENT_DISCOVERY_RELAY_REPLAY_FULL": 0,
+      "CONTENT_DISCOVERY_RELAY_REPLAY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_SELF_REJECTED": 0,
+      "CONTENT_DISCOVERY_RELAY_SERVICE_UNAVAILABLE": 0,
+      "CONTENT_DISCOVERY_REQUEST_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED": 0,
+      "CONTENT_DISCOVERY_RESPONSE_REJECTED": 54,
+      "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE": 54,
+      "CONTENT_DISCOVERY_RPC_IO_FAILED": 0,
+      "CONTENT_DISCOVERY_RPC_TIMED_OUT": 0,
+      "CONTENT_EXACT_ADDRESS_UNAVAILABLE": 0
+    },
+    "provider_lifecycle_counts": {
+      "CONTENT_PROVIDER_REGISTERED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_EXPIRED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_FAILED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_RECOVERED": 0,
+      "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING": 0,
+      "CONTENT_PROVIDER_WITHDRAWN": 0
+    }
+  },
+  "discovery_peers": {
+    "scope": "separate_node_rings_without_per_request_correlation",
+    "control_relay": "relay0",
+    "providers": [
+      "relay4",
+      "relay5"
+    ],
+    "windows": {
+      "relay0": {
+        "state": "valid",
+        "baseline_unix_ms": 1795565005854,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_EXACT_LOOKUP_FINISHED": 18,
+          "CONTENT_EXACT_LOOKUP_STARTED": 18,
+          "CONTENT_LOOKUP_REPLY_OFFERS": 18,
+          "CONTENT_LOOKUP_RESPONSE_AUTHORIZED": 18,
+          "CONTENT_PROVIDER_OFFER_VERIFIED": 18
+        }
+      },
+      "relay4": {
+        "state": "valid",
+        "baseline_unix_ms": 1795565005854,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_PROVIDER_REGISTERED": 19
+        }
+      },
+      "relay5": {
+        "state": "valid",
+        "baseline_unix_ms": 1795565005854,
+        "records": 1000,
+        "limit": 1000,
+        "window_covers_baseline": false,
+        "counts": {
+          "CONTENT_PROVIDER_REGISTERED": 18
+        }
+      }
+    }
+  }
+}

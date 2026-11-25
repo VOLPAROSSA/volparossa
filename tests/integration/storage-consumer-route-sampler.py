@@ -25,6 +25,8 @@ PHASES = ('initial', 'sampling', 'final_drain')
 OPERATIONS = ('paths_before', 'control_status', 'paths_after', 'route_binding',
     'exit_log_query', 'coverage', 'completion')
 CODES = ('timeout', 'process', 'local_io', 'invalid', 'deadline')
+ROUTE_CODES = ('paths_before_invalid', 'paths_after_invalid', 'bracket_changed', 'control_invalid',
+    'binding_policy_invalid', 'binding_changed', 'context_limit', 'control_absent', 'control_outside_policy')
 
 
 class SampleDeadline(ValueError):
@@ -71,15 +73,13 @@ def unique(pairs):
     return value
 
 
-def control_observation(raw, policy):
+def control_observation(raw, _policy):
     require(type(raw) is bytes and 0 < len(raw) <= MAX_REPLY)
     value = json.loads(raw, object_pairs_hook=unique)
     # ContentReceipt has other unrelated local-service fields. Only this actual
     # route-controller field is retained; no payload, endpoint or log is copied.
     require(type(value) is dict and type(value.get('control_relay_peer_id')) is str)
-    peer = value['control_relay_peer_id']
-    require(peer in policy['relay_peers'].values())
-    return peer
+    return value['control_relay_peer_id']
 
 
 def validate_route(value, policy):
@@ -90,6 +90,13 @@ def validate_route(value, policy):
         and value['control_relay_peer_id'] in policy['relay_peers'].values()
         and all(p['relay_peer_id'] in policy['relay_peers'].values() for p in value['scope']['paths'])
         and value['control_relay_peer_id'] not in {p['relay_peer_id'] for p in value['scope']['paths']})
+
+
+def check_route_part(check, value, policy, code):
+    try:
+        return check(value, policy)
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise OLD['RouteMismatch'](code) from None
 
 
 class Coverage(OLD['Coverage']):
@@ -105,16 +112,19 @@ class Coverage(OLD['Coverage']):
             for i, role in enumerate(BROKERS[:2])]))
 
     def route(self, before, status, after):
-        left, right = path_observation(before, self.policy), path_observation(after, self.policy)
-        require(left == right)
+        left = check_route_part(path_observation, before, self.policy, 'paths_before_invalid')
+        right = check_route_part(path_observation, after, self.policy, 'paths_after_invalid')
+        OLD['route_require'](left == right, 'bracket_changed')
         context, scope = left
-        broker = control_observation(status, self.policy)
+        broker = check_route_part(control_observation, status, self.policy, 'control_invalid')
+        OLD['route_require'](bool(broker), 'control_absent')
+        OLD['route_require'](broker in self.policy['relay_peers'].values(), 'control_outside_policy')
         binding = dict(route_context_id=context, control_relay_peer_id=broker, scope=scope)
-        validate_route(binding, self.policy)
+        check_route_part(validate_route, binding, self.policy, 'binding_policy_invalid')
         if context in self.route_bindings:
-            require(self.route_bindings[context] == binding)
+            OLD['route_require'](self.route_bindings[context] == binding, 'binding_changed')
         else:
-            require(len(self.route_bindings) < OLD['MAX_CONTEXTS'])
+            OLD['route_require'](len(self.route_bindings) < OLD['MAX_CONTEXTS'], 'context_limit')
             self.route_bindings[context] = binding
         self.current_context = context
         self.observed_contexts.add(context)
@@ -161,7 +171,8 @@ def validate_diagnostic(value):
     require(type(value) is dict and set(value) == {'version', 'kind', 'phase', 'operation', 'code',
         'samples', 'completed', 'failed'} and type(value['version']) is int and value['version'] == 1
         and value['kind'] == 'consumer-route-sampler-failure' and value['phase'] in PHASES
-        and value['operation'] in OPERATIONS and value['code'] in CODES)
+        and value['operation'] in OPERATIONS and (value['code'] in CODES
+            or (value['operation'] == 'route_binding' and value['code'] in ROUTE_CODES)))
     require(all(type(value[k]) is int and 0 <= value[k] <= OLD['MAX_SAMPLES'] * OLD['LIMIT']
         for k in ('samples', 'completed', 'failed')) and value['samples'] <= OLD['MAX_SAMPLES'])
 
@@ -208,6 +219,9 @@ def capture(binary, socket, baseline, minimum, *, client, policy, diagnostic=Non
             operation = 'coverage'
             coverage.add(raw)
             before_deadline(deadline)
+        except OLD['RouteMismatch'] as error:
+            code = error.code if operation == 'route_binding' and error.code in ROUTE_CODES else 'invalid'
+            raise failed(phase, operation, code) from None
         except (OSError, ValueError, TypeError, KeyError, RecursionError, subprocess.SubprocessError) as error:
             code = ('deadline' if isinstance(error, SampleDeadline) else
                 'timeout' if isinstance(error, subprocess.TimeoutExpired) else

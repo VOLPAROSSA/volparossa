@@ -1554,7 +1554,7 @@ UPLOAD_NAMES = (FRAGMENTS_NAMES - {"private-storage-fragments-smoke.json", "priv
 
 COOPERATIVE_BROWSER_NAMES = {f"agent-cooperative-browser-{name}.json" for name in (
     "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic",
-    "route-diagnostic")
+    "route-diagnostic", "flow-diagnostic")
 } | {"a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json",
      "agent-jobs-private-cleanup.json", "content-custody-fetch-live-selection.json",
      "content-custody-fetch-gates.json", "content-provider-custody-fetch-control.json",
@@ -1571,6 +1571,8 @@ COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-custody-executor-discovery-live-selection.json", "content-custody-executor-discovery-gates.json",
     "content-provider-custody-executor-discovery-control.json",
 } | {f"content-custody-executor-discovery-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
+
+COOPERATIVE_BROWSER_NAMES.update(f"agent-cooperative-browser-control-relay{i}.json" for i in range(3))
 
 BROWSER_FILTER_NAMES = {f"browser-filter-delivery-{suffix}.json" for suffix in (
     "original-report", "original-outer-cleanup", "original-diagnostic", "evidence", "prepared", "cache-before", "cache-after",

@@ -10,6 +10,7 @@ import re
 import runpy
 import stat
 import subprocess
+from tempfile import NamedTemporaryFile
 import sys
 import time
 import urllib.request
@@ -29,10 +30,11 @@ FILES = (
 )
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
     "smoke", "evidence", "provision", "panel", "observation", "result", "cleanup", "input", "diagnostic",
-    "route-diagnostic")) + (
+    "route-diagnostic", "flow-diagnostic")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
+    *(f"{NAME}-control-relay{i}.json" for i in range(3)),
     *(f"content-custody-fetch-privacy-{role}.json" for role in JOBS["CUSTODY"]["ROLES"]),
 )
 FALSE_SCOPE = ("private_offload_proven", "answer_correctness_proven", "global_peer_erasure_claimed",
@@ -42,6 +44,7 @@ STATUS_PHASES = frozenset(("wrapper-launch", "namespace-validation", "browser-st
     "cancel-task", "cancel-admitted", "cancel-authorized", "cancelled", "panel-cleanup",
     "result-validation", "browser-stop", "complete"))
 STATUS_ERRORS = frozenset(("CHECK_FAILED", "OS_ERROR", "SUBPROCESS_FAILED", "INTERRUPTED", "SCRIPT_FAILED",
+    "FIRST_TASK_WAIT_EXPIRED", "CANCEL_WAIT_EXPIRED",
     "busy", "invalid_request", "handshake_required", "no_such_task", "execution_failed",
     "cleanup_unconfirmed", "unavailable", "not_configured", "invalid_response", "invalid_question",
     "invalid_context", "public_consent_required", "invalid_license", "deadline_exceeded", "storage_bound"))
@@ -123,6 +126,25 @@ PROVIDER_LIFECYCLE_EVENT_CODES = frozenset(("CONTENT_PROVIDER_REGISTERED",
     "CONTENT_PROVIDER_WITHDRAWN", "CONTENT_PROVIDER_REGISTRATION_EXPIRED",
     "CONTENT_PROVIDER_REGISTRATION_RETRY_PENDING", "CONTENT_PROVIDER_REGISTRATION_RECOVERED",
     "CONTENT_PROVIDER_REGISTRATION_FAILED"))
+PEER_DISCOVERY_EVENT_CODES = PROVIDER_LIFECYCLE_EVENT_CODES | {
+    code for code in DISCOVERY_FAILURE_EVENT_CODES if code.startswith("CONTENT_DISCOVERY_RELAY_")
+} | {
+    "CONTENT_EXACT_COLLECTION_EXPIRED", "CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE",
+    "CONTENT_EXACT_ADDRESS_PROVENANCE_REJECTED", "CONTENT_EXACT_ADDRESS_TARGET_MISSING",
+    "CONTENT_EXACT_ADDRESS_HINTS_UNAVAILABLE", "CONTENT_EXACT_ADDRESS_REQUEST_REJECTED",
+    "CONTENT_LOOKUP_COLLECTION_REJECTED", "CONTENT_LOOKUP_RESPONSE_EXPIRED",
+    "CONTENT_LOOKUP_RELAY_ROLE_REJECTED", "CONTENT_LOOKUP_RELAY_AUTHORITY_REJECTED",
+    "CONTENT_LOOKUP_RESPONSE_AUTHORIZED", "CONTENT_LOOKUP_REPLY_CONNECTION_LOST",
+    "CONTENT_LOOKUP_REPLY_EMPTY", "CONTENT_LOOKUP_REPLY_OFFERS",
+    "CONTENT_LOOKUP_REPLY_CHANNEL_FAILED", "CONTENT_LOOKUP_REPLY_ENCODING_REJECTED",
+    "CONTENT_PROVIDER_OFFER_LATE",
+    "CONTENT_EXACT_LOOKUP_STARTED", "CONTENT_EXACT_LOOKUP_FINISHED",
+    "CONTENT_EXACT_ADDRESS_QUERY_STARTED", "CONTENT_EXACT_RESOLVED_REQUEST_SENT",
+    "CONTENT_EXACT_ADDRESS_UNAVAILABLE", "CONTENT_PROVIDER_SERVICE_EMPTY",
+    "CONTENT_PROVIDER_OFFER_REJECTED", "CONTENT_PROVIDER_OFFER_VERIFIED",
+    "CONTENT_PROVIDER_RESPONSE_PEER_REJECTED", "CONTENT_PROVIDER_REQUEST_DIAL_FAILED",
+    "CONTENT_PROVIDER_REQUEST_TIMED_OUT", "CONTENT_PROVIDER_REQUEST_CONNECTION_CLOSED",
+    "CONTENT_PROVIDER_REQUEST_IO_FAILED", "CONTENT_PROVIDER_REQUEST_PROTOCOL_UNSUPPORTED"}
 ANSWER_JOININGS = frozenset(("ordered_source_ranges_not_neural_synthesis", "single_source_answer",
     "hierarchical_peer_synthesis", "hierarchical_peer_synthesis_incomplete",
     "incomplete_fragment_answers", "awaiting_fragments_before_peer_synthesis"))
@@ -390,6 +412,11 @@ def account_home(work, cleanup=False):
 
 def pins():
     value = read(PINS)
+    discovered = value.pop("discovered_driver")
+    if TRIAL == "discovered-360m":
+        # The six other reviewed files are identical on this descendant of the historical Browser pin.
+        value["revision"] = discovered["revision"]
+        value["files"]["scripts/smoke_cooperative_compute.py"] = discovered["file"]
     require(value["version"] == 1 and value["repository"] == "https://github.com/VOLPAROSSA/volparossa-browser"
             and re.fullmatch(r"[0-9a-f]{40}", value["revision"]) and value["revision"] != "0" * 40
             and set(value["files"]) == set(FILES), "exact reviewed browser source pin required")
@@ -470,6 +497,19 @@ def closed_status(path):
         return dict(state="invalid")
 
 
+def closed_rpc(rpc, error):
+    if rpc is None:
+        return
+    require(type(rpc) is dict and rpc.get('category') in
+        ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
+        and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
+    expected = {'category', 'phase'}
+    if rpc['category'] == 'broker_rejected':
+        expected.add('code')
+        require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
+    require(set(rpc) == expected and error == 'peer_rpc', 'invalid closed RPC fields')
+
+
 def check_execution_diagnostic(value):
     require(type(value) is dict and type(value.get('version')) is int and value['version'] in (1, 2),
             'invalid closed coordinator version')
@@ -487,18 +527,7 @@ def check_execution_diagnostic(value):
         and receipt['terminal'] <= receipt['handles']
         and value['cleanup_confirmed'] == (value['local_cleanup_confirmed'] and receipt['confirmed']),
         'invalid closed receipt diagnostic')
-    def check_rpc(rpc, error):
-        if rpc is None:
-            return
-        require(type(rpc) is dict and rpc.get('category') in
-            ('exchange_unconfirmed', 'broker_rejected', 'receipt_validation')
-            and rpc.get('phase') in RPC_PHASES, 'invalid closed RPC diagnostic')
-        expected = {'category', 'phase'}
-        if rpc['category'] == 'broker_rejected':
-            expected.add('code')
-            require(rpc.get('code') in RPC_ERRORS, 'invalid closed broker code')
-        require(set(rpc) == expected and error == 'peer_rpc', 'invalid closed RPC fields')
-    check_rpc(value['rpc'], value['error_class'])
+    closed_rpc(value['rpc'], value['error_class'])
     if value['version'] == 2:
         require(all(value[name] is None or type(value[name]) is bool for name in ('execution_complete', 'answer_complete'))
                 and (value['answer_complete'] is not True or value['execution_complete'] is True),
@@ -510,7 +539,7 @@ def check_execution_diagnostic(value):
                 and recovery['terminal_persisted'] <= recovery['attempted']
                 and type(recovery['deadline_reached']) is bool and recovery['error'] in EXECUTION_ERRORS,
                 'invalid reconciliation observations')
-        check_rpc(recovery['rpc'], recovery['error'])
+        closed_rpc(recovery['rpc'], recovery['error'])
     return value
 
 
@@ -684,11 +713,76 @@ def closed_answer_diagnostic(task):
         return dict(state="invalid")
 
 
+def missing_attempts(task, status):
+    """Classify original journal records before teardown without exporting job IDs or payloads."""
+    try:
+        receipt = status['receipts']
+        require(receipt['phase'] == 'missing_terminal' and receipt['handles'] <= 128, 'receipt count')
+        finished = int((task / 'execution-diagnostic.json').stat().st_mtime)
+        handles = {}
+        for path in (task / 'document').glob('**/attempt-[0-9][0-9][0-9][0-9]/job-[0-3].json'):
+            handle = read(path, 65536)
+            key = handle['binding']['job_id']
+            require(isinstance(key, str) and re.fullmatch('[0-9a-f]{32}', key)
+                    and key not in handles and len(handles) < 128, 'original handle')
+            handles[key] = (path, handle)
+        require(len(handles) == receipt['handles'], 'incomplete handle inventory')
+        terminal = set()
+        for count, path in enumerate(task.glob('**/receipt-*.json'), 1):
+            require(count <= 512, 'bounded receipt inventory')
+            record = read(path, 262144)
+            key = record['handle']['binding']['job_id']
+            require(key in handles and path.name == f'receipt-{key}.json' and record['handle'] == handles[key][1]
+                    and record['status']['binding'] == record['handle']['binding'], 'unbound receipt')
+            if record['status']['state'] in ('complete', 'failed', 'cancelled'):
+                terminal.add(key)
+        require(len(terminal) == receipt['terminal'], 'incomplete terminal inventory')
+        rows = []
+        for key, (path, handle) in sorted(handles.items(), key=lambda item: item[1][0]):
+            if key in terminal:
+                continue
+            part = path.relative_to(task / 'document').parts[0]
+            stage = part if part in ('refinement', 'synthesis') else 'original' if re.fullmatch('package-[0-9]{4}', part) else 'other'
+            expiry = handle['binding']['expires_unix_seconds']
+            require(type(expiry) is int and expiry > 0, 'original lease')
+            row = dict(stage=stage, attempt=int(path.parent.name[8:]), expired_at_cleanup=expiry <= finished,
+                       expired_at_batch_record=None, result='absent', rpc=None)
+            result_path = path.parent / 'result.json'
+            if result_path.exists():
+                jobs = read(result_path, 1048576)['jobs']
+                row['expired_at_batch_record'] = expiry <= int(result_path.stat().st_mtime)
+                require(type(jobs) is list and len(jobs) <= 32 and all(type(job) is dict for job in jobs),
+                        'bounded original batch')
+                original = [entry for entry in jobs if entry.get('handle') == handle]
+                require(len(original) <= 1, 'ambiguous original attempt')
+                if original:
+                    item = original[0]
+                    require(item['state'] in ('unconfirmed', 'running', 'complete', 'failed', 'cancelled'), 'original state')
+                    row['result'] = item['state']
+                    diagnostic = item.get('diagnostic')
+                    if diagnostic is not None:
+                        closed_rpc(diagnostic, 'peer_rpc')
+                        row['rpc'] = diagnostic
+                else:
+                    row['result'] = 'unlisted'
+            rows.append(row)
+        return dict(state='valid', jobs=rows)
+    except (OSError, ValueError, KeyError, TypeError):
+        return dict(state='invalid')
+
+
 def coordinator_diagnostic(state):
     try:
         tasks = task_roots(state)
-        return dict(state='valid', tasks=[dict(ordinal=index + 1, answer_diagnostic=closed_answer_diagnostic(task),
-            **closed_execution(task / 'execution-diagnostic.json')) for index, task in enumerate(tasks)])
+        entries = []
+        for index, task in enumerate(tasks):
+            entry = dict(ordinal=index + 1, answer_diagnostic=closed_answer_diagnostic(task),
+                         **closed_execution(task / 'execution-diagnostic.json'))
+            status = entry.get('status', {})
+            if status.get('receipts', {}).get('phase') == 'missing_terminal':
+                entry['missing_attempts'] = missing_attempts(task, status)
+            entries.append(entry)
+        return dict(state='valid', tasks=entries)
     except FileNotFoundError:
         return dict(state='absent')
     except (OSError, ValueError, KeyError, TypeError):
@@ -744,7 +838,7 @@ def observer_invariant_reason(error):
     return OBSERVER_INVARIANT_REASONS.get(str(error)) if type(error) is ValueError else None
 
 
-def closed_rpc_events(path, baseline, query_code):
+def closed_rpc_events(path, baseline, query_code, *, discovery_peer=False):
     require(type(baseline) is int and baseline > 0 and type(query_code) is int and 0 <= query_code <= 255,
             "invalid RPC event observation arguments")
     if query_code != 0:
@@ -754,9 +848,9 @@ def closed_rpc_events(path, baseline, query_code):
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 262144
                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), "invalid private RPC event file")
         records = []
-        counts = dict.fromkeys(sorted(RPC_EVENT_CODES), 0)
-        discovery_counts = dict.fromkeys(sorted(DISCOVERY_FAILURE_EVENT_CODES), 0)
-        provider_counts = dict.fromkeys(sorted(PROVIDER_LIFECYCLE_EVENT_CODES), 0)
+        codes = (PEER_DISCOVERY_EVENT_CODES,) if discovery_peer else (
+            RPC_EVENT_CODES, DISCOVERY_FAILURE_EVENT_CODES, PROVIDER_LIFECYCLE_EVENT_CODES)
+        groups = [dict.fromkeys(sorted(scope), 0) for scope in codes]
         for line in path.read_text(encoding="ascii").splitlines():
             match = re.fullmatch(r"([0-9]{1,20})\tlevel=([0-9])\tevent=([A-Z0-9_]{1,96})\tsession=[0-9a-f]{0,64}\tpath=(?:-|[0-9]{1,10})", line)
             require(match is not None, "invalid bounded RPC event record")
@@ -764,10 +858,15 @@ def closed_rpc_events(path, baseline, query_code):
             require(timestamp > 0 and (not records or timestamp >= records[-1]), "RPC event clock regressed")
             records.append(timestamp)
             if timestamp > baseline:
-                for group in (counts, discovery_counts, provider_counts):
+                for group in groups:
                     if match[3] in group:
                         group[match[3]] += 1
         require(len(records) <= 1000, "RPC event ring exceeded")
+        if discovery_peer:
+            return dict(state="valid", baseline_unix_ms=baseline, records=len(records), limit=1000,
+                window_covers_baseline=bool(records) and records[0] <= baseline,
+                counts={key: value for key, value in groups[0].items() if value})
+        counts, discovery_counts, provider_counts = groups
         return dict(state="valid", baseline_unix_ms=baseline, limit=1000, records=len(records),
             window_covers_baseline=bool(records) and records[0] <= baseline,
             matching_failures=sum(counts.values()), counts=counts,
@@ -823,15 +922,48 @@ def closed_preselection_events(path):
     return value
 
 
+def peer_event_windows(work, baseline):
+    # The control relay performs exact provider lookups. Each provider has its
+    # own registration state. Query their separate event rings before teardown.
+    layout = read(work / "agent-jobs-layout.json")
+    peers = read(work / "a01-expected-peers.json")
+    control = [node for node in ("relay0", "relay1", "relay2")
+               if peers[node] == layout["control_relay_peer_id"]]
+    providers = layout["provider_nodes"]
+    require(len(control) == 1 and isinstance(providers, list) and len(providers) == len(set(providers)) == 2
+            and set(providers) <= {"relay3", "relay4", "relay5"}, "unknown discovery fixture role")
+    windows = {}
+    candidates = ["relay0", "relay1", "relay2"] if TRIAL else control
+    for node in [*candidates, *providers]:
+        with NamedTemporaryFile(dir=work, prefix="discovery-events-", suffix=".private") as private:
+            try:
+                query = subprocess.run([str(work / "bin/volparossa"), "--control-socket",
+                    str(work / f"runtime-{node}/control/agent.sock"), "logs", "--limit", "1000"],
+                    stdin=subprocess.DEVNULL, stdout=private, stderr=subprocess.DEVNULL, timeout=3)
+                code = int(query.returncode != 0)
+            except (OSError, subprocess.SubprocessError):
+                code = 1
+            windows[node] = closed_rpc_events(Path(private.name), baseline, code, discovery_peer=True)
+    return dict(scope="separate_node_rings_without_per_request_correlation",
+                control_relay=control[0], providers=providers, windows=windows)
+
+
 def diagnostic(work, browser_code, observer_code, baseline, rpc_query_code):
     JOBS["guest_work"](work)
     require(0 <= browser_code <= 255 and 0 <= observer_code <= 255, "invalid process exit status")
     root, state = paths(work)
-    write(work / f"{NAME}-diagnostic.json", dict(version=3, browser_exit_status=browser_code,
+    report = dict(version=3, browser_exit_status=browser_code,
         observer_exit_status=observer_code, browser=closed_status(root / "build/cooperative-proof/browser-status.json"),
         observer=closed_observer(work / f"{NAME}-observer-status.private"),
         coordinator=coordinator_diagnostic(state),
-        rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code)))
+        rpc_events=closed_rpc_events(work / f"{NAME}-rpc-events.private", baseline, rpc_query_code))
+    if TRIAL and (browser_code or observer_code):
+        try:
+            report["discovery_peers"] = peer_event_windows(work, baseline)
+        except (OSError, ValueError, TypeError, KeyError):
+            report["discovery_peers"] = dict(state="unavailable")
+        report["version"] = 4
+    write(work / f"{NAME}-diagnostic.json", report)
 
 
 def authorize(path, event):
@@ -853,6 +985,7 @@ def task_roots(state):
 
 
 def scan_workers(work, document, layout, brokers, observed):
+    pending = {}
     for path in sorted(document.glob("**/attempt-????/job-?.json")):
         handle = read(path, 16384)
         binding = handle["binding"]
@@ -862,8 +995,22 @@ def scan_workers(work, document, layout, brokers, observed):
         require(re.fullmatch(r"[0-9a-f]{32}", key), "invalid retained job identity")
         node = next((n for n in layout["provider_nodes"] if layout["provider_keys"][n] == handle["provider_key"]), None)
         require(node is not None, "unexpected task executor")
-        current = JOBS["worker_snapshot"](work, node, brokers[node], binding["dataset_sha256"])
-        if current and JOBS["alive"](current["worker"]):
+        candidates = pending.setdefault(node, {})
+        digest = binding["dataset_sha256"]
+        # A live dataset cannot distinguish two attempts on the same provider.
+        candidates[digest] = None if digest in candidates else (path, handle)
+    for node, candidates in pending.items():
+        unique = {digest: match for digest, match in candidates.items() if match is not None}
+        if not unique:
+            continue
+        # One /proc tree walk and systemd query per provider in this scan,
+        # regardless of how many history files are still on disk.
+        current = JOBS["worker_snapshot_for_datasets"](work, node, brokers[node], unique)
+        if (current and JOBS["alive"](current["worker"])
+                and all(entry["worker"] != current["worker"] for entry in observed.values())):
+            path, handle = unique[current["dataset_file"]["sha256"]]
+            binding = handle["binding"]
+            key = binding["job_id"]
             relative = path.relative_to(document).as_posix()
             match = re.match(r"synthesis/level-([0-9]{2})-group-[0-9]{4}/", relative)
             data = json.loads(current["dataset_json"])
@@ -1338,13 +1485,54 @@ def retained_result(document, fixture, layout, observed):
                 refinement=refinement, **trial_fields()) if TRIAL else {}))
 
 
-def observe(work, pid):
+def route_policy(peers):
+    return dict(exit_peer_id=peers["exit"], relay_peers={node: peers[node] for node in ("relay0", "relay1", "relay2")})
+
+
+def validate_sampled_routes(sampler, peers, layout, selected, gates):
+    policy = route_policy(peers)
+    sampler["validate_phase_route"](policy, selected, gates)
+    require(gates["exit_mptcp_tls_completed"] >= 6 and
+            any(row["route_context_id"] == layout["route_context_id"] and row["completed"] > 0
+                for row in gates["exit_flow_contexts"]), "initial protected task flow missing")
+    # The physical control links and packet observers are fixed for this trial.
+    # A new context must therefore retain this control relay and the same two
+    # data relays. Each context's exact path-ID mapping is checked by the sampler.
+    require(all(route["control_relay_peer_id"] == layout["control_relay_peer_id"]
+                for route in gates["observed_context_routes"]), "cooperative control relay changed")
+
+
+def observe_routes(work, pid, baseline, driver_seconds=2400):
+    JOBS["guest_work"](work)
+    require(TRIAL == "discovered-360m", "unexpected sampled route trial")
+    sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+    peers, layout = read(work / "a01-expected-peers.json"), read(work / "agent-jobs-layout.json")
+    diagnostic = {}
+    try:
+        with sampler["capture"](work / "bin/volparossa", work / "runtime-exit/control/agent.sock",
+                baseline, 6, client=work / "runtime-client/control/agent.sock", policy=route_policy(peers),
+                diagnostic=diagnostic) as coverage:
+            initial = coverage.route_bindings[coverage.current_context]
+            require(initial["route_context_id"] == layout["route_context_id"]
+                    and initial["control_relay_peer_id"] == layout["control_relay_peer_id"],
+                    "cooperative starting route differs")
+            # The panel waits for the independent observer's pre-consent gate.
+            observe(work, pid, driver_seconds)
+        write(work / "content-custody-fetch-gates.json", coverage.report(True))
+    finally:
+        if diagnostic:
+            sampler["validate_diagnostic"](diagnostic)
+            write(work / f"{NAME}-flow-diagnostic.json", diagnostic)
+
+
+def observe(work, pid, driver_seconds=2400):
+    require(type(driver_seconds) is int and 1 <= driver_seconds <= 3600, "invalid cooperative driver duration")
     JOBS["guest_work"](work)
     progress = dict(version=1, phase="setup", failure=None, invariant_reason=None, task_count=0,
                     observed_workers=0, cancel_workers=0, counts_saturated=False, driver_alive=None)
     tracked = dict(owner=None, tasks=[], observed={}, cancelled={})
     try:
-        observe_inner(work, pid, progress, tracked)
+        observe_inner(work, pid, progress, tracked, driver_seconds)
     except (Exception, KeyboardInterrupt) as error:
         progress["failure"] = observer_error(error)
         progress["invariant_reason"] = observer_invariant_reason(error)
@@ -1368,7 +1556,7 @@ def observe(work, pid):
             pass
 
 
-def observe_inner(work, pid, progress, tracked):
+def observe_inner(work, pid, progress, tracked, driver_seconds):
     root, state = paths(work)
     output = root / "build/cooperative-proof"
     progress["phase"] = "owner_binding"
@@ -1377,7 +1565,7 @@ def observe_inner(work, pid, progress, tracked):
     layout = read(work / "agent-jobs-layout.json")
     progress["phase"] = "broker_binding"
     brokers = {node: JOBS["identity"](JOBS["broker_pid"](node)) for node in layout["provider_nodes"]}
-    deadline = time.monotonic() + 2400
+    deadline = time.monotonic() + driver_seconds
     consent = False
     observed, cancelled = tracked["observed"], tracked["cancelled"]
     first = None
@@ -1533,12 +1721,45 @@ def check_evidence(value, revision, source_pins=None):
             private_job_roots_removed=True, publisher_key_removed=True), "private owned state remains")
     require(value["cleanup"] == dict(public_service_stopped=True, peer_brokers_stopped=True,
             browser_root_removed=True, public_receipts_removed=True, socket_removed=True), "app/service state remains")
-    JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1)
+    if TRIAL:
+        sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
+        validate_sampled_routes(sampler, value["peers"], value["layout"],
+                                value["path"]["selected_route"], value["path"]["gates"])
+        candidates = replacement_controls(value["peers"], value["layout"])
+        require(set(value["replacement_controls"]) == set(candidates), "replacement control coverage differs")
+        for node in candidates:
+            check_replacement_control(value["replacement_controls"][node], node, value["layout"]["provider_nodes"])
+        JOBS["CUSTODY"]["validate_path_observations"](value["path"], value["peers"], value["layout"],
+                                                     "fetch", payload_minimum=1)
+    else:
+        JOBS["CUSTODY"]["validate_path"](value["path"], value["peers"], value["layout"], "fetch", payload_minimum=1)
     for node in value["layout"]["provider_nodes"]:
         application = value["path"]["privacy"]["exit"]["provider_application"][node]
         require(application["request_packets"] > 0 and application["response_payload_bytes"] > 0,
                 "one selected executor did not exchange real protected traffic")
     require(value["path"]["gates"]["exit_mptcp_tls_completed"] >= 6, "protected task completions missing")
+
+
+def check_replacement_control(observed, node, providers):
+    control = JOBS["CUSTODY"]["SHARED"]
+    control["validate_control"](observed["capture"], node, providers, missing=False, require_contacts=False)
+    ips = control["PUBLIC_IPS"]
+    require(set(observed["routes"]) == set(providers), "replacement control route coverage differs")
+    for slot, provider in enumerate(providers):
+        segment = 86 + 2 * int(node[-1]) + slot
+        for direction, source, destination, device, hop in (
+                ("out", node, provider, f"cp{slot}", 2), ("back", provider, node, f"bp{node[-1]}{slot}", 1)):
+            routes = observed["routes"][provider][direction]
+            require(len(routes) == 1 and routes[0]["dst"] == ips[destination] and routes[0]["prefsrc"] == ips[source]
+                    and routes[0]["dev"] == device and routes[0]["gateway"] == f"10.241.{segment}.{hop}",
+                    "replacement control kernel route differs")
+
+
+def replacement_controls(peers, layout):
+    brokers = ["relay0", "relay1", "relay2"]
+    require(len({peers[node] for node in brokers}) == 3 and layout["control_relay_peer_id"] in
+            {peers[node] for node in brokers}, "unknown initial control relay")
+    return [node for node in brokers if peers[node] != layout["control_relay_peer_id"]]
 
 
 def evidence(work, revision):
@@ -1567,6 +1788,13 @@ def evidence(work, revision):
     value.update(trial_fields())
     if TRIAL:
         value["model_provision"] = read(work / "agent-jobs-provision.json")
+        read_route = runpy.run_path(str(HERE / "content-provider-smoke.py"))["read_route"]
+        value["replacement_controls"] = {node: dict(
+            capture=read(work / f"{NAME}-control-{node}.json"),
+            routes={provider: {direction: read_route(
+                work / f"{NAME}-{node}-{provider}-{direction}.json") for direction in ("out", "back")}
+                for provider in layout["provider_nodes"]})
+            for node in replacement_controls(value["peers"], layout)}
     check_evidence(value, revision)
     write(work / f"{NAME}-evidence.json", value)
 
@@ -1616,6 +1844,8 @@ def main(args):
         provision(Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
+    elif len(args) in (4, 5) and args[0] == "observe-routes":
+        observe_routes(Path(args[1]), int(args[2]), *map(int, args[3:]))
     elif len(args) == 6 and args[0] == "diagnostic":
         diagnostic(Path(args[1]), int(args[2]), int(args[3]), int(args[4]), int(args[5]))
     elif len(args) == 3 and args[0] == "collect":

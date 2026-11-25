@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "kind": "consumer-route-sampler-failure",
+  "phase": "sampling",
+  "operation": "route_binding",
+  "code": "invalid",
+  "samples": 114,
+  "completed": 287,
+  "failed": 0
+}

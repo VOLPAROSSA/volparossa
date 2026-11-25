@@ -9,6 +9,8 @@ mod follow;
 mod policy_assessment;
 mod readiness;
 mod resume;
+#[cfg(test)]
+mod status_test_peer;
 mod task;
 mod transcript;
 mod workflow;
