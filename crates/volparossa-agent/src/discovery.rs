@@ -91,7 +91,7 @@ use volparossa_local_control::{
     LogLevel, PeerSummary, PolicySnapshot as AgentPolicySnapshot, Reachability,
 };
 use volparossa_metrics::MetricsRegistry;
-use volparossa_peerstore::PeerStore;
+use volparossa_peerstore::{PeerStore, PeerStoreError};
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
@@ -286,6 +286,7 @@ pub(crate) enum ClientPreselectionError {
     /// A valid current snapshot lacks an eligible exit or enough diverse relays.
     /// Unlike Unavailable, this does not include policy/store/validation failures.
     NoEligiblePaths,
+    AwaitingPublication,
     Unavailable,
     Invalidated,
     Transport,
@@ -387,6 +388,35 @@ impl DiscoveryControlHandle {
     }
 
     pub(crate) async fn prepare_client_preselection(
+        &self,
+        parameters: ClientPreselectionParameters,
+    ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
+        // Only this pre-dispatch result can retry. A live route, reservation or
+        // probe has never started, and the caller retains its original deadline.
+        if parameters.restriction.is_some() {
+            return self.try_client_preselection(parameters).await;
+        }
+        let fresh_policy = || ClientPreselectionParameters {
+            restriction: None,
+            ..parameters
+        };
+        let deadline = Instant::now() + CLIENT_PRESELECTION_TIMEOUT;
+        let mut result = self.try_client_preselection(fresh_policy()).await;
+        while matches!(result, Err(ClientPreselectionError::AwaitingPublication)) {
+            result = tokio::time::timeout_at(deadline, async {
+                tokio::time::sleep(RESERVATION_MAINTENANCE_INTERVAL).await;
+                if Instant::now() >= deadline {
+                    return Err(ClientPreselectionError::Timeout);
+                }
+                self.try_client_preselection(fresh_policy()).await
+            })
+            .await
+            .map_err(|_| ClientPreselectionError::Timeout)?;
+        }
+        result
+    }
+
+    async fn try_client_preselection(
         &self,
         parameters: ClientPreselectionParameters,
     ) -> Result<PreparedPreselectionEvidence, ClientPreselectionError> {
@@ -1664,6 +1694,12 @@ struct AcceptedAdvertisementRecord {
     fingerprint: AdvertisementFingerprint,
 }
 
+struct StartupPublication {
+    digest: [u8; 32],
+    waiting_until_ms: Option<u64>,
+    relay: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OutboundReapCounts {
     ambiguous: usize,
@@ -1795,6 +1831,8 @@ pub struct DiscoveryRuntime {
     privacy_conflicts: HashMap<PrivacyConflictKey, u64>,
     forwarded_exit_fail_closed_until_ms: u64,
     accepted_advertisements: HashMap<[u8; 32], AcceptedAdvertisementRecord>,
+    startup_publications: HashMap<NodeId, StartupPublication>,
+    startup_publication_deadline: Instant,
     pending_client_forwards: HashMap<request_response::OutboundRequestId, PendingClientForward>,
     client_forward_index: HashMap<ClientForwardKey, request_response::OutboundRequestId>,
     completed_client_forwards: HashMap<ClientForwardKey, CompletedClientForward>,
@@ -1987,6 +2025,11 @@ impl DiscoveryRuntime {
             privacy_conflicts: HashMap::new(),
             forwarded_exit_fail_closed_until_ms: 0,
             accepted_advertisements: HashMap::new(),
+            startup_publications: HashMap::new(),
+            // The advertisement publisher refreshes at most 60 seconds apart.
+            startup_publication_deadline: Instant::now()
+                + Duration::from_secs(60)
+                + CAPABILITY_QUERY_INTERVAL,
             pending_client_forwards: HashMap::new(),
             client_forward_index: HashMap::new(),
             completed_client_forwards: HashMap::new(),
@@ -2049,7 +2092,7 @@ impl DiscoveryRuntime {
         self.synchronize_exit_policy(&state).await;
         self.publish_local(&state).await;
         self.query_capabilities(&state).await;
-        self.refresh_candidates(&state).await;
+        self.refresh_candidates(&state, true).await;
         let mut maintenance = tokio::time::interval(self.publisher.refresh_interval());
         maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut capability_maintenance = tokio::time::interval(CAPABILITY_QUERY_INTERVAL);
@@ -2110,7 +2153,7 @@ impl DiscoveryRuntime {
                     if self.store.prune_expired(now, PEER_RETENTION_SECONDS).is_err() {
                         state.write().await.log(LogLevel::Warn, "PEERSTORE_PRUNE_FAILED", unix_millis());
                     }
-                    self.refresh_candidates(&state).await;
+                    self.refresh_candidates(&state, false).await;
                 }
                 _ = reservation_maintenance.tick() => {
                     connection_budget::refresh(&mut self.service);
@@ -2380,6 +2423,35 @@ impl DiscoveryRuntime {
         }
     }
 
+    fn awaiting_startup_publication(
+        &self,
+        error: PreselectionSamplingError,
+        reason: Option<preselection_sampler::InvalidSnapshotReason>,
+        now_ms: u64,
+    ) -> bool {
+        use preselection_sampler::InvalidSnapshotReason;
+        let relays_only = match (error, reason) {
+            (PreselectionSamplingError::InsufficientDiverseRelays, _)
+            | (
+                PreselectionSamplingError::InvalidSnapshot,
+                Some(InvalidSnapshotReason::RelayCount),
+            ) => true,
+            (PreselectionSamplingError::NoEligibleForwardedExit, _)
+            | (
+                PreselectionSamplingError::InvalidSnapshot,
+                Some(InvalidSnapshotReason::NoForwardedExit),
+            ) => false,
+            _ => return false,
+        };
+        Instant::now() < self.startup_publication_deadline
+            && self.startup_publications.values().any(|stored| {
+                (!relays_only || stored.relay)
+                    && stored
+                        .waiting_until_ms
+                        .is_some_and(|expiry| expiry > now_ms)
+            })
+    }
+
     async fn reply_route_candidate_snapshot(
         &mut self,
         requested_candidates: usize,
@@ -2519,6 +2591,16 @@ impl DiscoveryRuntime {
                     }
                 }
                 let error = match failure.error {
+                    error
+                        if restriction.is_none()
+                            && self.awaiting_startup_publication(
+                                error,
+                                failure.snapshot_reason,
+                                captured_at_ms,
+                            ) =>
+                    {
+                        ClientPreselectionError::AwaitingPublication
+                    }
                     PreselectionSamplingError::InvalidPolicy => {
                         ClientPreselectionError::InvalidParameters
                     }
@@ -3701,6 +3783,9 @@ impl DiscoveryRuntime {
     }
 
     fn purge_completed_at(&mut self, now_ms: u64) {
+        if Instant::now() >= self.startup_publication_deadline {
+            self.startup_publications.clear();
+        }
         self.maintain_route_retirement(now_ms);
         self.completed_client_forwards
             .retain(|_, entry| entry.expires_at_ms > now_ms);
@@ -12508,7 +12593,7 @@ impl DiscoveryRuntime {
             state.write().await.log(level, code, timestamp_ms);
         }
         if outcome.refresh_candidates {
-            self.refresh_candidates(state).await;
+            self.refresh_candidates(state, false).await;
             self.schedule_exit_advertisement_fetches();
         }
     }
@@ -12851,11 +12936,21 @@ impl DiscoveryRuntime {
 
         let now = UnixTime::from_secs(now_ms / 1_000);
         if !actor_record_exact
-            && self
+            && let Err(error) = self
                 .store
                 .upsert_advertisement(&advertisement, &envelope, now)
-                .is_err()
         {
+            // A live refetch of the exact startup bytes can justify waiting
+            // for the next signed publication. The stale reply is still refused.
+            if matches!(error, PeerStoreError::StaleAdvertisement)
+                && capability_expiry_ms > now_ms
+                && Instant::now() < self.startup_publication_deadline
+                && let Some(stored) = self.startup_publications.get_mut(&advertisement.node_id)
+                && stored.digest == <[u8; 32]>::from(Sha256::digest(&envelope))
+            {
+                stored.waiting_until_ms = Some(capability_expiry_ms);
+                stored.relay = matches!(&provenance, AdvertisementProvenance::DirectRelay { .. });
+            }
             if matches!(&provenance, AdvertisementProvenance::DirectRelay { .. }) {
                 self.record_privacy_conflict(
                     peer,
@@ -12872,6 +12967,7 @@ impl DiscoveryRuntime {
                 now_ms,
             )));
         }
+        self.startup_publications.remove(&advertisement.node_id);
         self.accepted_advertisements.insert(
             accepted.node_id,
             AcceptedAdvertisementRecord {
@@ -13865,7 +13961,7 @@ impl DiscoveryRuntime {
         );
     }
 
-    async fn refresh_candidates(&mut self, state: &Arc<RwLock<AgentState>>) {
+    async fn refresh_candidates(&mut self, state: &Arc<RwLock<AgentState>>, startup: bool) {
         let now = UnixTime::from_secs(unix_seconds());
         let Ok(candidates) = self.store.load_candidates(now, self.candidate_limit) else {
             state
@@ -13878,6 +13974,18 @@ impl DiscoveryRuntime {
         // Until a producer supplies fresh, transport-, advertisement-, policy-, and selected-exit-
         // bound reachability/capacity/path measurements, no stored peer is a usable route candidate.
         let usable_candidates = 0;
+        if startup && self.roles.client {
+            for stored in &candidates {
+                self.startup_publications.insert(
+                    stored.advertisement.node_id.clone(),
+                    StartupPublication {
+                        digest: Sha256::digest(stored.signed_advertisement_envelope()).into(),
+                        waiting_until_ms: None,
+                        relay: false,
+                    },
+                );
+            }
+        }
         let summaries = candidates
             .into_iter()
             .map(|stored| {
@@ -23027,6 +23135,241 @@ mod tests {
                 &old, &changed, deadline
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn restarted_client_requires_new_signed_bytes_for_forwarded_exit() {
+        let mut old = fixture(test_client_roles());
+        let service = Identity::generate();
+        let peer = *service.peer_id();
+        let roles = RolesConfig {
+            client: false,
+            relay: false,
+            exit: true,
+        };
+        let now_ms = unix_millis();
+        let reply = service_advertisement(
+            &service,
+            roles,
+            &old.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &old.directory,
+        );
+        // A directly observed exit-only advertisement is stored but cannot grant an Exit.
+        assert!(
+            old.runtime
+                .ingest_advertisement(
+                    peer,
+                    reply.clone(),
+                    AdvertisementProvenance::DirectRelay {
+                        authenticated_peer: peer
+                    },
+                    &old.state
+                )
+                .await
+                .is_none()
+        );
+        assert!(old.runtime.forwarded_exits.is_empty());
+        let mut new = fixture(test_client_roles());
+        let store_path = old.directory.path().join("peers.sqlite");
+        drop(old.runtime);
+        new.runtime.store = PeerStore::open(store_path).expect("retained signed row");
+        new.state = old.state;
+        new.policy = old.policy;
+        new.runtime.refresh_candidates(&new.state, true).await;
+        let relay = Identity::generate();
+        let control = install_control(&mut new, &relay, now_ms);
+        let deadline = now_ms + 20_000;
+        new.runtime.mark_forwarded_exit_target(peer, deadline);
+        assert!(
+            new.runtime
+                .ingest_advertisement(
+                    peer,
+                    reply.clone(),
+                    forwarded_provenance(&control, &service, deadline),
+                    &new.state
+                )
+                .await
+                .is_none()
+        );
+        assert!(new.runtime.forwarded_exits.is_empty());
+        assert!(new.runtime.awaiting_startup_publication(
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            None,
+            now_ms
+        ));
+        assert!(!new.runtime.awaiting_startup_publication(
+            PreselectionSamplingError::InsufficientDiverseRelays,
+            None,
+            now_ms
+        ));
+        new.runtime.startup_publication_deadline = Instant::now();
+        assert!(!new.runtime.awaiting_startup_publication(
+            PreselectionSamplingError::NoEligibleForwardedExit,
+            None,
+            now_ms
+        ));
+
+        // An equal-sequence refetch outside the startup inventory still fails without waiting.
+        new.runtime.purge_completed_at(now_ms);
+        assert!(
+            new.runtime
+                .ingest_advertisement(
+                    peer,
+                    reply,
+                    forwarded_provenance(&control, &service, deadline),
+                    &new.state
+                )
+                .await
+                .is_none()
+        );
+        assert!(new.runtime.startup_publications.is_empty());
+        assert!(new.runtime.forwarded_exits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restarted_reciprocal_relay_uses_an_ordinary_new_publication() {
+        let mut old = fixture(test_client_roles());
+        let service = Identity::generate();
+        let peer = *service.peer_id();
+        let roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        let now_ms = unix_millis();
+        let first = service_advertisement(
+            &service,
+            roles,
+            &old.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &old.directory,
+        );
+        let direct = || AdvertisementProvenance::DirectRelay {
+            authenticated_peer: peer,
+        };
+        assert!(
+            old.runtime
+                .ingest_advertisement(peer, first.clone(), direct(), &old.state)
+                .await
+                .is_some()
+        );
+        let mut new = fixture(test_client_roles());
+        let path = old.directory.path().join("peers.sqlite");
+        drop(old.runtime);
+        new.runtime.store = PeerStore::open(path).expect("retained signed row");
+        new.state = old.state;
+        new.policy = old.policy;
+        new.runtime.refresh_candidates(&new.state, true).await;
+        assert!(
+            new.runtime
+                .ingest_advertisement(peer, first, direct(), &new.state)
+                .await
+                .is_none()
+        );
+        assert!(!new.runtime.direct_relays.contains_key(&peer));
+        assert!(new.runtime.awaiting_startup_publication(
+            PreselectionSamplingError::InsufficientDiverseRelays,
+            None,
+            now_ms
+        ));
+        let fresh = service_advertisement(
+            &service,
+            roles,
+            &new.policy,
+            2,
+            generate_nonce(),
+            now_ms,
+            &new.directory,
+        );
+        assert!(
+            new.runtime
+                .ingest_advertisement(peer, fresh.clone(), direct(), &new.state)
+                .await
+                .is_some()
+        );
+        assert_eq!(new.runtime.direct_relays[&peer].advertisement_sequence, 2);
+        assert!(new.runtime.startup_publications.is_empty());
+        assert!(
+            new.runtime
+                .ingest_advertisement(peer, fresh, direct(), &new.state)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_publication_wait_enforces_the_original_connect_deadline() {
+        for send_retry in [false, true] {
+            let (sender, mut receiver) = mpsc::channel(1);
+            let handle = DiscoveryControlHandle::from_sender(sender);
+            let start = Instant::now();
+            let request = tokio::spawn(async move {
+                handle
+                    .prepare_client_preselection(valid_client_preselection_parameters())
+                    .await
+            });
+            let Some(DiscoveryCommand::BeginClientPreselection { reply, .. }) =
+                receiver.recv().await
+            else {
+                panic!("expected first selection")
+            };
+            assert!(
+                reply
+                    .send(Err(ClientPreselectionError::AwaitingPublication))
+                    .is_ok()
+            );
+            tokio::task::yield_now().await;
+            let pending = if send_retry {
+                tokio::time::advance(RESERVATION_MAINTENANCE_INTERVAL).await;
+                let Some(DiscoveryCommand::BeginClientPreselection { reply, .. }) =
+                    receiver.recv().await
+                else {
+                    panic!("expected pre-deadline retry")
+                };
+                Some(reply)
+            } else {
+                None
+            };
+            tokio::time::advance(CLIENT_PRESELECTION_TIMEOUT - start.elapsed()).await;
+            assert!(matches!(
+                request.await.expect("completed"),
+                Err(ClientPreselectionError::Timeout)
+            ));
+            assert_eq!(start.elapsed(), CLIENT_PRESELECTION_TIMEOUT);
+            assert!(pending.is_none_or(|reply| reply.is_closed()));
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selection_retries_only_the_pre_dispatch_publication_wait() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let handle = DiscoveryControlHandle::from_sender(sender);
+        let actor = tokio::spawn(async move {
+            for result in [
+                ClientPreselectionError::AwaitingPublication,
+                ClientPreselectionError::NoEligiblePaths,
+            ] {
+                let Some(DiscoveryCommand::BeginClientPreselection { reply, .. }) =
+                    receiver.recv().await
+                else {
+                    panic!("expected another fresh selection")
+                };
+                assert!(reply.send(Err(result)).is_ok());
+            }
+        });
+        assert!(matches!(
+            handle
+                .prepare_client_preselection(valid_client_preselection_parameters())
+                .await,
+            Err(ClientPreselectionError::NoEligiblePaths)
+        ));
+        actor.await.expect("actor finished");
     }
 
     #[tokio::test]
