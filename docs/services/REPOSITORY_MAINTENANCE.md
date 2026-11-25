@@ -36,6 +36,24 @@ and commit and run Git object validation after retrieval. A fetched repository
 supplies source bytes. Approval of a new canonical ref and installation of a
 release each require their own decision. [Git bundle format and verification](https://git-scm.com/docs/git-bundle)
 
+Core `ad7748b7` recovered a 506-byte public Git bundle through a surviving custody
+holder after removal of the publisher's repository, cache and key. The receiver
+had only loopback and called the existing Core agent through its local socket.
+Git verified the original two commits and `refs/heads/main` in a fresh bare
+repository. Host-state comparison and guest cleanup passed. The original archive
+SHA-256 is `bb5932b0a6a6a50f2dbf126b1507bf5a21307275adea5311379ed27874f80894`.
+[Original trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45509864506) · [Git recovery receipt](../development/evidence/public-git-45509864506/content-custody-git-recovery.json)
+
+Core `4ab062f9` repeated the trial and exported the 506 received bytes,
+the signed publication manifest, the holder's signed custody receipt and the
+fetch result. The hosted verifier bound the downloaded bytes to both signatures,
+the topology's selected holder and the enrolled source ref. It then restored
+both file versions and checked the parent history and Git objects in another
+empty bare repository. The two original host snapshots match byte for byte,
+and zero owned guest objects remained. The archive SHA-256 is
+`1dbb22d139c096d680e5408589218dd8528c4f36c5adf7d60d9c846d481f71ee`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512807081) · [Original Git and topology receipts](../development/evidence/public-git-45512807081)
+
 Radicle Heartwood addresses a different part of the cycle. Its repository ID
 derives from the initial identity document and remains stable across renames.
 Delegates and a threshold govern changes. Signed refs bind advertised Git refs
