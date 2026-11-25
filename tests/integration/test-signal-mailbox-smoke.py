@@ -66,7 +66,9 @@ class RoutedNativeMailbox(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "phase"
             self.assertEqual(observed(marker), "bootstrap")
-            for value in ("offline-compose", "outgoing-row", "private-outbox", "outbox-binding"):
+            for value in ("offline-compose", "outgoing-row", "private-outbox", "outbox-binding",
+                          "worker-delivery-receipt", "worker-sender-pickup", "worker-confirmed-provider-check",
+                          "worker-interrupted-restart"):
                 marker.write_text(value)
                 self.assertEqual(observed(marker), value)
             for value in (b"unrelated detail", b"x" * 70, bytes([255])):

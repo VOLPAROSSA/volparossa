@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "chat_revision": "3014b2fd07f5f9202ec9918646f67de4eacea8e7",
+  "chat_revision": "5dafc3cf69fd647d16bcb26e6304e0644ab35b68",
   "signal_revision": "ef3872cb0249ec939d8aff857568a0e87a6b5075",
   "files": {
     "LICENSE": {
@@ -72,8 +72,8 @@
       "sha256": "44a3396a1e486e5d6c2510fde84a85d549239c8c46a151fc8225ffebe65e8d1f"
     },
     "scripts/run_native_mailbox.py": {
-      "bytes": 13267,
-      "sha256": "26ba7e742843ac682e2a03c945219840bb4571409392a755b004213db80862e2"
+      "bytes": 13401,
+      "sha256": "e4864ef6c31b25e96b4b2df5cb41a80af9a84f1019a1e5df34bd791f9bfbb5f4"
     },
     "scripts/run_native_receipts.py": {
       "bytes": 6854,
@@ -104,8 +104,8 @@
       "sha256": "7013b41dc57c9274fdbe5ddb4af69fac2141d949a5ce6757e4af95fae7f4cc05"
     },
     "tests/native/paired-mailbox_test.node.ts": {
-      "bytes": 34101,
-      "sha256": "b435580d334ecc2c921735b6b39a1125952f46e69942d9c015fe8ae165e799b3"
+      "bytes": 34683,
+      "sha256": "fab8f63bed3bff2e62b6d63d31d6ab65c98289e1146479971a59dd24bf32a8f2"
     },
     "upstream-lock.json": {
       "bytes": 2100,

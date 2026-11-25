@@ -89,7 +89,8 @@ def native_failure_phase(path):
         "stock-acknowledgements", "pair", "offline-send", "offline-compose", "outgoing-row",
         "private-outbox", "outbox-binding", "provider-custody", "offline-fetch", "recipient-reopen",
         "confirm-native-import", "peer-receipt", "sender-reopen", "complete",
-        "worker-outgoing", "worker-offline-pickup", "worker-native-confirmation",
+        "worker-outgoing", "worker-offline-pickup", "worker-native-confirmation", "worker-confirmed-provider-check",
+        "worker-delivery-receipt", "worker-sender-pickup", "worker-interrupted-restart",
         "worker-sender-restart", "worker-recipient-row", "worker-handoff-retirement",
     }
     try:
