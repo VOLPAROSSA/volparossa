@@ -373,7 +373,17 @@ fn tcp_flow_admission_production_call_checks_initial_and_existing_retry_boundary
         .expect("shared admission implementation")
         .0;
     assert!(admission.contains("crate::unix_millis().max(requested_at_ms), Instant::now()"));
-    assert!(admission.contains("Some(established.is_expired(wall_now_ms, monotonic_now))"));
+    assert!(admission.contains("ClientRouteControlState::established_expired,"));
+    let predicate = source
+        .split_once("    fn established_expired(")
+        .expect("shared production expiry predicate")
+        .1
+        .split_once("    fn current_content_route(")
+        .expect("next state query")
+        .0;
+    assert!(predicate.contains("Self::Established(established) =>"));
+    assert!(predicate.contains("Some(established.is_expired(wall_now_ms, monotonic_now))"));
+    assert!(predicate.contains("_ => None"));
     assert!(admission.contains("self.start_retirement(established)"));
 }
 
@@ -664,7 +674,7 @@ fn tcp_flow_admission_post_acquire_production_rechecks_and_forwards_fresh_activa
         .0;
     assert!(success.contains(".complete_tcp_flow_acquire("));
     assert!(success.contains("crate::unix_millis().max(now_ms), Instant::now()"));
-    assert!(success.contains("Some(established.is_expired(wall_now_ms, monotonic_now))"));
+    assert!(success.contains("ClientRouteControlState::established_expired,"));
     assert!(success.contains("retire,"));
     assert!(acquisition.contains("let retire = |prior| self.start_tcp_flow_retirement(prior)"));
     assert!(success.contains("return Ok((flow, material, activation_at_ms))"));
