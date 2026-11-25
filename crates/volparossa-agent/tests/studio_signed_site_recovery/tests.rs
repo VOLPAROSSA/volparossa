@@ -220,6 +220,7 @@ fn exact_observed_counts_refuse_missing_join_and_failure_cleanup() {
 fn normal_nonzero_with_closed_reason_is_required_for_preview_denial() {
     let expected = b"local site reviewed input digest differs";
     let result = CliResult {
+        approved_expiry: None,
         success: false,
         normal_exit: true,
         stdout: vec![],
@@ -232,18 +233,21 @@ fn normal_nonzero_with_closed_reason_is_required_for_preview_denial() {
             ..result
         },
         CliResult {
+            approved_expiry: None,
             success: true,
             normal_exit: true,
             stdout: vec![],
             stderr: expected.to_vec(),
         },
         CliResult {
+            approved_expiry: None,
             success: false,
             normal_exit: true,
             stdout: b"ready".to_vec(),
             stderr: expected.to_vec(),
         },
         CliResult {
+            approved_expiry: None,
             success: false,
             normal_exit: true,
             stdout: vec![],
@@ -369,5 +373,55 @@ fn independent_native_review_must_select_the_bundle_before_signing() {
     );
     for changed in ["", "not-a-digest", &hex::encode([0u8; 32])] {
         assert!(super::site::reviewed_digest(&sha, Some(changed.into())).is_err());
+    }
+}
+
+#[test]
+fn terminal_owner_requires_every_original_asset_and_the_signed_context() {
+    use std::fmt::Write as _;
+
+    let packed = packed();
+    let publisher = "ab".repeat(32);
+    let mut tty = format!(
+        "Publisher key  {publisher}\r\nSite name      \"{}\"\r\nRevision       1\r\nExpires at     1700000000 UTC (Unix seconds)\r\nCache limits   33554432 bytes, 128 chunks, 67108864 bytes minimum free\r\nBundle SHA-256 {}\r\n{} bytes in the bundle. 3 public assets:\r\n",
+        super::site::NAME,
+        hex::encode(packed.sha),
+        packed.bytes.len()
+    );
+    for row in &packed.assets {
+        let path = row["path"].as_str().unwrap();
+        let mime = if path == "/style.css" {
+            "text/css"
+        } else {
+            "text/html"
+        };
+        writeln!(
+            tty,
+            "  {path}  {} bytes  {mime}  {}\r",
+            row["bytes"],
+            row["sha256"].as_str().unwrap()
+        )
+        .unwrap();
+    }
+    let check = |body: &str| super::owner::verify_display(body, &publisher, &packed);
+    assert_eq!(check(&tty), Ok(1_700_000_000));
+    for changed in [
+        tty.replace("/style.css", "/another.css"),
+        tty.replace("text/css", "text/html"),
+        tty.replace(
+            packed.assets[0]["sha256"].as_str().unwrap(),
+            &"cd".repeat(32),
+        ),
+        tty.replace("Revision       1", "Revision       2"),
+        tty.replace(&publisher, &"cd".repeat(32)),
+        tty.replace("33554432", "33554431"),
+        tty.replace("UTC (Unix seconds)", "local"),
+        format!("{tty}  /extra.html\n"),
+        format!("{tty}Publisher key  {}\n", "cd".repeat(32)),
+        format!("{tty}Revision       3\n"),
+        format!("{tty}0 bytes in the bundle. 0 public assets:\n"),
+        format!("{tty}Expires at     1700000001 UTC (Unix seconds)\n"),
+    ] {
+        assert!(check(&changed).is_err());
     }
 }

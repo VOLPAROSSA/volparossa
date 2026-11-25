@@ -13,6 +13,8 @@ use std::{
 use super::{
     Cleanup, Progress, Result,
     fixture::{Fixture, absent},
+    owner::OwnerTerminal,
+    site::Packed,
 };
 use nix::{
     sys::signal::{Signal, kill},
@@ -262,7 +264,14 @@ pub(super) async fn bounded(reader: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+pub(super) enum Invocation<'a> {
+    Plain,
+    Negative,
+    Owner(&'a Packed, u64),
+}
+
 pub(super) struct CliResult {
+    pub(super) approved_expiry: Option<u64>,
     pub(super) success: bool,
     pub(super) normal_exit: bool,
     pub(super) stdout: Vec<u8>,
@@ -296,12 +305,21 @@ pub(super) async fn cli(
     progress: &Progress,
     work: Instant,
     total: Instant,
-    negative: bool,
+    mode: Invocation<'_>,
 ) -> Result<CliResult> {
     if Instant::now() >= work {
         return Err("operation_deadline");
     }
-    let mut child = Command::new(&fixture.cli)
+    let negative = matches!(mode, Invocation::Negative);
+    let (mut command, owner) = if let Invocation::Owner(packed, lifetime) = mode {
+        let (command, terminal) = OwnerTerminal::command(fixture)?;
+        (command, Some((terminal, packed, lifetime)))
+    } else {
+        let mut command = Command::new(&fixture.cli);
+        command.stdin(Stdio::null());
+        (command, None)
+    };
+    let mut child = command
         .arg("--control-socket")
         .arg(&fixture.socket)
         .arg("content")
@@ -309,12 +327,12 @@ pub(super) async fn cli(
         .current_dir(fixture.directory.path())
         .env_clear()
         .env("LANG", "C")
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| "cli_spawn")?;
+    drop(command);
     progress.count(|counts| {
         if negative {
             counts.negative_cli_started += 1;
@@ -325,13 +343,24 @@ pub(super) async fn cli(
     let captured = if let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take())
     {
         timeout_at(work, async {
-            let (out, err) = tokio::join!(bounded(stdout), bounded(stderr));
+            let approve = async {
+                match &owner {
+                    Some((terminal, packed, lifetime)) => terminal
+                        .authorize(fixture, packed, *lifetime)
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            };
+            let (stdout, stderr, approved_expiry) =
+                tokio::try_join!(bounded(stdout), bounded(stderr), approve)?;
             let status = child.wait().await.map_err(|_| "cli_wait")?;
             Ok(CliResult {
                 success: status.success(),
                 normal_exit: status.code().is_some(),
-                stdout: out?,
-                stderr: err?,
+                stdout,
+                stderr,
+                approved_expiry,
             })
         })
         .await
