@@ -25,13 +25,53 @@ revision to the repository's previously authorized governance and decision.
 Conflicting heads require verification against that history before publication
 continues. Popularity and mirror state confer no authority.
 
-Evaluate Radicle's repository identities, signed refs, peer replication and
-collaborative objects for patches and reviews. Compare an upstream integration
-with ordinary Git objects and existing DICN services. Check routing and metadata
-privacy, private-project access, recovery after seed loss, interoperability and
-the ability to export code and decision history before selecting a component.
-Record which DICN gaps it fills and which responsibilities remain with Core.
-[Radicle protocol guide](https://radicle.dev/guides/protocol)
+### Source recovery and Radicle
+
+Use a self-contained Git bundle for the first public source-recovery trial.
+A reader with an independently selected publisher, signed manifest and expected Git
+ref and commit can recover history using ordinary Git and the existing Core
+content transport. Bundle prerequisites would require a separate trusted source,
+so the fresh-repository trial requires a complete bundle. Check the expected ref
+and commit and run Git object validation after retrieval. A fetched repository
+supplies source bytes. Approval of a new canonical ref and installation of a
+release each require their own decision. [Git bundle format and verification](https://git-scm.com/docs/git-bundle)
+
+Core `ad7748b7` recovered a 506-byte public Git bundle through a surviving custody
+holder after removal of the publisher's repository, cache and key. The receiver
+had only loopback and called the existing Core agent through its local socket.
+Git verified the original two commits and `refs/heads/main` in a fresh bare
+repository. Host-state comparison and guest cleanup passed. The original archive
+SHA-256 is `bb5932b0a6a6a50f2dbf126b1507bf5a21307275adea5311379ed27874f80894`.
+[Original trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45509864506) · [Git recovery receipt](../development/evidence/public-git-45509864506/content-custody-git-recovery.json)
+
+Core `4ab062f9` repeated the trial and exported the 506 received bytes,
+the signed publication manifest, the holder's signed custody receipt and the
+fetch result. The hosted verifier bound the downloaded bytes to both signatures,
+the topology's selected holder and the enrolled source ref. It then restored
+both file versions and checked the parent history and Git objects in another
+empty bare repository. The two original host snapshots match byte for byte,
+and zero owned guest objects remained. The archive SHA-256 is
+`1dbb22d139c096d680e5408589218dd8528c4f36c5adf7d60d9c846d481f71ee`.
+[Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512807081) · [Original Git and topology receipts](../development/evidence/public-git-45512807081)
+
+Radicle Heartwood addresses a different part of the cycle. Its repository ID
+derives from the initial identity document and remains stable across renames.
+Delegates and a threshold govern changes. Signed refs bind advertised Git refs
+to a peer. Patches, reviews and issues are stored as collaborative Git objects.
+These properties make it a candidate for transferring review history along
+with source. A plain source-branch bundle omits review objects and delegate
+history unless those refs are explicitly included. The reviewed source declares
+MIT or Apache-2.0 licensing. [Identity document and visibility](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/identity/doc.rs) · [Signed refs](https://github.com/radicle-dev/heartwood/tree/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/storage/refs/sigrefs) · [Patch objects](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/crates/radicle/src/cob/patch.rs) · [Source licenses](https://github.com/radicle-dev/heartwood/blob/8b053320dc3d5dc2189be3105546ed4d852b0583/Cargo.toml)
+
+Heartwood uses Noise-authenticated peer sessions and disseminates availability
+and ref announcements through gossip. For private repositories, delegates and
+allowed node identities can obtain the source. An authorized seed holding a
+readable repository is a trusted recipient. Before enabling an adapter, verify
+which participants can observe repository interests, how the adapter uses the
+DICN transport, and whether a fresh node can recover both code and review history
+after seed loss. Keep private work out of the public trial. An integration must
+map accepted refs to VOLPAROSSA's independently authorized policy, evidence,
+release authority and recovery counters. [Radicle protocol and replication](https://radicle.dev/guides/protocol)
 
 Use Network for permitted peer discovery and transport, Storage for encrypted
 recovery copies, and existing signed publications and retention for durable

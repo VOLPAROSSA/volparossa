@@ -3,6 +3,7 @@
 mod preparation;
 mod preview;
 mod restore;
+pub(super) mod review;
 mod source;
 mod viewer;
 
