@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, writeFile, chmod, symlink, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, open, rename, link, writeFile, chmod, symlink, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -13,7 +13,13 @@ import { fileURLToPath } from 'node:url';
 import { boundedFile, fixtureBytes, ForegroundObservation, MAX_CIPHER, PHASES, PLAIN_BYTES,
   consumerFailureReport, depositDiagnostic, parseProcStat, replacementReady, requirePublishComplete, retainedSnapshot,
   retentionAdvanced, validateAppendProfile, validateCheckpoint, validateStorage,
-  createPublishCatalog, observeCatalogRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+  catalogWorkDirectory, createPublishCatalog, observeCatalogRestore, observeDavRestore, publish, withPublishCore, requestStageTarget, requestStageOutcome, withRequestStage } from './storage-consumer-maintenance.mjs';
+
+test('Cloud catalog publication and reads fit the guest GnuPG socket limit', () => {
+  const app = join('/opt', `va.${'a'.repeat(32)}.ABCDEF`, 'u/m/cloud');
+  const socket = join(catalogWorkDirectory(app), 'catalog-read-ABCDEF/g-abcdefgh/S.gpg-agent');
+  assert.ok(Buffer.byteLength(socket) < 104, socket);
+});
 
 test('request-stage target uses the actual per-copy journal and manifest provider association', () => {
   const providers = [1, 2, 3].map(value => ({ key: [...Buffer.alloc(32, value)] }));
@@ -1163,6 +1169,17 @@ test('four explicit phases and distinct deterministic incompressible fixture ide
   assert.throws(() => fixtureBytes('other'), /fixture_label/u);
 });
 
+test('Image exercise reports only known error codes from its own stages', () => {
+  const ctx = { provision: '1'.repeat(64), signal: new AbortController().signal, stage: 'image_owner_start' };
+  const failure = code => consumerFailureReport(ctx, 'exercise', Object.assign(new Error('private path'), { code }));
+  assert.equal(failure('maintenance_cleanup_unconfirmed').code, 'maintenance_cleanup_unconfirmed');
+  ctx.stage = 'image_repair';
+  assert.equal(failure('ENOENT').code, 'ENOENT');
+  assert.equal(failure('private path').code, 'application_failed');
+  ctx.stage = 'cloud_repair';
+  assert.equal(failure('ENOENT').code, 'application_failed');
+});
+
 test('same-fd private reads admit exact boundary and reject oversize, writable and symlink inputs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'storage-consumer-inert-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1173,6 +1190,31 @@ test('same-fd private reads admit exact boundary and reject oversize, writable a
   await chmod(path, 0o644); await assert.rejects(boundedFile(path, 4), /private_file/u);
   await chmod(path, 0o600); await symlink(path, join(root, 'link'));
   await assert.rejects(boundedFile(join(root, 'link'), 4));
+});
+
+test('atomic replica replacement between open and first fstat retries only a valid unlinked inode', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'storage-replica-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'replicas.json'), next = join(root, 'next');
+  await writeFile(path, 'old', { mode: 0o600 });
+  await writeFile(next, 'new', { mode: 0o600 });
+  const probe = await open(path);
+  const prototype = Object.getPrototypeOf(probe);
+  const originalStat = prototype.stat;
+  await probe.close();
+  t.mock.method(prototype, 'stat', async function (...args) {
+    await rename(next, path);
+    const retired = await Reflect.apply(originalStat, this, args);
+    assert.equal(retired.nlink, 0n);
+    return retired;
+  }, { times: 1 });
+  const ctx = { signal: new AbortController().signal, deadline: performance.now() + 2000 };
+  let reads = 0;
+  const bytes = await retainedSnapshot(ctx, () => { reads++; return boundedFile(path, 3); });
+  assert.equal(reads, 2);
+  assert.equal(bytes.toString(), 'new');
+  await link(path, join(root, 'alias'));
+  await assert.rejects(boundedFile(path, 3), { code: 'private_file' });
 });
 
 test('checkpoint validates authority scope and closed stage/cursor bounds', () => {
@@ -1191,6 +1233,43 @@ test('repair readiness requires both surviving providers and preserved unavailab
     r => { r[0].copies[1].provider_key = [...Buffer.from(keys[0], 'hex')]; },
     r => { r[0].handoff.phase = 'copying'; }, r => { r[1].copies[0].charge = 'uncertain'; }]) {
     const value = repaired(); mutate(value); assert.equal(replacementReady(value, keys), false);
+  }
+});
+
+test('DAV accounting uses exactly one matching foreground restore and survives later renewal uncertainty', async () => {
+  const digest = 'ab'.repeat(32), request = { sha256: digest }, control = { signal: AbortSignal.timeout(1000) };
+  const foreground = { ...storage(), operation: 'restore', restore_verified: true };
+  // Stopping a resumed owner after it marks a survivor uncertain gives a different status.
+  const later = storage();
+  later.storage.committed_payload_bytes = 175;
+  later.storage.uncertain_payload_bytes = 100;
+  const core = { async restore(r, c) { assert.equal(r, request); assert.equal(c, control); return foreground; },
+    async status() { return later; } };
+  const read = observeDavRestore((_input, options) => options.storageFactory('/private/config'), '/private/config', digest);
+  const bridge = await read.openCatalog({}, { storageFactory: async () => core });
+  assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
+  assert.equal(await read.download(() => bridge.restore(request, control)), foreground);
+  assert.throws(() => validateStorage(later, 100, 'repaired', 75), /repair_charge/u);
+  assert.deepEqual(read.accounting(100, 75), validateStorage(foreground, 100, 'repaired', 75));
+  await bridge.restore(request, control);
+  assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
+});
+
+test('DAV restore propagates the real result or failure and binds its digest and confirmation', async () => {
+  const selected = 'cd'.repeat(32);
+  for (const [requestDigest, verified, throws, inGet] of [
+    [selected, false, false, true], ['ab'.repeat(32), true, false, true], [selected, true, true, true],
+    [selected, true, false, false],
+  ]) {
+    const failure = Error('original failure'), value = { ...storage(), operation: 'restore', restore_verified: verified };
+    const core = { async restore() { if (throws) throw failure; return value; } };
+    const read = observeDavRestore((_input, options) => options.storageFactory('/config'), '/config', selected);
+    const bridge = await read.openCatalog({}, { storageFactory: async () => core });
+    const restore = () => bridge.restore({ sha256: requestDigest }, {});
+    const result = inGet ? read.download(restore) : restore();
+    if (throws) await assert.rejects(result, error => error === failure);
+    else assert.equal(await result, value);
+    assert.throws(() => read.accounting(100, 75), /cloud_restore_receipt/u);
   }
 });
 
@@ -1282,6 +1361,10 @@ test('entrypoint preserves actual app APIs, no runtime injection or reenrollment
   assert.match(exercise, /storageMaintenance: \[\{ config: join\(app, 'storage.json'\)/u);
   assert.match(exercise, /for await \(const chunk of dav\.streamFile\(selected\)\)/u);
   assert.match(exercise, /negativeAuthorization/u);
+  assert.match(exercise, /openCatalog: read\.openCatalog/u);
+  assert.match(exercise, /observeForeground\(ctx, app, c, \(\) => read\.download\(/u);
+  assert.match(exercise, /read\.accounting\(r\.cipher_bytes, retained\[name\]\.a_bytes\)/u);
+  assert.doesNotMatch(exercise, /await core\.status\(/u);
   assert.doesNotMatch(exercise, /enrollMaintenance|storePrivateFile|\.deposit\(|\.create\(|spawnProcess|openMaintenance:/u);
   assert.doesNotMatch(source, /npm|sudo|execSync|shell: true/u);
 });

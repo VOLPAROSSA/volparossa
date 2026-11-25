@@ -1,4 +1,4 @@
-//! Lost final acknowledgements on a real `SQLite` provider, over the normal owner IPC.
+//! Lost reservation and final acknowledgements on a real `SQLite` provider, over the normal owner IPC.
 use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
@@ -71,6 +71,26 @@ async fn reply(
     .await;
 }
 
+async fn receipt_timeout(stream: &mut UnixStream, request: ControlRequest, original: &[u8]) {
+    let Some(Operation::PrivateStorageOutcome(query)) = &request.operation else {
+        panic!("expected caller-bound local observation")
+    };
+    assert_eq!(query.original_request_id, original);
+    response(
+        stream,
+        request,
+        "PRIVATE_STORAGE_OUTCOME",
+        Payload::PrivateStorageOutcome(PrivateStorageOutcome {
+            status: PrivateStorageOutcomeStatus::Observed as i32,
+            phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
+            category: PrivateStorageOutcomeCategory::Timeout as i32,
+            deadline: PrivateStorageOutcomeDeadline::Operation as i32,
+            ..Default::default()
+        }),
+    )
+    .await;
+}
+
 async fn serve(
     listener: UnixListener,
     provider: SigningKey,
@@ -113,23 +133,7 @@ async fn serve(
             }
             reply(&mut stream, request, &signed, &provider, &mut backend).await;
         } else {
-            let Some(Operation::PrivateStorageOutcome(query)) = &request.operation else {
-                panic!("expected caller-bound local observation after Finalize")
-            };
-            assert_eq!(query.original_request_id, original);
-            response(
-                &mut stream,
-                request,
-                "PRIVATE_STORAGE_OUTCOME",
-                Payload::PrivateStorageOutcome(PrivateStorageOutcome {
-                    status: PrivateStorageOutcomeStatus::Observed as i32,
-                    phase: PrivateStorageOutcomePhase::RemoteReceiptRead as i32,
-                    category: PrivateStorageOutcomeCategory::Timeout as i32,
-                    deadline: PrivateStorageOutcomeDeadline::Operation as i32,
-                    ..Default::default()
-                }),
-            )
-            .await;
+            receipt_timeout(&mut stream, request, &original).await;
         }
     }
     if background {
@@ -225,4 +229,127 @@ async fn deposit_case(delivered: bool, background: bool) {
     assert_eq!(usage.leases, 1);
     assert_eq!(usage.committed_bytes, if delivered { 32 } else { 0 });
     assert_eq!(usage.reserved_bytes + usage.committed_bytes, 32);
+}
+
+#[tokio::test]
+async fn lost_reserve_receipt_recovers_the_same_lease_through_deposit_and_owner_delete() {
+    tokio::time::timeout(std::time::Duration::from_secs(15), reserve_case())
+        .await
+        .expect("lost Reserve must finish within the bounded script");
+}
+
+async fn serve_reserve(
+    listener: UnixListener,
+    provider: SigningKey,
+    grant: VerifiedStorageGrant,
+    mut backend: PrivateStorageProvider,
+    target: StorageTarget,
+    reserve: StorageOperation,
+) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let request = read_request(&mut stream).await.unwrap();
+    let signed = outcome_transfer::signed_request(&mut stream, &request, &provider, &grant).await;
+    assert_eq!(signed.target(), target);
+    assert_eq!(signed.operation(), reserve);
+    let first = backend
+        .apply(&signed, &[], crate::storage::now().unwrap())
+        .unwrap();
+    drop(stream); // Receipt lost after SQLite allocated the original lease.
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let query = read_request(&mut stream).await.unwrap();
+    receipt_timeout(&mut stream, query, &request.request_id).await;
+
+    let known = StorageTarget {
+        lease_id: Some(first.receipt.lease_id),
+        ..target
+    };
+    for (operation, expected) in [
+        (reserve, target),
+        (
+            StorageOperation::Append {
+                offset: 0,
+                length: 32,
+                sha256: target.sha256,
+            },
+            known,
+        ),
+        (StorageOperation::Finalize, known),
+        (StorageOperation::Delete, known),
+    ] {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut stream).await.unwrap();
+        let signed =
+            outcome_transfer::signed_request(&mut stream, &request, &provider, &grant).await;
+        assert_eq!(signed.target(), expected);
+        assert_eq!(signed.operation(), operation);
+        reply(&mut stream, request, &signed, &provider, &mut backend).await;
+    }
+}
+
+async fn reserve_case() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let socket = root.join("agent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (provider, owner, grant) = fixture_grant();
+    let path = root.join("provider");
+    let store = PrivateStorageStore::create(
+        &path,
+        StorageLimits {
+            capacity_bytes: CHUNK_BYTES as u64,
+            min_free_bytes: 0,
+        },
+    )
+    .unwrap();
+    let backend = PrivateStorageProvider::new(store, provider.verifying_key()).unwrap();
+    let expires_at = crate::storage::now().unwrap() + 600;
+    let reserve = StorageOperation::Reserve { expires_at };
+    let bytes = [23_u8; 32];
+    let hash = Sha256::digest(bytes).into();
+    let journal = Journal::new(&grant, 32, hash, expires_at).unwrap();
+    let target = journal.target().unwrap();
+    let server = tokio::spawn(serve_reserve(
+        listener,
+        provider,
+        grant.clone(),
+        backend,
+        target,
+        reserve,
+    ));
+    let journal_path = root.join("owner");
+    let mut retained = LockedJournal::create(&journal_path, journal).unwrap();
+    let input = root.join("ciphertext");
+    fs::write(&input, bytes).unwrap();
+    let mut input = fs::File::open(input).unwrap();
+    transfer::deposit_retained(&socket, &grant, &owner, &mut retained, &mut input)
+        .await
+        .unwrap();
+    drop(retained);
+    let mut reopened = LockedJournal::open(&journal_path).unwrap();
+    assert_eq!(
+        reopened.journal.last_state,
+        Some(ReceiptState::Committed as i32)
+    );
+    transfer::operate_retained(
+        &socket,
+        &grant,
+        &owner,
+        &mut reopened,
+        StorageOperation::Delete,
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        reopened.journal.last_state,
+        Some(ReceiptState::Deleted as i32)
+    );
+    let usage = PrivateStorageStore::open_existing(&path)
+        .unwrap()
+        .usage()
+        .unwrap();
+    assert_eq!(
+        (usage.leases, usage.reserved_bytes, usage.committed_bytes),
+        (0, 0, 0)
+    );
 }

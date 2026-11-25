@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Real, separate CLI processes exercising durable local opaque-blob storage.
+//! Real CLI processes exercising durable local storage and offline peer failures.
 //! These synthetic bytes are NOT an actual Signal archive or encrypted-message
 //! fixture. These tests prove neither encryption nor remote/network custody.
 
@@ -13,6 +13,47 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const CHUNK_BYTES: usize = 256 * 1024;
+
+#[test]
+fn peer_progress_failure_diagnostic_is_opt_in_and_preserves_the_exit_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let provider = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let run = |diagnostic: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_volparossa"));
+        command
+            .args(["storage", "peer", "progress", "--state"])
+            .arg(root.join("private-journal"))
+            .arg("--provider-key")
+            .arg(hex::encode(provider.to_bytes()))
+            .arg("--identity")
+            .arg(root.join("private-identity"))
+            .arg("--passphrase-file")
+            .arg(root.join("missing-private-passphrase"))
+            .env("RUST_LIB_BACKTRACE", "0")
+            .stdin(Stdio::null());
+        if diagnostic {
+            command.arg("--failure-diagnostic");
+        }
+        command.output().unwrap()
+    };
+    let plain = run(false);
+    let observed = run(true);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(plain.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&plain.stderr).contains("cannot read content identity passphrase")
+    );
+    assert_eq!(observed.status, plain.status);
+    assert_eq!(observed.stderr, plain.stderr);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&observed.stdout).unwrap(),
+        serde_json::json!({
+            "version": 1, "operation": "progress", "stage": "unknown",
+            "category": "unknown", "agent_code": null,
+        }),
+    );
+}
 
 fn invoke(root: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_volparossa"));

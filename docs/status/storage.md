@@ -393,3 +393,32 @@ matched, the topology reported zero remaining owned objects and the local fixtur
 was removed. The separate Core fragment lifecycle reported zero usage at its three
 providers. Remote cleanup and provider usage for the two application deposits
 remain unconfirmed. [Original exercise and cleanup reports](../development/evidence/storage-maintenance-45408914106) · [110,808-byte original archive, SHA-256 `90f4619e…80c022e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45408914106/artifacts/14933057121)
+
+On Core `29b82140` the client restarted with its original Storage enrollment.
+Route selection ended after twelve Connect calls with `NO_ELIGIBLE_PATHS`
+before the first path poll. The selection window included eleven invalid
+snapshot events and one no-exit event. The owner observed Core loss and advanced
+its cursor from 3 to 4. A second termination interrupted owner cleanup. The
+original receipt records neither a joined owner nor a process exit status.
+Guest cleanup removed its objects and its network snapshots matched. The
+applications had not started. [Original JSON receipts](../development/evidence/storage-maintenance-45419750177) · [KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177) · [35,674-byte archive, SHA-256 `eb2279cb…01a5f045`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45419750177/artifacts/14934864537)
+
+Core `f176b1b7` reconnected on its second Connect after the deliberate restart.
+The same owner retained its identities, advanced its cursor from 4 to 5 and
+joined. Immich and OpenCloud each published four fragments with two copies,
+1,598,292 committed bytes and zero uncertain bytes. The publication observer
+counted 56 completed protected flows and zero failed flows. [Original restart and publication receipts](../development/evidence/storage-maintenance-45506380399)
+
+During the shared restore exercise the route observer rejected the route binding
+after seven samples. Its receipt counted zero completed or failed flows in that
+window. The guest removed its local fixtures and retained zero remaining owned
+objects. The matching guest network digests and separate Core zero-usage receipt
+leave both application provider balances unverified. Shared cold restoration,
+owner deletion and the finite upload continuation remain open. [Original exercise and cleanup](../development/evidence/storage-maintenance-45506380399/storage-consumer-exercise.json) · [Full 111,492-byte archive, SHA-256 `fbdb5704…60633b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/45506380399/artifacts/14977026645)
+
+The candidate carries the same read-only MPTCP path and admitted control-relay
+observations as the Firefox trial. Each Storage sample still requires two
+matching live path observations around the control query, with the authorized
+exit and three distinct relays. An owner receipt can be retained separately if
+this gate fails. Cleanup of a retained application deposit still requires its
+owner signature and an independently queried provider balance. [Shared sampler and status changes](https://github.com/VOLPAROSSA/volparossa/pull/422) · [Repeated termination regression](https://github.com/VOLPAROSSA/volparossa/commit/81872882fb7ea8e52f75455a5060c9fd5c1b6932)

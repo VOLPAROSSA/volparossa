@@ -3,6 +3,7 @@
 """Inert orchestration contracts; not actual application or network evidence."""
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -11,6 +12,125 @@ TEXT = SCRIPT.read_text()
 
 
 class ConsumerShell(unittest.TestCase):
+    def test_failed_publish_delete_exports_only_closed_states_and_preserves_the_primary_failure(self):
+        script = """
+. "$1"
+consumer_user=/owner
+binary_directory=/bin
+WORK=/fixture
+private_storage_consumer_private() { printf '%s' "$sample"; return "$status"; }
+private_storage_consumer_release_known image
+"""
+        for sample, status, expected in [('owner_confirmed', 0, 'owner_confirmed'), ('unconfirmed', 0, 'unconfirmed'),
+                ('secret pathname', 0, 'unavailable'), ('owner_confirmed', 1, 'unavailable')]:
+            result = subprocess.run(['sh', '-eu', '-c', script, 'fixture', str(SCRIPT)],
+                env={'sample': sample, 'status': str(status)}, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), expected)
+        phase = TEXT.split('private_storage_consumer_phase() {', 1)[1].split('\n}', 1)[0]
+        self.assertLess(phase.index('storage-consumer-failure-boundary.py'), phase.index('private_storage_consumer_release_known image'))
+        self.assertLess(phase.index('private_storage_consumer_release_known cloud'), phase.index('fail CONSUMER_APPLICATION_FAILED'))
+
+    def test_failed_application_phase_releases_owners_and_reopens_only_the_withdrawn_original(self):
+        # Replace every network and process command. The real source determines
+        # which stages to call and whether the original error survives.
+        script = """
+. "$1"
+WORK=$2
+storage_consumer_profile_version=10
+consumer_user=$WORK/u/m
+WORKER_UID=1
+binary_directory=/unused
+storage_user=/unused
+storage_store_a=$3
+python3() { [ "$3" = flow-minimum ] && { echo 1; return 0; }; return 1; }
+timeout() { return 0; }
+storage_consumer_phase_start() { :; }
+private_storage_consumer_private() {
+    case $1 in
+        release-ready) return "$test_ready" ;;
+        release-known) echo "$3-$6" >>"$WORK/operations"; echo owner_confirmed ;;
+        *) return 1 ;;
+    esac
+}
+private_storage_replicas_serve() { echo "$1-$2" >>"$WORK/operations"; return 1; }
+fail() { echo "$1"; exit 7; }
+private_storage_consumer_phase "$4"
+"""
+        for phase, ready, original, reopen in (('exercise', 0, True, True), ('exercise', 0, False, False),
+                ('exercise', 1, True, False), ('finish', 0, True, False)):
+            with self.subTest(phase=phase, ready=ready, original=original), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                store = root / 'state-relay4/private-store'
+                store.mkdir(parents=True)
+                inode = f'{store.stat().st_dev}:{store.stat().st_ino}' if original else 'replaced'
+                result = subprocess.run(['sh', '-eu', '-c', script, 'inert', str(SCRIPT), tmp, inode, phase],
+                    env={'PATH': '/usr/bin:/bin', 'test_ready': str(ready)}, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(result.stdout.strip(), 'CONSUMER_APPLICATION_FAILED')
+                self.assertEqual((root / 'operations').read_text().splitlines(),
+                    (['relay4-yes'] if reopen else []) + ['image-' + phase, 'cloud-' + phase])
+
+    def test_provider_snapshot_after_failed_publish_preserves_the_healthy_upload_continuation(self):
+        script = """
+. "$1"
+WORK=$2
+consumer_user=$WORK/u/m
+storage_consumer_profile_version=$3
+storage_fixture_correlation=$4
+consumer_image_release=$5
+consumer_cloud_release=$6
+private_storage_consumer_usage_snapshot() { echo snapshot; return 1; }
+private_storage_consumer_private() { printf '%s\n' "$@"; }
+private_storage_consumer_cleanup
+private_storage_consumer_cleanup
+"""
+        for profile, correlation, image, cloud, snapshot in [
+                ('10', 'no', 'owner_confirmed', 'unconfirmed', True),
+                ('10', 'no', 'no_archive', 'unavailable', True),
+                ('10', 'no', '', '', False),
+                ('10', 'no', 'owner_confirmed', '', False),
+                ('10', 'yes', '', '', True),
+                ('9', 'no', '', '', False)]:
+            with self.subTest(profile=profile, correlation=correlation, image=image, cloud=cloud), tempfile.TemporaryDirectory() as work:
+                (Path(work) / 'u').mkdir()
+                result = subprocess.run(['sh', '-eu', '-c', script, 'fixture', str(SCRIPT), work,
+                    profile, correlation, image, cloud], capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.splitlines(), ['snapshot'] if snapshot else [])
+                expected = ['cleanup', str(Path(work) / 'u/m')]
+                if image and cloud:
+                    expected.extend([image, cloud])
+                record = Path(work) / 'storage-consumer-private-cleanup.json'
+                self.assertEqual(record.read_text().splitlines(), expected)
+
+    def test_catalog_restore_socket_fits_the_guest_root_before_owner_setup(self):
+        # Stop at the first install. Only the preflight runs with the real guest path shape.
+        script = '''
+. "$1"
+WORK=$2
+private_storage_maintenance=yes
+storage_consumer_profile_version=10
+WORKER_UID=123
+WORKER_GID=123
+jq() { return 0; }
+storage_consumer_control_prepare() { exit 99; }
+fail() { echo "$1"; exit 1; }
+install() { echo "$consumer_longest_socket"; exit 0; }
+private_storage_consumer_run
+'''
+        work = '/opt/va.' + 'a' * 32 + '.abcdef'
+        suffix = '/catalog-read-XXXXXX/g-xxxxxxxx/S.gpg-agent'
+        self.assertEqual(len((work + '/u/m/cloud/work' + suffix).encode()), 105)
+        for extra, length in (('', 102), ('x', 103), ('xx', 104)):
+            with self.subTest(length=length):
+                socket = work + extra + '/u/m/cloud/w' + suffix
+                self.assertEqual(len(socket.encode()), length)
+                result = subprocess.run(['sh', '-eu', '-c', script, 'inert', str(SCRIPT), work + extra],
+                    capture_output=True, text=True, timeout=5)
+                if length < 104:
+                    self.assertEqual((result.returncode, result.stdout.strip()), (0, socket))
+                else:
+                    self.assertEqual((result.returncode, result.stdout.strip()), (1, 'CONSUMER_SOCKET_PATH_TOO_LONG'))
+
     def test_joined_consumer_capacity_fits_both_objects_without_changing_other_profiles(self):
         script = '''
 . "$1"
@@ -66,7 +186,8 @@ private_storage_replicas_serve relay4 "$3"
                 'storage-consumer-maintenance-pins-v3.json', 'storage-consumer-maintenance-pins-v4.json',
                 'storage-consumer-maintenance-pins-v5.json', 'storage-consumer-maintenance-pins-v6.json',
                 'storage-consumer-maintenance-pins-v7.json', 'storage-consumer-maintenance-pins-v8.json',
-                'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json'):
+                'storage-consumer-maintenance-pins-v9.json', 'storage-consumer-maintenance-pins-v10.json',
+                'storage-consumer-maintenance-pins-v10-current.json'):
             self.assertIn(f'"$source_directory/tests/integration/{name}"', guest)
             self.assertIn(f'"$WORK/bin/{name}"', guest)
 

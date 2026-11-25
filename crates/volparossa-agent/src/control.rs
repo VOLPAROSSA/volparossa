@@ -980,15 +980,20 @@ async fn paths_response(
     routes: &ClientRouteControl,
     state: &Arc<RwLock<AgentState>>,
 ) -> ControlResponse {
-    if routes.refresh_mpquic_path_summaries().await.is_err() {
-        return response(
-            request_id,
-            ControlResult::Unavailable,
-            "MPQUIC_PATH_STATUS_UNAVAILABLE",
-            control_response::Payload::Ack(Empty {}),
-        );
-    }
-    let paths = state.read().await.path_list();
+    let committed = state.read().await.path_list_without_mpquic();
+    let paths = if let Some(paths) = committed {
+        paths
+    } else {
+        if routes.refresh_mpquic_path_summaries().await.is_err() {
+            return response(
+                request_id,
+                ControlResult::Unavailable,
+                "MPQUIC_PATH_STATUS_UNAVAILABLE",
+                control_response::Payload::Ack(Empty {}),
+            );
+        }
+        state.read().await.path_list()
+    };
     response(
         request_id,
         ControlResult::Ok,
@@ -1497,6 +1502,62 @@ mod tests {
             panic!("explicit paths response");
         };
         assert_eq!(paths.paths, vec![path]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paths_query_waits_for_a_busy_owner_only_for_committed_mpquic() {
+        let config = Config::default();
+        let state = Arc::new(RwLock::new(
+            AgentState::new(
+                &config,
+                config.roles,
+                None,
+                volparossa_metrics::MetricsRegistry::new(),
+            )
+            .unwrap(),
+        ));
+        let route =
+            ClientRouteControl::new_with_agent_state(PathBuf::default(), Arc::clone(&state));
+        let _busy = route.hold_route_owner_for_test().await;
+        let paths = |context| {
+            (1..=2)
+                .map(|id| volparossa_local_control::PathSummary {
+                    route_context_id: vec![context; 16],
+                    path_id: id,
+                    relay_peer_id: format!("relay-{id}"),
+                    exit_peer_id: "exit".into(),
+                    state: volparossa_local_control::PathState::Reachable as i32,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mptcp = paths(2);
+        state
+            .write()
+            .await
+            .replace_mptcp_paths(mptcp.clone())
+            .unwrap();
+        let query = || {
+            timeout(
+                Duration::from_secs(3),
+                paths_response(vec![1; 16], &route, &state),
+            )
+        };
+        let result = query()
+            .await
+            .expect("committed MPTCP paths are readable during acquisition");
+        assert_eq!(result.result, ControlResult::Ok as i32);
+        assert_eq!(
+            result.payload,
+            Some(control_response::Payload::Paths(
+                volparossa_local_control::PathList { paths: mptcp },
+            ))
+        );
+        state.write().await.replace_mpquic_paths(paths(3)).unwrap();
+        assert!(
+            query().await.is_err(),
+            "mixed paths must refresh the native MPQUIC owner"
+        );
     }
 
     #[tokio::test]

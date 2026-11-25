@@ -38,6 +38,8 @@ const APPEND_REVISIONS = Object.freeze({ image: '10c46b9d6424929748e324fdd188a2f
   cloud: 'dda7a21818ece774445cf63d6e9a01fe0f2803b2' });
 const FLOW_REVISIONS = Object.freeze({ image: '9694a2b9dcb40aceefd78dbc0ab34303071a0ffd',
   cloud: '47b0f03b84913761570c3de7037ba5509b848c23' });
+export const CURRENT_REVISIONS = Object.freeze({ image: '21988efc1ba112a9840e0f052f4e4d0dc56a9d63',
+  cloud: '08be97111c323df95af68b3331eabd260957d0e4' });
 const CHALLENGE_READ_REVISIONS = Object.freeze({ image: 'f51b8ace0352377c7068a93fc8f4544f18e52978',
   cloud: '5f143725fd18c98848beb61c9198a82066bfec13' });
 const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'working', 'paused',
@@ -45,7 +47,8 @@ const CHECKPOINTS = new Set(['enrolled', 'owner_locked', 'waiting_for_core', 'wo
 const SQL = Buffer.from('-- VOLPAROSSA synthetic quiesced snapshot\nCREATE TABLE fixture (id integer);\nINSERT INTO fixture VALUES (1);\n');
 const HASH = /^[a-f0-9]{64}$/u;
 const FAILURE_CODES = new Set(['phase_deadline', 'authority_expired', 'authority_changed', 'retained_binding',
-  'foreground_observation_missing', 'storage_result', 'repair_charge', 'delete_charge', 'publish_charge',
+  'foreground_observation_missing', 'storage_result', 'repair_charge', 'repair_placement', 'repair_pending', 'repair_redundancy',
+  'cloud_restore_receipt', 'delete_charge', 'publish_charge',
   'retention_identity', 'retention_geometry', 'checkpoint', 'child_cleanup', 'owner_join', 'image_restore',
   'image_decrypt', 'plaintext_mismatch', 'cloud_size', 'cloud_body', 'cloud_plaintext_cleanup', 'authorization',
   'cipher_identity', 'cipher_receipt', 'snapshot_crypto', 'publish_operation', 'enrollment_policy', 'enrollment',
@@ -68,6 +71,11 @@ const CATALOG_CODES = Object.freeze({
   PRIVATE_STAGE_CHANGED: 'catalog_stage_changed',
   CANCELLED: 'catalog_cancelled',
 });
+const IMAGE_EXERCISE_STAGES = new Set(['image_owner_start', 'image_repair', 'image_foreground_restore',
+  'image_decrypt', 'image_joined']);
+const IMAGE_EXERCISE_CODES = new Set(['ENOENT', 'EACCES', 'ELOOP', 'core_spawn_failed', 'enrollment_changed',
+  'foreground_cleanup_unconfirmed', 'maintenance_cleanup_unconfirmed', 'local_input_changed',
+  'local_input_unavailable', 'local_verification_failed', 'invalid_maintenance_report', 'operation_in_progress']);
 const PUBLISH_FAILURE_CODES = new Set([...Object.values(CATALOG_CODES), 'core_close_failed']);
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const check = (value, code) => { if (!value) fail(code); };
@@ -286,7 +294,7 @@ export function requirePublishComplete(value, app, operation, profileVersion = 1
 }
 
 export function consumerFailureReport(ctx, phase, error) {
-  if (error instanceof RequestStageFailure) return error.primary;
+  if (error instanceof CapturedFailure) return error.primary;
   if (error instanceof PublishLifecycleFailure) {
     return { ...error.primary, version: error.catalogRestore ? 13 : ctx.profileVersion + 2,
       ...(error.catalogRestore ? { catalog_restore: error.catalogRestore } : {}), publish_cleanup: error.cleanup };
@@ -295,6 +303,7 @@ export function consumerFailureReport(ctx, phase, error) {
   return { version: publish ? error.observation.version + 1 : 1, kind: 'storage-consumer-maintenance', phase, passed: false,
     provision_sha256: ctx.provision, stage: ctx.stage,
     code: ctx.signal.aborted ? 'phase_deadline' : FAILURE_CODES.has(error?.code)
+      || (phase === 'exercise' && IMAGE_EXERCISE_STAGES.has(ctx.stage) && IMAGE_EXERCISE_CODES.has(error?.code))
       || ([8, 9, 10].includes(ctx.profileVersion) && phase === 'publish' && PUBLISH_FAILURE_CODES.has(error?.code))
       ? error.code : 'application_failed',
     ...(publish ? { publish_observation: error.observation } : {}), cleanup_confirmed: false };
@@ -309,10 +318,13 @@ class PublishLifecycleFailure extends Error {
   }
 }
 
-class RequestStageFailure extends Error {
-  constructor(primary, cause) {
-    super('request_stage_original_failure', { cause });
-    this.primary = Object.freeze(primary);
+class CapturedFailure extends Error {
+  constructor(ctx, phase, cause) {
+    super('original_operation_failed', { cause });
+    let report;
+    try { report = consumerFailureReport(ctx, phase, cause); }
+    catch { report = consumerFailureReport(ctx, phase, undefined); }
+    this.primary = Object.freeze(report);
   }
 }
 
@@ -439,11 +451,9 @@ export async function withRequestStage(ctx, app, config, operation,
   } catch (error) {
     // Freeze the original phase outcome before optional query/disarm latency can
     // cross its deadline. No diagnostic error can replace this failure receipt.
-    let primary;
-    try { primary = consumerFailureReport(ctx, 'publish', error); }
-    catch { primary = consumerFailureReport(ctx, 'publish', undefined); }
+    const failure = new CapturedFailure(ctx, 'publish', error);
     if (finish) await finish(requestStageOutcome(error));
-    throw new RequestStageFailure(primary, error);
+    throw failure;
   }
 }
 
@@ -550,6 +560,9 @@ export function observeCatalogRestore(storageFactory) {
   } };
 }
 
+// GnuPG nests a temporary home under the catalog staging directory in the guest.
+export function catalogWorkDirectory(app) { return join(app, 'w'); }
+
 export async function createPublishCatalog(ctx, m, request, options) {
   if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = 'cloud_catalog_create';
   const observer = ctx.profileVersion === 10 ? observeCatalogRestore(options.storageFactory) : null;
@@ -593,9 +606,12 @@ export async function boundedFile(path, maximum, { publicFile = false } = {}) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
-    check(before.isFile() && before.nlink === 1n && before.size > 0n && before.size <= BigInt(maximum)
+    check(before.isFile() && before.size > 0n && before.size <= BigInt(maximum)
       && (publicFile ? before.uid === 0n && (before.mode & 0o022n) === 0n
         : before.uid === BigInt(process.getuid()) && (before.mode & 0o7777n) === 0o600n), 'private_file');
+    // Core atomically renames a complete private manifest over the previous inode.
+    // A descriptor opened just before replacement can already be unlinked at first stat.
+    check(before.nlink === 1n, !publicFile && before.nlink === 0n ? 'input_changed' : 'private_file');
     const bytes = Buffer.alloc(Number(before.size) + 1);
     let offset = 0;
     while (offset < bytes.length) {
@@ -654,11 +670,12 @@ export function validateStorage(result, bytes, kind, aBytes = 0) {
     'delete_charge');
   } else if (kind === 'repaired') {
     check(s.report_version === 2 && s.placement_authorizations === 3 && s.retained_copy_records === 11
-      && s.pending_retirements === 3 && s.replacement_overhead_included === true
-      && s.desired_copies_per_fragment === 2 && s.committed_payload_bytes === 2 * bytes
-      && s.uncertain_payload_bytes === aBytes && s.physical_payload_charge_upper_bound === 2 * bytes + aBytes
-      && s.fragments_with_confirmed_unexpired_copy === 4 && s.fully_redundant_from_retained_receipts === true,
-    'repair_charge');
+      && s.replacement_overhead_included === true && s.desired_copies_per_fragment === 2, 'repair_placement');
+    check(s.pending_retirements === 3, 'repair_pending');
+    check(s.committed_payload_bytes === 2 * bytes && s.uncertain_payload_bytes === aBytes
+      && s.physical_payload_charge_upper_bound === 2 * bytes + aBytes, 'repair_charge');
+    check(s.fragments_with_confirmed_unexpired_copy === 4 && s.fully_redundant_from_retained_receipts === true,
+      'repair_redundancy');
   } else {
     check(kind === 'published', 'storage_kind');
     check(s.physical_payload_charge_upper_bound === 2 * bytes && s.committed_payload_bytes === 2 * bytes
@@ -909,7 +926,8 @@ async function guard(root, profileVersion) {
     && provision.kind === 'storage-consumer-maintenance-runtime-provision'
     && provision.success === true && provision.guest_only === true && provision.shared_adapter_verified === true,
   'provision');
-  const revisions = profileVersion === 10 ? CHALLENGE_READ_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
+  const current = profileVersion === 10 && provision.pins.sources.image?.revision === CURRENT_REVISIONS.image;
+  const revisions = current ? CURRENT_REVISIONS : profileVersion === 10 ? CHALLENGE_READ_REVISIONS : profileVersion === 9 ? FLOW_REVISIONS : profileVersion === 8 ? APPEND_REVISIONS : profileVersion === 7 ? CHALLENGE_REVISIONS : profileVersion === 6 ? STREAM_REVISIONS : profileVersion === 5 ? OUTCOME_REVISIONS
     : profileVersion === 4 ? TLS_REVISIONS : profileVersion === 3 ? DETAIL_REVISIONS
     : profileVersion === 2 ? DIAGNOSTIC_REVISIONS : REVISIONS;
   for (const [name, source] of Object.entries(provision.pins.sources)) {
@@ -1013,10 +1031,11 @@ export async function publish(ctx, m) {
       }
       if (name === 'cloud') {
         ctx.stage = [8, 9, 10].includes(ctx.profileVersion) ? 'cloud_catalog_prepare' : 'cloud_catalog';
-        await fresh(join(app, 'work'));
+        const workDirectory = catalogWorkDirectory(app);
+        await fresh(workDirectory);
         await createPublishCatalog(ctx, m, { selection: [{ segments: ['synthetic-space', 'synthetic.bin'],
           bundle: join(app, 'bundle'), config: join(app, 'storage.json') }], output: join(app, 'catalog'),
-        workDirectory: join(app, 'work'), maxTotalBytes: 4 * MAX_CIPHER }, { signal: ctx.signal, storageFactory: factory });
+        workDirectory, maxTotalBytes: 4 * MAX_CIPHER }, { signal: ctx.signal, storageFactory: factory });
       }
       if ([8, 9, 10].includes(ctx.profileVersion)) ctx.stage = `${name}_policy_read`;
       const policy = await json(join(app, 'maintenance-policy.json'), 32768);
@@ -1053,6 +1072,38 @@ async function negativeAuthorization(origin, signal) {
 async function waitRepaired(ctx, app, c) {
   await until(ctx, () => repairedOnDisk(app, c));
 }
+// The foreground RESTORE finishes before the owner resumes renewal. Keep the result
+// of the authenticated DAV read, which can differ from a status sampled after shutdown.
+export function observeDavRestore(openCatalog, expectedConfig, expectedDigest) {
+  let calls = 0, receipt, reading = false;
+  return {
+    async download(operation) {
+      check(!reading, 'cloud_restore_receipt');
+      reading = true;
+      try { return await operation(); } finally { reading = false; }
+    },
+    openCatalog(input, options) {
+      const factory = options.storageFactory;
+      check(typeof factory === 'function', 'configuration');
+      return openCatalog(input, { ...options, storageFactory: async config => {
+        check(config === expectedConfig, 'configuration');
+        const core = await factory(config);
+        return { async restore(request, control) {
+          const matched = reading && request.sha256 === expectedDigest;
+          calls++;
+          const value = await core.restore(request, control);
+          if (calls === 1 && matched) receipt = value;
+          return value;
+        } };
+      } });
+    },
+    accounting(bytes, unavailableBytes) {
+      check(calls === 1 && receipt?.operation === 'restore' && receipt.restore_verified === true,
+        'cloud_restore_receipt');
+      return validateStorage(receipt, bytes, 'repaired', unavailableBytes);
+    },
+  };
+}
 async function exercise(ctx, m) {
   const retained = await json(join(ctx.root, 'consumer-binding.json'));
   check(retained.version === 1 && retained.provision_sha256 === ctx.provision, 'retained_binding');
@@ -1068,18 +1119,19 @@ async function exercise(ctx, m) {
       await removeCipher(app, r);
       if (name === 'image') {
         const core = await m.CoreStorage.open(join(app, 'storage.json'));
-        let session;
         try {
+          ctx.stage = 'image_owner_start';
+          const session = await core.startMaintenance({ enrollment: join(app, 'maintenance') }, { signal: ctx.signal });
           ctx.stage = 'image_repair';
-          session = await core.startMaintenance({ enrollment: join(app, 'maintenance') }, { signal: ctx.signal });
           await waitRepaired(ctx, app, c);
-          const accounting = validateStorage(await core.status({ signal: ctx.signal }), r.cipher_bytes, 'repaired', retained[name].a_bytes);
+          // Status pauses the owner too. Observe repair before the read and use the
+          // foreground restore's verified accounting when that read returns.
           ctx.stage = 'image_foreground_restore';
           const observed = await observeForeground(ctx, app, c, () => m.runSnapshotStorage({ operation: 'restore',
             config: join(app, 'storage.json'), receipt: join(app, 'bundle/receipt.json'), output: join(app, 'restored-bundle') },
           { signal: ctx.signal, storageFactory: async path => { check(path === join(app, 'storage.json'), 'configuration'); return core; } }));
           check(observed.value.restore_verified === true && observed.value.recovery_bundle_ready === true, 'image_restore');
-          validateStorage(observed.value, r.cipher_bytes, 'repaired', retained[name].a_bytes);
+          const accounting = validateStorage(observed.value, r.cipher_bytes, 'repaired', retained[name].a_bytes);
           ctx.stage = 'image_decrypt';
           await write(join(app, 'restored-bundle/recovery.key'), await boundedFile(join(app, 'bundle/recovery.key'), 1024));
           const decrypted = await python(['restore', '--bundle', join(app, 'restored-bundle'), '--expected-sha256', r.cipher_sha256,
@@ -1088,20 +1140,30 @@ async function exercise(ctx, m) {
             'image_decrypt');
           check((await boundedFile(join(app, 'restored-source/upload/synthetic-media.bin'), MAX_CIPHER)).equals(fixtureBytes(name))
             && (await boundedFile(join(app, 'restored-source/database.sql.gz'), 4096)).equals(gzipSync(SQL)), 'plaintext_mismatch');
+          ctx.stage = 'image_joined';
           await core.close();
           const stopped = await session.done;
           check(stopped.status === 'stopped' && stopped.local_process_joined === true, 'owner_join');
           result.image = { ...accounting, ...observed.lifecycle, cipher_cache_removed_before_read: true,
             application_decryption_verified: true, plaintext_sha256: sha(fixtureBytes(name)), plaintext_bytes: PLAIN_BYTES,
             quiesced_sql_dump_restored: true, original_enrollment_and_journals_retained: true, owner_joined: true };
-        } finally { await core.close(); }
+        } catch (error) {
+          // The phase fails closed and its supervisor independently checks teardown.
+          // A secondary close error must not replace the operation that failed.
+          const failure = new CapturedFailure(ctx, 'exercise', error);
+          try { await core.close(); } catch {}
+          throw failure;
+        }
       } else {
         ctx.stage = 'cloud_start';
         const token = randomBytes(32).toString('base64url');
-        const service = await m.startCloudService({ version: 1, catalog: join(app, 'catalog'), workDirectory: join(app, 'work'),
+        const workDirectory = catalogWorkDirectory(app);
+        const read = observeDavRestore(m.openPrivateCatalog, join(app, 'storage.json'), r.cipher_sha256);
+        const service = await m.startCloudService({ version: 1, catalog: join(app, 'catalog'), workDirectory,
           bearerToken: token, port: 0, allowedOrigins: [], maxOpenBytes: 4 * MAX_CIPHER, maxConcurrent: 1,
           requestTimeoutMs: 900000, maxRangeBytes: 4 * MAX_CIPHER,
-          storageMaintenance: [{ config: join(app, 'storage.json'), enrollment: join(app, 'maintenance') }] }, { signal: ctx.signal });
+          storageMaintenance: [{ config: join(app, 'storage.json'), enrollment: join(app, 'maintenance') }] },
+        { signal: ctx.signal, openCatalog: read.openCatalog });
         try {
           ctx.stage = 'cloud_repair';
           await waitRepaired(ctx, app, c);
@@ -1112,22 +1174,19 @@ async function exercise(ctx, m) {
             timeoutMs: 120000, totalTimeoutMs: 900000 });
           const selected = await dav.stat({ spaceId: 'synthetic-space', pathSegments: ['synthetic.bin'] });
           check(selected.size === PLAIN_BYTES, 'cloud_size');
-          const observed = await observeForeground(ctx, app, c, async () => {
+          const observed = await observeForeground(ctx, app, c, () => read.download(async () => {
             const hash = createHash('sha256'); let bytes = 0;
             for await (const chunk of dav.streamFile(selected)) {
               bytes += chunk.length; check(bytes <= PLAIN_BYTES && !ctx.signal.aborted, 'cloud_body'); hash.update(chunk);
             }
             check(bytes === PLAIN_BYTES && hash.digest('hex') === sha(fixtureBytes(name)), 'plaintext_mismatch');
-          });
+          }));
           await service.close();
-          const core = await m.CoreStorage.open(join(app, 'storage.json'));
-          try {
-            const accounting = validateStorage(await core.status({ signal: ctx.signal }), r.cipher_bytes, 'repaired', retained[name].a_bytes);
-            result.cloud = { ...accounting, ...observed.lifecycle, cipher_cache_removed_before_read: true,
-              authenticated_get_body_verified: true, wrong_token_status: 401, plaintext_sha256: sha(fixtureBytes(name)),
-              plaintext_bytes: PLAIN_BYTES, original_enrollment_and_journals_retained: true, owner_joined: true };
-          } finally { await core.close(); }
-          check((await readdir(join(app, 'work'))).length === 0, 'cloud_plaintext_cleanup');
+          const accounting = read.accounting(r.cipher_bytes, retained[name].a_bytes);
+          result.cloud = { ...accounting, ...observed.lifecycle, cipher_cache_removed_before_read: true,
+            authenticated_get_body_verified: true, wrong_token_status: 401, plaintext_sha256: sha(fixtureBytes(name)),
+            plaintext_bytes: PLAIN_BYTES, original_enrollment_and_journals_retained: true, owner_joined: true };
+          check((await readdir(workDirectory)).length === 0, 'cloud_plaintext_cleanup');
         } finally { await service.close(); }
       }
       await unchanged(app, retained[name]);

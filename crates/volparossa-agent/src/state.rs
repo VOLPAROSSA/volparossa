@@ -202,6 +202,13 @@ impl AgentState {
         }
     }
 
+    /// Copy the committed display under this read guard when no native MPQUIC refresh is due.
+    /// A concurrently admitted MPQUIC route publishes its identity and paths in one write.
+    #[must_use]
+    pub(crate) fn path_list_without_mpquic(&self) -> Option<PathList> {
+        self.mpquic_context_id.is_none().then(|| self.path_list())
+    }
+
     /// Publishes committed MPTCP relay paths, not observed active kernel subflows.
     ///
     /// Without per-subflow measurements these remain reachable with zero RTT and user bytes.

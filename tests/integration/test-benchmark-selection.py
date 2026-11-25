@@ -376,10 +376,12 @@ clock=100
 if benchmark_select_route private-storage-fragments mptcp; then exit 91; fi
 [ "$(cat "$WORK/private-storage-maintenance-selection-phase.private")" = initial ]
 [ "$(cat "$WORK/private-storage-maintenance-selection-end.private")" = 110 ]
+[ "$(cat "$WORK/private-storage-maintenance-connect-window.private")" = "1 100 110" ]
 clock=200
 benchmark_select_route private-storage-maintenance-reconnect mptcp
 [ "$(cat "$WORK/private-storage-maintenance-selection-phase.private")" = reconnect ]
 [ "$(cat "$WORK/private-storage-maintenance-selection-end.private")" = 210 ]
+[ ! -s "$WORK/private-storage-maintenance-connect-window.private" ]
 # A broken diagnostic writer on a later initialization must not preserve a
 # previous route result and falsely bind it to the new observation window.
 cp "$WORK/private-storage-maintenance-selection-route-diagnostic.json" "$WORK/observed.json"

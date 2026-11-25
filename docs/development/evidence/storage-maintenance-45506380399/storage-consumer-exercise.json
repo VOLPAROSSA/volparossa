@@ -1,0 +1,1 @@
+{"cleanup_confirmed": false, "code": "network_observation_failed", "kind": "storage-consumer-maintenance-orchestration", "network_version": 2, "passed": false, "phase": "exercise", "sampler": {"code": "invalid", "completed": 0, "failed": 0, "kind": "consumer-route-sampler-failure", "operation": "route_binding", "phase": "sampling", "samples": 7, "version": 1}, "version": 2}

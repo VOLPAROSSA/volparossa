@@ -75,7 +75,13 @@ pub(crate) enum Command {
     /// Upload already encrypted bytes; retain private state for interrupted-upload retries.
     Deposit(Deposit),
     /// Query the exact retained archive without reading, renewing or consuming it.
-    Progress(Existing),
+    Progress {
+        /// On failure, write a bounded JSON diagnostic to stdout.
+        #[arg(long)]
+        failure_diagnostic: bool,
+        #[command(flatten)]
+        existing: Existing,
+    },
     /// Restore into a NEW 0600 file, exposing it only after full length and SHA-256 checks.
     Restore(Restore),
     /// Explicitly extend this copy's finite lease within the original provider grant.
@@ -193,7 +199,16 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Grant(args) => grant(args, socket).await?,
         Command::Admission(args) => admission(&args, socket).await?,
         Command::Deposit(args) => Box::pin(transfer::deposit(args, socket)).await?,
-        Command::Progress(args) => transfer::existing(args, socket, None, false).await?,
+        Command::Progress {
+            failure_diagnostic,
+            existing,
+        } => transfer::existing(existing, socket, None, false)
+            .await
+            .inspect_err(|error| {
+                if failure_diagnostic {
+                    let _ = super::print(&diagnostics::progress_failure(error));
+                }
+            })?,
         Command::Restore(args) => Box::pin(transfer::restore(args, socket)).await?,
         Command::Renew(args) => {
             transfer::existing(args.existing, socket, Some(args.lifetime_seconds), false).await?
