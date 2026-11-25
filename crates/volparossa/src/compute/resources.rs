@@ -15,13 +15,15 @@ pub(super) struct Limits {
     pub(super) admission_headroom: Option<u64>,
 }
 
+pub(super) const SMALL_CPU: Limits = Limits {
+    address_space: 6 * GIB,
+    observed_rss: 3 * GIB,
+    admission_headroom: None,
+};
+
 pub(super) const fn limits(profile: ModelProfile) -> Limits {
     match profile {
-        ModelProfile::Default135 | ModelProfile::Smol360 => Limits {
-            address_space: 6 * GIB,
-            observed_rss: 3 * GIB,
-            admission_headroom: None,
-        },
+        ModelProfile::Default135 | ModelProfile::Smol360 => SMALL_CPU,
         ModelProfile::Smol1700 => Limits {
             address_space: 10 * GIB,
             observed_rss: 5 * GIB,

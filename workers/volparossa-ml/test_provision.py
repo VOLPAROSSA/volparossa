@@ -44,6 +44,14 @@ class ProvisionTests(unittest.TestCase):
         for profile in PROVISION.PROFILES:
             with self.subTest(profile=profile):
                 plain = PROVISION.load_pins(profile)
+                if profile == PROVISION.SPEECH_MODEL_PROFILE:
+                    with self.assertRaisesRegex(PROVISION.ProvisionError, "no task graph decoder"):
+                        PROVISION.load_pins(profile, task_graph_decoder=True)
+                    self.assertEqual(plain["wheels"], base["wheels"])
+                    weights = next(row for row in plain["files"] if row["path"] == "model.safetensors")
+                    self.assertEqual((weights["bytes"], weights["sha256"]), (966995080,
+                        "1d7734884874f1a1513ed9aa760a4f8e97aaa02fd6d93a3a85d27b2ae9ca596b"))
+                    continue
                 selected = PROVISION.load_pins(profile, task_graph_decoder=True)
                 self.assertEqual(selected["wheels"][:38], plain["wheels"])
                 self.assertEqual(selected["source_revisions"], plain["source_revisions"])

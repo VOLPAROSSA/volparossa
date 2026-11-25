@@ -42,6 +42,10 @@ PROFILE_WEIGHT_BYTES = {LARGE_MODEL_PROFILE: 723674912, REASONING_MODEL_PROFILE:
 PROFILE_PINS[QWEN_MODEL_PROFILE] = "model-pins-qwen3-0.6b.json"
 PROFILE_WEIGHT_BYTES[QWEN_MODEL_PROFILE] = 1503300328
 PROFILE_PINS[QWEN4B_MODEL_PROFILE] = "model-pins-qwen3-4b-instruct-2507.json"
+SPEECH_MODEL_PROFILE = "whisper-small-v1"
+PROFILES[SPEECH_MODEL_PROFILE] = ("openai/whisper-small", "973afd24965f72e36ca33b3055d56a652f456b4d")
+PROFILE_PINS[SPEECH_MODEL_PROFILE] = "model-pins-whisper-small.json"
+PROFILE_WEIGHT_BYTES[SPEECH_MODEL_PROFILE] = 966995080
 QWEN4B_SHARDS = {"model-00001-of-00003.safetensors": 3957900840,
                  "model-00002-of-00003.safetensors": 3987450520,
                  "model-00003-of-00003.safetensors": 99630640}
@@ -99,7 +103,8 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False, nat
             and pins["platform"] == "cpython-3.13-linux-x86_64"
             and pins["model_id"] == model_id and pins["revision"] == revision,
             "unsupported provisioning pin format/model")
-    count = 12 if model_profile == QWEN4B_MODEL_PROFILE else 9 if model_profile == QWEN_MODEL_PROFILE else 8
+    require(not task_graph_decoder or model_profile != SPEECH_MODEL_PROFILE, "speech has no task graph decoder")
+    count = {QWEN4B_MODEL_PROFILE: 12, QWEN_MODEL_PROFILE: 9, SPEECH_MODEL_PROFILE: 12}.get(model_profile, 8)
     require(len(pins["files"]) == count and len(pins["wheels"]) == 38,
             "unexpected artifact set")
     for group in (pins["files"], pins["wheels"]):
@@ -499,6 +504,12 @@ def execute(args, pins):
             for item in group:
                 print(json.dumps({"downloading": item["path"], "bytes": item["bytes"]}), flush=True)
                 download(item, directory / item["path"], opener, deadline)
+        if args.model_profile == SPEECH_MODEL_PROFILE:
+            notices = root / "notices"
+            notices.mkdir(mode=0o700)
+            license_root = HERE.parents[1] / "third_party/licenses"
+            shutil.copyfile(license_root / "openai-whisper-MIT.txt", notices / "OpenAI-MIT.txt")
+            shutil.copyfile(license_root / "mqvpn-Apache-2.0.txt", notices / "Apache-2.0.txt")
         verify_weight_set(pins, model, deadline)
         expanded = sum(wheel_expanded_bytes(wheels / x["path"]) for x in pins["wheels"])
         # Original wheels remain for license/provenance. No bytecode compilation;
