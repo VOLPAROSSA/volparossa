@@ -400,6 +400,36 @@ printf '%s\n' "$calls"
             value = json.loads(Path(temporary, 'observed.json').read_text())
             self.assertEqual((value['reason'], value['attempts'], value['retries']), ('SELECTED', 1, 0))
 
+    def test_first_custody_draw_waits_for_eligibility_within_a_fixed_budget(self):
+        script = r'''
+set -eu
+. "$1/benchmark-selection.sh"
+WORK=$2; scenario=$3; error=$4; binary_directory=/unused
+date() { printf '0\n'; }
+sleep() { :; }
+timeout() {
+    printf '1\n' >>"$WORK/attempts"
+    case "$error" in
+        early) [ "$(wc -l <"$WORK/attempts")" -lt 3 ] || return 0 ;;
+        denied) printf 'Error: agent rejected request: POLICY_UNAVAILABLE (Policy)\n' >&2; return 1 ;;
+    esac
+    printf 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)\n' >&2
+    return 1
+}
+benchmark_capture_paths() { printf '{}\n' >"$WORK/$1-selection.json"; }
+benchmark_select_route content-custody mptcp
+'''
+        for scenario, mode, attempts, success in (
+                ('content-custody', 'early', 3, True),
+                ('content-custody', 'persistent', 13, False),
+                ('content-custody', 'denied', 1, False),
+                ('content-provider', 'persistent', 1, False)):
+            with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(['sh', '-c', script, 'test', str(HERE), directory, scenario, mode],
+                    capture_output=True, timeout=10)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertEqual(len(Path(directory, 'attempts').read_text().splitlines()), attempts)
+
     def test_image_connect_diagnostic_keeps_only_allowlisted_native_reason(self):
         script = r'''
 set -eu

@@ -208,6 +208,7 @@ benchmark_select_route() {
     benchmark_attempt=0
     benchmark_draw=0
     benchmark_connect_count=0
+    benchmark_initial_no_path=0
     benchmark_connect_exit=null
     benchmark_connect_reason=NOT_STARTED
     benchmark_snapshot_status=null
@@ -269,7 +270,13 @@ benchmark_select_route() {
             if benchmark_route_diagnostic_prefix; then
                 benchmark_image_connect_reason "$WORK/$benchmark_label-connect.err"
             fi
-            if ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then
+            # On cold public-custody startup the first forwarded exit can appear
+            # before it is eligible. Retry only the original protected connect.
+            if [ "${scenario:-}:$benchmark_label:$benchmark_transport:$benchmark_draw" = content-custody:content-custody:mptcp:0 ] \
+                && [ "$benchmark_initial_no_path" -lt 12 ] \
+                && [ "$(cat "$WORK/$benchmark_label-connect.err")" = 'Error: agent rejected request: NO_ELIGIBLE_PATHS (Unavailable)' ]; then
+                benchmark_initial_no_path=$((benchmark_initial_no_path + 1))
+            elif ! a01_transient_connect_unavailable "$WORK/$benchmark_label-connect.err"; then
                 case $benchmark_connect_exit in
                     124|137) benchmark_image_route_diagnostic connect CONNECT_TIMEOUT ;;
                     *) benchmark_image_route_diagnostic connect CONNECT_REJECTED ;;
