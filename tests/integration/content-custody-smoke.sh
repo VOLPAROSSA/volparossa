@@ -442,24 +442,32 @@ content_custody_run() {
           agent_mount_positive_control:true,agent_cannot_read_user_state:true,client_cannot_read_provider_stores:true,
           user_cannot_read_agent_cache:true,fresh_consumer_cache:true,cache_mode:"0700",output_mode:"0600"}' \
         >"$WORK/content-custody-isolation.json"
-    PHASE=public-git-peer-recovery
-    git_holder=$(jq -er '.state.confirmed_holders[0]' "$WORK/content-custody-replacement.json") || fail GIT_HOLDER_MISSING
-    git_holder_node=$(jq -er --arg key "$git_holder" '.provider_keys | to_entries[] | select(.value == $key) | .key' \
-        "$WORK/content-custody-layout.json") || fail GIT_HOLDER_UNKNOWN
-    git_holder_peer=$(jq -er --arg node "$git_holder_node" '.[$node]' "$WORK/a01-expected-peers.json") || fail GIT_HOLDER_UNKNOWN
-    git_fixture=$WORK/client-fixtures/git-recovery
-    git_cache=$WORK/state-client/git-recovery-cache
-    [ ! -e "$git_fixture" ] && [ ! -L "$git_fixture" ] && [ ! -e "$git_cache" ] && [ ! -L "$git_cache" ] || fail GIT_RECOVERY_NOT_FRESH
-    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$git_fixture" || fail GIT_RECOVERY_NOT_FRESH
-    # This process can contact the already running Client only via its local Unix socket.
-    # Git itself has no external interface, mirror credential, checkout or publisher socket.
-    timeout --signal=TERM --kill-after=5s 480s unshare --net -- setpriv \
-        --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
-        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/public-git-recovery.py" "$binary_directory/volparossa" \
-        "$WORK/runtime-client/control/agent.sock" "$git_fixture" "$git_cache" "$git_holder" "$git_holder_peer" \
-        >"$WORK/content-custody-git-recovery.json" || fail GIT_PEER_RECOVERY_FAILED
-    rmdir "$git_fixture" || fail GIT_RECOVERY_CLEANUP_FAILED
+    recovery_holder=$(jq -er '.state.confirmed_holders[0]' "$WORK/content-custody-replacement.json") || fail CUSTODY_HOLDER_MISSING
+    recovery_holder_node=$(jq -er --arg key "$recovery_holder" '.provider_keys | to_entries[] | select(.value == $key) | .key' \
+        "$WORK/content-custody-layout.json") || fail CUSTODY_HOLDER_UNKNOWN
+    recovery_holder_peer=$(jq -er --arg node "$recovery_holder_node" '.[$node]' "$WORK/a01-expected-peers.json") || fail CUSTODY_HOLDER_UNKNOWN
+    for recovery_kind in git degoog; do
+        PHASE=public-$recovery_kind-peer-recovery
+        recovery_fixture=$WORK/client-fixtures/$recovery_kind-recovery
+        recovery_cache=$WORK/state-client/$recovery_kind-recovery-cache
+        [ ! -e "$recovery_fixture" ] && [ ! -L "$recovery_fixture" ] && \
+            [ ! -e "$recovery_cache" ] && [ ! -L "$recovery_cache" ] || fail CUSTODY_RECOVERY_NOT_FRESH
+        install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$recovery_fixture" || fail CUSTODY_RECOVERY_NOT_FRESH
+        case $recovery_kind in
+            git) recovery_script=public-git-recovery.py; recovery_input=/dev/null ;;
+            degoog) recovery_script=degoog-peer-recovery.py
+                recovery_input=$source_directory/tests/integration/fixtures/degoog-public-index.zip ;;
+        esac
+        # Only the local Client socket is reachable. Each receiver uses its own initially absent agent cache.
+        timeout --signal=TERM --kill-after=5s 480s unshare --net -- setpriv \
+            --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$custody_control_gid" \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- python3 -B "$WORK/bin/$recovery_script" "$binary_directory/volparossa" \
+            "$WORK/runtime-client/control/agent.sock" "$recovery_fixture" "$recovery_cache" \
+            "$recovery_holder" "$recovery_holder_peer" <"$recovery_input" \
+            >"$WORK/content-custody-$recovery_kind-recovery.json" || fail CUSTODY_PEER_RECOVERY_FAILED
+        rmdir "$recovery_fixture" || fail CUSTODY_RECOVERY_CLEANUP_FAILED
+    done
     for custody_node in relay3 relay4 relay5; do
         content_custody_cli "$custody_node" content stop >"$WORK/content-custody-$custody_node-stop.json" \
             2>"$WORK/content-custody-$custody_node-stop.err" || fail CUSTODY_PROVIDER_STOP_FAILED

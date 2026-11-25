@@ -1166,7 +1166,7 @@ if [ "$scenario" = content-repair ]; then
         || { printf '%s\n' 'content repair executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
-    for custody_fixture in content-custody-smoke.sh content-custody-smoke.py content-retain-smoke.py public-git-recovery.py \
+    for custody_fixture in content-custody-smoke.sh content-custody-smoke.py content-retain-smoke.py public-peer-recovery.py public-git-recovery.py degoog-peer-recovery.py \
         content-provider-smoke.sh content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$custody_fixture" ] \
             || [ -L "$source_directory/tests/integration/$custody_fixture" ]; then
@@ -3138,7 +3138,7 @@ if [ "$scenario" = content-provider ]; then
     done
 fi
 if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
-    for custody_script in content-custody-smoke.py content-retain-smoke.py public-git-recovery.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
+    for custody_script in content-custody-smoke.py content-retain-smoke.py public-peer-recovery.py public-git-recovery.py degoog-peer-recovery.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
     done
 fi
