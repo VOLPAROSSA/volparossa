@@ -27,6 +27,8 @@ NAME = "agent-cooperative-code-proposal"
 CODE_REVISION = "f27576ebd7e7ded2f1319186f34df87f48e970d7"
 WORKBENCH = read(HERE / "agent-cooperative-workbench-pins.json")
 WORKBENCH_REVISION = WORKBENCH["code_revision"]
+PLANNER = read(HERE / "agent-cooperative-planner-pins.json")
+PLANNER_REVISION = PLANNER["code_revision"]
 EDITOR_BYTES = 168033440
 EDITOR_SHA256 = "5f5c00a9da9d232e4c84e9eee68bbdeb4d8737462022626ce3bdb6948f3d8649"
 PROFILE = "qwen3-0.6b-v1"
@@ -42,7 +44,7 @@ ORIGINAL = b"def add(a, b):\n    return a - b\n"
 TEST_SHA = "78a8726db93e31cbe6f87dd58c7cb76d35cd5086d090c40b0e68caf9f0836835"
 QUESTION_SHA = "e1c169f57923c644bcdd3d7ac9ce5796049393c6e2c0ccd9938ad155d9bfdd0e"
 EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
-    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor")) + (
+    "smoke", "evidence", "provision", "driver", "observation", "result", "diagnostic", "capacity", "discovery", "discovery-drain", "control", "editor", "planner")) + (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
@@ -186,7 +188,19 @@ def await_discovery(work, pid):
     JOBS["guest_work"](work)
     owner = JOBS["identity"](pid)
     path = paths(work)[1].parent / "control-observer/discovery-ready.json"
-    deadline = time.monotonic() + 155
+    if read(work / f"{NAME}-provision.json")["local_model_planner"]:
+        # The local model may spend its own task budget before issuing the first public tool call.
+        # The independent public discovery deadline starts at that original request.
+        started = path.with_name("discovery-started.json")
+        limit = time.monotonic() + 2400
+        while not started.exists() and JOBS["alive"](owner) and time.monotonic() < limit:
+            time.sleep(0.1)
+        start = read(started, 1024)
+        require(set(start) == {"version", "monotonic_ns"} and start["version"] == 1
+                and type(start["monotonic_ns"]) is int and 0 < start["monotonic_ns"] <= time.monotonic_ns(), "discovery start")
+        deadline = start["monotonic_ns"] / 1000000000 + 155
+    else:
+        deadline = time.monotonic() + 155
     while not path.exists() and JOBS["alive"](owner) and time.monotonic() < deadline:
         time.sleep(0.02)
     value = read(path, 4096)
@@ -301,13 +315,25 @@ def bundle_manifest(value):
     fields = {"version", "kind", "code_revision", "node_version", "files"}
     require(type(value) is dict and value["kind"] == "public-code-proposal-inputs"
             and value["node_version"] == "24.19.0" and type(value["version"]) is int, "proposal bundle header")
-    workbench = value["version"] == 2
+    planner = value["version"] == 3
+    workbench = planner or value["version"] == 2
     if workbench:
-        require(set(value) == fields | {"frontend"} and value["frontend"] == "vscodium"
-                and value["code_revision"] == WORKBENCH_REVISION
-                and set(value["files"]) == set(WORKBENCH["files"]) | {"runtime/node", "runtime/node-LICENSE", "runtime/editor.deb"},
-                "pinned workbench inventory")
-        for name, pin in WORKBENCH["files"].items():
+        files = WORKBENCH["files"]
+        revision = WORKBENCH_REVISION
+        runtime = {"runtime/node", "runtime/node-LICENSE", "runtime/editor.deb"}
+        fields.add("frontend")
+        if planner:
+            files = files | PLANNER["files"]
+            revision = PLANNER_REVISION
+            fields |= {"planner", "opencode_revision", "opencode_binary_sha256"}
+            runtime |= {"runtime/opencode", "runtime/build-report.json"}
+            require(value["planner"] == "local_opencode" and value["opencode_revision"] == OLD["OPENCODE_REVISION"]
+                    and hex64(value["opencode_binary_sha256"])
+                    and value["files"]["runtime/opencode"]["sha256"] == value["opencode_binary_sha256"],
+                    "source-built OpenCode planner")
+        require(set(value) == fields and value["frontend"] == "vscodium" and value["code_revision"] == revision
+                and set(value["files"]) == set(files) | runtime, "pinned workbench inventory")
+        for name, pin in files.items():
             require(all(value["files"][name][key] == pin[key] for key in ("bytes", "sha256")), "pinned Code blob")
         require(value["files"]["runtime/editor.deb"] == dict(bytes=EDITOR_BYTES, sha256=EDITOR_SHA256, mode=0o600),
                 "pinned editor release")
@@ -316,11 +342,12 @@ def bundle_manifest(value):
                 and set(value["files"]) == set(BUNDLE_FILES), "exact proposal bundle")
     total = 0
     for name, row in value["files"].items():
-        maximum = {"runtime/node": 160 * 1048576, "runtime/editor.deb": EDITOR_BYTES}.get(name, 1048576)
+        maximum = {"runtime/node": 160 * 1048576, "runtime/editor.deb": EDITOR_BYTES,
+                   "runtime/opencode": 200 * 1048576, "runtime/build-report.json": 65536}.get(name, 1048576)
         require(set(row) == {"bytes", "sha256", "mode"} and type(row["bytes"]) is int and 0 < row["bytes"] <= maximum
-            and row["mode"] == (0o700 if name == "runtime/node" else 0o600) and hex64(row["sha256"]), "bundle file")
+            and row["mode"] == (0o700 if name in ("runtime/node", "runtime/opencode") else 0o600) and hex64(row["sha256"]), "bundle file")
         total += row["bytes"]
-    require(total <= (310 if workbench else 190) * 1048576, "bounded proposal bundle")
+    require(total <= (510 if planner else 310 if workbench else 190) * 1048576, "bounded proposal bundle")
     node = read(HERE / "agent-private-conversation-pins.json")["runtime"]["files"]
     for staged, original in (("runtime/node", "bin/node"), ("runtime/node-LICENSE", "LICENSE")):
         require(all(value["files"][staged][key] == node[original][key] for key in ("bytes", "sha256")), "Node pin")
@@ -356,7 +383,7 @@ def provision(work, bundle, expected):
     (root / "projects").mkdir(mode=0o700)
     os.chown(root / "projects", account.pw_uid, account.pw_gid)
     write(work / f"{NAME}-provision.json", dict(version=1, bundle_manifest_sha256=expected, manifest=selected,
-        local_model_planner=False, model_profile=PROFILE))
+        local_model_planner=selected.get("planner") == "local_opencode", model_profile=PROFILE))
 
 
 WORKBENCH_FLAGS = {"passed", "workspace_trust_granted", "previewed_exact_public_source", "owner_enrolled_public_source",
@@ -368,15 +395,42 @@ WORKBENCH_FAILURES = {None, "baseline", "workbench", "file_picker", "selected_fi
     "trust_page", "trust_grant", "trust_close", "workbench_failed"}
 
 
-def workbench_driver(value, successful=False):
+PLANNER_FAILURES = {"planner_start", "planner_action", "planner_result", "planner_result_model",
+    "planner_result_submission", "planner_result_completion", "planner_result_edit", "planner_result_digest",
+    "planner_result_check", "planner_result_ids", "editor_failed", "runtime_inputs",
+    "runtime_namespace", "private_handshake", "private_provider", "public_proxy", "runtime_state", "native_server",
+    "owner_verifier", "runtime_preparation", "model_task", "model_request_bound", "model_conversation",
+    "model_transport", "model_execution", "model_output", "model_tool_choice", "model_budget", "model_busy",
+    "model_cancelled", "model_cleanup", "model_incomplete", "native_session", "runtime_cleanup"}
+
+
+def workbench_driver(value, successful=False, *, planner=False):
     fields = WORKBENCH_FLAGS | {"version", "kind", "phase", "failure", "owner_check_status", "original_source_sha256",
         "original_tests_sha256", "question_sha256", "license", "actual_applied_sha256", "replacement_sha256",
         "core_task_id", "peer_job_id", "report_sha256"}
+    kind = "vscodium-public-peer-workbench"
+    if planner:
+        kind = "vscodium-opencode-public-peer-workbench"
+        fields |= {"local_planner_started", "local_model_profile", "model_requested_delegation",
+                   "approved_edits", "approved_commands", "approved_checks"}
+        require(type(value) is dict and all(type(value.get(k)) is bool
+                for k in ("local_planner_started", "model_requested_delegation"))
+                and value.get("local_model_profile") in (None, PROFILE)
+                and all(type(value.get(k)) is int and 0 <= value[k] <= 12
+                        for k in ("approved_edits", "approved_commands", "approved_checks")), "planner observation")
+        if "owner_planner_approved" in value:
+            fields.add("owner_planner_approved")
+            require(type(value["owner_planner_approved"]) is bool
+                    and (not value["local_planner_started"] or value["owner_planner_approved"]), "planner approval")
+        if successful:
+            require(value.get("owner_planner_approved") is True and value["local_planner_started"] and value["model_requested_delegation"]
+                    and value["local_model_profile"] == PROFILE and value["approved_edits"] > 0
+                    and value["approved_checks"] > 0, "model-directed public proposal and local approvals")
     require(type(value) is dict and set(value) == fields and value["version"] == 1
-        and value["kind"] == "vscodium-public-peer-workbench"
+        and value["kind"] == kind
         and all(type(value[key]) is bool for key in WORKBENCH_FLAGS)
         and value["phase"] in {"prepare", "workbench", "independent_check", "complete"}
-        and value["failure"] in WORKBENCH_FAILURES and value["owner_check_status"] in {None, "passed"}
+        and value["failure"] in (WORKBENCH_FAILURES | (PLANNER_FAILURES if planner else set())) and value["owner_check_status"] in {None, "passed"}
         and value["original_source_sha256"] == sha(ORIGINAL) and value["original_tests_sha256"] == TEST_SHA
         and value["question_sha256"] == QUESTION_SHA and value["license"] == "GPL-3.0-only"
         and all(value[key] is None or hex64(value[key]) for key in ("actual_applied_sha256", "replacement_sha256", "report_sha256"))
@@ -397,7 +451,8 @@ def workbench_selected(work):
 def owner_report(work, successful=False):
     root, _ = paths(work)
     if workbench_selected(work):
-        return workbench_driver(read(root / "projects/report.json", 65536), successful)
+        return workbench_driver(read(root / "projects/report.json", 65536), successful,
+            planner=read(work / f"{NAME}-provision.json")["local_model_planner"])
     return driver(read(root / "report.json", 65536), successful)
 
 
@@ -469,6 +524,8 @@ def retained_result(task, shown, layout, observed, *, workbench=False):
         and data["version"] == 6 and data["visibility"] == "public" and data["purpose"] == "code_proposal"
         and data["model_profile"] == PROFILE and data["output_contract"] == "single_file_replacement_v1"
         and data["license"] == "GPL-3.0-only" and len(data["inference"]) == 1
+        and set(data["inference"][0]) == {"question", "context", "start", "end"}
+        and sha(data["inference"][0]["question"].encode()) == QUESTION_SHA
         and data["inference"][0]["context"].encode() == ORIGINAL
         and data["inference"][0]["start"] == 0 and data["inference"][0]["end"] == len(ORIGINAL), "original public source")
     source_manifest = BROWSER["exact_bytes"](task / "source.manifest", 65536)
@@ -607,9 +664,26 @@ def capture(work, application_status, observer_status):
         observer = value
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    write(work / f"{NAME}-diagnostic.json", dict(version=1, driver_exit_status=application_status,
-        observer_exit_status=observer_status, driver_report=state, observer=observer,
-        peer_execution=closed_peer_status(paths(work)[1])))
+    report = dict(version=1, driver_exit_status=application_status, observer_exit_status=observer_status,
+                  driver_report=state, observer=observer, peer_execution=closed_peer_status(paths(work)[1]))
+    private_log = work / "private-planner-diagnostics" / "service.log"
+    if private_log.exists():
+        # Parse only fixed local lifecycle fields. The source log stays in the
+        # disposable root-only directory and is excluded from all exports.
+        project = runpy.run_path(str(HERE / "agent-private-conversation.py"))["service_diagnostic"]
+        report["local_planner_lifecycle"] = project(private_log)
+    write(work / f"{NAME}-diagnostic.json", report)
+
+
+def validate_planner(value):
+    fields = {"version", "model_profile", "weights_sha256", "observed_workers", "before_public_task",
+              "after_peer_receipt", "observed_workers_ended"}
+    require(type(value) is dict and set(value) == fields and value["version"] == 1 and value["model_profile"] == PROFILE
+            and value["weights_sha256"] == MODEL["base_weights"]["sha256"] and value["observed_workers_ended"] is True
+            and all(type(value[k]) is int and 1 <= value[k] <= 128
+                    for k in ("observed_workers", "before_public_task", "after_peer_receipt"))
+            and value["before_public_task"] + value["after_peer_receipt"] <= value["observed_workers"],
+            "local model worker before delegation and after the original peer receipt")
 
 
 def evidence(work, revision):
@@ -619,6 +693,8 @@ def evidence(work, revision):
     value = {key: read(work / f"{NAME}-{key}.json", 1048576) for key in ("provision", "driver", "observation", "result", "discovery", "control")}
     if workbench_selected(work):
         value["editor"] = read(work / f"{NAME}-editor.json")
+        if value["provision"]["local_model_planner"]:
+            value["planner"] = read(work / f"{NAME}-planner.json")
     value["discovery_drain"] = read(work / f"{NAME}-discovery-drain.json")
     value.update(source_revision=revision, layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), private_cleanup=read(work / "agent-jobs-private-cleanup.json"),
@@ -631,7 +707,7 @@ def evidence(work, revision):
         control_privacy=read(work / "content-provider-custody-executor-discovery-control.json"),
         gates=read(work / "content-custody-executor-discovery-gates.json"))
     for unit in ("volparossa-alpha-public-code.service", "volparossa-alpha-cooperative-code.service",
-            "volparossa-alpha-code-control-observer.service",
+            "volparossa-alpha-code-control-observer.service", "volparossa-alpha-workbench-planner.service",
             f"volparossa-alpha-compute@{value['layout']['provider_nodes'][0]}.service"):
         require(subprocess.check_output(["systemctl", "show", "--property=ActiveState", "--value", unit], text=True).strip()
             in {"inactive", "failed"}, "service still active")
@@ -645,7 +721,11 @@ def check_evidence(value, revision):
     bundle_manifest(value["provision"]["manifest"])
     result = value["result"]
     if value["provision"]["manifest"].get("frontend") == "vscodium":
-        shown = workbench_driver(value["driver"], successful=True)
+        planner = value["provision"]["manifest"].get("planner") == "local_opencode"
+        require(value["provision"]["local_model_planner"] is planner, "planner selection")
+        if planner:
+            validate_planner(value["planner"])
+        shown = workbench_driver(value["driver"], successful=True, planner=planner)
         pin = read(HERE / "agent-native-editor-pins.json")["editor"]
         require(value["editor"] == dict(version=1, product="VSCodium", release=pin["version"],
             source_commit=pin["declared_source_commit"], binary_sha256=pin["binary_sha256"],

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Run the pinned VSCodium workbench in a private mount and network namespace."""
 import json
+import os
 from pathlib import Path
 import pwd
 import runpy
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = Path(__file__).resolve().parent
 PROPOSAL = runpy.run_path(str(HERE / "agent-cooperative-code-proposal.py"))
@@ -43,7 +45,7 @@ def prepare(work, temporary, code):
     return release
 
 
-def service(root, code, release, owner_socket):
+def service(root, code, release, owner_socket, planner_socket=None):
     # The root-owned topology runs with umask 077. The ordinary editor must
     # traverse the empty system mount parents. The staged data and private
     # socket retain their same-owner access modes on their own bind mounts.
@@ -63,6 +65,17 @@ def service(root, code, release, owner_socket):
     readonly = ["/usr", "/etc/passwd", "/etc/group", "/etc/ld.so.cache", "/etc/fonts",
                 f"{code}/code:/opt/volparossa-code", f"{release}:/opt/volparossa-editor",
                 f"{code}/runtime/node:/opt/volparossa-node", f"{owner_socket}:/workbench/public.sock"]
+    driver = "public_peer_editor_ui.cjs"
+    if planner_socket is not None:
+        runtime = root / "opt/volparossa-runtime"
+        runtime.mkdir()
+        runtime.chmod(0o755)
+        (code / "projects/private.sock").touch(mode=0o600, exist_ok=False)
+        readonly.append(f"{planner_socket}:/workbench/private.sock")
+        for asset in ("opencode", "build-report.json"):
+            (runtime / asset).touch()
+            readonly.append(f"{code}/runtime/{asset}:/opt/volparossa-runtime/{asset}")
+        driver = "public_peer_planner_ui.cjs"
     # This root already belongs exclusively to this invocation. On ext4,
     # systemd 257 creates the fallback RootEphemeral copy under the unit's
     # umask, leaving its root untraversable by the editor user.
@@ -74,7 +87,56 @@ def service(root, code, release, owner_socket):
              "BindReadOnlyPaths=" + " ".join(readonly), f"BindPaths={code}/projects:/workbench", "ReadWritePaths=/workbench"]
     return ["/usr/bin/systemd-run", "--quiet", "--wait", "--collect", "--unit=" + UNIT, "--service-type=exec",
             *("--property=" + prop for prop in props), "--", "/opt/volparossa-node",
-            "/opt/volparossa-code/scripts/public_peer_editor_ui.cjs", "--execute", "--yes"]
+            f"/opt/volparossa-code/scripts/{driver}", "--execute", "--yes"]
+
+
+def private_workers(group, weights, seen):
+    # Inspect only this dedicated service's cgroup. No conversation or model output is opened.
+    for candidate in group.read_text().splitlines():
+        process = Path("/proc") / candidate
+        try:
+            with (process / "cmdline").open("rb") as stream:
+                if not stream.read(32).startswith(b"/runtime/bin/python3\0-I\0-c\0"):
+                    continue
+            identity = PROPOSAL["JOBS"]["identity"](int(candidate))
+            key = (identity["pid"], identity["start_ticks"])
+            if key in seen:
+                continue
+            model = process / "root/model/model.safetensors"
+            require(os.path.samefile(weights, model), "planner model identity")
+            mounts = {row.split()[4]: row.split()[5].split(",") for row in (process / "mountinfo").read_text().splitlines()}
+            interfaces = [row.split(":")[0].strip() for row in (process / "net/dev").read_text().splitlines()[2:]]
+            require(all("ro" in mounts.get(name, []) for name in ("/runtime", "/model")) and interfaces == ["lo"]
+                    and os.readlink(process / "ns/net") != os.readlink("/proc/self/ns/net")
+                    and (process / "cgroup").read_text().strip() == "0::/system.slice/" + group.parent.name,
+                    "local planner worker scope")
+            if PROPOSAL["JOBS"]["alive"](identity):
+                yield key
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+
+
+def run_planner(work, state, command):
+    weights = work / "agent-jobs-user/provision/model/model.safetensors"
+    fingerprint = PROPOSAL["digest"](weights)
+    require(fingerprint == PROPOSAL["MODEL"]["base_weights"]["sha256"], "planner weights")
+    group = Path("/sys/fs/cgroup/system.slice/volparossa-alpha-workbench-planner.service/cgroup.procs")
+    seen, before, after = set(), set(), set()
+    with subprocess.Popen(command) as editor:
+        while editor.poll() is None:
+            for key in private_workers(group, weights, seen):
+                require(len(seen) < 128, "planner worker bound")
+                if not PROPOSAL["BROWSER"]["task_roots"](state):
+                    before.add(key)
+                if any(state.glob("*/execution/receipt-*.json")):
+                    after.add(key)
+                seen.add(key)
+            time.sleep(0.2)
+    ended = not any(PROPOSAL["JOBS"]["alive"](dict(pid=pid, start_ticks=ticks)) for pid, ticks in seen)
+    PROPOSAL["write"](work / "agent-cooperative-code-proposal-planner.json",
+        dict(version=1, model_profile=PROPOSAL["PROFILE"], weights_sha256=fingerprint, observed_workers=len(seen),
+             before_public_task=len(before), after_peer_receipt=len(after), observed_workers_ended=ended))
+    return editor.returncode
 
 
 def main(work):
@@ -87,6 +149,9 @@ def main(work):
         temporary = Path(staging)
         release = prepare(work, temporary, code)
         root = temporary / "root"
+        if manifest.get("planner") == "local_opencode":
+            socket = work / "agent-jobs-user/local-planner/private.sock"
+            return run_planner(work, state, service(root, code, release, state.parent / "public.sock", socket))
         return subprocess.run(service(root, code, release, state.parent / "public.sock"), check=False).returncode
 
 

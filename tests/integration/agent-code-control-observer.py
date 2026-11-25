@@ -17,6 +17,7 @@ import signal
 import socket
 import stat
 import struct
+import time
 
 CONTROL_MAX = 256 * 1024
 REQUEST_MAX = 2 * 1024 * 1024
@@ -142,6 +143,7 @@ class Observer:
                 require(set(request) in ({1, 2, 34}, {1, 2, 33}))
                 if 34 in request:
                     require(self.discovery is None and self.selected is None and self.active == 1)
+                    self.write("discovery-started.json", dict(version=1, monotonic_ns=time.monotonic_ns()))
                     query = fields(request[34])
                     require(query == {1:self.publisher, 6:1, 7:1, 8:PROFILE, 10:1})
                 else:

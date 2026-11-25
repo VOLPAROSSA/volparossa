@@ -15,6 +15,10 @@ require = CHECK["require"]
 LIMIT = 341 * 1048576
 
 
+def archive_limit(selected):
+    return 520 * 1048576 if selected.get("planner") == "local_opencode" else LIMIT
+
+
 def file_info(path, maximum):
     info = path.lstat()
     require(path.is_absolute() and path.resolve(strict=True) == path
@@ -61,11 +65,11 @@ def capture(root, archive, expected):
                 bundle.addfile(header, reader)
                 require(reader.hash.hexdigest() == record["sha256"] and not source.read(1), "bundle bytes changed")
     archive.chmod(0o600)
-    require(archive.stat().st_size <= LIMIT, "archive too large")
+    require(archive.stat().st_size <= archive_limit(selected), "archive too large")
 
 
 def unpack(archive, root, expected):
-    file_info(archive, LIMIT)
+    file_info(archive, 520 * 1048576)
     require(root.is_absolute() and root.resolve() == root
             and not root.exists() and not root.is_symlink(), "new bundle directory required")
     with tarfile.open(archive, mode="r:") as bundle:
@@ -75,6 +79,7 @@ def unpack(archive, root, expected):
                 "manifest must be first")
         raw = bundle.extractfile(first).read(65537)
         selected = manifest(raw, expected)
+        require(archive.stat().st_size <= archive_limit(selected), "archive too large")
         root.mkdir(mode=0o700)
         seen = set()
         while member := bundle.next():

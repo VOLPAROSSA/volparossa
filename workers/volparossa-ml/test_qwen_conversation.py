@@ -174,6 +174,9 @@ class QwenConversationTests(unittest.TestCase):
         self.assertTrue(kwargs["tokenize"])
         self.assertNotIn("truncation", kwargs)
         self.assertIn(data["instructions"], args[0][0]["content"])
+        offered = [tool["function"]["name"] for tool in kwargs["tools"]]
+        self.assertEqual(offered, ["vp_0", "vp_1"])
+        self.assertIn("complete catalog: " + ", ".join(offered) + ".", args[0][0]["content"])
         self.assertEqual(args[0][1], {"role": "system", "content": "Developer instructions:\nKeep my ordered instruction."})
         self.assertEqual(args[0][3]["tool_calls"][0]["function"]["name"], "vp_0")
         self.assertEqual(args[0][3]["content"], "Tool call ID: c1")

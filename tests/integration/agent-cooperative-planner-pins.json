@@ -1,0 +1,41 @@
+{
+  "code_revision": "e9a3b22573c44a7119115debcb1ed21504cd7bda",
+  "files": {
+    "code/scripts/opencode_session.cjs": {
+      "bytes": 13260,
+      "sha256": "5b7feba06131caf7f81686973e2d2fb243ecdc2dea6d0b47cfea59b09811dc9c"
+    },
+    "code/scripts/opencode_session.py": {
+      "bytes": 8421,
+      "sha256": "ba0a8041b26deec930f8292136f62177fa389c7956605337e4fa111d13ce6bbe"
+    },
+    "code/scripts/public_peer_editor_ui.cjs": {
+      "bytes": 17112,
+      "sha256": "2a34d196536a1a076d43ed8dc4d82f1261b6a22312cc0f98c6d70179f934e5bd"
+    },
+    "code/scripts/public_peer_planner_ui.cjs": {
+      "bytes": 6707,
+      "sha256": "888e82346c2db53bf691895a3fdb6e3654f6a8ee76b813bc6f97debf302a9f88"
+    },
+    "code/scripts/smoke_opencode_cooperation.cjs": {
+      "bytes": 20828,
+      "sha256": "a064a8786f94698c9d315338b0a2e3a0d78b793319d965308dccb120af1a9bc1"
+    },
+    "code/src/cooperative-tool-server.cjs": {
+      "bytes": 4867,
+      "sha256": "bda47f06f6cb4c7722c4584922b4965cd4c9a8dfdcd888bdca15fe59d6a63bc1"
+    },
+    "code/src/extension.cjs": {
+      "bytes": 28612,
+      "sha256": "52db40c5437f0c3375052063199708ba0c691d4f04277d3269654720c3ea99dd"
+    },
+    "code/src/opencode-bridge.cjs": {
+      "bytes": 8807,
+      "sha256": "2c31604b46d5f8e3da7b3c1ffbbba014351a3f3860d1154c1e3f414a1b96a545"
+    },
+    "code/src/opencode-runtime.cjs": {
+      "bytes": 14490,
+      "sha256": "b3765a0c50d79170f0e5fab1923965ea27350b7823ab90d4b3cbd67e41b533dc"
+    }
+  }
+}

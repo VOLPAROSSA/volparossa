@@ -323,6 +323,24 @@ jq() { return 83; }
             item = manifest(); item["files"][name][key] = value
             with self.assertRaises(ValueError): C["bundle_manifest"](item)
 
+    def test_planner_receipt_needs_distinct_local_workers_before_and_after_the_actual_peer(self):
+        value = dict(version=1, model_profile=C["PROFILE"], weights_sha256=C["MODEL"]["base_weights"]["sha256"],
+            observed_workers=4, before_public_task=2, after_peer_receipt=2, observed_workers_ended=True)
+        C["validate_planner"](value)
+        for change in (dict(observed_workers=3), dict(before_public_task=0), dict(after_peer_receipt=0),
+                       dict(observed_workers_ended=False), dict(weights_sha256="f" * 64), dict(unapproved_field=True)):
+            with self.assertRaises(ValueError):
+                C["validate_planner"]({**value, **change})
+
+    def test_private_planner_can_acquire_only_the_real_runtime_lease(self):
+        shell = (HERE / "agent-cooperative-code-proposal.sh").read_text()
+        block = shell[shell.index("        code_runtime="):shell.index("        code_attempt=0", shell.index("        code_runtime="))]
+        self.assertIn("code_planner_lease=$code_runtime/.volparossa-compute.lock", block)
+        self.assertIn("os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600", block)
+        self.assertIn('--runtime-root "$code_runtime"', block)
+        self.assertIn('--property=ProtectSystem=strict --property="ReadWritePaths=$code_planner $code_planner_lease"', block)
+        self.assertNotIn('ReadWritePaths=$code_runtime', block)
+
     def test_root_owned_workbench_parents_are_traversable_under_the_topology_private_umask(self):
         helper = runpy.run_path(str(HERE / "agent-cooperative-workbench.py"))
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,15 +350,17 @@ jq() { return 83; }
             projects.mkdir(parents=True, mode=0o700)
             original = os.umask(0o077)
             try:
-                command = helper["service"](staging / "root", account, staging / "editor", staging / "public.sock")
+                command = helper["service"](staging / "root", account, staging / "editor",
+                                            staging / "public.sock", staging / "private.sock")
             finally:
                 os.umask(original)
-            for name in (".", "opt", "etc", "usr", "var", "var/lib", "workbench"):
+            for name in (".", "opt", "opt/volparossa-runtime", "etc", "usr", "var", "var/lib", "workbench"):
                 self.assertEqual((staging / "root" / name).stat().st_mode & 0o777, 0o755)
             self.assertEqual((staging / "root/var/lib/volparossa").readlink(), Path("/workbench/session/home"))
             self.assertEqual(staging.stat().st_mode & 0o777, 0o700)
             self.assertEqual(projects.stat().st_mode & 0o777, 0o700)
             self.assertEqual((projects / "public.sock").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((projects / "private.sock").stat().st_mode & 0o777, 0o600)
             self.assertIn("--property=PrivateNetwork=yes", command)
             self.assertIn("--property=User=volparossa", command)
             self.assertIn("--property=RootDirectory=" + str(staging / "root"), command)
@@ -410,7 +430,8 @@ jq() { return 83; }
             (task / "dataset.manifest").write_bytes(b"synthetic dataset manifest")
             dataset = dict(version=6, visibility="public", purpose="code_proposal", license="GPL-3.0-only",
                 model_profile=C["PROFILE"], source_manifest_hex=source_manifest.hex(),
-                inference=[dict(question="synthetic parser question", context=C["ORIGINAL"].decode(), start=0, end=len(C["ORIGINAL"]))],
+                inference=[dict(question="Correct the bug in add: it should add its two numeric inputs. Return only the entire corrected Python file, "
+                    "without Markdown or explanation. Do not change tests or install dependencies.", context=C["ORIGINAL"].decode(), start=0, end=len(C["ORIGINAL"]))],
                 output_contract="single_file_replacement_v1")
             write(task / "dataset.json", dataset)
             raw = (task / "dataset.json").read_bytes()
