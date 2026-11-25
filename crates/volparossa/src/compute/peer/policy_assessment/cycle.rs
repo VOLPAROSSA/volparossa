@@ -95,6 +95,7 @@ fn assessment_options(args: &Options, resume: bool) -> super::Options {
         source_publisher_key: (!resume).then_some(args.source_publisher_key),
         source_name: (!resume).then(|| args.source_name.clone()),
         source_manifest_id: (!resume).then_some(args.source_manifest_id),
+        repository_proposal_sha256: None,
         cache: (!resume).then(|| args.cache.clone()),
         reuse_cache: !resume && args.reuse_cache,
         publisher_key: (!resume).then_some(args.publication_key),

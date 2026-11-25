@@ -41,6 +41,9 @@ pub(crate) struct Options {
     pub(super) source_name: Option<String>,
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_manifest)]
     pub(super) source_manifest_id: Option<[u8; 32]>,
+    /// Independent SHA-256 of the complete Git proposal. Its author must differ from both reviewers.
+    #[arg(long, conflicts_with = "resume", value_parser = parse_manifest)]
+    pub(super) repository_proposal_sha256: Option<[u8; 32]>,
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     pub(super) cache: Option<PathBuf>,
     #[arg(long, requires = "cache")]
@@ -142,6 +145,25 @@ fn parse_manifest(value: &str) -> Result<[u8; 32], String> {
         return Err("compute_policy_source_manifest".into());
     }
     Ok(id)
+}
+
+fn check_repository_proposal(
+    expected: Option<[u8; 32]>,
+    scope: &assessment::Scope,
+    reviewers: &[VerifyingKey],
+) -> Result<()> {
+    if let Some(expected) = expected {
+        ensure!(
+            scope.source_sha256 == hex::encode(expected)
+                && reviewers.len() == 2
+                && reviewers[0] != reviewers[1]
+                && reviewers
+                    .iter()
+                    .all(|key| hex::encode(key.as_bytes()) != scope.source_publisher_key),
+            "compute_repository_proposal_binding"
+        );
+    }
+    Ok(())
 }
 
 fn preview(args: &Options) -> Result<Value> {
@@ -276,6 +298,7 @@ async fn enroll(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>
         &hex::encode(selection.manifest_id),
         &download.text,
     )?;
+    check_repository_proposal(args.repository_proposal_sha256, &scope, &args.provider_key)?;
     let mut fingerprints = Vec::new();
     let profile = args.model_profile.unwrap_or(ModelProfile::Smol360);
     for key in &args.provider_key {

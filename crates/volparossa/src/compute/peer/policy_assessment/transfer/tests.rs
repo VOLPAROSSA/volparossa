@@ -565,3 +565,51 @@ async fn structured_four_stage_projection_rejects_an_authentic_but_wrong_stage_c
         "compute_policy_output_contract"
     );
 }
+
+#[tokio::test]
+async fn repository_review_replays_original_claims_and_requires_independent_enrollment() {
+    let root = private_root();
+    let requester = SigningKey::from_bytes(&[25; 32]);
+    let package = fixture_bundle(root.path(), &requester).await;
+    let path = root.path().join("retained-review.json");
+    task::write_bytes(&path, &package, false).unwrap();
+    let (enrolled, _) = storage::load(root.path()).unwrap();
+    let args = || RepositoryReview {
+        bundle: path.clone(),
+        requester_key: requester.verifying_key(),
+        source_publisher_key: parse_key(&enrolled.scope.source_publisher_key).unwrap(),
+        source_manifest_id: parse_manifest(&enrolled.scope.source_manifest_id).unwrap(),
+        repository_proposal_sha256: parse_manifest(&sha(SUBJECT.as_bytes())).unwrap(),
+        provider_key: enrolled
+            .providers
+            .iter()
+            .map(|key| parse_key(key).unwrap())
+            .collect(),
+    };
+    let report = repository_review_value(&args()).unwrap();
+    assert_eq!(report["repository_ref_updated"], false);
+    assert_eq!(report["release_authorized"], false);
+    assert_eq!(report["review"]["network_policy_activation"], false);
+    // Ordinary assessment and the original receipt package retain their existing scope.
+    check_repository_proposal(None, &enrolled.scope, &[]).unwrap();
+    for binding in [
+        "proposal",
+        "author",
+        "manifest",
+        "requester",
+        "reviewers",
+        "self_review",
+    ] {
+        let mut changed = args();
+        match binding {
+            "proposal" => changed.repository_proposal_sha256[0] ^= 1,
+            "manifest" => changed.source_manifest_id[0] ^= 1,
+            "author" => changed.source_publisher_key = changed.requester_key,
+            "requester" => changed.requester_key = changed.source_publisher_key,
+            "reviewers" => changed.provider_key.reverse(),
+            "self_review" => changed.provider_key[0] = changed.source_publisher_key,
+            _ => unreachable!(),
+        }
+        assert!(repository_review_value(&changed).is_err(), "{binding}");
+    }
+}

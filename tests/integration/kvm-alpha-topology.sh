@@ -50,6 +50,7 @@ agent_active_recovery=no
 agent_adapter_aggregation=no
 agent_autonomous_aggregation=no
 agent_policy_assessment=no
+agent_repository_review=no
 agent_train_cycle=no
 agent_train_loop=no
 agent_artifact_quarantine=no
@@ -86,7 +87,7 @@ usage() {
         '         --scenario content-provider accepts --browser-filter-bundle ARCHIVE --browser-filter-manifest-sha256 HEX' \
         '         --scenario protected-quote checks signed refusal and authority; it does not prove protected execution.' \
         '         or --weather-client-bundle ARCHIVE --weather-client-manifest-sha256 HEX (not both)' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|reciprocity-private-dns|local-link|mixed-link|mpquic-growth|mptcp-growth|mptcp-refill|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|private-storage-peer|private-storage-replicas|signal-backup|private-storage-handoff|private-storage-fragments|private-storage-maintenance|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-active-recovery|agent-adapter-aggregation|agent-autonomous-aggregation|agent-policy-assessment|agent-repository-review|dns-cache]'
 }
 
 print_plan() {
@@ -254,6 +255,10 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_repository_review" = yes ]; then
+            printf '%s\n' 'Recover the enrolled public Git change and original signed peer reviews on a separate participant.'
+            return
+        fi
         if [ "$agent_policy_assessment" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA public policy-assessment plan:' \
@@ -842,6 +847,7 @@ while [ "$#" -gt 0 ]; do
             agent_adapter_aggregation=no
             agent_autonomous_aggregation=no
             agent_policy_assessment=no
+            agent_repository_review=no
             agent_train_cycle=no
             agent_train_loop=no
             agent_artifact_quarantine=no
@@ -886,6 +892,7 @@ while [ "$#" -gt 0 ]; do
                 agent-adapter-aggregation) scenario=agent-jobs; agent_adapter_aggregation=yes; wifi_link=no; uplink_link=no ;;
                 agent-autonomous-aggregation) scenario=agent-jobs; agent_autonomous_aggregation=yes; wifi_link=no; uplink_link=no ;;
                 agent-policy-assessment) scenario=agent-jobs; agent_policy_assessment=yes; wifi_link=no; uplink_link=no ;;
+                agent-repository-review) scenario=agent-jobs; agent_repository_review=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -1279,11 +1286,11 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     done
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
+if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
     [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
         && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
 fi
-if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then
     for decoder_pin in graph-decoder-pins.json graph-decoder-requirements.lock; do
         [ -f "$source_directory/workers/volparossa-ml/$decoder_pin" ] \
             && [ ! -L "$source_directory/workers/volparossa-ml/$decoder_pin" ] || exit 69
@@ -2980,9 +2987,13 @@ if [ "$agent_model_planning" = yes ]; then
     # shellcheck source=tests/integration/agent-model-planning-smoke.sh
     . "$source_directory/tests/integration/agent-model-planning-smoke.sh"
 fi
-if [ "$agent_policy_assessment" = yes ]; then
+if [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then
     # shellcheck source=tests/integration/agent-policy-assessment-smoke.sh
     . "$source_directory/tests/integration/agent-policy-assessment-smoke.sh"
+fi
+if [ "$agent_repository_review" = yes ]; then
+    # shellcheck source=tests/integration/agent-repository-review-smoke.sh
+    . "$source_directory/tests/integration/agent-repository-review-smoke.sh"
 fi
 if [ "$agent_successor_serving" = yes ] || [ "$agent_active_recovery" = yes ] || [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ]; then
     # shellcheck source=tests/integration/agent-successor-serving-smoke.sh
@@ -3246,10 +3257,10 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-qwen3-0.6b.json" \
             "$WORK/bin/ml/model-pins-qwen3-0.6b.json"
     fi
-    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
+    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi
-    if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+    if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then
         for decoder_pin in graph-decoder-pins.json graph-decoder-requirements.lock; do
             install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$decoder_pin" "$WORK/bin/ml/$decoder_pin"
         done
@@ -3294,6 +3305,9 @@ if [ "$agent_model_planning" = yes ]; then
     for planning_script in agent-model-planning-smoke.py agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$planning_script" "$WORK/bin/$planning_script"
     done
+fi
+if [ "$agent_repository_review" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/scripts/repository-review-subject.py" "$WORK/bin/repository-review-subject.py"
 fi
 if [ "$agent_policy_assessment" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-policy-assessment-smoke.py" "$WORK/bin/agent-policy-assessment-smoke.py"
@@ -3545,7 +3559,7 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-custody ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then
     # Fixture reachability, not selection injection: the original actor starts with this
     # network already in place. Providers remain reachable via the Exit and actual broker.
     ip netns exec "$CLIENT" nft -f - <<'CONTENT_ADAPTIVE_FILTER'
@@ -4286,7 +4300,7 @@ launch_agent() {
         # not read the publisher's files merely because both use the same UID.
         set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay3 $WORK/state-relay5"
     fi
-    if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ] || [ "$agent_policy_assessment" = yes ]; then
+    if [ "$agent_adapter_aggregation" = yes ] || [ "$agent_autonomous_aggregation" = yes ] || [ "$agent_policy_assessment" = yes ] || [ "$agent_repository_review" = yes ]; then
         # Fixed public model provisioning remains visible; peer source/adapters do not.
         case $node in
             relay3) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay4 $WORK/state-relay5" ;;
