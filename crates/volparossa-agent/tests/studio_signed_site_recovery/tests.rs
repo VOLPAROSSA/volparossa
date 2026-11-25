@@ -400,7 +400,7 @@ fn terminal_owner_requires_every_original_asset_and_the_signed_context() {
         ));
     }
     let check = |body: &str| super::owner::verify_display(body, &publisher, &packed);
-    assert_eq!(check(&tty), Ok(1700000000));
+    assert_eq!(check(&tty), Ok(1_700_000_000));
     for changed in [
         tty.replace("/style.css", "/another.css"),
         tty.replace("text/css", "text/html"),

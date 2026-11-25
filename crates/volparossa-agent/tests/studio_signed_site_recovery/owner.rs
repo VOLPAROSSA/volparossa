@@ -2,7 +2,7 @@
 //! Disposable owner terminal. The signed CLI retains its normal controlling-terminal path.
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::{self, Read, Write},
     process::Stdio,
     time::Duration,
 };
@@ -12,11 +12,7 @@ use nix::{
     pty::openpty,
     sys::termios::{LocalFlags, tcgetattr},
 };
-use tokio::{
-    io::{Interest, unix::AsyncFd},
-    process::Command,
-    time::sleep,
-};
+use tokio::{process::Command, time::sleep};
 use volparossa_content::site::SiteBundle;
 
 use super::{
@@ -25,7 +21,20 @@ use super::{
     site::{NAME, Packed, now},
 };
 
-pub(super) struct OwnerTerminal(AsyncFd<File>);
+pub(super) struct OwnerTerminal(File);
+
+// Only two short prompts cross this test PTY. Yield between nonblocking attempts
+// so the enclosing timeout and child teardown can run without a blocked I/O task.
+async fn ready<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                sleep(Duration::from_millis(5)).await
+            }
+            result => return result,
+        }
+    }
+}
 
 impl OwnerTerminal {
     pub(super) fn command(fixture: &Fixture) -> Result<(Command, Self)> {
@@ -35,7 +44,7 @@ impl OwnerTerminal {
         }
         fcntl(&pair.master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
             .map_err(|_| "owner_pty_nonblocking")?;
-        let master = AsyncFd::new(File::from(pair.master)).map_err(|_| "owner_pty_async")?;
+        let master = File::from(pair.master);
         // The child inherits our process group and is not its leader, so setsid
         // execs the real CLI in place. stdout and stderr stay independent of /dev/tty.
         let mut command = Command::new("/usr/bin/setsid");
@@ -50,12 +59,10 @@ impl OwnerTerminal {
         let mut bytes = Vec::new();
         while !bytes.ends_with(prompt.as_bytes()) {
             let mut buffer = [0; 4096];
-            let count = self
-                .0
-                .async_io(Interest::READABLE, |mut fd| fd.read(&mut buffer))
+            let count = ready(|| (&self.0).read(&mut buffer))
                 .await
                 .map_err(|_| "owner_pty_read")?;
-            if count == 0 || bytes.len() + count > 65536 {
+            if count == 0 || bytes.len() + count > 65_536 {
                 return Err("owner_prompt_bound");
             }
             bytes.extend_from_slice(&buffer[..count]);
@@ -66,9 +73,7 @@ impl OwnerTerminal {
     async fn line(&self, bytes: &[u8]) -> Result<()> {
         let mut line = bytes.to_vec();
         line.push(b'\n');
-        let count = self
-            .0
-            .async_io(Interest::WRITABLE, |mut fd| fd.write(&line))
+        let count = ready(|| (&self.0).write(&line))
             .await
             .map_err(|_| "owner_pty_write")?;
         if count != line.len() {
@@ -107,7 +112,7 @@ impl OwnerTerminal {
                 .as_encoded_bytes()
                 .escape_ascii()
                 .to_string();
-            if field(body, label) != Some(expected.as_str()) {
+            if field(&body, label) != Some(expected.as_str()) {
                 return Err("owner_output_path");
             }
         }
@@ -115,7 +120,7 @@ impl OwnerTerminal {
         self.through("VOLPAROSSA identity passphrase: ").await?;
         // The prompt can be printed just before the password reader disables echo.
         // The caller's single deadline also covers this wait and reaps the child.
-        while tcgetattr(self.0.get_ref())
+        while tcgetattr(&self.0)
             .map_err(|_| "owner_pty_flags")?
             .local_flags
             .contains(LocalFlags::ECHO)
