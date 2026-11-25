@@ -152,7 +152,7 @@ def score_clip(phrase, recording, result):
         require(type(result[key]) is int and 0 < result[key] < (1 << 64))
     expected, actual = words(phrase), words(transcript)
     errors = word_errors(expected, actual)
-    return {"wav_sha256": recording["sha256"], "audio_samples": recording["samples"],
+    return {"reference_wav_sha256": recording["sha256"], "audio_samples": recording["samples"],
             "transcript_sha256": sha256(transcript.encode()), "reference_words": len(expected),
             "hypothesis_words": len(actual), "word_errors": errors, "word_error_rate": errors / len(expected),
             "elapsed_ms": result["elapsed_ms"], "max_observed_rss_bytes": result["max_observed_rss_bytes"],
@@ -174,7 +174,7 @@ def score(directory, exported=False):
             require(recording == {"samples": samples, "sha256": sha256(path.read_bytes())})
             result_path = directory / (name + ".result.json")
         clips[name] = score_clip(phrase, recording, load(result_path))
-    require(len({row["wav_sha256"] for row in clips.values()}) == len(clips))
+    require(len({row["reference_wav_sha256"] for row in clips.values()}) == len(clips))
     passed = all(row["passed"] for row in clips.values())
     return {"version": 1, "scope": "synthetic_english_speech", "model_profile": "whisper-small-v1",
             "maximum_word_error_rate_per_clip": 0.25, "clips": clips, "passed": passed}

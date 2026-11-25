@@ -2048,7 +2048,7 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-reasoning-source-publication.json"))
         if scenario == "speech-recognition":
             candidates.extend((root / name, f"{label}/{name}") for name in (
-                "speech-recognition-smoke.json", "speech-reference.json", "speech-bicycle.json", "speech-station.json"))
+                "speech-recognition-smoke.json", "speech-synthesis-smoke.json", "speech-reference.json", "speech-bicycle.json", "speech-station.json"))
         if scenario == "agent-private-task":
             # Exact synthetic-fixture proof only, never arbitrary private input,
             # model reports or a prefix glob over the owner's work area.

@@ -45,6 +45,10 @@ pub(crate) struct Options {
 
 /// Admit bounded RIFF chunks, including ordinary ancillary metadata, and one PCM payload.
 fn samples(bytes: &[u8]) -> Result<usize> {
+    inspect_wave(bytes, None)
+}
+
+pub(super) fn inspect_wave(bytes: &[u8], marker: Option<&[u8]>) -> Result<usize> {
     fn word(bytes: &[u8]) -> Result<usize> {
         Ok(u32::from_le_bytes(bytes.try_into()?) as usize)
     }
@@ -56,6 +60,7 @@ fn samples(bytes: &[u8]) -> Result<usize> {
         "compute_speech_wave"
     );
     let mut chunks = &bytes[12..];
+    let mut marker_seen = false;
     let mut format = false;
     let mut count = None;
     while !chunks.is_empty() {
@@ -64,8 +69,8 @@ fn samples(bytes: &[u8]) -> Result<usize> {
         let padded = size.checked_add(size % 2).context("compute_speech_chunk")?;
         ensure!(padded <= chunks.len() - 8, "compute_speech_chunk");
         let payload = &chunks[8..8 + size];
-        match &chunks[..4] {
-            b"fmt " => {
+        match (&chunks[..4], marker) {
+            (b"fmt ", _) => {
                 ensure!(
                     !format
                         && payload.len() >= 16
@@ -74,7 +79,7 @@ fn samples(bytes: &[u8]) -> Result<usize> {
                 );
                 format = true;
             }
-            b"data" => {
+            (b"data", _) => {
                 ensure!(
                     format
                         && count.is_none()
@@ -90,10 +95,25 @@ fn samples(bytes: &[u8]) -> Result<usize> {
                 );
                 count = Some(size / 2);
             }
-            _ => {}
+            (b"LIST", Some(text)) => {
+                ensure!(
+                    !marker_seen
+                        && payload.starts_with(b"INFOICMT")
+                        && payload.len() >= 12
+                        && word(&payload[8..12])? == text.len()
+                        && payload[12..].strip_prefix(text) == Some(&[0_u8][..text.len() % 2]),
+                    "compute_synthesis_voice_marker"
+                );
+                marker_seen = true;
+            }
+            _ => ensure!(marker.is_none(), "compute_synthesis_metadata"),
         }
         chunks = &chunks[8 + padded..];
     }
+    ensure!(
+        marker.is_none() || marker_seen,
+        "compute_synthesis_voice_marker"
+    );
     count.context("compute_speech_data")
 }
 
@@ -211,6 +231,22 @@ mod tests {
             data[44] = 1;
         }
         data
+    }
+
+    #[test]
+    fn synthesis_requires_one_structural_voice_label() {
+        let label = b"test";
+        let mut data = wave(8);
+        assert!(super::inspect_wave(&data, Some(label)).is_err());
+        let chunk = b"LIST\x10\0\0\0INFOICMT\x04\0\0\0test";
+        data.extend(chunk);
+        let len = u32::try_from(data.len() - 8).unwrap();
+        data[4..8].copy_from_slice(&len.to_le_bytes());
+        assert_eq!(super::inspect_wave(&data, Some(label)).unwrap(), 8);
+        assert!(super::inspect_wave(&data, Some(b"fake")).is_err());
+        let tag = data.len() - 12;
+        data[tag..tag + 4].copy_from_slice(b"JUNK");
+        assert!(super::inspect_wave(&data, Some(label)).is_err());
     }
 
     #[test]

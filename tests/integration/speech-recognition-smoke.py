@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Exercise the normal Core CLI on the two authorized synthetic guest recordings."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,8 @@ def execute(root, output, revision):
     scratch.mkdir(mode=0o700)
     subprocess.run([*fixture, "prepare", recordings], timeout=40, check=True)
     (output / "speech-reference.json").write_bytes((recordings / "reference.json").read_bytes())
+    synthesized = runpy.run_path(str(HERE / "speech-synthesis-smoke.py"))["generate"](
+        root, recordings, output, revision, lifecycle)
     receipt = {"version": 1, "source_revision": revision, "model_sha256": MODEL_SHA,
                "scope": "synthetic_english_speech", "passed": False, "phase": "recognition"}
     try:
@@ -86,8 +89,10 @@ def execute(root, output, revision):
             # The ordinary CLI debug subscriber uses stdout. Keep the full stream private in
             # this synthetic guest and export only the shared closed lifecycle projection.
             trace = recordings / (name + ".log")
+            marked_input = synthesized / (name + ".wav")
+            input_digest = hashlib.sha256(marked_input.read_bytes()).hexdigest()
             with trace.open("xb") as log:
-                result = subprocess.run([*command, recordings / (name + ".wav")], stdout=log,
+                result = subprocess.run([*command, marked_input], stdout=log,
                                         env=dict(os.environ, NO_COLOR="1",
                                                  RUST_LOG="off,volparossa::compute::private_diagnostic=debug"),
                                         timeout=150)
@@ -99,7 +104,11 @@ def execute(root, output, revision):
             response = json.loads(lines[-1])
             require(response["max_observed_rss_bytes"] > 0 and response["elapsed_ms"] > 0 and not any(scratch.iterdir()))
             (recordings / (name + ".result.json")).write_bytes(lines[-1] + b"\n")
-            (output / ("speech-" + name + ".json")).write_bytes(lines[-1] + b"\n")
+            original = lines[-1] + b"\n"
+            (output / ("speech-" + name + ".json")).write_bytes(original)
+            require(hashlib.sha256(marked_input.read_bytes()).hexdigest() == input_digest)
+            receipt.setdefault("recognizer_inputs", {})[name] = {
+                "marked_wav_sha256": input_digest, "result_file_sha256": hashlib.sha256(original).hexdigest()}
         receipt["phase"] = "score"
         score = subprocess.run([*fixture, "score", recordings], stdout=subprocess.PIPE, timeout=15)
         receipt["score"] = json.loads(score.stdout)

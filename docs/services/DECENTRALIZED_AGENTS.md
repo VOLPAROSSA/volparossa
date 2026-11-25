@@ -170,6 +170,20 @@ describes the trust assumptions for these exercises.
 
 ## Audio, images and natural conversation
 
+The local synthesis command reads up to 512 bytes of owner-held UTF-8 text
+from a mode-0600 file. Select an English or Dutch eSpeak NG system voice and
+a new output name in an owner-only directory. Preview with the same arguments
+without `--execute`. On Debian 13 it requires the locally installed `espeak-ng`
+package. One successful call writes a marked synthetic 16 kHz mono PCM WAV
+compatible with `compute transcribe`. The worker runs with isolated networking
+and without a sound device. Playback remains under the caller's control.
+
+```sh
+volparossa compute synthesize --voice nl --input /absolute/private/text.txt \
+    --output /absolute/private/reply.wav --execute
+```
+
+
 The owner-local `volparossa compute transcribe` command accepts a mode-0600
 mono 16 kHz PCM16 WAV of up to 30 seconds. It shares the compute runtime lease,
 offline CPU sandbox, resource bounds and worker lifetime cleanup. The command
