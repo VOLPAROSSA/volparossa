@@ -190,6 +190,15 @@ enum ClientRouteControlState {
 }
 
 impl ClientRouteControlState {
+    fn established_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> Option<bool> {
+        match self {
+            Self::Established(established) => {
+                Some(established.is_expired(wall_now_ms, monotonic_now))
+            }
+            _ => None,
+        }
+    }
+
     fn current_content_route(&self) -> Option<&EstablishedRoute<ReservationSession>> {
         let Self::Established(established) = self else {
             return None;
@@ -1903,12 +1912,7 @@ impl ClientRouteControl {
                             state,
                             flow,
                             || (crate::unix_millis().max(now_ms), Instant::now()),
-                            |state, wall_now_ms, monotonic_now| match state {
-                                ClientRouteControlState::Established(established) => {
-                                    Some(established.is_expired(wall_now_ms, monotonic_now))
-                                }
-                                _ => None,
-                            },
+                            ClientRouteControlState::established_expired,
                             retire,
                             failure,
                         )
@@ -1943,12 +1947,7 @@ impl ClientRouteControl {
         self.admit_tcp_flow_attempt(
             previous,
             || (crate::unix_millis().max(requested_at_ms), Instant::now()),
-            |state, wall_now_ms, monotonic_now| match state {
-                ClientRouteControlState::Established(established) => {
-                    Some(established.is_expired(wall_now_ms, monotonic_now))
-                }
-                _ => None,
-            },
+            ClientRouteControlState::established_expired,
             |prior| self.start_tcp_flow_retirement(prior),
             failure,
         )

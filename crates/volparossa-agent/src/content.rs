@@ -774,7 +774,9 @@ impl ContentRuntime {
         let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
         let result = timeout(
             OPERATION_TIMEOUT,
-            https::download(request, context, stream, request_id, ready_sent),
+            Box::pin(https::download(
+                request, context, stream, request_id, ready_sent,
+            )),
         )
         .await
         .map_err(|_| ContentError::Unavailable)?;
