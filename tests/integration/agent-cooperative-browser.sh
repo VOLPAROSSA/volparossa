@@ -3,6 +3,43 @@
 # The same real peer graph as agent-public-document, driven by a genuine Gecko panel.
 # shellcheck disable=SC2154,SC2034
 
+# Each replacement control needs the same restricted discovery reachability as the
+# initially selected relay. The original control links and their capture remain live.
+agent_cooperative_browser_prepare_controls() {
+    case $provider_control_node in relay0|relay1|relay2) ;; *) return 1 ;; esac
+    for cooperative_relay in relay0 relay1 relay2; do
+        [ "$cooperative_relay" != "$provider_control_node" ] || continue
+        (
+            provider_control_peer=$(jq -er --arg node "$cooperative_relay" '.[$node]' "$WORK/a01-expected-peers.json") || exit 1
+            content_provider_control_underlay "${cooperative_relay#relay}"
+        ) || return 1
+    done
+}
+
+agent_cooperative_browser_start_control_captures() {
+    [ -z "$CONSUMER_CONTROL_0_PID$CONSUMER_CONTROL_1_PID$CONSUMER_CONTROL_2_PID" ] || return 1
+    for cooperative_relay in relay0 relay1 relay2; do
+        [ "$cooperative_relay" != "$provider_control_node" ] || continue
+        content_provider_node "$cooperative_relay" || return 1
+        cooperative_capture_ns=$provider_ns; cooperative_capture_ips=$provider_ip
+        for cooperative_provider in "$provider_node_a" "$provider_node_b"; do
+            content_provider_node "$cooperative_provider" || return 1
+            cooperative_capture_ips=$cooperative_capture_ips,$provider_ip
+        done
+        cooperative_capture=$WORK/agent-cooperative-browser-control-$cooperative_relay
+        ip netns exec "$cooperative_capture_ns" python3 "$WORK/bin/privacy-observer.py" \
+            content-control "$cooperative_capture.json" "$cooperative_capture.ready" --content-providers \
+            "--content-control=$cooperative_capture_ips" cp0 cp1 >"$cooperative_capture.log" 2>&1 &
+        cooperative_capture_pid=$!
+        case $cooperative_relay in
+            relay0) CONSUMER_CONTROL_0_PID=$cooperative_capture_pid ;;
+            relay1) CONSUMER_CONTROL_1_PID=$cooperative_capture_pid ;;
+            relay2) CONSUMER_CONTROL_2_PID=$cooperative_capture_pid ;;
+        esac
+        wait_observer "$cooperative_capture_pid" "$cooperative_capture.ready" || return 1
+    done
+}
+
 agent_cooperative_browser_python() {
     if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
         set -- --trial discovered-360m "$@"
@@ -83,6 +120,9 @@ agent_cooperative_browser_run() {
     [ "$(stat -Lc '%a:%u' "$cooperative_socket")" = "600:$AGENT_UID" ] || fail COOPERATIVE_BROWSER_SOCKET_AUTHORITY
     PHASE=agent-cooperative-browser-panel
     content_custody_phase_start fetch
+    if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+        agent_cooperative_browser_start_control_captures || fail COOPERATIVE_BROWSER_CONTROL_CAPTURE_FAILED
+    fi
     # sysusers records the account home but does not create it in this non-package
     # guest. Create only the exact missing home; cleanup removes it only if still empty.
     agent_cooperative_browser_python account-home-prepare "$WORK" || fail COOPERATIVE_BROWSER_HOME_FAILED
@@ -135,6 +175,7 @@ agent_cooperative_browser_run() {
         benchmark_capture_paths content-custody-fetch-live mptcp || fail CUSTODY_LIVE_ROUTE_UNAVAILABLE
         stop_privacy_observers || fail CUSTODY_CAPTURE_INCOMPLETE
         content_provider_stop_control_observer || fail CUSTODY_CONTROL_CAPTURE_INCOMPLETE
+        storage_consumer_stop_captures || fail COOPERATIVE_BROWSER_CONTROL_CAPTURE_INCOMPLETE
         # The sampled Exit log and live route bindings are checked alongside
         # both provider captures by the final cooperative evidence verifier.
         test -s "$WORK/content-custody-fetch-gates.json" || fail CUSTODY_PROTECTED_FLOW_INCOMPLETE

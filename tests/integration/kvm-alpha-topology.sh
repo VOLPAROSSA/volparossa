@@ -2886,6 +2886,8 @@ if [ "$private_storage_maintenance" = yes ]; then
     . "$source_directory/tests/integration/storage-consumer-maintenance-smoke.sh"
     # shellcheck source=tests/integration/storage-consumer-control-underlay.sh
     . "$source_directory/tests/integration/storage-consumer-control-underlay.sh"
+fi
+if [ "$private_storage_maintenance" = yes ] || [ "$agent_cooperative_browser_discovered" = yes ]; then
     # shellcheck source=tests/integration/storage-consumer-network.sh
     . "$source_directory/tests/integration/storage-consumer-network.sh"
 fi

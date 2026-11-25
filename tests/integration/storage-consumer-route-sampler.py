@@ -26,7 +26,7 @@ OPERATIONS = ('paths_before', 'control_status', 'paths_after', 'route_binding',
     'exit_log_query', 'coverage', 'completion')
 CODES = ('timeout', 'process', 'local_io', 'invalid', 'deadline')
 ROUTE_CODES = ('paths_before_invalid', 'paths_after_invalid', 'bracket_changed', 'control_invalid',
-    'binding_policy_invalid', 'binding_changed', 'context_limit')
+    'binding_policy_invalid', 'binding_changed', 'context_limit', 'control_absent', 'control_outside_policy')
 
 
 class SampleDeadline(ValueError):
@@ -73,15 +73,13 @@ def unique(pairs):
     return value
 
 
-def control_observation(raw, policy):
+def control_observation(raw, _policy):
     require(type(raw) is bytes and 0 < len(raw) <= MAX_REPLY)
     value = json.loads(raw, object_pairs_hook=unique)
     # ContentReceipt has other unrelated local-service fields. Only this actual
     # route-controller field is retained; no payload, endpoint or log is copied.
     require(type(value) is dict and type(value.get('control_relay_peer_id')) is str)
-    peer = value['control_relay_peer_id']
-    require(peer in policy['relay_peers'].values())
-    return peer
+    return value['control_relay_peer_id']
 
 
 def validate_route(value, policy):
@@ -119,6 +117,8 @@ class Coverage(OLD['Coverage']):
         OLD['route_require'](left == right, 'bracket_changed')
         context, scope = left
         broker = check_route_part(control_observation, status, self.policy, 'control_invalid')
+        OLD['route_require'](bool(broker), 'control_absent')
+        OLD['route_require'](broker in self.policy['relay_peers'].values(), 'control_outside_policy')
         binding = dict(route_context_id=context, control_relay_peer_id=broker, scope=scope)
         check_route_part(validate_route, binding, self.policy, 'binding_policy_invalid')
         if context in self.route_bindings:

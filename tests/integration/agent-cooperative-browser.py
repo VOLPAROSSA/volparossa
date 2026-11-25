@@ -34,6 +34,7 @@ EXPORT_NAMES = tuple(f"{NAME}-{suffix}.json" for suffix in (
     "a01-expected-peers.json", "agent-jobs-layout.json", "agent-jobs-provision.json", "agent-jobs-private-cleanup.json",
     "content-custody-fetch-live-selection.json", "content-custody-fetch-gates.json",
     "content-provider-custody-fetch-control.json",
+    *(f"{NAME}-control-relay{i}.json" for i in range(3)),
     *(f"content-custody-fetch-privacy-{role}.json" for role in JOBS["CUSTODY"]["ROLES"]),
 )
 FALSE_SCOPE = ("private_offload_proven", "answer_correctness_proven", "global_peer_erasure_claimed",
@@ -932,7 +933,8 @@ def peer_event_windows(work, baseline):
     require(len(control) == 1 and isinstance(providers, list) and len(providers) == len(set(providers)) == 2
             and set(providers) <= {"relay3", "relay4", "relay5"}, "unknown discovery fixture role")
     windows = {}
-    for node in [*control, *providers]:
+    candidates = ["relay0", "relay1", "relay2"] if TRIAL else control
+    for node in [*candidates, *providers]:
         with NamedTemporaryFile(dir=work, prefix="discovery-events-", suffix=".private") as private:
             try:
                 query = subprocess.run([str(work / "bin/volparossa"), "--control-socket",
@@ -1723,6 +1725,10 @@ def check_evidence(value, revision, source_pins=None):
         sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
         validate_sampled_routes(sampler, value["peers"], value["layout"],
                                 value["path"]["selected_route"], value["path"]["gates"])
+        candidates = replacement_controls(value["peers"], value["layout"])
+        require(set(value["replacement_controls"]) == set(candidates), "replacement control coverage differs")
+        for node in candidates:
+            check_replacement_control(value["replacement_controls"][node], node, value["layout"]["provider_nodes"])
         JOBS["CUSTODY"]["validate_path_observations"](value["path"], value["peers"], value["layout"],
                                                      "fetch", payload_minimum=1)
     else:
@@ -1732,6 +1738,28 @@ def check_evidence(value, revision, source_pins=None):
         require(application["request_packets"] > 0 and application["response_payload_bytes"] > 0,
                 "one selected executor did not exchange real protected traffic")
     require(value["path"]["gates"]["exit_mptcp_tls_completed"] >= 6, "protected task completions missing")
+
+
+def check_replacement_control(observed, node, providers):
+    control = JOBS["CUSTODY"]["SHARED"]
+    control["validate_control"](observed["capture"], node, providers, missing=False, require_contacts=False)
+    ips = control["PUBLIC_IPS"]
+    require(set(observed["routes"]) == set(providers), "replacement control route coverage differs")
+    for slot, provider in enumerate(providers):
+        segment = 86 + 2 * int(node[-1]) + slot
+        for direction, source, destination, device, hop in (
+                ("out", node, provider, f"cp{slot}", 2), ("back", provider, node, f"bp{node[-1]}{slot}", 1)):
+            routes = observed["routes"][provider][direction]
+            require(len(routes) == 1 and routes[0]["dst"] == ips[destination] and routes[0]["prefsrc"] == ips[source]
+                    and routes[0]["dev"] == device and routes[0]["gateway"] == f"10.241.{segment}.{hop}",
+                    "replacement control kernel route differs")
+
+
+def replacement_controls(peers, layout):
+    brokers = ["relay0", "relay1", "relay2"]
+    require(len({peers[node] for node in brokers}) == 3 and layout["control_relay_peer_id"] in
+            {peers[node] for node in brokers}, "unknown initial control relay")
+    return [node for node in brokers if peers[node] != layout["control_relay_peer_id"]]
 
 
 def evidence(work, revision):
@@ -1760,6 +1788,13 @@ def evidence(work, revision):
     value.update(trial_fields())
     if TRIAL:
         value["model_provision"] = read(work / "agent-jobs-provision.json")
+        read_route = runpy.run_path(str(HERE / "content-provider-smoke.py"))["read_route"]
+        value["replacement_controls"] = {node: dict(
+            capture=read(work / f"{NAME}-control-{node}.json"),
+            routes={provider: {direction: read_route(
+                work / f"{NAME}-{node}-{provider}-{direction}.json") for direction in ("out", "back")}
+                for provider in layout["provider_nodes"]})
+            for node in replacement_controls(value["peers"], layout)}
     check_evidence(value, revision)
     write(work / f"{NAME}-evidence.json", value)
 

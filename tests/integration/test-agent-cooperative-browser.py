@@ -86,6 +86,18 @@ def discovered_fixture():
     sampler = runpy.run_path(str(HERE / "storage-consumer-route-sampler.py"))
     selected = value["path"]["selected_route"]
     peers, layout = value["peers"], value["layout"]
+    value["replacement_controls"] = {}
+    ips = check["JOBS"]["CUSTODY"]["SHARED"]["PUBLIC_IPS"]
+    for node in check["replacement_controls"](peers, layout):
+        capture = copy.deepcopy(value["path"]["control_privacy"])
+        routes = {}
+        for slot, provider in enumerate(layout["provider_nodes"]):
+            capture["content_control_pairs"][f"cp{slot}"] = [ips[node], ips[provider]]
+            segment = 86 + 2 * int(node[-1]) + slot
+            routes[provider] = dict(out=[dict(dst=ips[provider], dev=f"cp{slot}", prefsrc=ips[node],
+                gateway=f"10.241.{segment}.2")], back=[dict(dst=ips[node], dev=f"bp{node[-1]}{slot}",
+                prefsrc=ips[provider], gateway=f"10.241.{segment}.1")])
+        value["replacement_controls"][node] = dict(capture=capture, routes=routes)
     coverage = sampler["Coverage"](100, check["route_policy"](peers))
     events = b"99\tlevel=1\tevent=STARTED\tsession=\tpath=-\n"
     status = json.dumps({"control_relay_peer_id": layout["control_relay_peer_id"]}).encode()
@@ -777,6 +789,10 @@ class CooperativeBrowserProof(unittest.TestCase):
             lambda v: v["result"].update(total_parts=1),
             lambda v: v["result"]["refinement"].update(exact_frontier_verified=False),
             lambda v: v["result"]["refinement"].update(original_token_limited_outputs=1),
+            lambda v: v["replacement_controls"].clear(),
+            lambda v: next(iter(v["replacement_controls"].values()))["capture"].update(
+                unexpected_provider_application_packets=1),
+            lambda v: next(iter(v["replacement_controls"].values()))["routes"]["relay4"]["back"][0].update(dev="pc0"),
             lambda v: v["panel"]["observed"].update(explicit_consent=False),
             lambda v: v["panel"]["observed"].update(scoped_cancel_confirmed=False),
             lambda v: v["model_provision"].update(download_bytes=523040250),
@@ -1075,6 +1091,12 @@ class CooperativeBrowserProof(unittest.TestCase):
             with mock.patch.object(subprocess, "run", side_effect=query):
                 result = CHECK["peer_event_windows"](work, 100)
             self.assertEqual(observed, ["relay1", "relay4", "relay5"])
+            observed.clear()
+            with mock.patch.object(subprocess, "run", side_effect=query), \
+                    mock.patch.dict(CHECK["peer_event_windows"].__globals__, TRIAL="discovered-360m"):
+                rotated = CHECK["peer_event_windows"](work, 100)
+            self.assertEqual(observed, ["relay0", "relay1", "relay2", "relay4", "relay5"])
+            self.assertEqual(set(rotated["windows"]), set(observed))
             self.assertEqual(result["windows"]["relay1"]["counts"], {
                 "CONTENT_PROVIDER_SERVICE_EMPTY": 1, "CONTENT_DISCOVERY_RELAY_QUEUE_FULL": 1,
                 "CONTENT_LOOKUP_RESPONSE_AUTHORIZED": 1, "CONTENT_LOOKUP_REPLY_EMPTY": 1,

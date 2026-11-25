@@ -1556,6 +1556,8 @@ COOPERATIVE_CODE_PROPOSAL_NAMES |= {
     "content-provider-custody-executor-discovery-control.json",
 } | {f"content-custody-executor-discovery-privacy-{role}.json" for role in ("client", "relay0", "relay1", "relay2", "exit")}
 
+COOPERATIVE_BROWSER_NAMES.update(f"agent-cooperative-browser-control-relay{i}.json" for i in range(3))
+
 BROWSER_FILTER_NAMES = {f"browser-filter-delivery-{suffix}.json" for suffix in (
     "original-report", "original-outer-cleanup", "original-diagnostic", "evidence", "prepared", "cache-before", "cache-after",
     "launch", "tree-before", "tree-after", "input-cleanup", "retained", "artifacts")}

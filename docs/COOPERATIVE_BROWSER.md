@@ -186,6 +186,15 @@ owned objects and the host snapshots matched. The original 33,407-byte archive
 has SHA-256 `4e157cca57bf74dee5d7a42be828c0a35f0a5e6bc99c731ed09d479897f68a67`.
 [Hosted trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/45512806565) · [Original reports](development/evidence/browser-cooperative-45512806565)
 
+The discovered trial now gives each of the two possible replacement control
+relays the same fixture reachability to the two enrolled providers as the initial
+control relay. Each added link admits the authenticated discovery service's
+UDP port 41000 and drops other traffic and forwarding. The checker reads both
+kernel route directions and the drained packet capture for each replacement
+candidate. Both enrolled workers still have to exchange application traffic
+through the original protected path and Exit. Failure diagnostics read each
+candidate's own bounded event ring.
+
 The worker-lifetime observer formerly counted the persistent broker among the
 task's transient workers. The correction excludes only the recorded broker
 PID and start time before deliberate broker shutdown. Every observed transient

@@ -355,7 +355,10 @@ agent_jobs_setup() {
             "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
         content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
     else
-        content_provider_control_underlay
+        content_provider_control_underlay || fail JOBS_CONTROL_UNDERLAY_FAILED
+        if [ "${agent_cooperative_browser_discovered:-no}" = yes ]; then
+            agent_cooperative_browser_prepare_controls || fail COOPERATIVE_BROWSER_CONTROL_UNDERLAY_FAILED
+        fi
     fi
     for jobs_node in "$provider_node_a" "$provider_node_b"; do
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \

@@ -208,7 +208,9 @@ class ContextSampler(unittest.TestCase):
                 (2, b'x' * 65537, 'paths_after', 'invalid', 3),
                 (3, b'x' * (262144 + 1), 'exit_log_query', 'invalid', 4),
                 (0, b'PRIVATE MALFORMED', 'route_binding', 'paths_before_invalid', 3),
-                (1, b'{"control_relay_peer_id":"PRIVATE"}', 'route_binding', 'control_invalid', 3),
+                (1, b'{"control_relay_peer_id":"PRIVATE"}', 'route_binding', 'control_outside_policy', 3),
+                (1, b'{"control_relay_peer_id":""}', 'route_binding', 'control_absent', 3),
+                (1, b'{"control_relay_peer_id":1}', 'route_binding', 'control_invalid', 3),
                 (2, b'', 'route_binding', 'paths_after_invalid', 3),
                 (2, paths(b), 'route_binding', 'bracket_changed', 3),
                 (3, b'PRIVATE MALFORMED', 'coverage', 'invalid', 4)):
