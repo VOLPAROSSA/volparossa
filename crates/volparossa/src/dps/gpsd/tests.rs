@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 use chrono::Utc;
 use serde_json::{Value, json};
+use volparossa_local_control::dps::{DPS_SERVICE_VERSION, FrameKind, NavigationAuthentication};
 
 use super::*;
 

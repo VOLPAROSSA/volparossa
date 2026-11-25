@@ -44,13 +44,27 @@ typedef struct DpsQualityV1 {
   uint32_t limitations_mask;
 } DpsQualityV1;
 
+/* Caller-asserted WGS84 ellipsoidal height. Unknown and MSL are unsupported. */
+#define VOLPAROSSA_DPS_WGS84_ELLIPSOID UINT32_C(1)
+typedef struct DpsGeodeticClaimV1 {
+  uint32_t height_reference;
+  uint32_t reserved; /* Must be zero. */
+  double latitude_degrees;
+  double longitude_degrees;
+  double height_metres;
+  double comparison_radius_metres; /* Positive 3D comparison scale, <= 1,000,000 m. */
+  uint64_t observed_at_unix_ms;
+} DpsGeodeticClaimV1;
+
 #if defined(__cplusplus)
 static_assert(sizeof(DpsQualityV1) == 36, "DPS ABI size");
 static_assert(alignof(DpsQualityV1) == 4, "DPS ABI alignment");
+static_assert(sizeof(DpsGeodeticClaimV1) == 48, "DPS geodetic ABI size");
 extern "C" {
 #else
 _Static_assert(sizeof(DpsQualityV1) == 36, "DPS ABI size");
 _Static_assert(_Alignof(DpsQualityV1) == 4, "DPS ABI alignment");
+_Static_assert(sizeof(DpsGeodeticClaimV1) == 48, "DPS geodetic ABI size");
 #endif
 
 /* Bare canonical DpsAssessRequest, NOT ControlRequest or a socket operation.
@@ -69,6 +83,14 @@ _Static_assert(_Alignof(DpsQualityV1) == 4, "DPS ABI alignment");
 int32_t volparossa_dps_assess_v1(const uint8_t *input, size_t input_len,
                               uint64_t now_unix_ms, DpsQualityV1 *output,
                               size_t output_size);
+
+/* Explicit one-observation adapter. Source kind is Other. A missing, future or
+ * more than five-second-old observation gives a valid unavailable summary.
+ * Zero evaluation time, unsupported datum or invalid geometry/radius rejects.
+ * Output ownership and error behavior follow volparossa_dps_assess_v1.
+ * Supplying a horizontal accuracy radius alone cannot define the 3D scale. */
+int32_t volparossa_dps_assess_geodetic_v1(DpsGeodeticClaimV1 claim, uint64_t now_unix_ms,
+                                          DpsQualityV1 *output, size_t output_size);
 
 #if defined(__cplusplus)
 }
