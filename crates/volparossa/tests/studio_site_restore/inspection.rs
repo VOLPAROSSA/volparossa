@@ -86,7 +86,7 @@ fn current_time_and_native_site_type_are_checked_before_reporting() {
     let root = tempfile::tempdir().unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
     let public = hex::encode(key.verifying_key().to_bytes());
-    let mut cache = ChunkStore::open(
+    let mut cache = ChunkStore::create(
         &root.path().join("test-store"),
         CacheLimits {
             max_bytes: 4096,
