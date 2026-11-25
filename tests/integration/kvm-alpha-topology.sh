@@ -6542,6 +6542,8 @@ start_privacy_observers() {
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;
+        content-mailbox-worker-privacy)
+            [ "$scenario" = content-mailbox ] && [ "${signal_mailbox:-no}" = yes ] || return 1 ;;
         content-mailbox-send-privacy|content-mailbox-receive-privacy|content-mailbox-desktop-privacy|content-mailbox-paired-send-privacy|content-mailbox-paired-receive-privacy)
             [ "$scenario" = content-mailbox ] || return 1 ;;
         private-storage-peer-privacy)

@@ -95,6 +95,21 @@ class RoutedNativeMailbox(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SMOKE["verified"](modified, SOURCE)
 
+    def test_worker_capture_is_admitted_only_in_the_signal_mailbox_overlay(self):
+        driver = (HERE / "kvm-alpha-topology.sh").read_text()
+        gate = driver[driver.index("start_privacy_observers() {"):]
+        gate = gate[:gate.index("    esac") + len("    esac")] + "\n}\n"
+        for scenario, signal, prefix, accepted in (
+                ("content-mailbox", "yes", "content-mailbox-worker-privacy", True),
+                ("content-mailbox", "no", "content-mailbox-worker-privacy", False),
+                ("content-provider", "yes", "content-mailbox-worker-privacy", False),
+                ("content-mailbox", "yes", "content-mailbox-unreviewed-privacy", False)):
+            with self.subTest(scenario=scenario, signal=signal, prefix=prefix):
+                result = subprocess.run(["sh", "-c", gate +
+                    'scenario=$1; signal_mailbox=$2; start_privacy_observers "$3"',
+                    "observer-admission", scenario, signal, prefix])
+                self.assertEqual(result.returncode == 0, accepted)
+
     def test_guest_export_is_closed_and_matches_driver(self):
         names=SMOKE["NAMES"]
         self.assertTrue(all(n.endswith(".json") and "/" not in n for n in names))
