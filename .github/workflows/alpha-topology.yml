@@ -217,6 +217,7 @@ jobs:
           sh -n tests/integration/content-custody-smoke.sh
           python3 -B tests/integration/test-content-custody-smoke.py
           python3 -B tests/integration/test-public-git-recovery.py
+          python3 -B tests/integration/test-degoog-peer-recovery.py
           sh -n tests/integration/private-storage-peer-smoke.sh
           python3 -B tests/integration/test-private-storage-peer-smoke.py
           sh -n tests/integration/private-storage-replicas-smoke.sh
@@ -1511,10 +1512,41 @@ jobs:
           python3 -B tests/integration/content-custody-smoke.py report "$report" "$GITHUB_SHA"
           python3 -B tests/integration/public-git-recovery.py verify-host \
             "$VOLPAROSSA_ALPHA_OUTPUT/content-custody-git-recovery.json" "$report" "$GITHUB_SHA"
+          python3 -B tests/integration/degoog-peer-recovery.py verify-host \
+            "$VOLPAROSSA_ALPHA_OUTPUT/content-custody-degoog-recovery.json" "$report" "$GITHUB_SHA" \
+            "$RUNNER_TEMP/degoog-received.db"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Check out the enrolled public Browser search adapter
+        if: success() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content-custody'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: VOLPAROSSA/volparossa-browser
+          ref: 24c8be70dc416b167127b9b02e4ca2f40c357f15
+          path: degoog-browser
+          persist-credentials: false
+      - name: Check out upstream DeGoog for the independent consumer
+        if: success() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content-custody'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: degoog-org/degoog
+          ref: 1f7d2f172aad3ed5e5a69aa227b384573203742c
+          path: degoog-consumer
+          persist-credentials: false
+      - name: Search the index recovered from the enrolled peer
+        if: success() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content-custody'
+        run: |
+          set -euo pipefail
+          bash degoog-browser/integration/degoog/stage.sh degoog-consumer
+          sha=7ec92c63b697c290d7634027be4e41e2eaab237459100782910183dd62fe12e3
+          sudo unshare --net -- setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            python3 -I -B degoog-browser/integration/degoog/trial.py --peer-snapshot \
+            "$RUNNER_TEMP/bun-linux-x64/bun" "$GITHUB_WORKSPACE/degoog-consumer" \
+            "$RUNNER_TEMP/degoog-received.db" "$sha" | tee "$VOLPAROSSA_ALPHA_OUTPUT/degoog-peer-search.json"
 
       - name: Require source-bound public user tasks and retained-result resume
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-public-task'
